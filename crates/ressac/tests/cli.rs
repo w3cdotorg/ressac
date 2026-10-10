@@ -78,9 +78,25 @@ fn fatal_errors_exit_1_with_a_message() {
 
 #[test]
 fn closed_stdout_does_not_panic() {
+    use std::io::Read;
     use std::process::Stdio;
     let home = tempfile::tempdir().unwrap();
-    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    // Several hundred KB of OPML, far above the 64 KB pipe buffer, so the write must hit EPIPE.
+    let mut xml = String::from("<opml version=\"2.0\"><body>");
+    for i in 0..3000 {
+        xml.push_str(&format!(
+            "<outline text=\"Feed number {i} with a reasonably long title to pad the export\" xmlUrl=\"https://example{i}.org/feed.xml\" htmlUrl=\"https://example{i}.org/\"/>"
+        ));
+    }
+    xml.push_str("</body></opml>");
+    let big = home.path().join("big.opml");
+    std::fs::write(&big, xml).unwrap();
+    assert!(
+        ressac(home.path(), &["import", big.to_str().unwrap()])
+            .status
+            .success()
+    );
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_ressac"))
         .args([
             "--db",
@@ -89,11 +105,20 @@ fn closed_stdout_does_not_panic() {
         ])
         .env("HOME", home.path())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     drop(child.stdout.take());
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
     let code = child.wait().unwrap().code();
-    assert!(matches!(code, Some(0) | Some(1)), "{code:?}");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]
