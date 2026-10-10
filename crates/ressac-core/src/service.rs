@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
 use tokio::sync::mpsc;
+use url::Url;
 
 use crate::discover::{alternate_feeds, same_feed};
 use crate::error::Result;
@@ -142,8 +143,9 @@ pub struct Ressac {
     store: Store,
     source: LocalSource,
     wayback: Wayback,
-    /// Pause between Wayback requests (1 request per second in production).
-    wayback_gap: Duration,
+    /// Pause between two requests to the same host: Wayback lookups and consecutive
+    /// article pages (1 request per second in production).
+    host_gap: Duration,
 }
 
 impl Ressac {
@@ -156,12 +158,12 @@ impl Ressac {
     }
 
     pub fn with_parts(store: Store, limits: FetchLimits, wayback_base: &str) -> Result<Self> {
-        let wayback_gap = limits.per_host_gap;
+        let host_gap = limits.per_host_gap;
         Ok(Self {
             store,
             source: LocalSource::new(limits)?,
             wayback: Wayback::new(wayback_base)?,
-            wayback_gap,
+            host_gap,
         })
     }
 
@@ -242,6 +244,12 @@ impl Ressac {
                 self.diagnose_all(Utc::now())?;
                 self.discover_replacements(sink, Utc::now(), &stop).await?;
             }
+        }
+        if !unreachable && !stop.load(Ordering::Relaxed) {
+            let mut fetched: Vec<FeedId> = fresh.keys().copied().collect();
+            fetched.sort_unstable();
+            self.fetch_full_texts(&fetched, started, sink, &stop)
+                .await?;
         }
         let mut summary = self.diagnose_all(Utc::now())?;
         summary.network_unreachable = unreachable;
@@ -348,6 +356,53 @@ impl Ressac {
         Ok(())
     }
 
+    /// Extracts the entries this run stored for `prefer_full_text` feeds, at most
+    /// `FULLTEXT_PER_FEED_PER_RUN` per feed. Stops between entries on request, and waits
+    /// `host_gap` between two pages of the same host.
+    async fn fetch_full_texts(
+        &self,
+        fetched: &[FeedId],
+        since: DateTime<Utc>,
+        sink: &dyn EventSink,
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        let mut queue = Vec::new();
+        for &feed_id in fetched {
+            if self.store.prefer_full_text(feed_id)? {
+                queue.extend(self.store.entries_needing_fulltext(
+                    feed_id,
+                    since,
+                    FULLTEXT_PER_FEED_PER_RUN,
+                )?);
+            }
+        }
+        if queue.is_empty() {
+            return Ok(());
+        }
+        sink.emit(&Event::Probing {
+            what: FULL_ARTICLES.into(),
+            total: queue.len(),
+        });
+        tracing::info!(entries = queue.len(), "fetching full articles");
+        let mut previous_host: Option<String> = None;
+        for (entry_id, url) in queue {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let host = page_host(&url);
+            if host.is_some() && host == previous_host {
+                tokio::time::sleep(self.host_gap).await;
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            let outcome = fetch_article(&self.source, &url).await;
+            self.save_extraction(entry_id, &outcome, sink)?;
+            previous_host = host;
+        }
+        Ok(())
+    }
+
     /// Diagnoses every active feed, stores the results and the garden's triage flags.
     pub fn diagnose_all(&self, now: DateTime<Utc>) -> Result<Summary> {
         let feeds: Vec<FeedRow> = self
@@ -440,7 +495,7 @@ impl Ressac {
                 break;
             }
             if i > 0 {
-                tokio::time::sleep(self.wayback_gap).await;
+                tokio::time::sleep(self.host_gap).await;
             }
             match self.wayback.closest(site, *around).await {
                 Ok(Some(url)) => {
@@ -551,6 +606,11 @@ fn is_challenged(raw: &RawResponse) -> bool {
 /// timeout (the whole exchange, redirects included).
 async fn fetch_article(source: &LocalSource, url: &str) -> Extraction {
     article_from(&source.fetch_raw(url, None, None).await)
+}
+
+/// The host of an article URL, for the per-host pause.
+fn page_host(url: &str) -> Option<String> {
+    Url::parse(url).ok()?.host_str().map(str::to_owned)
 }
 
 /// Maps a page fetch to an extraction outcome. A 401 asks for credentials, so it reads as a
@@ -935,7 +995,8 @@ mod tests {
     /// title, only a summary). Returns the app and both entry ids.
     fn app_with_entries(base: &str) -> (Ressac, i64, i64) {
         let store = Store::open_in_memory().unwrap();
-        let xml = r#"<opml><body><outline text="T" xmlUrl="https://t.example/feed"/></body></opml>"#;
+        let xml =
+            r#"<opml><body><outline text="T" xmlUrl="https://t.example/feed"/></body></opml>"#;
         store
             .import_outlines(&opml::parse(xml).unwrap(), false, Utc::now())
             .unwrap();
@@ -1013,14 +1074,25 @@ mod tests {
     #[tokio::test]
     async fn extract_entry_saves_the_article_and_reports_it() {
         let server = MockServer::start().await;
-        serve(&server, "/article", 200, &article_page(), "text/html; charset=utf-8").await;
+        serve(
+            &server,
+            "/article",
+            200,
+            &article_page(),
+            "text/html; charset=utf-8",
+        )
+        .await;
         let (app, linked, _) = app_with_entries(&server.uri());
         let recorder = Recorder::default();
         assert_eq!(
             app.extract_entry(linked, &recorder).await.unwrap(),
             ExtractOutcome::Saved
         );
-        let row = app.store().fulltext(linked).unwrap().expect("a stored article");
+        let row = app
+            .store()
+            .fulltext(linked)
+            .unwrap()
+            .expect("a stored article");
         assert!(row.html.as_deref().unwrap().contains("Paragraph 7."));
         assert_eq!(row.error, None);
         assert_eq!(

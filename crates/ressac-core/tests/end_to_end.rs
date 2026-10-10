@@ -1,15 +1,17 @@
 //! Import → refresh → diagnose → Wayback against a local mock web.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use ressac_core::model::{Action, Status};
-use ressac_core::service::{Event, EventSink, RefreshOptions, Ressac};
+use ressac_core::model::{Action, FeedId, Status};
+use ressac_core::service::{
+    Event, EventSink, FULL_ARTICLES, FULLTEXT_PER_FEED_PER_RUN, RefreshOptions, Ressac,
+};
 use ressac_core::source::FetchLimits;
 use ressac_core::store::Store;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Default)]
@@ -258,4 +260,198 @@ async fn unreachable_network_does_not_kill_feeds() {
             attempted: 4
         }
     )));
+}
+
+const PARA: &str = "The tide comes in twice a day, pulled by the moon and the sun, and the shore keeps a careful record of every visit in sand, shells and drifting weed.";
+
+fn article_page() -> String {
+    let body: String = (0..8)
+        .map(|i| format!("<p>Paragraph {i}. {PARA} {PARA}</p>"))
+        .collect();
+    format!(
+        "<!DOCTYPE html><html><head><title>Tides</title></head><body><article><h1>Tides</h1>{body}</article></body></html>"
+    )
+}
+
+/// An RSS feed whose items link to `{base}/page/{guid}` (no dates: they read as just published).
+fn linked_rss(title: &str, base: &str, guids: &[String]) -> String {
+    let items: String = guids
+        .iter()
+        .map(|g| {
+            format!(
+                "<item><guid>{g}</guid><title>Entry {g}</title><link>{base}/page/{g}</link></item>"
+            )
+        })
+        .collect();
+    format!(
+        r#"<?xml version="1.0"?><rss version="2.0"><channel><title>{title}</title><link>{base}/</link><description>A feed</description>{items}</channel></rss>"#
+    )
+}
+
+/// Two feeds served by `server`: Long (25 linked entries, "Always fetch full article" on)
+/// and Short (2 linked entries, off). Returns the app and both feed ids.
+async fn full_text_app(server: &MockServer) -> (Ressac, FeedId, FeedId) {
+    let base = server.uri();
+    let long: Vec<String> = (0..25).map(|i| format!("l{i}")).collect();
+    let short: Vec<String> = (0..2).map(|i| format!("s{i}")).collect();
+    serve(
+        server,
+        "/long.xml",
+        ok_rss(linked_rss("Long", &base, &long)),
+    )
+    .await;
+    serve(
+        server,
+        "/short.xml",
+        ok_rss(linked_rss("Short", &base, &short)),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/page/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(article_page(), "text/html"))
+        .mount(server)
+        .await;
+    let opml = format!(
+        r#"<opml><body><outline text="Long" xmlUrl="{base}/long.xml"/><outline text="Short" xmlUrl="{base}/short.xml"/></body></opml>"#
+    );
+    let app = Ressac::with_parts(Store::open_in_memory().unwrap(), limits(), &base).unwrap();
+    app.import_opml(&opml, false).unwrap();
+    let id = |title: &str| {
+        app.store()
+            .feeds()
+            .unwrap()
+            .into_iter()
+            .find(|f| f.title == title)
+            .unwrap()
+            .id
+    };
+    let (long_id, short_id) = (id("Long"), id("Short"));
+    app.store().set_prefer_full_text(long_id, true).unwrap();
+    (app, long_id, short_id)
+}
+
+fn epoch() -> DateTime<Utc> {
+    "2000-01-01T00:00:00Z".parse().unwrap()
+}
+
+#[tokio::test]
+async fn refresh_fetches_full_articles_for_feeds_that_prefer_them() {
+    let server = MockServer::start().await;
+    let (app, long, short) = full_text_app(&server).await;
+    let recorder = Recorder::default();
+    app.refresh(
+        RefreshOptions::default(),
+        &recorder,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+
+    let left = |feed_id| {
+        app.store()
+            .entries_needing_fulltext(feed_id, epoch(), 100)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        left(long),
+        25 - FULLTEXT_PER_FEED_PER_RUN,
+        "at most 20 per feed and run"
+    );
+    assert_eq!(left(short), 2, "Short does not prefer full articles");
+
+    let events = recorder.0.lock().unwrap().clone();
+    let announced = events
+        .iter()
+        .position(|e| {
+            *e == Event::Probing {
+                what: FULL_ARTICLES.into(),
+                total: FULLTEXT_PER_FEED_PER_RUN,
+            }
+        })
+        .expect("the full-article pass is announced");
+    let extracted: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(
+                e,
+                Event::Extracted {
+                    ok: true,
+                    error: None,
+                    ..
+                }
+            )
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(extracted.len(), FULLTEXT_PER_FEED_PER_RUN);
+    assert!(extracted.iter().all(|i| *i > announced));
+    assert!(matches!(events.last(), Some(Event::Finished { .. })));
+
+    // A forced second run stores no new entries, so nothing more is extracted.
+    let again = Recorder::default();
+    app.refresh(
+        RefreshOptions {
+            force: true,
+            ..RefreshOptions::default()
+        },
+        &again,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !again
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::Extracted { .. }))
+    );
+}
+
+/// Raises the stop flag on the first extraction, as Ctrl-C or the app's stop button would.
+struct StopOnFirstExtract {
+    events: Mutex<Vec<Event>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl EventSink for StopOnFirstExtract {
+    fn emit(&self, event: &Event) {
+        if matches!(event, Event::Extracted { .. }) {
+            self.stop.store(true, Ordering::Relaxed);
+        }
+        self.events.lock().unwrap().push(event.clone());
+    }
+}
+
+#[tokio::test]
+async fn a_stop_request_ends_the_full_article_pass_between_entries() {
+    let server = MockServer::start().await;
+    let (app, long, _) = full_text_app(&server).await;
+    let stop = Arc::new(AtomicBool::new(false));
+    let sink = StopOnFirstExtract {
+        events: Mutex::default(),
+        stop: stop.clone(),
+    };
+    app.refresh(RefreshOptions::default(), &sink, stop)
+        .await
+        .unwrap();
+    let events = sink.events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Extracted { .. }))
+            .count(),
+        1
+    );
+    assert!(matches!(events.last(), Some(Event::Finished { .. })));
+    assert_eq!(
+        app.store()
+            .entries_needing_fulltext(long, epoch(), 100)
+            .unwrap()
+            .len(),
+        24
+    );
 }
