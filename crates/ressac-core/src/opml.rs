@@ -303,6 +303,7 @@ fn feed_outline(feed: &FeedRow, cemetery: bool) -> String {
         Some(d) => attrs.insert("description".into(), d),
         None => attrs.remove("description"),
     };
+    attrs.remove("ressac:wayback");
     if cemetery && let Some(w) = &feed.wayback_url {
         attrs.insert("ressac:wayback".into(), w.clone());
     }
@@ -529,6 +530,35 @@ mod tests {
                 buried[0].attrs["ressac:wayback"],
                 "http://web.archive.org/web/2012/girl"
             );
+        }
+
+        #[test]
+        fn stale_wayback_attribute_is_dropped_from_a_normal_export() {
+            let s = Store::open_in_memory().unwrap();
+            let xml = r#"<opml xmlns:ressac="x"><body><outline text="A" xmlUrl="http://a.example.org/f" ressac:wayback="http://web.archive.org/x"/></body></opml>"#;
+            s.import_outlines(
+                &parse(xml).unwrap(),
+                false,
+                "2026-10-10T08:00:00Z".parse().unwrap(),
+            )
+            .unwrap();
+            let out = export(&s, false).unwrap();
+            assert!(!out.contains("ressac:wayback"), "{out}");
+        }
+
+        #[test]
+        fn special_characters_survive_a_round_trip() {
+            let s = Store::open_in_memory().unwrap();
+            let xml = r#"<opml><body><outline text="Say &quot;hi&quot; &lt;b&gt;" xmlUrl="http://a.example.org/f?a=1&amp;b=2"/></body></opml>"#;
+            s.import_outlines(
+                &parse(xml).unwrap(),
+                false,
+                "2026-10-10T08:00:00Z".parse().unwrap(),
+            )
+            .unwrap();
+            let feeds = all_feeds(&parse(&export(&s, false).unwrap()).unwrap());
+            assert_eq!(feeds[0].title, "Say \"hi\" <b>");
+            assert_eq!(feeds[0].xml_url, "http://a.example.org/f?a=1&b=2");
         }
     }
 }

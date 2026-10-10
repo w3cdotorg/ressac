@@ -123,6 +123,21 @@ impl Store {
             return Ok(None);
         };
         let snap: FeedSnapshot = serde_json::from_str(&previous)?;
+        if snap.state == "active" {
+            let clash: Option<FeedId> = tx
+                .query_row(
+                    "SELECT id FROM feed WHERE url_key = ?1 AND state = 'active' AND id <> ?2",
+                    params![snap.url_key, feed_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(other) = clash {
+                return Err(Error::Invalid(format!(
+                    "Feed #{other} already uses {}; cannot undo.",
+                    snap.xml_url
+                )));
+            }
+        }
         tx.execute(
             "UPDATE feed SET xml_url = ?2, url_key = ?3, state = ?4, merged_into_id = ?5 WHERE id = ?1",
             params![feed_id, snap.xml_url, snap.url_key, snap.state, snap.merged_into_id],
@@ -143,13 +158,30 @@ impl Store {
                 let status: String = r.get(3)?;
                 let action: Option<String> = r.get(4)?;
                 let decided_at: String = r.get(5)?;
+                let invalid = |col: usize, what: &str| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        col,
+                        rusqlite::types::Type::Text,
+                        format!("invalid {what} in garden_decision").into(),
+                    )
+                };
                 Ok(DecisionRecord {
                     id: r.get(0)?,
                     feed_id: r.get(1)?,
-                    decision: Decision::parse(&decision).unwrap_or(Decision::Keep),
-                    status_at_decision: Status::parse(&status).unwrap_or(Status::Unchecked),
-                    action: action.and_then(|a| serde_json::from_str(&a).ok()),
-                    decided_at: parse_ts(&decided_at).unwrap_or_default(),
+                    decision: Decision::parse(&decision).ok_or_else(|| invalid(2, "decision"))?,
+                    status_at_decision: Status::parse(&status)
+                        .ok_or_else(|| invalid(3, "status"))?,
+                    action: action
+                        .map(|a| serde_json::from_str(&a))
+                        .transpose()
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?,
+                    decided_at: parse_ts(&decided_at).ok_or_else(|| invalid(5, "timestamp"))?,
                 })
             })?
             .map(|r| r.map(|d| (d.feed_id, d)))
@@ -266,5 +298,71 @@ mod tests {
             s.record_decision(1, Decision::Repair, Status::Dead, None, now())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn undo_refuses_when_the_old_address_is_taken_again() {
+        let s = store();
+        s.record_decision(1, Decision::Bury, Status::Dead, None, now())
+            .unwrap();
+        let xml =
+            r#"<opml><body><outline text="A2" xmlUrl="http://a.example.org/feed"/></body></opml>"#;
+        s.import_outlines(&opml::parse(xml).unwrap(), false, now())
+            .unwrap();
+        let err = s.undo_last_decision().unwrap_err();
+        assert!(
+            err.to_string().contains("already uses") && err.to_string().contains("cannot undo"),
+            "{err}"
+        );
+        assert_eq!(s.feed(1).unwrap().state, "buried");
+        assert!(s.latest_decisions().unwrap().contains_key(&1));
+    }
+
+    #[test]
+    fn undo_restores_url_key_after_redirect_and_merge_state() {
+        let s = store();
+        let key = s.feed(1).unwrap().url_key;
+        let action = Action::FollowRedirect {
+            url: "https://a2.example.org/feed".into(),
+        };
+        s.record_decision(1, Decision::Repair, Status::Moved, Some(&action), now())
+            .unwrap();
+        assert_ne!(s.feed(1).unwrap().url_key, key);
+        s.undo_last_decision().unwrap();
+        assert_eq!(s.feed(1).unwrap().url_key, key);
+        s.record_decision(
+            1,
+            Decision::Repair,
+            Status::Duplicate,
+            Some(&Action::MergeInto { feed_id: 2 }),
+            now(),
+        )
+        .unwrap();
+        s.undo_last_decision().unwrap();
+        let f = s.feed(1).unwrap();
+        assert_eq!((f.state.as_str(), f.merged_into_id), ("active", None));
+    }
+
+    #[test]
+    fn corrupt_decision_rows_are_errors_not_defaults() {
+        let s = store();
+        s.conn()
+            .execute(
+                "INSERT INTO garden_decision (feed_id, decision, status_at_decision, previous, decided_at) \
+                 VALUES (1, 'bogus', 'Dead', '{}', '2026-10-10T08:00:00.000Z')",
+                [],
+            )
+            .unwrap_err(); // the CHECK constraint rejects it, so bypass it below
+        s.conn()
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .unwrap();
+        s.conn()
+            .execute(
+                "INSERT INTO garden_decision (feed_id, decision, status_at_decision, previous, decided_at) \
+                 VALUES (1, 'bogus', 'Dead', '{}', '2026-10-10T08:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        assert!(s.latest_decisions().is_err());
     }
 }
