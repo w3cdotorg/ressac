@@ -50,21 +50,21 @@ pub fn looks_like_html(content_type: Option<&str>, body: &[u8]) -> bool {
 const CHALLENGE_SNIFF_BYTES: usize = 64 * 1024;
 
 /// Fingerprints of anti-bot interstitials (lowercase): Akamai/Anubis-style "Client
-/// Challenge", Cloudflare, DDoS-Guard, DataDome and PerimeterX.
-const CHALLENGE_MARKERS: [&[u8]; 9] = [
+/// Challenge", Cloudflare, DDoS-Guard, DataDome and PerimeterX. `challenge-platform` is
+/// deliberately absent: Cloudflare's JS detections inject it into ordinary pages.
+const CHALLENGE_MARKERS: [&[u8]; 8] = [
     b"<title>client challenge",
     b"<title>just a moment",
     b"attention required! | cloudflare",
     b"cf-chl-",
-    b"challenge-platform",
     b"_cf_chl_opt",
     b"<title>ddos-guard",
-    b"captcha-delivery.com",
+    b"captcha-delivery.com/captcha",
     b"px-captcha",
 ];
 
 /// True when an HTML head (case-insensitive) is an anti-bot challenge, not a real page.
-fn is_challenge_page(head: &[u8]) -> bool {
+pub(crate) fn is_challenge_page(head: &[u8]) -> bool {
     let lower = head.to_ascii_lowercase();
     CHALLENGE_MARKERS
         .iter()
@@ -93,9 +93,11 @@ fn parse_xml(body: &[u8], base_url: &str) -> Result<feed_rs::model::Feed, ErrorK
 }
 
 /// Repairs the usual ways feeds are not well-formed XML: bare `&`, HTML entities XML does
-/// not declare (`&nbsp;`, `&eacute;`) and control bytes XML 1.0 forbids. Both kinds of
-/// entity become literal text (`&amp;nbsp;`), which renders right later because summaries
-/// are HTML. `<![CDATA[ ... ]]>` sections are copied untouched.
+/// not declare and control bytes XML 1.0 forbids. Common HTML entities (`&nbsp;`,
+/// `&eacute;`, `&hellip;`) become numeric references, so titles show real characters;
+/// unknown names become literal text (`&amp;name;`). Numeric references to characters
+/// XML forbids are dropped. `<![CDATA[ ... ]]>` sections are copied untouched. Each `&`
+/// costs at most `MAX_REFERENCE_BYTES`, so the repair is linear in the body size.
 fn sanitize_xml(body: &[u8]) -> Vec<u8> {
     const CDATA_OPEN: &[u8] = b"<![CDATA[";
     const CDATA_CLOSE: &[u8] = b"]]>";
@@ -113,12 +115,17 @@ fn sanitize_xml(body: &[u8]) -> Vec<u8> {
             continue;
         }
         match body[i] {
-            b'&' => match entity_len(rest) {
-                Some((len, true)) => {
+            b'&' => match reference_at(rest) {
+                Some((len, Reference::Keep)) => {
                     out.extend_from_slice(&rest[..len]);
                     i += len;
                 }
-                Some((len, false)) => {
+                Some((len, Reference::Numeric(code))) => {
+                    out.extend_from_slice(format!("&#{code};").as_bytes());
+                    i += len;
+                }
+                Some((len, Reference::Drop)) => i += len,
+                Some((len, Reference::Literal)) => {
                     out.extend_from_slice(b"&amp;");
                     out.extend_from_slice(&rest[1..len]);
                     i += len;
@@ -138,17 +145,37 @@ fn sanitize_xml(body: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Length of the well-formed reference at the start of `s` (which begins with `&`), and
-/// whether XML itself defines it. `None` when no valid reference starts here.
-fn entity_len(s: &[u8]) -> Option<(usize, bool)> {
-    let semi = s.iter().position(|&b| b == b';')?;
+/// Longest reference name looked at, `;` included. A `&` with no `;` this close is bare.
+const MAX_REFERENCE_BYTES: usize = 34;
+
+/// What to do with a well-formed `&...;` reference.
+#[derive(Debug, PartialEq)]
+enum Reference {
+    /// XML defines it: copy as is.
+    Keep,
+    /// A common HTML entity: write this numeric reference instead.
+    Numeric(u32),
+    /// A numeric reference to a character XML 1.0 forbids: remove it.
+    Drop,
+    /// An unknown name: escape the `&` so it reads as literal text.
+    Literal,
+}
+
+/// Length of the well-formed reference at the start of `s` (which begins with `&`) and
+/// what to do with it. `None` when no valid reference starts here. Looks at no more than
+/// `MAX_REFERENCE_BYTES` bytes.
+fn reference_at(s: &[u8]) -> Option<(usize, Reference)> {
+    let window = &s[..s.len().min(MAX_REFERENCE_BYTES)];
+    let semi = window.iter().position(|&b| b == b';')?;
     let name = &s[1..semi];
-    let defined = match name {
+    let kind = match name {
         [b'#', b'x', digits @ ..] if !digits.is_empty() => {
-            digits.iter().all(u8::is_ascii_hexdigit).then_some(true)?
+            digits.iter().all(u8::is_ascii_hexdigit).then_some(())?;
+            code_reference(digits, 16)
         }
         [b'#', digits @ ..] if !digits.is_empty() => {
-            digits.iter().all(u8::is_ascii_digit).then_some(true)?
+            digits.iter().all(u8::is_ascii_digit).then_some(())?;
+            code_reference(digits, 10)
         }
         [first, tail @ ..]
             if (first.is_ascii_alphabetic() || *first == b'_')
@@ -156,11 +183,66 @@ fn entity_len(s: &[u8]) -> Option<(usize, bool)> {
                     .iter()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) =>
         {
-            matches!(name, b"amp" | b"lt" | b"gt" | b"quot" | b"apos")
+            if matches!(name, b"amp" | b"lt" | b"gt" | b"quot" | b"apos") {
+                Reference::Keep
+            } else {
+                html_entity(name).map_or(Reference::Literal, Reference::Numeric)
+            }
         }
         _ => return None,
     };
-    Some((semi + 1, defined))
+    Some((semi + 1, kind))
+}
+
+/// A numeric reference is kept when it names a character XML 1.0 allows, else dropped.
+fn code_reference(digits: &[u8], radix: u32) -> Reference {
+    let allowed = std::str::from_utf8(digits)
+        .ok()
+        .and_then(|d| u32::from_str_radix(d, radix).ok())
+        .is_some_and(|c| {
+            matches!(c, 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x1_0000..=0x10_FFFF)
+        });
+    if allowed {
+        Reference::Keep
+    } else {
+        Reference::Drop
+    }
+}
+
+/// HTML 4 Latin-1 entities, from U+00A0 to U+00FF in order.
+const LATIN1_ENTITIES: [&str; 96] = [
+    "nbsp", "iexcl", "cent", "pound", "curren", "yen", "brvbar", "sect", "uml", "copy", "ordf",
+    "laquo", "not", "shy", "reg", "macr", "deg", "plusmn", "sup2", "sup3", "acute", "micro",
+    "para", "middot", "cedil", "sup1", "ordm", "raquo", "frac14", "frac12", "frac34", "iquest",
+    "Agrave", "Aacute", "Acirc", "Atilde", "Auml", "Aring", "AElig", "Ccedil", "Egrave", "Eacute",
+    "Ecirc", "Euml", "Igrave", "Iacute", "Icirc", "Iuml", "ETH", "Ntilde", "Ograve", "Oacute",
+    "Ocirc", "Otilde", "Ouml", "times", "Oslash", "Ugrave", "Uacute", "Ucirc", "Uuml", "Yacute",
+    "THORN", "szlig", "agrave", "aacute", "acirc", "atilde", "auml", "aring", "aelig", "ccedil",
+    "egrave", "eacute", "ecirc", "euml", "igrave", "iacute", "icirc", "iuml", "eth", "ntilde",
+    "ograve", "oacute", "ocirc", "otilde", "ouml", "divide", "oslash", "ugrave", "uacute", "ucirc",
+    "uuml", "yacute", "thorn", "yuml",
+];
+
+/// Code point of a common HTML entity: Latin-1 plus the typographic ones.
+fn html_entity(name: &[u8]) -> Option<u32> {
+    if let Some(i) = LATIN1_ENTITIES.iter().position(|e| e.as_bytes() == name) {
+        return Some(0xA0 + i as u32);
+    }
+    Some(match name {
+        b"ndash" => 0x2013,
+        b"mdash" => 0x2014,
+        b"lsquo" => 0x2018,
+        b"rsquo" => 0x2019,
+        b"sbquo" => 0x201A,
+        b"ldquo" => 0x201C,
+        b"rdquo" => 0x201D,
+        b"bdquo" => 0x201E,
+        b"hellip" => 0x2026,
+        b"bull" => 0x2022,
+        b"trade" => 0x2122,
+        b"euro" => 0x20AC,
+        _ => return None,
+    })
 }
 
 pub fn parse_feed(
@@ -180,8 +262,22 @@ pub fn parse_feed(
         );
     }
     let feed = match parse_xml(body, base_url) {
+        Ok(feed) if body.starts_with(b"<") => {
+            // The XML parser keeps undeclared HTML entities as literal text (`&eacute;`),
+            // which would show in plain-text titles: prefer the repaired reading when the
+            // repair changed something and still parses.
+            let repaired = sanitize_xml(body);
+            match (repaired != body)
+                .then(|| parse_xml(&repaired, base_url).ok())
+                .flatten()
+            {
+                Some(better) => better,
+                None => feed,
+            }
+        }
         Ok(feed) => feed,
-        Err(ErrorKind::Parse) => {
+        // XML only: a JSON Feed with a raw control character must not have its `&` rewritten.
+        Err(ErrorKind::Parse) if body.starts_with(b"<") => {
             // Be lenient like NetNewsWire and Vienna: one retry on a repaired copy, and the
             // original error stands when that fails too.
             let repaired = sanitize_xml(body);
@@ -323,7 +419,6 @@ mod tests {
             "<html><title>Just a moment...</title>",
             "<title>Attention Required! | Cloudflare</title>",
             "<div id=\"cf-chl-widget-abc\"></div>",
-            "<script src=\"/cdn-cgi/challenge-platform/h/b/orchestrate\"></script>",
             "<script>window._cf_chl_opt={}</script>",
             "<TITLE>DDoS-Guard</TITLE>",
             "<iframe src=\"https://geo.captcha-delivery.com/captcha/\">",
@@ -402,10 +497,10 @@ mod tests {
         let f = parse_feed(BARE_AMP.as_bytes(), None, "https://u.example/feed", now()).unwrap();
         assert_eq!(f.title.as_deref(), Some("Photos & more"));
         assert_eq!(f.entries[0].title.as_deref(), Some("Fish & Chips"));
-        assert_eq!(f.entries[1].title.as_deref(), Some("AT&T&nbsp;news"));
+        assert_eq!(f.entries[1].title.as_deref(), Some("AT&T\u{a0}news"));
         let summary = f.entries[0].summary_html.as_deref().unwrap();
         assert!(
-            summary.contains("&eacute;") && summary.contains("&nbsp;"),
+            summary.contains("café") && summary.contains('\u{a0}'),
             "{summary}"
         );
     }
@@ -422,8 +517,8 @@ mod tests {
         );
         assert_eq!(fixed("&#38;&#x26;&#X26;"), "&#38;&#x26;&amp;#X26;");
         assert_eq!(
-            fixed("&nbsp;&eacute;&_a.b-c;"),
-            "&amp;nbsp;&amp;eacute;&amp;_a.b-c;"
+            fixed("&nbsp;&eacute;&_a.b-c;&bogus;"),
+            "&#160;&#233;&amp;_a.b-c;&amp;bogus;"
         );
         assert_eq!(fixed("AT&T; x"), "AT&amp;T; x");
     }
@@ -467,6 +562,104 @@ mod tests {
     fn unrepairable_xml_keeps_the_original_error() {
         assert_eq!(
             parse_feed(b"<rss><channel><title>x & y", None, "http://x.org", now()),
+            Err(ErrorKind::Parse)
+        );
+    }
+
+    #[test]
+    fn sanitizer_is_linear_on_bare_ampersands_without_semicolons() {
+        let body = "a & b ".repeat(170_000); // about 1 MB, no ';' anywhere
+        let started = std::time::Instant::now();
+        let out = sanitize_xml(body.as_bytes());
+        let elapsed = started.elapsed();
+        assert_eq!(out, "a &amp; b ".repeat(170_000).as_bytes());
+        let bound = if cfg!(debug_assertions) {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_millis(100)
+        };
+        assert!(elapsed < bound, "took {elapsed:?}");
+    }
+
+    #[test]
+    fn jsd_script_on_a_small_page_is_not_a_challenge() {
+        let parked = b"<!DOCTYPE html><html><head><title>Parked</title></head><body>for sale\
+<script src=\"/cdn-cgi/challenge-platform/scripts/jsd/main.js\"></script></body></html>";
+        assert_eq!(
+            parse_feed(parked, Some("text/html"), "http://x.org/feed", now()),
+            Err(ErrorKind::HtmlInsteadOfFeed)
+        );
+        assert!(!is_challenge_page(parked));
+        assert!(!is_challenge_page(
+            b"<script src=\"https://ct.captcha-delivery.com/c.js\"></script>"
+        ));
+    }
+
+    #[test]
+    fn sanitizer_maps_common_html_entities_to_numeric_references() {
+        let fixed = |s: &str| String::from_utf8(sanitize_xml(s.as_bytes())).unwrap();
+        for (name, code) in [
+            ("nbsp", 160),
+            ("iexcl", 161),
+            ("agrave", 224),
+            ("Eacute", 201),
+            ("ccedil", 231),
+            ("ntilde", 241),
+            ("szlig", 223),
+            ("uuml", 252),
+            ("yuml", 255),
+            ("laquo", 171),
+            ("raquo", 187),
+            ("copy", 169),
+            ("reg", 174),
+            ("deg", 176),
+            ("middot", 183),
+            ("ndash", 8211),
+            ("mdash", 8212),
+            ("lsquo", 8216),
+            ("rsquo", 8217),
+            ("sbquo", 8218),
+            ("ldquo", 8220),
+            ("rdquo", 8221),
+            ("bdquo", 8222),
+            ("hellip", 8230),
+            ("bull", 8226),
+            ("trade", 8482),
+            ("euro", 8364),
+        ] {
+            assert_eq!(fixed(&format!("&{name};")), format!("&#{code};"), "{name}");
+        }
+        assert_eq!(fixed("&NBSP;&Foo;&amp;"), "&amp;NBSP;&amp;Foo;&amp;");
+    }
+
+    #[test]
+    fn html_entities_in_titles_become_real_characters() {
+        let rss = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title><link>http://u.example/</link><description>d</description><item><guid>1</guid><title>Caf&eacute; &ndash; l&rsquo;&eacute;t&eacute; &hellip;</title></item></channel></rss>"#;
+        let f = parse_feed(rss.as_bytes(), None, "http://u.example/feed", now()).unwrap();
+        assert_eq!(f.entries[0].title.as_deref(), Some("Café – l’été …"));
+    }
+
+    #[test]
+    fn numeric_references_xml_forbids_are_dropped() {
+        let fixed = |s: &str| String::from_utf8(sanitize_xml(s.as_bytes())).unwrap();
+        assert_eq!(
+            fixed("a&#0;b&#1;c&#xD800;d&#xFFFE;e&#xFFFF;f&#x110000;g&#xFFFFFF;h&#99999999999;i"),
+            "abcdefghi"
+        );
+        assert_eq!(
+            fixed("&#9;&#10;&#13;&#x20;&#xD7FF;&#xE000;&#x10000;&#x10FFFF;"),
+            "&#9;&#10;&#13;&#x20;&#xD7FF;&#xE000;&#x10000;&#x10FFFF;"
+        );
+        let rss = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>T&#0;itle &</title><link>http://u.example/</link><description>d</description></channel></rss>"#;
+        let f = parse_feed(rss.as_bytes(), None, "http://u.example/feed", now()).unwrap();
+        assert_eq!(f.title.as_deref(), Some("Title &"));
+    }
+
+    #[test]
+    fn json_feed_with_a_raw_control_character_is_not_repaired() {
+        let json = "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"T\x01\",\"items\":[{\"id\":\"1\",\"url\":\"https://x.org/?a=1&b=2\"}]}";
+        assert_eq!(
+            parse_feed(json.as_bytes(), None, "https://x.org/feed.json", now()),
             Err(ErrorKind::Parse)
         );
     }
