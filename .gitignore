@@ -6,3 +6,10 @@
 # OPML réels : jamais dans le dépôt
 *.opml
 !tests/fixtures/**/*.opml
+
+# Xcode: the project is generated from apps/macos/project.yml by xcodegen
+apps/macos/Ressac.xcodeproj/
+apps/macos/build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
