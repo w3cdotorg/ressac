@@ -108,7 +108,7 @@ ressac/
 - **Escaping repair:** double-escaped ampersands in URLs (`&amp;amp;` → `&`) are repaired.
 - **URL key:** lowercase host, strip leading `www.`, strip trailing `/`, ignore scheme. Used only for comparison; original URLs are kept.
 - **Exact duplicates** (same `url_key`) collapse into the first occurrence. Same-name feeds with different URLs are **not** merged (Vienna's `(1)` suffixes are homonyms).
-- **Idempotent:** re-importing the same file changes nothing.
+- **Idempotent:** re-importing the same file changes nothing, even after triage: a feed already exists when any feed, buried or not, has its URL key as current or original address. New feeds and folders go after the existing items of their folder.
 - **`--dry-run`:** prints added / merged / skipped counts and lists, and writes nothing.
 
 ### Fetch

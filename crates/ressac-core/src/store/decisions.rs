@@ -305,9 +305,15 @@ mod tests {
         let s = store();
         s.record_decision(1, Decision::Bury, Status::Dead, None, now())
             .unwrap();
-        let xml =
-            r#"<opml><body><outline text="A2" xmlUrl="http://a.example.org/feed"/></body></opml>"#;
-        s.import_outlines(&opml::parse(xml).unwrap(), false, now())
+        // A re-import no longer revives the address of a buried feed, so the clash comes from
+        // another client writing the shared database.
+        s.conn()
+            .execute(
+                "INSERT INTO feed (position, title, xml_url, xml_url_original, url_key, added_at) \
+                 VALUES (9, 'A2', 'http://a.example.org/feed', 'http://a.example.org/feed', \
+                 'a.example.org/feed', '2026-10-10T08:00:00.000Z')",
+                [],
+            )
             .unwrap();
         let err = s.undo_last_decision().unwrap_err();
         assert!(

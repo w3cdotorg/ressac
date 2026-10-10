@@ -1,6 +1,6 @@
 //! Folders and feeds: OPML import and read access.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -17,7 +17,7 @@ pub struct ImportReport {
     pub feeds_added: usize,
     /// (dropped title, kept title) for exact duplicates inside the imported file.
     pub merged: Vec<(String, String)>,
-    /// Feeds whose URL key already exists among active feeds in the database.
+    /// Feeds already in the database, in any state, under their current or original address.
     pub skipped_existing: usize,
 }
 
@@ -83,8 +83,10 @@ fn feed_row(r: &Row<'_>) -> rusqlite::Result<FeedRow> {
 }
 
 impl Store {
-    /// Imports folders and feeds. Folders are matched by (parent, name); feeds by URL key
-    /// among active feeds. A dry run executes the same statements and rolls them back.
+    /// Imports folders and feeds. Folders are matched by (parent, name). A feed already
+    /// exists when any feed, buried or not, has its URL key as current or original address,
+    /// so triage (burials, merges, repairs) survives a re-import. New items go after the
+    /// existing ones of their folder. A dry run executes the same statements and rolls them back.
     pub fn import_outlines(
         &self,
         outlines: &[Outline],
@@ -93,8 +95,16 @@ impl Store {
     ) -> Result<ImportReport> {
         let tx = self.conn().unchecked_transaction()?;
         let mut report = ImportReport::default();
+        let known = known_keys(&tx)?;
         let mut seen: HashMap<String, String> = HashMap::new();
-        import_level(&tx, outlines, None, &ts(now), &mut seen, &mut report)?;
+        let mut ctx = ImportCtx {
+            tx: &tx,
+            now: &ts(now),
+            known: &known,
+            seen: &mut seen,
+            report: &mut report,
+        };
+        import_level(&mut ctx, outlines, None)?;
         if dry_run {
             tx.rollback()?;
         } else {
@@ -150,15 +160,48 @@ impl Store {
     }
 }
 
+/// URL keys of every feed in the database, from both its current and original address.
+fn known_keys(tx: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = tx.prepare("SELECT url_key, xml_url_original FROM feed")?;
+    let mut keys = HashSet::new();
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+        let (key, original) = row?;
+        keys.insert(key);
+        keys.insert(url_key(&original));
+    }
+    Ok(keys)
+}
+
+/// First free position in a folder (or at the root), after its feeds and sub-folders.
+fn next_position(tx: &Connection, parent: Option<FolderId>) -> Result<i64> {
+    let max: Option<i64> = tx.query_row(
+        "SELECT max(position) FROM (SELECT position FROM feed WHERE folder_id IS ?1 \
+         UNION ALL SELECT position FROM folder WHERE parent_id IS ?1)",
+        [parent],
+        |r| r.get(0),
+    )?;
+    Ok(max.map_or(0, |m| m + 1))
+}
+
+struct ImportCtx<'a> {
+    tx: &'a Connection,
+    now: &'a str,
+    /// Keys present before the import started.
+    known: &'a HashSet<String>,
+    /// Keys added by this import → title kept, for duplicates inside the file.
+    seen: &'a mut HashMap<String, String>,
+    report: &'a mut ImportReport,
+}
+
 fn import_level(
-    tx: &Connection,
+    ctx: &mut ImportCtx<'_>,
     items: &[Outline],
     parent: Option<FolderId>,
-    now: &str,
-    seen: &mut HashMap<String, String>,
-    report: &mut ImportReport,
 ) -> Result<()> {
-    for (position, item) in items.iter().enumerate() {
+    let tx = ctx.tx;
+    for (index, item) in items.iter().enumerate() {
+        // The file order, pushed past anything already in the folder (a re-import appends).
+        let position = || -> Result<i64> { Ok(next_position(tx, parent)?.max(index as i64)) };
         match item {
             Outline::Folder { name, children } => {
                 let existing: Option<FolderId> = tx
@@ -173,27 +216,22 @@ fn import_level(
                     None => {
                         tx.execute(
                             "INSERT INTO folder (parent_id, name, position) VALUES (?1, ?2, ?3)",
-                            params![parent, name, position as i64],
+                            params![parent, name, position()?],
                         )?;
-                        report.folders_added += 1;
+                        ctx.report.folders_added += 1;
                         tx.last_insert_rowid()
                     }
                 };
-                import_level(tx, children, Some(id), now, seen, report)?;
+                import_level(ctx, children, Some(id))?;
             }
             Outline::Feed(feed) => {
                 let key = url_key(&feed.xml_url);
-                if let Some(kept) = seen.get(&key) {
-                    report.merged.push((feed.title.clone(), kept.clone()));
+                if let Some(kept) = ctx.seen.get(&key) {
+                    ctx.report.merged.push((feed.title.clone(), kept.clone()));
                     continue;
                 }
-                let exists: i64 = tx.query_row(
-                    "SELECT count(*) FROM feed WHERE url_key = ?1 AND state = 'active'",
-                    [&key],
-                    |r| r.get(0),
-                )?;
-                if exists > 0 {
-                    report.skipped_existing += 1;
+                if ctx.known.contains(&key) {
+                    ctx.report.skipped_existing += 1;
                     continue;
                 }
                 let original = feed
@@ -206,7 +244,7 @@ fn import_level(
                      description_original, opml_attrs, added_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         parent,
-                        position as i64,
+                        position()?,
                         feed.title,
                         feed.xml_url,
                         original,
@@ -214,11 +252,11 @@ fn import_level(
                         key,
                         feed.description,
                         serde_json::to_string(&feed.attrs)?,
-                        now
+                        ctx.now
                     ],
                 )?;
-                seen.insert(key, feed.title.clone());
-                report.feeds_added += 1;
+                ctx.seen.insert(key, feed.title.clone());
+                ctx.report.feeds_added += 1;
             }
         }
     }
@@ -228,6 +266,7 @@ fn import_level(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Action, Decision, Status};
     use crate::opml;
 
     const FIXTURE: &str = include_str!("../../../../tests/fixtures/vienna-like.opml");
@@ -300,6 +339,98 @@ mod tests {
         let paths = store.folder_paths().unwrap();
         let yt = cht.iter().find(|f| f.xml_url.contains("youtube")).unwrap();
         assert_eq!(paths[&yt.folder_id.unwrap()], "Jon / YouTube");
+    }
+
+    /// Export without the `dateCreated` line, which carries the current time.
+    fn export_body(store: &Store, cemetery: bool) -> String {
+        opml::export(store, cemetery)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.contains("<dateCreated>"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn reimport_after_triage_changes_nothing() {
+        let (store, _) = imported();
+        let feeds = store.feeds().unwrap();
+        let (buried, repaired) = (feeds[0].id, feeds[1].id);
+        store
+            .record_decision(buried, Decision::Bury, Status::Dead, None, now())
+            .unwrap();
+        let moved = Action::FollowRedirect {
+            url: "https://moved.example.net/new-feed".into(),
+        };
+        store
+            .record_decision(
+                repaired,
+                Decision::Repair,
+                Status::Moved,
+                Some(&moved),
+                now(),
+            )
+            .unwrap();
+        let (feeds_before, export_before, cemetery_before) = (
+            store.feeds().unwrap(),
+            export_body(&store, false),
+            export_body(&store, true),
+        );
+        let again = store
+            .import_outlines(&opml::parse(FIXTURE).unwrap(), false, now())
+            .unwrap();
+        assert_eq!((again.folders_added, again.feeds_added), (0, 0));
+        assert_eq!(
+            store.feeds().unwrap(),
+            feeds_before,
+            "states and URLs unchanged"
+        );
+        assert_eq!(export_body(&store, false), export_before);
+        assert_eq!(export_body(&store, true), cemetery_before);
+    }
+
+    #[test]
+    fn reimport_appends_new_feeds_after_existing_ones() {
+        let store = Store::open_in_memory().unwrap();
+        let first = r#"<opml><body><outline text="Blogs">
+            <outline text="X" xmlUrl="https://x.example.org/feed"/>
+            <outline text="Y" xmlUrl="https://y.example.org/feed"/>
+            </outline></body></opml>"#;
+        store
+            .import_outlines(&opml::parse(first).unwrap(), false, now())
+            .unwrap();
+        let second = r#"<opml><body><outline text="Blogs">
+            <outline text="Z" xmlUrl="https://z.example.org/feed"/>
+            <outline text="Sub"><outline text="W" xmlUrl="https://w.example.org/feed"/></outline>
+            </outline></body></opml>"#;
+        let report = store
+            .import_outlines(&opml::parse(second).unwrap(), false, now())
+            .unwrap();
+        assert_eq!((report.folders_added, report.feeds_added), (1, 2));
+        let positions: Vec<(String, i64)> = store
+            .feeds()
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.title != "W")
+            .map(|f| (f.title, f.position))
+            .collect();
+        assert_eq!(
+            positions,
+            [("X".into(), 0), ("Y".into(), 1), ("Z".into(), 2)]
+        );
+        let sub = store
+            .folders()
+            .unwrap()
+            .into_iter()
+            .find(|f| f.name == "Sub")
+            .unwrap();
+        assert_eq!(sub.position, 3, "a new sub-folder goes after them too");
+        let body = export_body(&store, false);
+        let order: Vec<usize> = ["\"X\"", "\"Y\"", "\"Z\"", "\"Sub\""]
+            .iter()
+            .map(|t| body.find(t).unwrap())
+            .collect();
+        assert!(order.is_sorted(), "{body}");
     }
 
     #[test]
