@@ -1,5 +1,7 @@
 //! Garden logic, independent of any UI: rows, the triage queue, decisions.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 
 use crate::error::Result;
@@ -116,6 +118,16 @@ pub fn load_rows(store: &Store) -> Result<Vec<GardenRow>> {
     Ok(rows)
 }
 
+/// Stores every feed's triage verdict (`feed_health.needs_triage`) so that other clients
+/// read the rule instead of reimplementing it. Called after every diagnosis, decision and undo.
+pub fn recompute_triage(store: &Store) -> Result<()> {
+    let flags: HashMap<FeedId, bool> = load_rows(store)?
+        .iter()
+        .map(|r| (r.feed_id, r.needs_triage()))
+        .collect();
+    store.save_triage(&flags)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Progress {
     pub decided: usize,
@@ -154,11 +166,14 @@ pub fn decide(
         Decision::Repair => diagnosis.and_then(|d| d.action),
         Decision::Keep | Decision::Bury => None,
     };
-    store.record_decision(feed_id, decision, status, action.as_ref(), now)
+    store.record_decision(feed_id, decision, status, action.as_ref(), now)?;
+    recompute_triage(store)
 }
 
 pub fn undo(store: &Store) -> Result<Option<FeedId>> {
-    store.undo_last_decision()
+    let undone = store.undo_last_decision()?;
+    recompute_triage(store)?;
+    Ok(undone)
 }
 
 pub fn apply_safe_repairs(store: &Store, now: DateTime<Utc>) -> Result<(usize, Vec<String>)> {
@@ -176,6 +191,7 @@ pub fn apply_safe_repairs(store: &Store, now: DateTime<Utc>) -> Result<(usize, V
             Err(other) => return Err(other),
         }
     }
+    recompute_triage(store)?;
     Ok((applied, skipped))
 }
 
@@ -392,5 +408,47 @@ mod tests {
             decide(&s, 3, Decision::Repair, now()).is_err(),
             "Fossil has nothing to repair"
         );
+    }
+
+    /// `needs_triage` as other clients read it, by feed id.
+    fn stored_flags(s: &Store) -> Vec<(FeedId, bool)> {
+        s.conn()
+            .prepare("SELECT feed_id, needs_triage FROM v_garden_row ORDER BY feed_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    fn assert_flags_match_rows(s: &Store) {
+        let mut expected: Vec<(FeedId, bool)> = load_rows(s)
+            .unwrap()
+            .iter()
+            .map(|r| (r.feed_id, r.needs_triage()))
+            .collect();
+        expected.sort();
+        assert_eq!(stored_flags(s), expected);
+    }
+
+    #[test]
+    fn triage_flags_follow_decisions_undo_and_safe_repairs() {
+        let s = store();
+        recompute_triage(&s).unwrap();
+        assert_eq!(
+            stored_flags(&s),
+            [(1, true), (2, false), (3, true), (4, true)]
+        );
+        decide(&s, 3, Decision::Keep, now()).unwrap();
+        decide(&s, 1, Decision::Bury, now()).unwrap();
+        assert_eq!(
+            stored_flags(&s),
+            [(1, false), (2, false), (3, false), (4, true)]
+        );
+        assert_eq!(undo(&s).unwrap(), Some(1));
+        assert_eq!(stored_flags(&s)[0], (1, true), "undo brings the feed back");
+        apply_safe_repairs(&s, now()).unwrap();
+        assert_eq!(stored_flags(&s)[3], (4, false), "repaired");
+        assert_flags_match_rows(&s);
     }
 }
