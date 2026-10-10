@@ -277,32 +277,36 @@ fn off_site_hop<'a>(last: &'a AttemptRecord, xml_url: &str) -> Option<&'a str> {
     (!same_host && site_of(&hop.url)? != site_of(xml_url)?).then_some(hop.url.as_str())
 }
 
-/// Words that mark a consent, login or account wall rather than a shutdown page.
-const WALL_WORDS: [&str; 7] = [
-    "consent", "login", "signin", "sign-in", "auth", "sso", "account",
+/// Single tokens that mark a consent, login or account wall rather than a shutdown page.
+const WALL_TOKENS: [&str; 11] = [
+    "consent",
+    "login",
+    "signin",
+    "auth",
+    "auth0",
+    "oauth",
+    "authorize",
+    "sso",
+    "okta",
+    "account",
+    "accounts",
 ];
 
-/// Whether a host label or path segment is a wall word, or starts with one followed
-/// by a separator (`login.php`, `sign-in`); `consent`, `login`, `signin` and `account`
-/// also match as plain prefixes (`accounts`). `author` is not `auth`.
-fn is_wall_part(part: &str) -> bool {
-    let part = part.to_ascii_lowercase();
-    WALL_WORDS.iter().any(|w| {
-        let plain_prefix = matches!(*w, "consent" | "login" | "signin" | "account");
-        part == *w
-            || (plain_prefix && part.starts_with(w))
-            || part
-                .strip_prefix(w)
-                .is_some_and(|rest| rest.starts_with(['.', '-', '_']))
-    })
-}
-
+/// Whether the host labels and path segments, split on `-` `_` `.` `/`, hold a wall token
+/// (`login`, `sign_in`, `log-in`, `auth0`, `okta`, ...). `authors` is not a wall.
 fn looks_like_a_wall(url: &str) -> bool {
     let Ok(u) = url::Url::parse(url) else {
         return false;
     };
-    let host = u.host_str().unwrap_or("");
-    host.split('.').chain(u.path().split('/')).any(is_wall_part)
+    let text = format!("{}{}", u.host_str().unwrap_or(""), u.path()).to_ascii_lowercase();
+    let tokens: Vec<&str> = text
+        .split(['-', '_', '.', '/'])
+        .filter(|t| !t.is_empty())
+        .collect();
+    tokens.iter().any(|t| WALL_TOKENS.contains(t))
+        || tokens
+            .windows(2)
+            .any(|w| matches!(w, ["log" | "sign", "in"]))
 }
 
 /// Whether the URL's path looks like a feed (`feed`, `rss`, `atom`, `xml`, `rdf`).
@@ -316,12 +320,13 @@ fn looks_like_a_feed(url: &str) -> bool {
         .any(|w| path.contains(w))
 }
 
-/// HTML where a feed should be, or a client error other than 408/429. A 401/403 whose
-/// final address looks like a feed is a firewall in front of a live publisher.
+/// HTML where a feed should be, or a client error other than 408/429. A 401/403 or a
+/// challenge page whose final address looks like a feed is a firewall in front of a live
+/// publisher; on any other page it is the new site's own gate.
 fn is_definitive_off_site(err: &ErrorKind, target: &str) -> bool {
     match err {
         ErrorKind::HtmlInsteadOfFeed => true,
-        ErrorKind::Http(401 | 403) => !looks_like_a_feed(target),
+        ErrorKind::Http(401 | 403) | ErrorKind::Challenge => !looks_like_a_feed(target),
         ErrorKind::Http(code) => (400..500).contains(code) && !matches!(code, 408 | 429),
         _ => false,
     }
@@ -731,7 +736,6 @@ mod tests {
             ErrorKind::Http(429),
             ErrorKind::Http(408),
             ErrorKind::Timeout,
-            ErrorKind::Challenge,
         ] {
             let a = redirected(kind.clone(), &[(301, "https://publisher.example.net/rss")]);
             let d = diagnose(&ev(vec![a], vec![]));
@@ -966,6 +970,13 @@ mod tests {
             "https://example.com/sso/start",
             "https://auth.example.com/",
             "https://example.com/account/home",
+            "https://wordpress.com/log-in?redirect_to=x",
+            "https://example.com/users/sign_in",
+            "https://tenant.auth0.com/login",
+            "https://acme.okta.com/app",
+            "https://example.com/authorize?client=1",
+            "https://example.com/oauth/start",
+            "https://example.com/Users/Sign-In",
         ] {
             let a = redirected(ErrorKind::HtmlInsteadOfFeed, &[(302, target)]);
             let d = diagnose(&feed_at("https://blog.example.org/feed", a));
@@ -1027,5 +1038,21 @@ mod tests {
             "{:?}",
             d.evidence.bullets
         );
+    }
+
+    /// Re-review R1: a challenge on a non-feed page of another site is the new site's gate.
+    #[test]
+    fn off_site_challenge_follows_the_403_rule() {
+        let a = redirected(
+            ErrorKind::Challenge,
+            &[(302, "https://www.networksolutions.com/typepad")],
+        );
+        let d = diagnose(&feed_at("http://ioudgine.typepad.com/blog/atom.xml", a));
+        assert_eq!(d.status, Status::Dead);
+        assert_eq!(d.evidence.clue, "→ off");
+        let a = redirected(ErrorKind::Challenge, &[(301, "https://example.com/feed/")]);
+        let d = diagnose(&feed_at("http://feeds.feedburner.com/example", a));
+        assert_eq!(d.status, Status::Ailing);
+        assert!(d.remarks.contains(&Remark::Blocked));
     }
 }
