@@ -84,8 +84,8 @@ ressac/
 |---|---|
 | `schema_meta` | `version`. A binary refuses a database whose version is newer than it knows. |
 | `folder` | `id`, `parent_id` (nullable), `name`, `position`. |
-| `feed` | Identity and placement: `id`, `folder_id`, `position`, `title`, `added_at`. URLs: `xml_url` (current), `xml_url_original`, `html_url`, `url_key` (normalized, unique among non-buried feeds), `final_url` (after last redirect chain). Descriptions: `description_original` (from OPML), `description_current` (from last parse). HTTP cache: `etag`, `last_modified`. Lifecycle: `state` (`active` / `buried`), `merged_into_id` (nullable), `opml_attrs` (JSON of all original outline attributes). |
-| `fetch_log` | `feed_id`, `at`, `http_status`, `error_kind`, `redirect_chain` (JSON list of `{status, url}`), `content_type`, `bytes`, `duration_ms`, `entry_count`. Last 20 rows per feed kept. |
+| `feed` | Identity and placement: `id`, `folder_id`, `position`, `title`, `added_at`. URLs: `xml_url` (current), `xml_url_original`, `html_url`, `url_key` (normalized, unique among non-buried feeds), `final_url` (after last redirect chain). Descriptions: `description_original` (from OPML), `description_current` (from last parse). HTTP cache: `etag`, `last_modified`. Lifecycle: `state` (`active` / `buried`), `merged_into_id` (nullable), `opml_attrs` (JSON of all original outline attributes). Probe caches: `https_available` (nullable bool), `discovered_url`, `discovery_checked_at`, `wayback_url`. |
+| `fetch_log` | `feed_id`, `run_id`, `at`, `http_status`, `error_kind`, `redirect_chain` (JSON list of `{status, url}`), `content_type`, `bytes`, `duration_ms`, `entry_count`, `not_modified`, `network_suspect`. Last 20 rows per feed kept. |
 | `entry` | `id`, `feed_id`, `guid` (unique per feed), `url`, `title`, `author`, `published_at`, `published_at_is_fallback`, `updated_at`, `summary_html`, `content_html`, `content_kind` (nullable, filled in sub-project 2), `read_at`, `starred_at`, `fetched_at`. |
 | `feed_health` | `feed_id` (PK), `status`, `reason` (one English sentence), `evidence` (JSON), `remarks` (JSON list), `proposed_action` (JSON or null), `hijack_score`. Cadence: `last_entry_at`, `median_interval_days`, `entries_per_month`. Housekeeping: `computed_at`. |
 | `garden_decision` | `feed_id`, `decision` (`keep` / `repair` / `bury`), `status_at_decision`, `action` (JSON of the applied repair, if any), `previous` (JSON of the feed fields it changed, for undo), `decided_at`, `note`. Latest row per feed wins; history kept for undo. |
@@ -122,7 +122,7 @@ ressac/
 - **Parsing (`feed-rs`):** RSS 0.9x/1.0 (RDF)/2.0, Atom, JSON Feed.
   - **Charset:** read from the XML declaration or the HTTP header. ISO-8859-1 support is verified first in the implementation plan.
   - **HTML instead of a feed:** `HtmlInsteadOfFeed` error, recorded as evidence.
-- **Entry identity:** feed GUID/id, else link, else SHA-256 of title + date.
+- **Entry identity:** `feed-rs` entry id: the feed's GUID/id when present, otherwise `feed-rs`'s stable hash of first link + title (verified on feed-rs 3.0.0).
 - **Missing or unparseable dates:** use fetch time and set `published_at_is_fallback`.
 - **Persistence:** one transaction per feed (log row + entries + health).
 - **Health:** recomputed for each feed after its fetch.
@@ -130,7 +130,7 @@ ressac/
 ### Autodiscovery and Wayback
 
 - **Autodiscovery:** when a feed meets the Dead conditions, fetch its `html_url` once and read `<link rel="alternate" type="application/(rss|atom)+xml|application/feed+json">`. If it points to a different, parseable feed, propose it (status Moved).
-- **Wayback (`check` only):** for Dead and Hijacked feeds, query `https://archive.org/wayback/available?url=<html_url>&timestamp=<last_entry_at>`, at 1 request per second. The closest snapshot URL is stored in `evidence.wayback_url`.
+- **Wayback (`check` only):** for Dead and Hijacked feeds, query `https://archive.org/wayback/available?url=<html_url>&timestamp=<last_entry_at>`, at 1 request per second. The closest snapshot URL is stored in `feed.wayback_url` (it survives re-diagnosis).
 
 ### Output
 
@@ -163,7 +163,7 @@ A feed that has never been fetched has status `Unchecked`.
 |---|---|
 | Spam lexicon hit in title, description or recent entries (multilingual list in code: casino, slot, betting, loan, `xóc đĩa`, `trúng lớn`, …) | 0.4 |
 | Description language ≠ language of the feed title + older entries (`whatlang`, only on texts ≥ 50 chars with confidence ≥ 0.8) | 0.4 |
-| Recent entries' language ≠ language of entries stored by earlier fetches (when any) | 0.4 |
+| Language of the 5 newest entries ≠ language of the older stored entries (when there are any) | 0.4 |
 | Redirect chain ends on a different registrable domain | 0.3 |
 | `HtmlInsteadOfFeed` on a URL that used to serve a feed | 0.3 |
 
@@ -196,7 +196,7 @@ A feed that has never been fetched has status `Unchecked`.
   - schema newer than binary;
   - unreadable OPML (with line and column).
 - **Exit codes:** `0` success (sick feeds are not a failure), `1` fatal, `2` usage.
-- **Network guard:** if > 50 % of attempted feeds in one run fail with `Dns` or `Connect`, the run prints `Network looks unreachable — results not recorded as failures`. Those attempts are logged with a `network_suspect` flag and excluded from Dead counting.
+- **Network guard:** if a run attempts at least 4 feeds and > 50 % of them fail with `Dns` or `Connect`, the run prints `Network looks unreachable — results not recorded as failures`. Those attempts are logged with a `network_suspect` flag and excluded from Dead counting.
 - **Ctrl-C:** stop scheduling, finish in-flight transactions, exit cleanly.
 - **Logging:** `tracing` to `~/Library/Logs/Ressac/ressac.log` (daily rotation); `-v` mirrors to stderr.
 
@@ -280,11 +280,11 @@ Checking 187 feeds… ███████████████████�
 | Fixture | `tests/fixtures/vienna-like.opml`, hand-written. It covers nested folders, `(1)` homonyms, an http/https duplicate, `&amp;amp;`, a spam description, a JS-polluted description, a JSON Feed, an RDF feed, a moved blog. Personal sites use `example.org`; big public sites (xkcd, Daring Fireball) keep real URLs. |
 | Manual run | `ressac check` against the real Vienna OPML; results and threshold calibration logged in `notes.md`. |
 
-**CI (GitHub Actions, `macos-latest`):** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. The same three commands are run locally before any phase is reported done.
+**CI (GitHub Actions, `ubuntu-latest`; the core is portable and macOS runners cost 10× the minutes on a private repo):** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. The same three commands are run locally before any phase is reported done.
 
 ## 11. Risks and open points
 
-- **`feed-rs` charset handling** for legacy ISO-8859-1 feeds is unverified. It is the first task of the plan; fallback is decoding with `encoding_rs` before parsing.
+- ~~`feed-rs` charset handling~~: verified on 2026-10-10, feed-rs 3.0.0 decodes ISO-8859-1 from the XML declaration.
 - **Hijack weights are guesses** until calibrated on the real OPML. False positives are harmless (nothing auto-buries) but noisy.
 - **Emoji width** varies by terminal; `--ascii` is the escape hatch.
 - **Rate-limited hosts** (Tumblr, YouTube) may answer `429`. It is treated as Ailing, and the per-host 1 s gap is the first knob to turn.
