@@ -116,12 +116,14 @@ ressac/
 - **Concurrency:** at most 16 requests in flight, 1 per host, 1 s gap between requests to the same host.
 - **Conditional requests:** `If-None-Match` / `If-Modified-Since`. A `304` is a success with no parsing.
 - **Redirects:** followed manually, at most 5, and every hop is recorded (status + URL).
-- **Limits:** 30 s total timeout, 10 MB body cap.
-- **User-Agent:** `Ressac/<version>`. No browser impersonation; `403` is recorded as blocked.
+- **Limits:** 30 s total timeout, 10 MB body cap (`max_bytes`). A feed whose buffered head carries a podcast marker (`xmlns:itunes`, `xmlns:podcast`, an `<itunes:` tag, or an `<enclosure>` whose `type` starts with `audio/` or `video/`) may run up to 32 MB (`max_podcast_bytes`), since podcast feeds with years of show notes are legitimately large. The podcast decision is made once, the first time the 10 MB cap is crossed, over the buffered body plus the current chunk, limited to its first 1 MB (so a large feed is never rescanned chunk after chunk). Past the applicable cap the fetch fails with `TooLarge`.
+- **User-Agent:** `Ressac/<version>`. No browser impersonation; `403` and anti-bot challenge pages are recorded as blocked (see the `blocked` remark, §7).
 - **Skips:** feeds fetched less than 30 min ago (unless `--force`) and buried feeds.
 - **Parsing (`feed-rs`):** RSS 0.9x/1.0 (RDF)/2.0, Atom, JSON Feed.
   - **Charset:** read from the XML declaration or the HTTP header. ISO-8859-1 support is verified first in the implementation plan.
+  - **Lenient XML re-read:** a body that starts with `<` is repaired by a sanitiser, as NetNewsWire and Vienna do; JSON Feed bodies are never repaired (a retry would corrupt their `&`). The repair escapes bare `&` (`&amp;`), maps the common HTML named entities XML does not declare (all Latin-1 names such as `&nbsp;` and `&eacute;`, plus `&ndash;`, `&mdash;`, `&lsquo;`, `&rsquo;`, `&ldquo;`, `&rdquo;`, `&hellip;`, `&bull;`, `&trade;`, `&euro;` and similar) to numeric references, so titles show real characters, and escapes unknown names (`&amp;name;`). The five XML entities and valid numeric references stay as they are; numeric references to characters XML 1.0 forbids (`&#0;`, surrogates, `U+FFFE`/`U+FFFF`, above `U+10FFFF`) and C0 control bytes (except tab, LF, CR) are dropped. `<![CDATA[ ... ]]>` sections are copied untouched. The scan is bounded: each `&` looks at no more than 34 following bytes, so the cost is linear in the body size even for megabytes of unescaped text. `parse_feed` uses it in two ways: when the original body does not parse, it is parsed once more on the repaired copy (if that also fails, the original `Parse` error stands); and because `feed-rs` keeps undeclared entities literal when the first parse succeeds, an XML body that parses is also sanitised, and the repaired reading is used when it differs and parses (one extra scan and copy per XML feed, no second parse when nothing changed). A repaired parse is logged at debug level.
   - **HTML instead of a feed:** `HtmlInsteadOfFeed` error, recorded as evidence.
+  - **Challenge pages:** an HTML body whose first 64 KB match a known anti-bot interstitial yields `Challenge` instead of `HtmlInsteadOfFeed`. Markers (case-insensitive): Akamai/Anubis-style "Client Challenge", Cloudflare (`_cf_chl_opt`, `cf-chl-`, the "Just a moment..." and "Attention Required! | Cloudflare" titles), DDoS-Guard, DataDome (`captcha-delivery.com/captcha`) and PerimeterX (`px-captcha`). The bare `/cdn-cgi/challenge-platform/` script is not a marker: Cloudflare injects it into ordinary pages. Because these interstitials are usually served with an error status, a non-2xx answer with status `401`, `403`, `429` or `503` is also checked: a `cf-mitigated: challenge` header, or a challenge marker in the first 64 KB of its body (read within the total timeout, read errors ignored), gives `Challenge` instead of `Http(n)`; any other such answer, and every other status, stays `Http(n)`. `Challenge` is a transient error. Autodiscovery treats a challenge page, on the site page or on a candidate feed, as "could not be checked" (nothing is stamped as checked); so does the HTTPS probe.
 - **Entry identity:** `feed-rs` entry id: the feed's GUID/id when present, otherwise `feed-rs`'s stable hash of first link + title (verified on feed-rs 3.0.0).
 - **Missing or unparseable dates:** use fetch time and set `published_at_is_fallback`.
 - **Persistence:** one transaction per feed (log row + entries + health).
@@ -149,8 +151,8 @@ ressac/
 | 1 | 👯 **Duplicate** | Another active feed has the same normalized `final_url`, **or** ≥ 80 % of this feed's last 20 entry GUIDs/links appear in another active feed. The older feed (lower `id`) is canonical; the other is the Duplicate. |
 | 2 | 🦠 **Hijacked** | `hijack_score ≥ 0.6` (see below). |
 | 3 | 🚚 **Moved** | The leading run of `301`/`308` hops ends on a different `url_key` that parses as a feed (a temporary hop ends the run), **or** the feed meets the Dead conditions below and autodiscovery found a different, parseable feed. |
-| 4 | 🪦 **Dead** | Last attempt returned `404`/`410` or NXDOMAIN, **or** ≥ 5 consecutive failures spanning ≥ 14 days. Failures discounted by the network guard (§8) don't count. |
-| 5 | 🤒 **Ailing** | Last attempt failed with a transient error (`5xx`, `429`, `403`, `Timeout`, `Tls`, `Parse`, `Encoding`, `TooLarge`). |
+| 4 | 🪦 **Dead** | Last attempt returned `404`/`410` or NXDOMAIN, **or** its redirect chain ends on another site (`url_key::site_of`, approximate registrable domain; any hop status) and the error is `HtmlInsteadOfFeed` or `Http(4xx)` other than `408`/`429` (the feed was shut down for good by redirecting it, e.g. FiveThirtyEight → ABC News, closed Typepad blogs), **or** ≥ 5 consecutive failures spanning ≥ 14 days. Failures discounted by the network guard (§8) don't count. On the off-site rule, `5xx`, `Timeout`, `Tls`, `Connect`, `TooLarge` and `Parse` on the other site do not trigger it (a `Challenge` is treated like a `401`/`403`, see below) (they may be transient or fixable, e.g. a feedburner feed redirecting to a publisher site that has a 500 for a day); a feed announced by the new owner's site is never adopted as a replacement (no Moved via autodiscovery), the evidence names the redirect target, and a feed that site announces is listed (`The new site announces <url>; adopt it by hand only if it is the same publication.`) because the same owner cannot be told from a new one. Further guards: `site_of` keeps three labels only for a known second-level suffix under a 2-letter TLD (`co com net org gov edu ac ne or go gob gv nic mil ltd plc sch nom gouv asso`), and a hop whose host equals the feed's host after removing `www.`, or is a subdomain of it or its parent, is the same site (`www.rfi.fr` ↔ `rfi.fr`, `feeds.nos.nl` ↔ `nos.nl`); a `401`/`403` or a `Challenge` counts only when the final address does not look like a feed (a challenge on a non-feed page belongs to the new site, so ioudgine stays Dead whatever Cloudflare answers that day) (path containing `feed`, `rss`, `atom`, `xml` or `rdf`), since a firewall in front of a live publisher answers that way (a feedburner feed redirected to `example.com/feed/` that answers `403` stays Ailing, `blocked`); and the rule does not fire when the final host or path, split on `-` `_` `.` `/`, holds a consent or login wall token (`consent`, `login`, `log`+`in`, `signin`, `sign`+`in`, `auth`, `auth0`, `oauth`, `authorize`, `sso`, `okta`, `account`, `accounts`; `consent.yahoo.com`, `login.microsoftonline.com`, `/users/sign_in`; `/authors/` is not a wall). |
+| 5 | 🤒 **Ailing** | Last attempt failed with a transient error (`5xx`, `429`, `403`, `Timeout`, `Tls`, `Parse`, `Encoding`, `TooLarge`, `Challenge`). |
 | 6 | 🦴 **Fossil** | Responding, last entry > 2 years ago. |
 | 7 | 🌙 **Dormant** | Responding, last entry between 90 days and 2 years ago. |
 | 8 | 🌿 **Alive** | Responding, last entry < 90 days ago. |
@@ -167,7 +169,7 @@ A feed that has never been fetched has status `Unchecked`.
 | Redirect chain ends on a different registrable domain | 0.3 |
 | `HtmlInsteadOfFeed` on a URL that used to serve a feed | 0.3 |
 
-*Calibrated 2026-10-10 on the real Vienna run, pending user confirmation:* the redirect and `HtmlInsteadOfFeed` signals count only alongside lexicon or language evidence; alone they describe a site its owner closed (FiveThirtyEight → ABC News), not spam. Lexicon terms match at a word start, optionally plural, then a word end or a number (`casinos`, `casino88`, `togel4d`); `slot` counts only when numbered (`slot88`).
+*Calibrated 2026-10-10 on the real Vienna run, confirmed by the user:* the redirect and `HtmlInsteadOfFeed` signals count only alongside lexicon or language evidence; alone they describe a site its owner closed (FiveThirtyEight → ABC News), not spam. Lexicon terms match at a word start, optionally plural, then a word end or a number (`casinos`, `casino88`, `togel4d`); `slot` counts only when numbered (`slot88`).
 
 **Remarks** (secondary, any status):
 
@@ -175,6 +177,9 @@ A feed that has never been fetched has status `Unchecked`.
 - `http_only`
 - `similar_title`: same folder, normalized titles within edit distance 2, one of them Dead/Fossil (the Orange Drenka case).
 - `date_fallback`: more than half the entries use the fallback date.
+- `blocked`: the last attempt failed with `403` or with an anti-bot challenge page. It is a fact about the last fetch, not a status: it is usually paired with Ailing, but an off-site shutdown ending in `403` (ioudgine) is Dead and still carries it.
+
+**Evidence note:** when `hijack_score > 0` but the feed is not Hijacked (and is neither Duplicate nor Unchecked), the evidence bullets end with `Possible spam signs (score 0.4, below the 0.6 threshold):` followed by the hijack bullets. The reason and clue are unchanged, and the language hint stays Hijacked-only (a Dead feed with a 0.4 score is shown as Dead, with the hint underneath).
 
 **Proposed actions:**
 
@@ -192,7 +197,7 @@ A feed that has never been fetched has status `Unchecked`.
 
 ## 8. Error handling
 
-- **Per-feed errors never abort a run.** `ErrorKind` = `Dns`, `Connect`, `Tls`, `Timeout`, `Http(u16)`, `Parse`, `Encoding`, `TooLarge`, `HtmlInsteadOfFeed`.
+- **Per-feed errors never abort a run.** `ErrorKind` = `Dns`, `Connect`, `Tls`, `Timeout`, `Http(u16)`, `Parse`, `Encoding`, `TooLarge`, `HtmlInsteadOfFeed`, `Challenge`. `fetch_log.error_kind` stores the JSON form (`"Challenge"`), so readers of the schema, such as the future Swift app, must expect it.
 - **Fatal errors** (clear message, exit code `1`):
   - database locked or unwritable;
   - schema newer than binary;

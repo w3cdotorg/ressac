@@ -95,6 +95,8 @@ pub enum ErrorKind {
     Encoding,
     TooLarge,
     HtmlInsteadOfFeed,
+    /// An anti-bot challenge page (Cloudflare, DataDome, ...) served instead of the feed.
+    Challenge,
 }
 
 impl ErrorKind {
@@ -107,6 +109,7 @@ impl ErrorKind {
         match self {
             ErrorKind::Http(code) => format!("HTTP {code}"),
             ErrorKind::HtmlInsteadOfFeed => "HTML page instead of a feed".to_string(),
+            ErrorKind::Challenge => "anti-bot challenge page".to_string(),
             ErrorKind::TooLarge => "response too large".to_string(),
             other => format!("{other:?}"),
         }
@@ -124,6 +127,7 @@ impl ErrorKind {
             ErrorKind::Encoding => "charset".into(),
             ErrorKind::TooLarge => "huge".into(),
             ErrorKind::HtmlInsteadOfFeed => "HTML".into(),
+            ErrorKind::Challenge => "bot".into(),
         }
     }
 }
@@ -287,6 +291,13 @@ mod tests {
         assert_eq!(serde_json::to_string(&ErrorKind::Dns).unwrap(), "\"Dns\"");
         assert_eq!(ErrorKind::Http(410).label(), "HTTP 410");
         assert_eq!(ErrorKind::Timeout.clue(), "timeout");
+        assert_eq!(
+            serde_json::to_string(&ErrorKind::Challenge).unwrap(),
+            "\"Challenge\""
+        );
+        assert_eq!(ErrorKind::Challenge.label(), "anti-bot challenge page");
+        assert_eq!(ErrorKind::Challenge.clue(), "bot");
+        assert!(!ErrorKind::Challenge.is_network());
         assert!(ErrorKind::Connect.is_network());
         assert!(!ErrorKind::Timeout.is_network());
     }

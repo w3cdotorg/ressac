@@ -63,15 +63,28 @@ Base jetable dans le scratchpad (`--db …/vienna-run.sqlite`, `HOME` redirigé 
 - **Spec §7** mise à jour (Moved par la suite initiale de 301/308, note de calibrage du détournement en attente de confirmation).
 - Re-diagnostic par `ressac fetch` dans la fenêtre de 30 min, sans réseau (toujours 186 lignes de `fetch_log`, 1 passage) : comptes inchangés (Alive 92, Fossil 63, Dormant 13, Ailing 7, Dead 6, Moved 4, Hijacked 0, Duplicate 1).
 
-### Questions ouvertes pour l'utilisateur
+### Réponses de l'utilisateur (10/10/2026)
 
-- **Détournements non détectés** : apps & stacks (description vietnamienne sur des urinoirs), Publishers Weekly (avocate brésilienne, 0 entrée) et HIPSTAMATIC SKYRIM (recettes en anglais avec fermes de liens) restent Fossil avec un score de 0. La langue de la description n'a rien à quoi se comparer (titre trop court, pas ou presque pas d'entrées), et les recettes sont dans la même langue que le titre. Faut-il un nouveau signal (par exemple la langue des autres flux du dossier) ? Ils apparaîtront de toute façon dans le jardin comme Fossil.
-- **Sites fermés vus comme Ailing au premier passage** : Re/code (500 Fastly « unknown domain »), FiveThirtyEight (301 vers une page ABC News), ioudgine (Typepad fermé) ne deviendront Dead qu'après 5 échecs sur 14 jours. Faut-il un raccourci (redirection vers un autre domaine qui finit en erreur ou en HTML) ?
-- **Page anti-robots** : POLICEtcetera reçoit une page « Client Challenge » de Le Monde, classée `HtmlInsteadOfFeed`. La traiter comme un blocage (`blocked`) ?
-- **Plafond de 10 Mo** : Slate's Culture Gabfest pèse 12 Mo (podcast). Relever le plafond pour les podcasts, ou les laisser Ailing ?
-- **XML invalide** : Unphotographable (`&` nus, dernière entrée en 2017) ; NetNewsWire et Vienna tolèrent ce genre de flux. Ajouter une relecture tolérante, ou laisser Ailing ?
-- **Google Blog: Research** est un sous-ensemble de Google Blog: Innovation & AI : fusion ou garder les deux ?
-- **Bibliobsession 2.0** : Dead, mais l'indice de spam (0,4) n'apparaît pas dans les preuves affichées, seulement le 404. Faut-il l'y montrer ?
+- **Détournements non détectés** (apps & stacks, Publishers Weekly, HIPSTAMATIC SKYRIM) : ils restent Fossil, pas de nouveau signal.
+- **Sites fermés vus comme Ailing au premier passage** : raccourci Dead quand la redirection mène hors du site et finit en HTML ou en 4xx (hors 408 et 429). Arbitrage : les 5xx, Timeout, Tls, Connect, `Challenge`, `TooLarge` et `Parse` sur l'autre site ne déclenchent pas la règle, car ils peuvent être passagers ou réparables (par exemple un flux feedburner redirigé vers le site d'un éditeur qui a un 500 pendant un jour). Re/code (500 sans redirection) reste donc Ailing. Un flux annoncé par le site du nouveau propriétaire (ABC News) n'est jamais adopté comme remplaçant.
+- **Page anti-robots** (POLICEtcetera) : classée `Challenge` (nouveau `ErrorKind`), remarque `blocked`, statut Ailing.
+- **Plafond de 10 Mo** : 32 Mo pour les podcasts (marqueurs iTunes, Podcasting 2.0 ou enclosure audio/vidéo dans l'en-tête).
+- **XML invalide** (Unphotographable) : relecture tolérante, une seule fois, sur une copie réparée.
+- **Google Blog: Research** : fusion validée, à faire par l'utilisateur dans le jardin (`r` sur la ligne Duplicate).
+- **Bibliobsession 2.0** : l'indice de spam est affiché dans les preuves (« Possible spam signs (score 0.4, below the 0.6 threshold): »), sans changer le statut ni la raison.
+- **Règle du détournement (§7)** : confirmée.
+
+### Revue du calibrage (10/10/2026)
+
+Une revue du lot de calibrage a donné six points importants et dix mineurs, tous arbitrés puis corrigés.
+
+- **Robustesse** : assainisseur XML borné (coût linéaire), décision podcast prise une seule fois sur le premier Mo, détection des pages anti-robots limitée à de vrais marqueurs (le script `challenge-platform` seul ne compte plus) et étendue aux réponses 401/403/429/503 (en-tête `cf-mitigated` ou corps). La découverte automatique traite une page anti-robots comme « non vérifiable ». Les entités HTML nommées sont converties en vrais caractères, y compris dans les titres, et les références numériques interdites sont supprimées. Pas de relecture tolérante sur un JSON Feed.
+- **Même site** : `site_of` ne garde trois étiquettes que pour un suffixe connu (`co.uk`, `com.au`, `gouv.fr`…), et `www.` ou un sous-domaine du même hôte compte comme le même site (`www.rfi.fr` et `rfi.fr`).
+- **403 hors site** : un 401/403 ou une page anti-robots ne déclenche la règle Dead que si l'adresse finale ne ressemble pas à un flux (un pare-feu devant un éditeur vivant reste Ailing, `blocked`). La règle ne se déclenche pas non plus sur un mur de consentement ou de connexion.
+- **Arbitrage I6** : on garde Dead + Bury quand un flux est redirigé hors du site, car on ne peut pas distinguer le même propriétaire d'un nouveau. Coût : un blog qui a déménagé sur un nouveau domaine est proposé à l'enterrement, avec la nouvelle adresse affichée dans les preuves (« The new site announces … ») pour une adoption à la main.
+- **Remarque `blocked`** : conservée, c'est un fait. Elle peut donc accompagner un statut Dead (ioudgine). La spec §7 le dit.
+- **Indice de spam (M8)** : aucun changement de comportement, l'utilisateur voulait l'indice. Sur le run réel, 5 flux l'affichent : Bibliobsession (le cas visé), ReadWriteWeb (Alive, vocabulaire de paris dans un site tech) et trois flux Fossil avec une langue incohérente. On pourra le restreindre plus tard (statuts non Alive, ou termes du lexique seulement).
+- **Identifiants d'articles (R3)** : les entrées sans GUID dont le titre contenait une entité non déclarée changent d'identifiant une fois après la mise à jour (le titre est désormais haché avec le vrai caractère), donc quelques doublons d'articles apparaissent dans une base existante au premier relevé. C'est ponctuel, et la vraie base de Clément n'existe pas encore.
 
 ## Paysage existant (10/10/2026)
 

@@ -18,8 +18,10 @@ use crate::health::links::{LinkInput, apply_similar_titles, find_duplicates};
 use crate::health::{FeedEvidence, diagnose};
 use crate::model::{Action, Diagnosis, ErrorKind, FeedId, Status, parse_ts, ts};
 use crate::opml::{self, clean_description};
-use crate::parse::{ParsedFeed, parse_feed};
-use crate::source::{FeedRef, FetchAttempt, FetchLimits, LocalSource, Source};
+use crate::parse::{
+    CHALLENGE_SNIFF_BYTES, ParsedFeed, is_challenge_page, looks_like_html, parse_feed,
+};
+use crate::source::{FeedRef, FetchAttempt, FetchLimits, LocalSource, RawResponse, Source};
 use crate::store::{FeedRow, ImportReport, Store};
 use crate::url_key::{https_variant, url_key};
 use crate::wayback::Wayback;
@@ -444,9 +446,21 @@ fn https_verdict(attempt: &FetchAttempt, http: &ParsedFeed) -> Option<bool> {
     }
 }
 
-/// Failures that say nothing about the site itself.
+/// Failures that say nothing about the site itself (a challenge page hides it from us).
 fn is_transient(e: &ErrorKind) -> bool {
-    matches!(e, ErrorKind::Dns | ErrorKind::Connect | ErrorKind::Timeout)
+    matches!(
+        e,
+        ErrorKind::Dns | ErrorKind::Connect | ErrorKind::Timeout | ErrorKind::Challenge
+    )
+}
+
+/// True when a fetch ended on an anti-bot gate (a `Challenge` error, or a 200 HTML page
+/// that is the interstitial): the site was not really seen.
+fn is_challenged(raw: &RawResponse) -> bool {
+    raw.error == Some(ErrorKind::Challenge)
+        || (raw.error.is_none()
+            && looks_like_html(raw.content_type.as_deref(), &raw.body)
+            && is_challenge_page(&raw.body[..raw.body.len().min(CHALLENGE_SNIFF_BYTES)]))
 }
 
 /// `Some(found)` once the site was checked (`found` is `None` when it announces nothing new);
@@ -459,6 +473,9 @@ async fn discover_one(
     let page = source
         .fetch_raw(feed.html_url.as_deref()?, None, None)
         .await;
+    if is_challenged(&page) {
+        return None;
+    }
     match &page.error {
         Some(e) if is_transient(e) => return None,
         Some(_) => return Some(None),
@@ -472,6 +489,9 @@ async fn discover_one(
         return Some(None);
     };
     let raw = source.fetch_raw(&candidate, None, None).await;
+    if is_challenged(&raw) {
+        return None;
+    }
     let parses = raw.error.is_none()
         && parse_feed(&raw.body, raw.content_type.as_deref(), &raw.final_url, now).is_ok();
     Some(parses.then_some(candidate))
@@ -481,6 +501,106 @@ async fn discover_one(
 mod tests {
     use super::*;
     use crate::parse::ParsedEntry;
+    use wiremock::matchers::path;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const CHALLENGE: &str =
+        "<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>";
+    const RSS: &str = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title><link>http://example.org/</link><description>d</description><item><guid>1</guid><title>One</title></item></channel></rss>"#;
+
+    fn row(html_url: String) -> FeedRow {
+        FeedRow {
+            id: 1,
+            folder_id: None,
+            position: 0,
+            title: "T".into(),
+            xml_url: "https://old.example/feed".into(),
+            xml_url_original: "https://old.example/feed".into(),
+            html_url: Some(html_url),
+            url_key: url_key("https://old.example/feed"),
+            final_url: None,
+            description_original: None,
+            description_current: None,
+            etag: None,
+            last_modified: None,
+            state: "active".into(),
+            merged_into_id: None,
+            opml_attrs: "{}".into(),
+            https_available: None,
+            discovered_url: None,
+            discovery_checked_at: None,
+            wayback_url: None,
+        }
+    }
+
+    async fn serve(server: &MockServer, at: &str, status: u16, body: &str, ct: &str) {
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(path(at))
+            .respond_with(ResponseTemplate::new(status).set_body_raw(body.to_string(), ct))
+            .mount(server)
+            .await;
+    }
+
+    async fn discover(server: &MockServer) -> Option<Option<String>> {
+        let source = LocalSource::new(FetchLimits::default()).unwrap();
+        discover_one(&source, &row(format!("{}/", server.uri())), Utc::now()).await
+    }
+
+    #[tokio::test]
+    async fn a_challenge_site_page_is_not_checked() {
+        let server = MockServer::start().await;
+        serve(&server, "/", 200, CHALLENGE, "text/html").await;
+        assert_eq!(discover(&server).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_403_challenge_site_page_is_not_checked() {
+        let server = MockServer::start().await;
+        serve(
+            &server,
+            "/",
+            403,
+            "<script>window._cf_chl_opt={}</script>",
+            "text/html",
+        )
+        .await;
+        assert_eq!(discover(&server).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_challenge_on_the_candidate_feed_is_not_checked() {
+        let server = MockServer::start().await;
+        let page = r#"<html><head><link rel="alternate" type="application/rss+xml" href="/new.xml"></head></html>"#;
+        serve(&server, "/", 200, page, "text/html").await;
+        serve(&server, "/new.xml", 200, CHALLENGE, "text/html").await;
+        assert_eq!(discover(&server).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_plain_site_without_a_feed_is_checked_and_empty() {
+        let server = MockServer::start().await;
+        serve(
+            &server,
+            "/",
+            200,
+            "<html><body>hi</body></html>",
+            "text/html",
+        )
+        .await;
+        assert_eq!(discover(&server).await, Some(None));
+    }
+
+    #[tokio::test]
+    async fn a_parsing_candidate_is_found() {
+        let server = MockServer::start().await;
+        let page = r#"<html><head><link rel="alternate" type="application/rss+xml" href="/new.xml"></head></html>"#;
+        serve(&server, "/", 200, page, "text/html").await;
+        serve(&server, "/new.xml", 200, RSS, "application/rss+xml").await;
+        assert_eq!(
+            discover(&server).await,
+            Some(Some(format!("{}/new.xml", server.uri())))
+        );
+    }
 
     fn feed(guids: &[&str]) -> ParsedFeed {
         ParsedFeed {
@@ -553,7 +673,12 @@ mod tests {
                 "{e:?}"
             );
         }
-        for e in [ErrorKind::Dns, ErrorKind::Connect, ErrorKind::Timeout] {
+        for e in [
+            ErrorKind::Dns,
+            ErrorKind::Connect,
+            ErrorKind::Timeout,
+            ErrorKind::Challenge,
+        ] {
             assert_eq!(
                 https_verdict(&attempt(None, Some(e.clone())), &http),
                 None,
