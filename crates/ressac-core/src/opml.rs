@@ -10,7 +10,10 @@ use crate::url_key::repair_url;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outline {
-    Folder { name: String, children: Vec<Outline> },
+    Folder {
+        name: String,
+        children: Vec<Outline>,
+    },
     Feed(OpmlFeed),
 }
 
@@ -58,12 +61,17 @@ pub fn parse(xml: &str) -> Result<Vec<Outline>> {
                 let attrs = attributes(&e).map_err(|m| opml_error(xml, position, &m))?;
                 let item = match feed_from(attrs) {
                     Ok(feed) => Outline::Feed(feed),
-                    Err(attrs) => Outline::Folder { name: folder_name(&attrs), children: Vec::new() },
+                    Err(attrs) => Outline::Folder {
+                        name: folder_name(&attrs),
+                        children: Vec::new(),
+                    },
                 };
                 push(&mut stack, item);
             }
             Event::End(e) if e.name().0 == "outline" => match stack.pop() {
-                Some(Frame::Folder(name, children)) => push(&mut stack, Outline::Folder { name, children }),
+                Some(Frame::Folder(name, children)) => {
+                    push(&mut stack, Outline::Folder { name, children })
+                }
                 Some(Frame::Ignored) => {}
                 _ => return Err(opml_error(xml, position, "unexpected </outline>")),
             },
@@ -98,7 +106,9 @@ fn attributes(e: &BytesStart) -> std::result::Result<BTreeMap<String, String>, S
 }
 
 /// A feed outline has a non-empty `xmlUrl`; anything else is a folder (attributes handed back).
-fn feed_from(attrs: BTreeMap<String, String>) -> std::result::Result<OpmlFeed, BTreeMap<String, String>> {
+fn feed_from(
+    attrs: BTreeMap<String, String>,
+) -> std::result::Result<OpmlFeed, BTreeMap<String, String>> {
     if !attrs.get("xmlUrl").is_some_and(|u| !u.trim().is_empty()) {
         return Err(attrs);
     }
@@ -109,12 +119,21 @@ fn feed_from(attrs: BTreeMap<String, String>) -> std::result::Result<OpmlFeed, B
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| xml_url.clone());
-    let html_url = attrs.get("htmlUrl").map(|u| repair_url(u)).filter(|u| !u.is_empty());
+    let html_url = attrs
+        .get("htmlUrl")
+        .map(|u| repair_url(u))
+        .filter(|u| !u.is_empty());
     let description = attrs
         .get("description")
         .map(|d| d.trim().to_string())
         .filter(|d| !d.is_empty());
-    Ok(OpmlFeed { title, xml_url, html_url, description, attrs })
+    Ok(OpmlFeed {
+        title,
+        xml_url,
+        html_url,
+        description,
+        attrs,
+    })
 }
 
 fn folder_name(attrs: &BTreeMap<String, String>) -> String {
@@ -129,7 +148,11 @@ fn opml_error(xml: &str, position: usize, message: &str) -> Error {
     let bytes = &xml.as_bytes()[..position.min(xml.len())];
     let line = bytes.iter().filter(|b| **b == b'\n').count() + 1;
     let line_start = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    Error::Opml { line, column: bytes.len() - line_start + 1, message: message.to_string() }
+    Error::Opml {
+        line,
+        column: bytes.len() - line_start + 1,
+        message: message.to_string(),
+    }
 }
 
 /// Markers of scripts pasted into descriptions by old blog platforms (Tumblr, StatCounter).
@@ -183,7 +206,10 @@ mod tests {
     }
 
     fn find<'a>(items: &'a [Outline], title: &str) -> &'a OpmlFeed {
-        feeds(items).into_iter().find(|f| f.title == title).expect(title)
+        feeds(items)
+            .into_iter()
+            .find(|f| f.title == title)
+            .expect(title)
     }
 
     #[test]
@@ -197,9 +223,13 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["Blogs", "Biblis", "Infos", "Jon"]);
-        let Outline::Folder { children, .. } = &items[0] else { panic!("Blogs is a folder") };
+        let Outline::Folder { children, .. } = &items[0] else {
+            panic!("Blogs is a folder")
+        };
         assert_eq!(children.len(), 3);
-        assert!(matches!(&children[1], Outline::Folder { name, children } if name == "potes" && children.len() == 3));
+        assert!(
+            matches!(&children[1], Outline::Folder { name, children } if name == "potes" && children.len() == 3)
+        );
         assert_eq!(feeds(&items).len(), 12);
     }
 
@@ -211,7 +241,10 @@ mod tests {
             flickr.xml_url,
             "http://api.flickr.com/services/feeds/photos_public.gne?id=48609153@N00&lang=en-us&format=rss_200"
         );
-        assert!(flickr.attrs["xmlUrl"].contains("&amp;lang"), "original attribute kept as read");
+        assert!(
+            flickr.attrs["xmlUrl"].contains("&amp;lang"),
+            "original attribute kept as read"
+        );
     }
 
     #[test]
@@ -219,18 +252,37 @@ mod tests {
         let items = parse(FIXTURE).unwrap();
         let cht = find(&items, "Center for Humane Technology (1)");
         assert!(cht.xml_url.contains("youtube.com"));
-        assert_eq!(find(&items, "xkcd.com").html_url.as_deref(), Some("https://xkcd.com/"));
-        assert_eq!(find(&items, "Orange Drenka").description, None, "empty description is None");
+        assert_eq!(
+            find(&items, "xkcd.com").html_url.as_deref(),
+            Some("https://xkcd.com/")
+        );
+        assert_eq!(
+            find(&items, "Orange Drenka").description,
+            None,
+            "empty description is None"
+        );
     }
 
     #[test]
     fn cleans_javascript_polluted_descriptions() {
         let items = parse(FIXTURE).unwrap();
-        let raw = find(&items, "Girl on the Couch").description.clone().unwrap();
+        let raw = find(&items, "Girl on the Couch")
+            .description
+            .clone()
+            .unwrap();
         assert!(raw.contains("sc_project"));
-        assert_eq!(clean_description(&raw).as_deref(), Some("A book is a loaded gun in the house next door"));
-        assert_eq!(clean_description("<p>Hello <b>world</b></p>").as_deref(), Some("Hello world"));
-        assert_eq!(clean_description("  var _gaq = _gaq || [];").as_deref(), None);
+        assert_eq!(
+            clean_description(&raw).as_deref(),
+            Some("A book is a loaded gun in the house next door")
+        );
+        assert_eq!(
+            clean_description("<p>Hello <b>world</b></p>").as_deref(),
+            Some("Hello world")
+        );
+        assert_eq!(
+            clean_description("  var _gaq = _gaq || [];").as_deref(),
+            None
+        );
     }
 
     #[test]
@@ -240,6 +292,9 @@ mod tests {
             Err(Error::Opml { line, .. }) => assert!(line >= 3, "line {line}"),
             other => panic!("expected OPML error, got {other:?}"),
         }
-        assert!(matches!(parse("<opml><body><outline text=\"x\">"), Err(Error::Opml { .. })));
+        assert!(matches!(
+            parse("<opml><body><outline text=\"x\">"),
+            Err(Error::Opml { .. })
+        ));
     }
 }
