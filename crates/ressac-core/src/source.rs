@@ -26,6 +26,10 @@ pub struct FetchLimits {
     pub per_host_gap: Duration,
     pub timeout: Duration,
     pub max_bytes: usize,
+    /// Higher cap for podcast feeds (see `looks_like_podcast`), whose full-history
+    /// feeds can run far past `max_bytes`. 16 in flight x 32 MB bounds worst-case
+    /// memory at 512 MB.
+    pub max_podcast_bytes: usize,
     pub max_redirects: usize,
 }
 
@@ -36,6 +40,7 @@ impl Default for FetchLimits {
             per_host_gap: Duration::from_secs(1),
             timeout: Duration::from_secs(30),
             max_bytes: 10 * 1024 * 1024,
+            max_podcast_bytes: 32 * 1024 * 1024,
             max_redirects: 5,
         }
     }
@@ -196,7 +201,20 @@ impl LocalSource {
             loop {
                 match resp.chunk().await {
                     Ok(Some(chunk)) => {
-                        if out.body.len() + chunk.len() > self.limits.max_bytes {
+                        let total = out.body.len() + chunk.len();
+                        // The feed's head is what is buffered; a single oversized first
+                        // chunk is its own head.
+                        let head = if out.body.is_empty() {
+                            &chunk[..]
+                        } else {
+                            &out.body[..]
+                        };
+                        let cap = if total > self.limits.max_bytes && looks_like_podcast(head) {
+                            self.limits.max_podcast_bytes
+                        } else {
+                            self.limits.max_bytes
+                        };
+                        if total > cap {
                             out.body.clear();
                             out.error = Some(ErrorKind::TooLarge);
                             return;
@@ -303,6 +321,29 @@ impl Source for LocalSource {
         drop(tx);
         while lanes.join_next().await.is_some() {}
     }
+}
+
+/// True when the head of a feed (what is buffered so far) carries a podcast marker:
+/// an iTunes/Podcasting 2.0 namespace or tag, or an audio/video `<enclosure>`.
+fn looks_like_podcast(head: &[u8]) -> bool {
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+    if [&b"xmlns:itunes"[..], b"xmlns:podcast", b"<itunes:"]
+        .iter()
+        .any(|m| contains(head, m))
+    {
+        return true;
+    }
+    let mut rest = head;
+    while let Some(i) = rest.windows(10).position(|w| w == b"<enclosure") {
+        rest = &rest[i + 10..];
+        let tag = &rest[..rest.iter().position(|&b| b == b'>').unwrap_or(rest.len())];
+        if contains(tag, b"type=\"audio/") || contains(tag, b"type=\"video/") {
+            return true;
+        }
+    }
+    false
 }
 
 fn header(resp: &reqwest::Response, name: HeaderName) -> Option<String> {
@@ -589,6 +630,95 @@ mod tests {
             .unwrap()
             .fetch_one(&feed(1, format!("{}/feed", server.uri())))
             .await;
+        assert_eq!(a.error, Some(ErrorKind::TooLarge));
+    }
+
+    fn podcast_body(items: usize) -> String {
+        let mut b = String::from(
+            r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Pod</title><link>http://example.org/</link><description>d</description>"#,
+        );
+        for i in 0..items {
+            b.push_str(&format!(
+                "<item><guid>{i}</guid><title>Episode {i}</title></item>"
+            ));
+        }
+        b.push_str("</channel></rss>");
+        b
+    }
+
+    async fn fetch_body(body: String, limits: FetchLimits) -> FetchAttempt {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/feed"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/rss+xml"))
+            .mount(&server)
+            .await;
+        LocalSource::new(limits)
+            .unwrap()
+            .fetch_one(&feed(1, format!("{}/feed", server.uri())))
+            .await
+    }
+
+    #[test]
+    fn podcast_markers_are_recognised() {
+        assert!(looks_like_podcast(b"<rss xmlns:itunes=\"x\">"));
+        assert!(looks_like_podcast(b"<rss xmlns:podcast=\"x\">"));
+        assert!(looks_like_podcast(
+            b"<item><itunes:duration>1</itunes:duration>"
+        ));
+        assert!(looks_like_podcast(
+            b"<enclosure url=\"a.mp3\" length=\"1\" type=\"audio/mpeg\"/>"
+        ));
+        assert!(looks_like_podcast(
+            b"<enclosure type=\"video/mp4\" url=\"a\"/>"
+        ));
+        assert!(!looks_like_podcast(b"<rss><channel><title>Blog</title>"));
+        assert!(!looks_like_podcast(
+            b"<enclosure url=\"a.jpg\" type=\"image/jpeg\"/> audio/ type=\"audio/\""
+        ));
+        assert!(!looks_like_podcast(b""));
+    }
+
+    #[tokio::test]
+    async fn non_podcast_over_the_cap_is_too_large() {
+        let a = fetch_body(
+            RSS.replace("<item>", &format!("<!--{}--><item>", "x".repeat(500))),
+            FetchLimits {
+                max_bytes: 100,
+                max_podcast_bytes: 100_000,
+                ..fast()
+            },
+        )
+        .await;
+        assert_eq!(a.error, Some(ErrorKind::TooLarge));
+    }
+
+    #[tokio::test]
+    async fn podcast_over_the_cap_but_under_the_podcast_cap_is_fetched() {
+        let a = fetch_body(
+            podcast_body(20),
+            FetchLimits {
+                max_bytes: 300,
+                max_podcast_bytes: 100_000,
+                ..fast()
+            },
+        )
+        .await;
+        assert_eq!(a.error, None);
+        assert_eq!(a.feed.unwrap().entries.len(), 20);
+    }
+
+    #[tokio::test]
+    async fn podcast_over_the_podcast_cap_is_too_large() {
+        let a = fetch_body(
+            podcast_body(20),
+            FetchLimits {
+                max_bytes: 300,
+                max_podcast_bytes: 600,
+                ..fast()
+            },
+        )
+        .await;
         assert_eq!(a.error, Some(ErrorKind::TooLarge));
     }
 
