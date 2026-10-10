@@ -39,6 +39,13 @@ targets:
         ENABLE_APP_SANDBOX: NO
         ENABLE_HARDENED_RUNTIME: NO
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    postCompileScripts:
+      - name: Embed ressac helper
+        path: scripts/embed-helper.sh
+        basedOnDependencyAnalysis: false
+        showEnvVars: false
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/ressac
     scheme:
       testTargets:
         - RessacTests
