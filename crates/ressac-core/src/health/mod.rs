@@ -2,6 +2,7 @@
 
 mod cadence;
 pub mod hijack;
+pub mod links;
 
 pub use cadence::cadence;
 
