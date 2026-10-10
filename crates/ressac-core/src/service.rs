@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::discover::{alternate_feeds, same_feed};
 use crate::error::Result;
+use crate::extract::{Article, ExtractError, extract_article};
 use crate::garden;
 use crate::health::links::{LinkInput, apply_similar_titles, find_duplicates};
 use crate::health::{FeedEvidence, diagnose};
@@ -113,6 +114,9 @@ pub enum ExtractOutcome {
     /// No entry has this id.
     UnknownEntry,
 }
+
+/// What fetching and extracting one article page gave.
+type Extraction = std::result::Result<Article, ExtractError>;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Summary {
@@ -452,6 +456,44 @@ impl Ressac {
     }
 
     /// Status counts and safe repairs over active feeds (decisions are not considered).
+    /// Fetches the entry's page, extracts the article and stores the outcome (spec §6).
+    /// A failure is stored too, as one English sentence; a later call retries.
+    pub async fn extract_entry(
+        &self,
+        entry_id: i64,
+        sink: &dyn EventSink,
+    ) -> Result<ExtractOutcome> {
+        let Some((_, url)) = self.store.entry_for_extract(entry_id)? else {
+            return Ok(ExtractOutcome::UnknownEntry);
+        };
+        let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
+            return Ok(ExtractOutcome::NoUrl);
+        };
+        let outcome = fetch_article(&self.source, &url).await;
+        Ok(match self.save_extraction(entry_id, &outcome, sink)? {
+            None => ExtractOutcome::Saved,
+            Some(sentence) => ExtractOutcome::Failed(sentence),
+        })
+    }
+
+    /// Stores one extraction outcome and emits `Extracted`. Returns the failure sentence.
+    fn save_extraction(
+        &self,
+        entry_id: i64,
+        outcome: &Extraction,
+        sink: &dyn EventSink,
+    ) -> Result<Option<String>> {
+        self.store.save_fulltext(entry_id, outcome, Utc::now())?;
+        let error = outcome.as_ref().err().map(ExtractError::sentence);
+        tracing::info!(entry_id, error = error.as_deref(), "full article");
+        sink.emit(&Event::Extracted {
+            entry_id,
+            ok: error.is_none(),
+            error: error.clone(),
+        });
+        Ok(error)
+    }
+
     pub fn summary(&self) -> Result<Summary> {
         let diags = self.store.diagnoses()?;
         let mut summary = Summary::default();
@@ -503,6 +545,29 @@ fn is_challenged(raw: &RawResponse) -> bool {
         || (raw.error.is_none()
             && looks_like_html(raw.content_type.as_deref(), &raw.body)
             && is_challenge_page(&raw.body[..raw.body.len().min(CHALLENGE_SNIFF_BYTES)]))
+}
+
+/// Fetches an article page through the feed source: same client, user agent, body cap and
+/// timeout (the whole exchange, redirects included).
+async fn fetch_article(source: &LocalSource, url: &str) -> Extraction {
+    article_from(&source.fetch_raw(url, None, None).await)
+}
+
+/// Maps a page fetch to an extraction outcome. A 401 asks for credentials, so it reads as a
+/// login wall; other fetch errors keep their kind ("HTTP 404.", "Timeout.").
+fn article_from(raw: &RawResponse) -> Extraction {
+    if is_challenged(raw) {
+        return Err(ExtractError::Challenge);
+    }
+    match &raw.error {
+        Some(ErrorKind::Http(401)) => return Err(ExtractError::LoginWall),
+        Some(kind) => return Err(ExtractError::Fetch(kind.clone())),
+        None => {}
+    }
+    if !looks_like_html(raw.content_type.as_deref(), &raw.body) {
+        return Err(ExtractError::NoContent);
+    }
+    extract_article(&String::from_utf8_lossy(&raw.body), &raw.final_url)
 }
 
 /// `Some(found)` once the site was checked (`found` is `None` when it announces nothing new);
@@ -837,6 +902,201 @@ mod tests {
                 total: FULLTEXT_PER_FEED_PER_RUN,
             }),
             serde_json::json!({"event": "probing", "what": "full articles", "total": 20})
+        );
+    }
+
+    const PARA: &str = "The tide comes in twice a day, pulled by the moon and the sun, and the shore keeps a careful record of every visit in sand, shells and drifting weed.";
+
+    /// A page `dom_smoothie` extracts (checked against 0.18.2: about 2,500 characters of text).
+    fn article_page() -> String {
+        let body: String = (0..8)
+            .map(|i| format!("<p>Paragraph {i}. {PARA} {PARA}</p>"))
+            .collect();
+        format!(
+            "<!DOCTYPE html><html><head><title>Tides | Shore Notes</title><meta name=\"author\" content=\"Ada Lovelace\"></head><body><nav><a href=\"/\">Home</a></nav><article><h1>Tides</h1>{body}</article><footer>Footer</footer></body></html>"
+        )
+    }
+
+    fn parsed_entry(guid: &str, url: Option<String>, title: Option<&str>) -> ParsedEntry {
+        ParsedEntry {
+            guid: guid.into(),
+            url,
+            title: title.map(Into::into),
+            author: None,
+            published_at: Utc::now(),
+            published_at_is_fallback: false,
+            updated_at: None,
+            summary_html: Some("<p>Only a summary.</p>".into()),
+            content_html: None,
+        }
+    }
+
+    /// An app whose feed #1 holds `linked` (→ `{base}/article`) and `bare` (no link, no
+    /// title, only a summary). Returns the app and both entry ids.
+    fn app_with_entries(base: &str) -> (Ressac, i64, i64) {
+        let store = Store::open_in_memory().unwrap();
+        let xml = r#"<opml><body><outline text="T" xmlUrl="https://t.example/feed"/></body></opml>"#;
+        store
+            .import_outlines(&opml::parse(xml).unwrap(), false, Utc::now())
+            .unwrap();
+        let parsed = ParsedFeed {
+            title: Some("T".into()),
+            description: None,
+            site_url: None,
+            entries: vec![
+                parsed_entry("linked", Some(format!("{base}/article")), Some("Tides")),
+                parsed_entry("bare", None, None),
+            ],
+        };
+        store
+            .record_attempt("r", &attempt(Some(parsed), None))
+            .unwrap();
+        let id = |guid: &str| -> i64 {
+            store
+                .conn()
+                .query_row("SELECT id FROM entry WHERE guid = ?1", [guid], |r| r.get(0))
+                .unwrap()
+        };
+        let (linked, bare) = (id("linked"), id("bare"));
+        let limits = FetchLimits {
+            per_host_gap: Duration::ZERO,
+            timeout: Duration::from_secs(5),
+            ..FetchLimits::default()
+        };
+        let app = Ressac::with_parts(store, limits, "http://127.0.0.1:9").unwrap();
+        (app, linked, bare)
+    }
+
+    fn raw(status: Option<u16>, error: Option<ErrorKind>, ct: &str, body: &str) -> RawResponse {
+        RawResponse {
+            status,
+            error,
+            final_url: "https://x.example/a".into(),
+            content_type: Some(ct.into()),
+            body: body.as_bytes().to_vec(),
+            ..RawResponse::default()
+        }
+    }
+
+    #[test]
+    fn article_from_maps_fetch_outcomes() {
+        let err = |r: RawResponse| article_from(&r).err();
+        assert_eq!(
+            err(raw(Some(403), Some(ErrorKind::Challenge), "text/html", "")),
+            Some(ExtractError::Challenge)
+        );
+        assert_eq!(
+            err(raw(Some(200), None, "text/html", CHALLENGE)),
+            Some(ExtractError::Challenge),
+            "a 200 interstitial is a challenge too"
+        );
+        assert_eq!(
+            err(raw(Some(401), Some(ErrorKind::Http(401)), "text/html", "")),
+            Some(ExtractError::LoginWall)
+        );
+        assert_eq!(
+            err(raw(Some(404), Some(ErrorKind::Http(404)), "text/html", "")),
+            Some(ExtractError::Fetch(ErrorKind::Http(404)))
+        );
+        assert_eq!(
+            err(raw(None, Some(ErrorKind::Timeout), "", "")),
+            Some(ExtractError::Fetch(ErrorKind::Timeout))
+        );
+        assert_eq!(
+            err(raw(Some(200), None, "application/pdf", "%PDF-1.7")),
+            Some(ExtractError::NoContent)
+        );
+        let article = article_from(&raw(Some(200), None, "text/html", &article_page())).unwrap();
+        assert!(article.html.contains("Paragraph 7."), "{}", article.html);
+    }
+
+    #[tokio::test]
+    async fn extract_entry_saves_the_article_and_reports_it() {
+        let server = MockServer::start().await;
+        serve(&server, "/article", 200, &article_page(), "text/html; charset=utf-8").await;
+        let (app, linked, _) = app_with_entries(&server.uri());
+        let recorder = Recorder::default();
+        assert_eq!(
+            app.extract_entry(linked, &recorder).await.unwrap(),
+            ExtractOutcome::Saved
+        );
+        let row = app.store().fulltext(linked).unwrap().expect("a stored article");
+        assert!(row.html.as_deref().unwrap().contains("Paragraph 7."));
+        assert_eq!(row.error, None);
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![Event::Extracted {
+                entry_id: linked,
+                ok: true,
+                error: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_extraction_is_stored_and_a_retry_replaces_it() {
+        let server = MockServer::start().await;
+        serve(&server, "/article", 404, "gone", "text/plain").await;
+        let (app, linked, _) = app_with_entries(&server.uri());
+        let recorder = Recorder::default();
+        assert_eq!(
+            app.extract_entry(linked, &recorder).await.unwrap(),
+            ExtractOutcome::Failed("HTTP 404.".into())
+        );
+        let failed = app.store().fulltext(linked).unwrap().unwrap();
+        assert_eq!(failed.error.as_deref(), Some("HTTP 404."));
+        assert_eq!(failed.html, None);
+
+        server.reset().await;
+        serve(&server, "/article", 200, &article_page(), "text/html").await;
+        assert_eq!(
+            app.extract_entry(linked, &recorder).await.unwrap(),
+            ExtractOutcome::Saved
+        );
+        let saved = app.store().fulltext(linked).unwrap().unwrap();
+        assert!(saved.html.is_some());
+        assert_eq!(saved.error, None);
+        assert_eq!(
+            recorder.0.lock().unwrap()[0],
+            Event::Extracted {
+                entry_id: linked,
+                ok: false,
+                error: Some("HTTP 404.".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_challenge_page_is_stored_as_such() {
+        let server = MockServer::start().await;
+        serve(&server, "/article", 200, CHALLENGE, "text/html").await;
+        let (app, linked, _) = app_with_entries(&server.uri());
+        assert_eq!(
+            app.extract_entry(linked, &NullSink).await.unwrap(),
+            ExtractOutcome::Failed("Anti-bot challenge page.".into())
+        );
+    }
+
+    /// Review Focus 1: an entry with no link (and no title) cannot be extracted; nothing is
+    /// stored or emitted, and the CLI turns this into exit 2 (Phase 5).
+    #[tokio::test]
+    async fn extract_without_url_is_a_usage_error() {
+        let (app, _, bare) = app_with_entries("http://127.0.0.1:9");
+        let recorder = Recorder::default();
+        assert_eq!(
+            app.extract_entry(bare, &recorder).await.unwrap(),
+            ExtractOutcome::NoUrl
+        );
+        assert!(app.store().fulltext(bare).unwrap().is_none());
+        assert!(recorder.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn extract_of_an_unknown_entry_is_reported() {
+        let (app, _, _) = app_with_entries("http://127.0.0.1:9");
+        assert_eq!(
+            app.extract_entry(9_999, &NullSink).await.unwrap(),
+            ExtractOutcome::UnknownEntry
         );
     }
 }
