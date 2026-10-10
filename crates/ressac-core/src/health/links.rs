@@ -246,8 +246,8 @@ mod tests {
     #[test]
     fn short_alive_title_is_never_compared() {
         let feeds = [
-            input(1, Some(1), "Orang", "a", &[]),
-            input(2, Some(1), "Orange Drenka", "b", &[]),
+            input(1, Some(1), "Abcd", "a", &[]),
+            input(2, Some(1), "Abcdef", "b", &[]),
         ];
         let mut diags = HashMap::from([(1, diag(Status::Alive)), (2, diag(Status::Dead))]);
         apply_similar_titles(&feeds, &mut diags);
