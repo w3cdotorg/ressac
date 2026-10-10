@@ -44,6 +44,11 @@ enum ArticleTemplate {
     /// address), since `<base>` is removed; links and images keep only http(s) addresses
     /// (images may also be `data:image/…`, except SVG).
     static func sanitize(_ html: String, baseURL: URL? = nil) -> String {
+        // Tidy and the recursive renderer overflow the stack on pathological nesting, so such
+        // input (or anything huge) skips the parser and is shown as escaped plain text.
+        if html.utf8.count > maxInputBytes || estimatedNestingDepth(html) > maxNestingDepth {
+            return plainTextFallback(html)
+        }
         let wrapped = "<html><body>\(html)</body></html>"
         guard let document = try? XMLDocument(xmlString: wrapped, options: [.documentTidyHTML, .nodeLoadExternalEntitiesNever]),
               let body = document.rootElement()?.children?.first(where: { name(of: $0) == "body" })
@@ -52,16 +57,115 @@ enum ArticleTemplate {
         }
         var out = ""
         for child in body.children ?? [] {
-            render(child, baseURL: baseURL, into: &out)
+            render(child, baseURL: baseURL, depth: 1, into: &out)
         }
         return out
+    }
+
+    static let maxNestingDepth = 256
+    static let maxInputBytes = 2_000_000
+    private static let voidTags: Set<String> = [
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
+    ]
+
+    /// Linear, non-recursive estimate of the deepest element nesting: opening tags minus closing
+    /// tags, ignoring void and self-closing tags, comments, `<!…>` and `<?…>`.
+    static func estimatedNestingDepth(_ html: String) -> Int {
+        let bytes = Array(html.utf8)
+        var depth = 0, deepest = 0, i = 0
+        while i < bytes.count {
+            guard bytes[i] == 0x3C else { i += 1; continue }  // <
+            let next = i + 1 < bytes.count ? bytes[i + 1] : 0
+            if next == 0x21 || next == 0x3F {  // <! or <?
+                if bytes[i...].starts(with: [0x3C, 0x21, 0x2D, 0x2D]) {
+                    i = indexAfter([0x2D, 0x2D, 0x3E], in: bytes, from: i + 4)
+                } else {
+                    i = indexAfter([0x3E], in: bytes, from: i + 1)
+                }
+                continue
+            }
+            let closing = next == 0x2F
+            let nameStart = closing ? i + 2 : i + 1
+            var j = nameStart
+            while j < bytes.count, isASCIILetterOrDigit(bytes[j]) { j += 1 }
+            guard j > nameStart, isASCIILetter(bytes[nameStart]) else { i += 1; continue }
+            let tag = String(decoding: bytes[nameStart..<j], as: UTF8.self).lowercased()
+            // Find the end of the tag, skipping quoted attribute values.
+            var quote: UInt8 = 0
+            var k = j
+            while k < bytes.count {
+                let c = bytes[k]
+                if quote != 0 { if c == quote { quote = 0 } } else if c == 0x22 || c == 0x27 { quote = c } else if c == 0x3E { break }
+                k += 1
+            }
+            let selfClosing = k > 0 && k < bytes.count && bytes[k - 1] == 0x2F
+            if closing {
+                depth = max(0, depth - 1)
+            } else if !voidTags.contains(tag) && !selfClosing {
+                depth += 1
+                deepest = max(deepest, depth)
+            }
+            i = k + 1
+        }
+        return deepest
+    }
+
+    private static func indexAfter(_ pattern: [UInt8], in bytes: [UInt8], from start: Int) -> Int {
+        var i = start
+        while i + pattern.count <= bytes.count {
+            if bytes[i] == pattern[0], bytes[i..<(i + pattern.count)].elementsEqual(pattern) { return i + pattern.count }
+            i += 1
+        }
+        return bytes.count
+    }
+
+    private static func isASCIILetter(_ b: UInt8) -> Bool { (0x41...0x5A).contains(b) || (0x61...0x7A).contains(b) }
+    private static func isASCIILetterOrDigit(_ b: UInt8) -> Bool { isASCIILetter(b) || (0x30...0x39).contains(b) }
+
+    /// Tags stripped by a linear scan, basic entities decoded, blank lines turned into paragraphs,
+    /// everything escaped.
+    static func plainTextFallback(_ html: String) -> String {
+        let bytes = Array(html.utf8)
+        var text = [UInt8]()
+        text.reserveCapacity(bytes.count)
+        var i = 0
+        while i < bytes.count {
+            if bytes[i] == 0x3C, i + 1 < bytes.count {
+                let next = bytes[i + 1]
+                if next == 0x21 || next == 0x3F || next == 0x2F || isASCIILetter(next) {
+                    if bytes[i...].starts(with: [0x3C, 0x21, 0x2D, 0x2D]) {
+                        i = indexAfter([0x2D, 0x2D, 0x3E], in: bytes, from: i + 4)
+                    } else {
+                        i = indexAfter([0x3E], in: bytes, from: i + 1)
+                    }
+                    text.append(0x20)
+                    continue
+                }
+            }
+            text.append(bytes[i])
+            i += 1
+        }
+        let decoded = String(decoding: text, as: UTF8.self)
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&amp;", with: "&")
+        let paragraphs = decoded
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return paragraphs.map { "<p>\(escapeText($0))</p>" }.joined(separator: "\n")
     }
 
     private static func name(of node: XMLNode) -> String {
         (node.localName ?? node.name ?? "").lowercased()
     }
 
-    private static func render(_ node: XMLNode, baseURL: URL?, into out: inout String) {
+    private static func render(_ node: XMLNode, baseURL: URL?, depth: Int, into out: inout String) {
+        if depth > maxNestingDepth { return }
         switch node.kind {
         case .text:
             out += escapeText(node.stringValue ?? "")
@@ -70,7 +174,7 @@ enum ArticleTemplate {
             let tag = name(of: element)
             if droppedElements.contains(tag) { return }
             guard allowedElements.contains(tag) else {
-                for child in element.children ?? [] { render(child, baseURL: baseURL, into: &out) }
+                for child in element.children ?? [] { render(child, baseURL: baseURL, depth: depth + 1, into: &out) }
                 return
             }
             let attributes = safeAttributes(of: element, tag: tag, baseURL: baseURL)
@@ -81,7 +185,7 @@ enum ArticleTemplate {
             }
             out += ">"
             guard !voidElements.contains(tag) else { return }
-            for child in element.children ?? [] { render(child, baseURL: baseURL, into: &out) }
+            for child in element.children ?? [] { render(child, baseURL: baseURL, depth: depth + 1, into: &out) }
             out += "</\(tag)>"
         default:
             // Comments, processing instructions, DTD nodes: dropped.

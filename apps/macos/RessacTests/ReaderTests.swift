@@ -118,6 +118,25 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(clean.contains(#"<p title="say &quot;hi&quot;">1 &lt; 2 &amp;&amp; 3 &gt; 2"#))
     }
 
+    @Test func deepNestingDoesNotOverflowTheStack() {
+        let deep = String(repeating: "<div>", count: 100_000) + "deep text" + String(repeating: "</div>", count: 100_000)
+        let clean = ArticleTemplate.sanitize(deep)
+        #expect(clean.contains("deep text"))
+        #expect(!clean.contains("<div"))
+        // 300 levels: over the cap, so the plain-text path (no elements survive).
+        let medium = String(repeating: "<blockquote>", count: 300) + "mid text" + String(repeating: "</blockquote>", count: 300)
+        #expect(ArticleTemplate.estimatedNestingDepth(medium) == 300)
+        let plain = ArticleTemplate.sanitize(medium)
+        #expect(plain == "<p>mid text</p>")
+        // 200 levels: still parsed normally.
+        let ok = String(repeating: "<blockquote>", count: 200) + "ok text" + String(repeating: "</blockquote>", count: 200)
+        #expect(ArticleTemplate.sanitize(ok).contains("<blockquote>"))
+        // Void tags and comments do not count as depth.
+        #expect(ArticleTemplate.estimatedNestingDepth("<p>a<br>b<img src=\"x>\"><!-- <div><div> --></p>") == 1)
+        let paragraphs = ArticleTemplate.plainTextFallback("<p>one &amp; two</p>\n\n<p>three &lt;x&gt;</p>")
+        #expect(paragraphs == "<p>one &amp; two</p>\n<p>three &lt;x&gt;</p>")
+    }
+
     @Test func survivesGarbage() {
         #expect(ArticleTemplate.sanitize("") == "")
         #expect(ArticleTemplate.sanitize("< not a tag > 3 < 4").contains("&lt; not a tag &gt; 3 &lt; 4"))
