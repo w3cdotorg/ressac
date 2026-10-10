@@ -212,6 +212,15 @@ async fn full_pipeline_classifies_every_kind_of_feed() {
         .await
         .unwrap();
     assert_eq!(again.count(Status::Alive), 1);
+    let events = recorder.0.lock().unwrap();
+    let second_started = events
+        .iter()
+        .filter(|e| matches!(e, Event::Started { .. }))
+        .nth(1);
+    assert!(
+        matches!(second_started, Some(Event::Started { total: 0 })),
+        "{second_started:?}"
+    );
 }
 
 #[tokio::test]

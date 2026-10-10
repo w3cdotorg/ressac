@@ -16,10 +16,10 @@ use crate::discover::{alternate_feeds, same_feed};
 use crate::error::Result;
 use crate::health::links::{LinkInput, apply_similar_titles, find_duplicates};
 use crate::health::{FeedEvidence, diagnose};
-use crate::model::{Action, Diagnosis, FeedId, Status, parse_ts, ts};
+use crate::model::{Action, Diagnosis, ErrorKind, FeedId, Status, parse_ts, ts};
 use crate::opml::{self, clean_description};
 use crate::parse::{ParsedFeed, parse_feed};
-use crate::source::{FeedRef, FetchLimits, LocalSource, Source};
+use crate::source::{FeedRef, FetchAttempt, FetchLimits, LocalSource, Source};
 use crate::store::{FeedRow, ImportReport, Store};
 use crate::url_key::{https_variant, url_key};
 use crate::wayback::Wayback;
@@ -173,7 +173,9 @@ impl Ressac {
             }
         }
         // A panicking lane only loses its own feeds; the rest of the run is still valid.
-        let _ = fetching.await;
+        if let Err(e) = fetching.await {
+            tracing::error!(error = %e, "fetch lane failed");
+        }
 
         let unreachable = attempted >= MIN_ATTEMPTS_FOR_GUARD && network_failures * 2 > attempted;
         if unreachable {
@@ -189,8 +191,10 @@ impl Ressac {
             });
         } else if !stop.load(Ordering::Relaxed) {
             self.probe_https(&fresh, sink, stop.clone()).await?;
-            self.diagnose_all(Utc::now())?;
-            self.discover_replacements(sink, Utc::now()).await?;
+            if !stop.load(Ordering::Relaxed) {
+                self.diagnose_all(Utc::now())?;
+                self.discover_replacements(sink, Utc::now(), &stop).await?;
+            }
         }
         let mut summary = self.diagnose_all(Utc::now())?;
         summary.network_unreachable = unreachable;
@@ -235,18 +239,25 @@ impl Ressac {
         let source = self.source.clone();
         let probing = tokio::spawn(async move { source.refresh(candidates, tx, stop).await });
         while let Some(attempt) = rx.recv().await {
-            let same = match (&attempt.feed, fresh.get(&attempt.feed_id)) {
-                (Some(https), Some(http)) => same_feed(https, http),
-                _ => false,
-            };
-            self.store.set_https_available(attempt.feed_id, same)?;
+            if let Some(http) = fresh.get(&attempt.feed_id)
+                && let Some(verdict) = https_verdict(&attempt, http)
+            {
+                self.store.set_https_available(attempt.feed_id, verdict)?;
+            }
         }
-        let _ = probing.await;
+        if let Err(e) = probing.await {
+            tracing::error!(error = %e, "fetch lane failed");
+        }
         Ok(())
     }
 
     /// For Dead feeds with a site address, looks for a replacement feed announced by the site.
-    async fn discover_replacements(&self, sink: &dyn EventSink, now: DateTime<Utc>) -> Result<()> {
+    async fn discover_replacements(
+        &self,
+        sink: &dyn EventSink,
+        now: DateTime<Utc>,
+        stop: &AtomicBool,
+    ) -> Result<()> {
         let diags = self.store.diagnoses()?;
         let recheck_before = now - chrono::Duration::days(DISCOVERY_RECHECK_DAYS);
         let candidates: Vec<FeedRow> = self
@@ -271,13 +282,21 @@ impl Ressac {
             total: candidates.len(),
         });
         let source = &self.source;
-        let found: Vec<(FeedId, Option<String>)> = stream::iter(candidates)
-            .map(|f| async move { (f.id, discover_one(source, &f, now).await) })
+        let found: Vec<(FeedId, Option<Option<String>>)> = stream::iter(candidates)
+            .map(|f| async move {
+                if stop.load(Ordering::Relaxed) {
+                    return (f.id, None);
+                }
+                (f.id, discover_one(source, &f, now).await)
+            })
             .buffer_unordered(PROBE_CONCURRENCY)
             .collect()
             .await;
-        for (id, url) in found {
-            self.store.set_discovery(id, url.as_deref(), now)?;
+        // `None` means the site could not be checked: leave it unstamped so the next run retries.
+        for (id, checked) in found {
+            if let Some(url) = checked {
+                self.store.set_discovery(id, url.as_deref(), now)?;
+            }
         }
         Ok(())
     }
@@ -415,19 +434,131 @@ impl Ressac {
     }
 }
 
-async fn discover_one(source: &LocalSource, feed: &FeedRow, now: DateTime<Utc>) -> Option<String> {
+/// What an https probe tells about a feed. `None` when the failure may be transient
+/// (the answer stays unknown and the next run probes again).
+fn https_verdict(attempt: &FetchAttempt, http: &ParsedFeed) -> Option<bool> {
+    match (&attempt.feed, &attempt.error) {
+        (Some(https), _) => Some(same_feed(https, http)),
+        (None, Some(e)) if is_transient(e) => None,
+        (None, _) => Some(false),
+    }
+}
+
+/// Failures that say nothing about the site itself.
+fn is_transient(e: &ErrorKind) -> bool {
+    matches!(e, ErrorKind::Dns | ErrorKind::Connect | ErrorKind::Timeout)
+}
+
+/// `Some(found)` once the site was checked (`found` is `None` when it announces nothing new);
+/// `None` when it could not be checked (transient page-fetch failure, no site address).
+async fn discover_one(
+    source: &LocalSource,
+    feed: &FeedRow,
+    now: DateTime<Utc>,
+) -> Option<Option<String>> {
     let page = source
         .fetch_raw(feed.html_url.as_deref()?, None, None)
         .await;
-    if page.error.is_some() {
-        return None;
+    match &page.error {
+        Some(e) if is_transient(e) => return None,
+        Some(_) => return Some(None),
+        None => {}
     }
     let html = String::from_utf8_lossy(&page.body);
-    let candidate = alternate_feeds(&html, &page.final_url)
+    let Some(candidate) = alternate_feeds(&html, &page.final_url)
         .into_iter()
-        .find(|u| url_key(u) != feed.url_key)?;
+        .find(|u| url_key(u) != feed.url_key)
+    else {
+        return Some(None);
+    };
     let raw = source.fetch_raw(&candidate, None, None).await;
     let parses = raw.error.is_none()
         && parse_feed(&raw.body, raw.content_type.as_deref(), &raw.final_url, now).is_ok();
-    parses.then_some(candidate)
+    Some(parses.then_some(candidate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::ParsedEntry;
+
+    fn feed(guids: &[&str]) -> ParsedFeed {
+        ParsedFeed {
+            title: Some("T".into()),
+            description: None,
+            site_url: None,
+            entries: guids
+                .iter()
+                .map(|g| ParsedEntry {
+                    guid: g.to_string(),
+                    url: None,
+                    title: None,
+                    author: None,
+                    published_at: Utc::now(),
+                    published_at_is_fallback: false,
+                    updated_at: None,
+                    summary_html: None,
+                    content_html: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn attempt(feed: Option<ParsedFeed>, error: Option<ErrorKind>) -> FetchAttempt {
+        FetchAttempt {
+            feed_id: 1,
+            at: Utc::now(),
+            requested_url: "https://x.example/feed".into(),
+            final_url: "https://x.example/feed".into(),
+            http_status: None,
+            error,
+            redirect_chain: vec![],
+            content_type: None,
+            bytes: 0,
+            duration_ms: 0,
+            not_modified: false,
+            etag: None,
+            last_modified: None,
+            feed,
+        }
+    }
+
+    #[test]
+    fn https_verdict_compares_parsed_feeds() {
+        let http = feed(&["a", "b", "c"]);
+        assert_eq!(
+            https_verdict(&attempt(Some(feed(&["a", "b", "c"])), None), &http),
+            Some(true)
+        );
+        assert_eq!(
+            https_verdict(&attempt(Some(feed(&["x", "y", "z"])), None), &http),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn https_verdict_is_definitive_for_site_answers_only() {
+        let http = feed(&["a"]);
+        for e in [
+            ErrorKind::Tls,
+            ErrorKind::Http(404),
+            ErrorKind::Parse,
+            ErrorKind::Encoding,
+            ErrorKind::HtmlInsteadOfFeed,
+            ErrorKind::TooLarge,
+        ] {
+            assert_eq!(
+                https_verdict(&attempt(None, Some(e.clone())), &http),
+                Some(false),
+                "{e:?}"
+            );
+        }
+        for e in [ErrorKind::Dns, ErrorKind::Connect, ErrorKind::Timeout] {
+            assert_eq!(
+                https_verdict(&attempt(None, Some(e.clone())), &http),
+                None,
+                "{e:?}"
+            );
+        }
+    }
 }
