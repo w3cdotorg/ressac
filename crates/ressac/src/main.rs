@@ -1,6 +1,7 @@
 //! `ressac`: tidy your RSS subscriptions, then read them calmly.
 
 mod output;
+mod tui;
 
 use std::io::Write;
 use std::path::PathBuf;
