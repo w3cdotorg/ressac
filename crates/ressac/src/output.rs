@@ -1,6 +1,7 @@
 //! Human and JSON output for the CLI commands.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use ressac_core::model::Status;
@@ -43,37 +44,73 @@ pub fn glyph(status: Status, ascii: bool) -> &'static str {
     }
 }
 
-pub enum Sink {
+enum Display {
     /// Progress bar on stderr (hidden automatically when stderr is not a terminal).
     Progress(ProgressBar),
     /// One JSON object per line on stdout.
     Json,
 }
 
+/// Shows refresh events and counts fetched feeds, for the interruption notice.
+pub struct Sink {
+    display: Display,
+    started: AtomicUsize,
+    done: AtomicUsize,
+}
+
 pub fn sink(json: bool) -> Sink {
     if json {
-        return Sink::Json;
+        return Sink::new(Display::Json);
     }
     let bar = ProgressBar::new(0);
     let style =
         ProgressStyle::with_template("Checking {pos}/{len} feeds {bar:20} {elapsed}  {wide_msg}")
             .unwrap_or_else(|_| ProgressStyle::default_bar());
     bar.set_style(style);
-    Sink::Progress(bar)
+    Sink::new(Display::Progress(bar))
 }
 
 impl Sink {
+    fn new(display: Display) -> Self {
+        Sink {
+            display,
+            started: AtomicUsize::new(0),
+            done: AtomicUsize::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn hidden() -> Self {
+        Sink::new(Display::Progress(ProgressBar::hidden()))
+    }
+
     pub fn finish(&self) {
-        if let Sink::Progress(bar) = self {
+        if let Display::Progress(bar) = &self.display {
             bar.finish_and_clear();
         }
+    }
+
+    /// Feeds announced by `started` that never reported `feed_done`.
+    pub fn not_fetched(&self) -> usize {
+        self.started
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.done.load(Ordering::Relaxed))
     }
 }
 
 impl EventSink for Sink {
     fn emit(&self, event: &Event) {
-        match self {
-            Sink::Json => {
+        match event {
+            Event::Started { total } => {
+                self.started.fetch_add(*total, Ordering::Relaxed);
+            }
+            Event::FeedDone { .. } => {
+                self.done.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        match &self.display {
+            Display::Json => {
                 // A closed stdout (BrokenPipe) must not panic; the final write reports it.
                 let _ = writeln!(
                     std::io::stdout().lock(),
@@ -81,7 +118,7 @@ impl EventSink for Sink {
                     serde_json::to_string(event).unwrap_or_default()
                 );
             }
-            Sink::Progress(bar) => match event {
+            Display::Progress(bar) => match event {
                 Event::Started { total } => bar.set_length(*total as u64),
                 Event::FeedDone { title, .. } => {
                     bar.inc(1);
@@ -94,6 +131,15 @@ impl EventSink for Sink {
                 Event::WaybackDone { .. } | Event::Finished { .. } => {}
             },
         }
+    }
+}
+
+/// Printed on stderr after a run stopped by Ctrl-C.
+pub fn interrupted_message(not_fetched: usize) -> String {
+    if not_fetched == 1 {
+        "Interrupted: 1 feed was not fetched.".to_string()
+    } else {
+        format!("Interrupted: {not_fetched} feeds were not fetched.")
     }
 }
 
@@ -167,6 +213,37 @@ mod tests {
         for s in Status::ALL {
             assert_eq!(glyph(s, true).chars().count(), 1);
         }
+    }
+
+    #[test]
+    fn sink_counts_feeds_left_unfetched() {
+        let sink = Sink::hidden();
+        assert_eq!(sink.not_fetched(), 0);
+        sink.emit(&Event::Started { total: 5 });
+        for feed_id in [1, 2] {
+            sink.emit(&Event::FeedDone {
+                feed_id,
+                title: "T".into(),
+                error: None,
+            });
+        }
+        assert_eq!(sink.not_fetched(), 3);
+    }
+
+    #[test]
+    fn interrupted_message_counts_unfetched_feeds() {
+        assert_eq!(
+            interrupted_message(3),
+            "Interrupted: 3 feeds were not fetched."
+        );
+        assert_eq!(
+            interrupted_message(1),
+            "Interrupted: 1 feed was not fetched."
+        );
+        assert_eq!(
+            interrupted_message(0),
+            "Interrupted: 0 feeds were not fetched."
+        );
     }
 
     #[test]

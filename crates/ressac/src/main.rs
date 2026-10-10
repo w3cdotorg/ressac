@@ -4,7 +4,7 @@ mod output;
 mod tui;
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,12 +73,18 @@ enum Command {
     },
 }
 
+/// Exit code of a run stopped by Ctrl-C (128 + SIGINT), as shells expect.
+const INTERRUPTED: u8 = 130;
+
+/// Printed instead of running a command that needs feeds on an empty database.
+const NO_FEEDS: &str = "No feeds yet: run \"ressac import <file.opml>\" first.";
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let _log_guard = init_logging(cli.verbose);
     match run(cli).await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) if is_broken_pipe(&e) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -95,19 +101,48 @@ fn is_broken_pipe(e: &anyhow::Error) -> bool {
     })
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
+fn open(db: &Path) -> anyhow::Result<Ressac> {
+    Ressac::open(db).with_context(|| format!("cannot open database {}", db.display()))
+}
+
+/// Opens the database for a command that needs feeds. With none (or no database yet),
+/// prints the first-run hint instead, without creating anything.
+fn open_with_feeds(db: &Path) -> anyhow::Result<Option<Ressac>> {
+    if db.exists() {
+        let app = open(db)?;
+        if app.store().feed_count()? > 0 {
+            return Ok(Some(app));
+        }
+    }
+    eprintln!("{NO_FEEDS}");
+    Ok(None)
+}
+
+/// After a fetch stopped by Ctrl-C: say how much was left undone, exit 130.
+fn interrupted(stop: &AtomicBool, sink: &output::Sink) -> ExitCode {
+    if stop.load(Ordering::Relaxed) {
+        eprintln!("{}", output::interrupted_message(sink.not_fetched()));
+        ExitCode::from(INTERRUPTED)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let db = cli
         .db
         .clone()
         .unwrap_or_else(ressac_core::store::default_path);
-    let open =
-        || Ressac::open(&db).with_context(|| format!("cannot open database {}", db.display()));
     let stop = Arc::new(AtomicBool::new(false));
     {
+        // First Ctrl-C: stop scheduling and finish cleanly. Second one: leave now.
         let stop = stop.clone();
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
                 stop.store(true, Ordering::Relaxed);
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    std::process::exit(INTERRUPTED.into());
+                }
             }
         });
     }
@@ -126,7 +161,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     PRODUCTION_WAYBACK,
                 )?
             } else {
-                open()?
+                open(&db)?
             };
             let report = app.import_opml(&xml, dry_run)?;
             if cli.json {
@@ -146,17 +181,24 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Fetch { force } => {
-            let app = open()?;
+            let Some(app) = open_with_feeds(&db)? else {
+                return Ok(ExitCode::SUCCESS);
+            };
             let sink = output::sink(cli.json);
-            let result = app.refresh(RefreshOptions { force }, &sink, stop).await;
+            let result = app
+                .refresh(RefreshOptions { force }, &sink, stop.clone())
+                .await;
             sink.finish();
             let summary = result?;
             if !cli.json {
                 writeln!(out, "{}", output::summary_text(&summary, cli.ascii))?;
             }
+            return Ok(interrupted(&stop, &sink));
         }
         Command::Check { force } => {
-            let app = open()?;
+            let Some(app) = open_with_feeds(&db)? else {
+                return Ok(ExitCode::SUCCESS);
+            };
             let sink = output::sink(cli.json);
             let refreshed = app
                 .refresh(RefreshOptions { force }, &sink, stop.clone())
@@ -168,7 +210,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     return Err(e.into());
                 }
             };
-            let looked_up = app.lookup_wayback(&sink, stop).await;
+            let looked_up = app.lookup_wayback(&sink, stop.clone()).await;
             sink.finish();
             looked_up?;
             let mut summary = app.summary()?;
@@ -182,13 +224,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             } else {
                 writeln!(out, "{}", output::summary_text(&summary, cli.ascii))?;
             }
+            return Ok(interrupted(&stop, &sink));
         }
         Command::Garden => {
-            let app = open()?;
+            let Some(app) = open_with_feeds(&db)? else {
+                return Ok(ExitCode::SUCCESS);
+            };
             tui::run(&app, cli.ascii)?;
         }
         Command::Export { output, cemetery } => {
-            let app = open()?;
+            let Some(app) = open_with_feeds(&db)? else {
+                return Ok(ExitCode::SUCCESS);
+            };
             let xml = opml::export(app.store(), cemetery)?;
             match output {
                 Some(path) => std::fs::write(&path, xml)
@@ -197,7 +244,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Daily-rotated log file in ~/Library/Logs/Ressac, mirrored to stderr with `-v`.

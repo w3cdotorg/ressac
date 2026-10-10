@@ -122,6 +122,28 @@ fn closed_stdout_does_not_panic() {
 }
 
 #[test]
+fn commands_on_an_empty_store_hint_at_import() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        &["fetch"][..],
+        &["check"],
+        &["garden"],
+        &["export"],
+        &["export", "--cemetery"],
+        &["--json", "fetch"],
+    ] {
+        let out = ressac(home.path(), args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "No feeds yet: run \"ressac import <file.opml>\" first.\n",
+            "{args:?}"
+        );
+        assert!(out.stdout.is_empty(), "{args:?}: nothing else runs");
+    }
+}
+
+#[test]
 fn usage_errors_exit_2() {
     let home = tempfile::tempdir().unwrap();
     assert_eq!(ressac(home.path(), &["frobnicate"]).status.code(), Some(2));

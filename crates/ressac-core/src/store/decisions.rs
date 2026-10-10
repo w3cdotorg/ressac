@@ -102,6 +102,20 @@ impl Store {
                 )?;
             }
             (Decision::Repair, Some(Action::MergeInto { feed_id: target })) => {
+                let target_active = *target != feed_id
+                    && tx
+                        .query_row(
+                            "SELECT 1 FROM feed WHERE id = ?1 AND state = 'active'",
+                            [target],
+                            |_| Ok(()),
+                        )
+                        .optional()?
+                        .is_some();
+                if !target_active {
+                    return Err(Error::Invalid(format!(
+                        "Cannot merge into #{target}: it is not an active feed."
+                    )));
+                }
                 tx.execute(
                     "UPDATE feed SET state = 'buried', merged_into_id = ?2 WHERE id = ?1",
                     params![feed_id, target],
@@ -322,6 +336,35 @@ mod tests {
         }
         assert_eq!(s.feed(1).unwrap().state, "buried");
         assert_eq!(s.latest_decisions().unwrap()[&1].decision, Decision::Bury);
+    }
+
+    #[test]
+    fn merge_target_must_be_another_active_feed() {
+        let s = store();
+        s.record_decision(2, Decision::Bury, Status::Dead, None, now())
+            .unwrap();
+        for target in [1, 2, 99] {
+            match s.record_decision(
+                1,
+                Decision::Repair,
+                Status::Duplicate,
+                Some(&Action::MergeInto { feed_id: target }),
+                now(),
+            ) {
+                Err(Error::Invalid(msg)) => assert_eq!(
+                    msg,
+                    format!("Cannot merge into #{target}: it is not an active feed.")
+                ),
+                other => panic!("merge into #{target}: expected Invalid, got {other:?}"),
+            }
+        }
+        let f = s.feed(1).unwrap();
+        assert_eq!((f.state.as_str(), f.merged_into_id), ("active", None));
+        assert_eq!(
+            s.latest_decisions().unwrap().len(),
+            1,
+            "only the burial of #2"
+        );
     }
 
     #[test]

@@ -5,6 +5,8 @@ use ressac_core::garden::{GardenRow, Progress, progress, safe_repairs};
 use ressac_core::model::{Decision, FeedId, Status};
 
 const PAGE: usize = 10;
+/// Footer hint when no feed has been diagnosed yet.
+const CHECK_FIRST: &str = "Run \"ressac check\" first to diagnose your feeds.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -74,6 +76,10 @@ impl GardenState {
             ascii,
         };
         state.refilter();
+        let mut active = state.rows.iter().filter(|r| !r.buried).peekable();
+        if active.peek().is_some() && active.all(|r| r.status() == Status::Unchecked) {
+            state.message = Some(CHECK_FIRST.into());
+        }
         state
     }
 
@@ -483,6 +489,20 @@ mod tests {
             s.on_key(key(KeyCode::Char('k'))),
             Command::Decide(3, Decision::Keep)
         );
+    }
+
+    #[test]
+    fn an_all_unchecked_garden_suggests_running_check() {
+        let mut rows = sample_rows();
+        for r in &mut rows {
+            r.diagnosis = None;
+        }
+        let s = GardenState::new(rows, false);
+        assert_eq!(
+            s.message.as_deref(),
+            Some("Run \"ressac check\" first to diagnose your feeds.")
+        );
+        assert_eq!(state().message, None);
     }
 
     #[test]

@@ -110,3 +110,10 @@ Base jetable dans le scratchpad (`--db …/vienna-run.sqlite`, `HOME` redirigé 
 - clippy (rustc 1.99) : `manual_is_multiple_of` refuse `len % 2 == 0` ; utiliser `len.is_multiple_of(2)` dans la médiane.
 - Test planifié `age_of_last_entry_decides_alive_dormant_fossil` : 1000 jours avant 2026-10-10 donne 2024-01-14, pas 2023. Attendu corrigé en "2024" (le code suit la spec : indice = année de la dernière entrée).
 - Écart spec/plan : la spec exige `HtmlInsteadOfFeed` « sur une URL qui servait un flux » ; le plan pèse 0.3 dès que la dernière tentative est en `HtmlInsteadOfFeed`, sans vérifier l'historique. Gardé tel quel (à calibrer au vrai run).
+
+### Vague finale de corrections (10/10/2026)
+- **reqwest 0.13.5 / classification** : `is_connect()` est vrai aussi pour les échecs DNS et pour les échecs de poignée de main TLS (rustls). Tester `is_connect()` avant tout renverrait donc DNS et TLS en `Connect`. Ordre retenu : délai, DNS (texte), TLS (texte et `is_connect()`), corps/décodage, sinon `Connect`.
+- **rustls** : un serveur HTTP en clair interrogé en `https://` donne « received corrupt message of type InvalidContentType », sans le mot « tls » ; le classement le rangeait en `Connect`. Marqueurs rustls ajoutés (« received corrupt message », « peer is incompatible », « peer misbehaved », « received fatal alert »).
+- **`reqwest::Error::without_url()`** consomme l'erreur : `classify` prend désormais l'erreur par valeur. Le message de premier niveau contient l'URL complète (« error sending request for url (…) ») ; les sources de la chaîne, elles, ne la contiennent pas.
+- **Délai total** : `tokio::time::timeout` autour d'une boucle qui écrit dans un `&mut RawResponse` ; à l'échéance, le futur est abandonné, l'emprunt se termine et la chaîne de redirections déjà vue reste lisible.
+- **Ctrl-C en mode TUI** : en mode brut, crossterm désactive ISIG, Ctrl-C arrive comme touche et non comme signal ; le second Ctrl-C (sortie 130) ne concerne donc que `fetch` et `check`.

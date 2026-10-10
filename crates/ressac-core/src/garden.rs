@@ -43,13 +43,25 @@ impl GardenRow {
         !self.buried
             && needs_triage(
                 self.status(),
-                self.decision.as_ref().map(|d| d.status_at_decision),
+                self.decision.as_ref().map(|d| self.baseline(d)),
             )
+    }
+
+    /// The status a decision is measured against. A repair is meant to leave the feed
+    /// healthy, so once the feed was fetched again after it, any problem status brings it
+    /// back (Alive baseline). Until then its diagnosis still describes the old address.
+    fn baseline(&self, d: &DecisionRecord) -> Status {
+        let fetched_since = self.attempts.first().is_some_and(|a| a.at > d.decided_at);
+        if d.decision == Decision::Repair && fetched_since {
+            Status::Alive
+        } else {
+            d.status_at_decision
+        }
     }
 }
 
 /// A feed needs triage when its status is a problem and it is undecided, or it got
-/// strictly more urgent than when it was decided (spec §9).
+/// strictly more urgent than its decision baseline (spec §9).
 pub fn needs_triage(status: Status, decided_at: Option<Status>) -> bool {
     status.needs_triage() && decided_at.is_none_or(|prev| status.urgency() < prev.urgency())
 }
@@ -339,6 +351,36 @@ mod tests {
                 .attempts
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_repaired_feed_comes_back_on_any_problem_found_after_the_repair() {
+        let s = store();
+        decide(&s, 4, Decision::Repair, now()).unwrap();
+        let row = |s: &Store| {
+            load_rows(s)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.feed_id == 4)
+                .unwrap()
+        };
+        assert!(
+            !row(&s).needs_triage(),
+            "the stale Moved diagnosis predates the repair"
+        );
+        s.record_attempt("r", &failed_attempt(4, now() + chrono::Duration::hours(1)))
+            .unwrap();
+        for status in [Status::Dead, Status::Fossil] {
+            s.save_diagnoses(&HashMap::from([(4, diag(status, None))]), now())
+                .unwrap();
+            assert!(
+                row(&s).needs_triage(),
+                "{status:?} after a repair of a Moved feed"
+            );
+        }
+        s.save_diagnoses(&HashMap::from([(4, diag(Status::Dormant, None))]), now())
+            .unwrap();
+        assert!(!row(&s).needs_triage());
     }
 
     #[test]

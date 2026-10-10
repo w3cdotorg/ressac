@@ -25,7 +25,13 @@ fn health_row(r: &Row<'_>) -> rusqlite::Result<(FeedId, Diagnosis)> {
     Ok((
         r.get(0)?,
         Diagnosis {
-            status: Status::parse(&status).unwrap_or(Status::Unchecked),
+            status: Status::parse(&status).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    format!("unknown status {status:?} in feed_health").into(),
+                )
+            })?,
             reason: r.get(2)?,
             evidence: serde_json::from_str(&evidence).map_err(|e| json_error(3, e))?,
             remarks: serde_json::from_str(&remarks).map_err(|e| json_error(4, e))?,
@@ -181,6 +187,21 @@ mod tests {
         assert_eq!(s.diagnosis(1).unwrap(), Some(changed));
         assert_eq!(s.diagnosis(2).unwrap(), None);
         assert_eq!(s.diagnoses().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unknown_status_is_an_error_not_unchecked() {
+        let s = store();
+        s.save_diagnoses(&HashMap::from([(1, sample())]), now())
+            .unwrap();
+        s.conn()
+            .execute(
+                "UPDATE feed_health SET status = 'Zombie' WHERE feed_id = 1",
+                [],
+            )
+            .unwrap();
+        assert!(s.diagnosis(1).is_err());
+        assert!(s.diagnoses().is_err());
     }
 
     #[test]

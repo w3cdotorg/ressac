@@ -123,6 +123,14 @@ impl Store {
         Ok(rows)
     }
 
+    /// Number of feeds in any state.
+    pub fn feed_count(&self) -> Result<usize> {
+        let n: i64 = self
+            .conn()
+            .query_row("SELECT count(*) FROM feed", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
     pub fn feed(&self, id: FeedId) -> Result<FeedRow> {
         Ok(self.conn().query_row(
             &format!("SELECT {FEED_COLUMNS} FROM feed WHERE id = ?1"),
@@ -297,6 +305,7 @@ mod tests {
         );
         assert_eq!(report.skipped_existing, 0);
         assert_eq!(store.feeds().unwrap().len(), 11);
+        assert_eq!(store.feed_count().unwrap(), 11);
     }
 
     #[test]

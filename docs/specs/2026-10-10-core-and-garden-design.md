@@ -137,8 +137,8 @@ ressac/
 - **Human mode:** an `indicatif` progress bar, then a summary.
 - **`--json` mode:** one JSON object per line on stdout:
   - `{"event":"started","total":187}`
-  - `{"event":"feed_done","feed_id":…,"status":"Alive","error":null}`
-  - `{"event":"finished","summary":{…}}`
+  - `{"event":"feed_done","feed_id":…,"title":"…","error":null|"HTTP 404"}`
+  - `{"event":"finished","summary":{…}}`: the diagnosis comes here, once every feed is fetched.
 
 ## 7. Diagnosis
 
@@ -197,9 +197,9 @@ A feed that has never been fetched has status `Unchecked`.
   - database locked or unwritable;
   - schema newer than binary;
   - unreadable OPML (with line and column).
-- **Exit codes:** `0` success (sick feeds are not a failure), `1` fatal, `2` usage.
+- **Exit codes:** `0` success (sick feeds are not a failure), `1` fatal, `2` usage, `130` interrupted (Ctrl-C).
 - **Network guard:** if a run attempts at least 4 feeds and > 50 % of them fail with `Dns` or `Connect`, the run prints `Network looks unreachable — results not recorded as failures`. Those attempts are logged with a `network_suspect` flag and excluded from Dead counting.
-- **Ctrl-C:** stop scheduling, finish in-flight transactions, exit cleanly.
+- **Ctrl-C:** stop scheduling, finish in-flight transactions, print `Interrupted: N feeds were not fetched.` on stderr and exit `130`. A second Ctrl-C exits at once.
 - **Logging:** `tracing` to `~/Library/Logs/Ressac/ressac.log` (daily rotation); `-v` mirrors to stderr.
 
 ## 9. Garden UI
@@ -231,7 +231,7 @@ Full-screen ratatui app. Layout:
 
 - **Order:** status urgency, then folder, then title.
 - **List columns:** status glyph, title, top-level folder, and one short clue (language flag, HTTP code, last-entry year, months asleep, `= #id` for duplicates).
-- **What needs triage:** an active feed whose status is Duplicate, Hijacked, Moved, Dead, Ailing or Fossil, **and** that has no decision yet, **or** whose current status ranks strictly more urgent (§7 order) than its `status_at_decision`. Example: a Fossil you kept comes back if it turns Dead; it does not come back if it turns Dormant.
+- **What needs triage:** an active feed whose status is Duplicate, Hijacked, Moved, Dead, Ailing or Fossil, **and** that has no decision yet, **or** whose current status ranks strictly more urgent (§7 order) than its `status_at_decision`. Example: a Fossil you kept comes back if it turns Dead; it does not come back if it turns Dormant. A repair is measured against Alive instead, once the feed has been fetched again: any problem status after a repair brings it back.
 - **Defaults:** Alive and Dormant feeds count as kept. They stay browsable but never enter the queue, so the counter reads `decided / needing triage`.
 
 **Keys:**

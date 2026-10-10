@@ -111,7 +111,8 @@ impl LocalSource {
     }
 
     /// GET `url`, following up to `max_redirects` redirects by hand to record every hop.
-    /// Conditional headers are sent on the first request only.
+    /// Conditional headers are sent on the first request only. The timeout covers the
+    /// whole exchange, redirects and body included; on expiry the hops seen so far are kept.
     pub async fn fetch_raw(
         &self,
         url: &str,
@@ -122,6 +123,25 @@ impl LocalSource {
             final_url: url.to_string(),
             ..RawResponse::default()
         };
+        let exchange = self.follow(url, etag, last_modified, &mut out);
+        if tokio::time::timeout(self.limits.timeout, exchange)
+            .await
+            .is_err()
+        {
+            out.error = Some(ErrorKind::Timeout);
+            out.body.clear();
+        }
+        out
+    }
+
+    /// The redirect loop of `fetch_raw`, writing into `out` as it goes.
+    async fn follow(
+        &self,
+        url: &str,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        out: &mut RawResponse,
+    ) {
         let mut current = url.to_string();
         loop {
             let mut req = self.client.get(&current);
@@ -136,8 +156,8 @@ impl LocalSource {
             let resp = match req.send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    out.error = Some(classify(&e));
-                    return out;
+                    out.error = Some(classify(e));
+                    return;
                 }
             };
             let status = resp.status().as_u16();
@@ -157,7 +177,7 @@ impl LocalSource {
                     }
                     _ => {
                         out.error = Some(ErrorKind::Http(status));
-                        return out;
+                        return;
                     }
                 }
             }
@@ -166,11 +186,11 @@ impl LocalSource {
             out.last_modified = header(&resp, LAST_MODIFIED);
             if status == 304 {
                 out.not_modified = true;
-                return out;
+                return;
             }
             if !(200..300).contains(&status) {
                 out.error = Some(ErrorKind::Http(status));
-                return out;
+                return;
             }
             let mut resp = resp;
             loop {
@@ -179,14 +199,14 @@ impl LocalSource {
                         if out.body.len() + chunk.len() > self.limits.max_bytes {
                             out.body.clear();
                             out.error = Some(ErrorKind::TooLarge);
-                            return out;
+                            return;
                         }
                         out.body.extend_from_slice(&chunk);
                     }
-                    Ok(None) => return out,
+                    Ok(None) => return,
                     Err(e) => {
-                        out.error = Some(classify(&e));
-                        return out;
+                        out.error = Some(classify(e));
+                        return;
                     }
                 }
             }
@@ -300,12 +320,15 @@ fn host_of(url: &str) -> String {
 }
 
 /// Maps a reqwest error to an `ErrorKind` by inspecting the whole source chain.
-fn classify(e: &reqwest::Error) -> ErrorKind {
+/// The URL is dropped first, so a host or path containing "tls" cannot fool the match.
+/// reqwest reports DNS and TLS handshake failures as connect errors too, hence the order.
+fn classify(e: reqwest::Error) -> ErrorKind {
     if e.is_timeout() {
         return ErrorKind::Timeout;
     }
+    let e = e.without_url();
     let mut text = e.to_string();
-    let mut source = std::error::Error::source(e);
+    let mut source = std::error::Error::source(&e);
     while let Some(s) = source {
         text.push_str(" | ");
         text.push_str(&s.to_string());
@@ -317,7 +340,7 @@ fn classify(e: &reqwest::Error) -> ErrorKind {
         || text.contains("nodename nor servname")
     {
         ErrorKind::Dns
-    } else if text.contains("certificate") || text.contains("tls") || text.contains("handshake") {
+    } else if e.is_connect() && TLS_MARKERS.iter().any(|m| text.contains(m)) {
         ErrorKind::Tls
     } else if e.is_body() || e.is_decode() {
         ErrorKind::Parse
@@ -325,6 +348,17 @@ fn classify(e: &reqwest::Error) -> ErrorKind {
         ErrorKind::Connect
     }
 }
+
+/// Fragments of TLS failures as rustls and the connector word them.
+const TLS_MARKERS: [&str; 7] = [
+    "tls",
+    "certificate",
+    "handshake",
+    "received corrupt message",
+    "peer is incompatible",
+    "peer misbehaved",
+    "received fatal alert",
+];
 
 #[cfg(test)]
 mod tests {
@@ -472,6 +506,75 @@ mod tests {
             .fetch_one(&feed(1, format!("{}/feed", server.uri())))
             .await;
         assert_eq!(a.error, Some(ErrorKind::Timeout));
+    }
+
+    #[tokio::test]
+    async fn the_timeout_covers_the_whole_redirect_chain() {
+        let server = MockServer::start().await;
+        for (from, to) in [("/a", "/b"), ("/b", "/c"), ("/c", "/d")] {
+            Mock::given(method("GET"))
+                .and(path(from))
+                .respond_with(
+                    ResponseTemplate::new(301)
+                        .insert_header("Location", to)
+                        .set_delay(Duration::from_millis(200)),
+                )
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/d"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(RSS, "application/rss+xml")
+                    .set_delay(Duration::from_millis(200)),
+            )
+            .mount(&server)
+            .await;
+        let limits = FetchLimits {
+            timeout: Duration::from_millis(500),
+            ..fast()
+        };
+        let a = LocalSource::new(limits)
+            .unwrap()
+            .fetch_one(&feed(1, format!("{}/a", server.uri())))
+            .await;
+        assert_eq!(a.error, Some(ErrorKind::Timeout));
+        assert!(
+            !a.redirect_chain.is_empty() && a.redirect_chain.len() < 3,
+            "the hops seen before the deadline are kept: {:?}",
+            a.redirect_chain
+        );
+        assert!(a.feed.is_none());
+    }
+
+    #[tokio::test]
+    async fn tls_in_the_url_does_not_make_a_refused_connection_a_tls_error() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let a = LocalSource::new(fast())
+            .unwrap()
+            .fetch_one(&feed(
+                1,
+                format!("http://127.0.0.1:{port}/tls/handshake/certificate.xml"),
+            ))
+            .await;
+        assert_eq!(a.error, Some(ErrorKind::Connect));
+    }
+
+    #[tokio::test]
+    async fn a_failed_handshake_is_a_tls_error() {
+        let server = MockServer::start().await;
+        serve_rss(&server, "/feed").await;
+        let https = server.uri().replace("http://", "https://");
+        let a = LocalSource::new(fast())
+            .unwrap()
+            .fetch_one(&feed(1, format!("{https}/feed")))
+            .await;
+        assert_eq!(a.error, Some(ErrorKind::Tls));
     }
 
     #[tokio::test]
