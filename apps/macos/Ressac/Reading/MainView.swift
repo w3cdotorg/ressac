@@ -25,6 +25,7 @@ struct MainView: View {
                 ReaderView(state: state)
             }
         }
+        .background(ReadingWindowReader(state: state))
         .searchable(text: $state.searchText, placement: .toolbar, prompt: "Search")
         .searchFocused($searchFocused)
         .onChange(of: searchFocused) { _, focused in state.isSearchFocused = focused }
@@ -190,5 +191,17 @@ struct EntryRowView: View {
             }
         }
         .padding(.vertical, 3)
+    }
+}
+
+/// Tells `AppState` which window is the reading window, to gate single-letter shortcuts.
+private struct ReadingWindowReader: NSViewRepresentable {
+    let state: AppState
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        // The view has no window yet while SwiftUI builds it.
+        Task { @MainActor [weak view] in state.registerReadingWindow(view?.window) }
     }
 }

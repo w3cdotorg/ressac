@@ -160,6 +160,8 @@ enum ProposedAction: Codable, Sendable, Equatable {
     case adoptDiscovered(url: String)
     case mergeInto(feedId: Int64)
     case bury
+    /// An action type newer than this app (a newer core wrote it): shown, never applied.
+    case unknown(String)
 
     private enum CodingKeys: String, CodingKey {
         case type, url
@@ -174,14 +176,14 @@ enum ProposedAction: Codable, Sendable, Equatable {
         case "adopt_discovered": self = .adoptDiscovered(url: try c.decode(String.self, forKey: .url))
         case "merge_into": self = .mergeInto(feedId: try c.decode(Int64.self, forKey: .feedId))
         case "bury": self = .bury
-        case let other:
-            throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown action \(other)")
+        case let other: self = .unknown(other)
         }
     }
 
     func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
+        case let .unknown(type): try c.encode(type, forKey: .type)
         case let .upgradeHttps(url):
             try c.encode("upgrade_https", forKey: .type)
             try c.encode(url, forKey: .url)
@@ -208,7 +210,12 @@ enum ProposedAction: Codable, Sendable, Equatable {
     }
 
     /// Everything except burying (core `Action::is_repair`).
-    var isRepair: Bool { self != .bury }
+    var isRepair: Bool {
+        switch self {
+        case .bury, .unknown: false
+        default: true
+        }
+    }
 
     /// Same wording as the core's `Action::label`.
     var label: String {
@@ -218,6 +225,7 @@ enum ProposedAction: Codable, Sendable, Equatable {
         case let .adoptDiscovered(url): "adopt discovered feed \(url)"
         case let .mergeInto(feedId): "merge into #\(feedId)"
         case .bury: "bury → cemetery"
+        case let .unknown(type): "\(type) (newer than this app)"
         }
     }
 }

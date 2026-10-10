@@ -44,23 +44,28 @@ enum ArticleTemplate {
     /// Returns inert HTML. Relative `href`/`src` are resolved against `baseURL` (the entry's
     /// address), since `<base>` is removed; links and images keep only http(s) addresses
     /// (images may also be `data:image/…`, except SVG).
-    static func sanitize(_ html: String, baseURL: URL? = nil) -> String {
+    static func sanitize(_ html: String, baseURL: URL? = nil, budget: TimeInterval = parseBudget) -> String {
         let key = CacheKey(html: html, baseURL: baseURL)
         if let cached = cache.withLock({ $0.lookup(key) }) { return cached }
-        let result = sanitizeUncached(html, baseURL: baseURL)
-        if html.utf8.count <= maxParsedBytes { cache.withLock { $0.store(key, result) } }
+        let (result, timedOut) = sanitizeUncached(html, baseURL: baseURL, budget: budget)
+        // A timed-out parse is a busy moment, not a property of the article: do not remember it.
+        if html.utf8.count <= maxParsedBytes, !timedOut { cache.withLock { $0.store(key, result) } }
         return result
     }
 
-    private static func sanitizeUncached(_ html: String, baseURL: URL?) -> String {
+    private static func sanitizeUncached(_ html: String, baseURL: URL?, budget: TimeInterval) -> (html: String, timedOut: Bool) {
         // Tidy and the recursive renderer overflow the stack on pathological nesting, and libxml's
         // repair of misnested end tags is quadratic, so such input (or anything big) skips the
         // parser and is shown as escaped plain text.
         let size = html.utf8.count
         if size > maxParsedBytes || estimatedNestingDepth(html) > maxNestingDepth {
-            return size > maxInputBytes ? plainTextFallback(String(decoding: html.utf8.prefix(maxInputBytes), as: UTF8.self)) : plainTextFallback(html)
+            let text = size > maxInputBytes ? String(decoding: html.utf8.prefix(maxInputBytes), as: UTF8.self) : html
+            return (plainTextFallback(text), false)
         }
-        return onLargeStack(timeout: parseBudget) { parseAndRender(html, baseURL: baseURL) } ?? plainTextFallback(html)
+        if let rendered = onLargeStack(timeout: budget, { parseAndRender(html, baseURL: baseURL) }) {
+            return (rendered, false)
+        }
+        return (plainTextFallback(html), true)
     }
 
     // MARK: Memo

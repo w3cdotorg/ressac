@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import SwiftUI
 import Testing
 @testable import Ressac
 
@@ -23,10 +24,12 @@ private func row(_ id: Int64, _ title: String, status: String?, folder: String? 
             row(7, "Early", status: "Dead", folder: "Biblis / Sub"),
         ]
         let all = GardenModel.sections(rows, scope: .all)
-        #expect(all.map(\.id) == ["Moved", "Dead", "Alive", "Unchecked", "Buried"])
-        #expect(all[1].rows.map(\.title) == ["Early", "alpha", "Zed"])
-        #expect(all[1].header == "🪦 DEAD · 3")
-        #expect(all.last?.rows.map(\.feedId) == [5])
+        #expect(all.map(\.id) == ["Moved", "Dead", "Alive", "Unchecked"])
+        #expect(all[1].rows.map(\.title) == ["Early", "alpha", "Gone", "Zed"])
+        #expect(all[1].header == "🪦 DEAD · 4")
+        let cemetery = GardenModel.sections(rows.filter(GardenModel.isBuried), scope: .cemetery)
+        #expect(cemetery.map(\.id) == ["Buried"])
+        #expect(cemetery.last?.rows.map(\.feedId) == [5])
         let queue = GardenModel.sections(rows, scope: .needsTriage)
         #expect(queue.first { $0.id == "Dead" }?.rows.map(\.feedId) == [7, 2, 5, 1])
         #expect(!queue.contains { $0.id == "Buried" })
@@ -43,6 +46,39 @@ private func row(_ id: Int64, _ title: String, status: String?, folder: String? 
         #expect(!GardenModel.isDimmed(waiting, scope: .needsTriage, seenInQueue: [1, 2]))
         #expect(!GardenModel.isDimmed(decided, scope: .all, seenInQueue: [1, 2]))
         #expect(GardenModel.visibleRows(rows + [row(4, "Gone", status: "Dead", state: "buried")], scope: .cemetery, seenInQueue: []).map(\.feedId) == [4])
+    }
+
+    @Test func allFeedsKeepsAFeedBuriedDuringTheVisitDimmed() {
+        let active = row(1, "Active", status: "Alive")
+        let buriedNow = row(2, "Buried now", status: "Dead", state: "buried", needsTriage: false, decision: "bury")
+        let buriedBefore = row(3, "Buried before", status: "Dead", state: "buried", needsTriage: false, decision: "bury")
+        let rows = [active, buriedNow, buriedBefore]
+        #expect(GardenModel.visibleRows(rows, scope: .all, seenInQueue: [2]).map(\.feedId) == [1, 2])
+        #expect(GardenModel.visibleRows(rows, scope: .all, seenInQueue: []).map(\.feedId) == [1])
+        #expect(GardenModel.isDimmed(buriedNow, scope: .all, seenInQueue: [2]))
+        #expect(!GardenModel.isDimmed(active, scope: .all, seenInQueue: [2]))
+    }
+
+    @Test func gardenKeysIgnoreCommandControlAndOptionChords() {
+        let dead = row(1, "Dead", status: "Dead")
+        for chord: EventModifiers in [.command, .control, .option, [.command, .shift]] {
+            for key in ["b", "k", "u", "R", "o"] {
+                #expect(GardenModel.command(for: key, modifiers: chord, row: dead, safeRepairCount: 1) == nil)
+            }
+        }
+        #expect(GardenModel.command(for: "R", modifiers: .shift, row: dead, safeRepairCount: 1) == .confirmSafeRepairs)
+        #expect(GardenModel.command(for: "b", modifiers: [], row: dead, safeRepairCount: 0) == .decide(.bury))
+    }
+
+    @Test func anUnknownProposedActionDecodesAndOffersNoRepair() throws {
+        let action = try JSONDecoder().decode(ProposedAction.self, from: Data(#"{"type":"teleport","to":"mars"}"#.utf8))
+        #expect(action == .unknown("teleport"))
+        #expect(!action.isSafe)
+        #expect(!action.isRepair)
+        #expect(action.label.contains("teleport"))
+        let odd = row(1, "Odd", status: "Dead", action: action)
+        #expect(GardenModel.safeRepairs([odd]).isEmpty)
+        #expect(GardenModel.command(for: "r", row: odd, safeRepairCount: 0) == .message("Nothing to repair for this feed."))
     }
 
     @Test func progressCountsLikeTheTerminalGarden() {

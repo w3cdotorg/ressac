@@ -27,9 +27,12 @@ final class AppDatabase: Sendable {
 
     let writer: any DatabaseWriter
     var reader: any DatabaseReader { writer }
+    /// The database file, for connections of our own (see `DataVersionWatcher`).
+    let url: URL
 
-    private init(writer: any DatabaseWriter) {
+    private init(writer: any DatabaseWriter, url: URL) {
         self.writer = writer
+        self.url = url
     }
 
     /// Opens an existing database. `busyTimeout` is 5 s in the app; tests shorten it.
@@ -37,7 +40,7 @@ final class AppDatabase: Sendable {
         var config = Configuration()
         config.busyMode = .timeout(busyTimeout)
         config.label = "Ressac"
-        return AppDatabase(writer: try DatabasePool(path: url.path, configuration: config))
+        return AppDatabase(writer: try DatabasePool(path: url.path, configuration: config), url: url)
     }
 
     /// `schema_meta.version`, or nil when the file does not exist.

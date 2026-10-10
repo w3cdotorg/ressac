@@ -7,7 +7,8 @@ struct GardenTable: View {
     @Bindable var state: AppState
     let scope: GardenScope
 
-    /// `Queries.garden(scope: .all)` (active feeds) and `.cemetery` (buried ones).
+    /// `Queries.garden(scope: .all)` (active feeds) and `.cemetery` (buried ones, kept in All Feeds
+    /// and Needs Triage only when buried during this visit).
     @State private var active: [GardenRow] = []
     @State private var buried: [GardenRow] = []
     /// Feeds seen needing triage during this visit: once decided (here, by ⇧R or in the
@@ -43,7 +44,7 @@ struct GardenTable: View {
                 }
                 .focused($listFocused)
                 .onKeyPress(phases: .down) { press in
-                    handle(press.characters, safeRepairCount: safeRepairs.count)
+                    handle(press.characters, modifiers: press.modifiers, safeRepairCount: safeRepairs.count)
                 }
             }
         }
@@ -63,7 +64,6 @@ struct GardenTable: View {
         }
         .task(id: scope) {
             buried = []
-            guard scope != .all else { return }
             await observe(.cemetery) { buried = $0 }
         }
     }
@@ -114,9 +114,9 @@ struct GardenTable: View {
         }
     }
 
-    private func handle(_ key: String, safeRepairCount: Int) -> KeyPress.Result {
+    private func handle(_ key: String, modifiers: EventModifiers, safeRepairCount: Int) -> KeyPress.Result {
         let row = rows.first { $0.feedId == state.selectedFeedId }
-        guard let command = GardenModel.command(for: key, row: row, safeRepairCount: safeRepairCount) else {
+        guard let command = GardenModel.command(for: key, modifiers: modifiers, row: row, safeRepairCount: safeRepairCount) else {
             return .ignored
         }
         message = nil

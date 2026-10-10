@@ -85,12 +85,21 @@ enum ImportPreview {
 
     @ObservationIgnored private let preview: @Sendable (URL) async throws -> ImportReport
     @ObservationIgnored private let submit: @MainActor (RunRequest) async -> Bool
+    @ObservationIgnored private let isRefreshRunning: @MainActor () -> Bool
 
     init(preview: @escaping @Sendable (URL) async throws -> ImportReport,
-         submit: @escaping @MainActor (RunRequest) async -> Bool) {
+         submit: @escaping @MainActor (RunRequest) async -> Bool,
+         isRefreshRunning: @escaping @MainActor () -> Bool = { false }) {
         self.preview = preview
         self.submit = submit
+        self.isRefreshRunning = isRefreshRunning
     }
+
+    static let refreshRunningMessage = "A refresh is running; try again when it ends."
+
+    /// The coordinator refuses an import while a long run is active, so the sheet says so
+    /// instead of closing with nothing imported.
+    var importBlockedMessage: String? { isRefreshRunning() ? Self.refreshRunningMessage : nil }
 
     /// The bundled helper on the database in use, and the app's run coordinator.
     static func live(database: URL, runs: RunCoordinator) -> OPMLFlow {
@@ -101,7 +110,8 @@ enum ImportPreview {
                 }
                 return try await ImportPreview.run(executable: executable, database: database, file: file)
             },
-            submit: { await runs.submit($0) }
+            submit: { await runs.submit($0) },
+            isRefreshRunning: { runs.isLongRunActive }
         )
     }
 
@@ -146,7 +156,7 @@ enum ImportPreview {
 
     /// Imports the confirmed file, then fetches every feed (spec §7, first run).
     func confirm() async {
-        guard case .confirming(let file, _) = step else { return }
+        guard case .confirming(let file, _) = step, importBlockedMessage == nil else { return }
         step = .importing(file)
         if await submit(.importOPML(file, dryRun: false)) {
             _ = await submit(.fetch(feeds: []))
@@ -316,13 +326,18 @@ struct ImportConfirmationSheet: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+            if let blocked = flow.importBlockedMessage {
+                Text(blocked)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { flow.cancel() }
                     .keyboardShortcut(.cancelAction)
                 Button("Import") { Task { await flow.confirm() } }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(report.feedsAdded == 0)
+                    .disabled(report.feedsAdded == 0 || flow.importBlockedMessage != nil)
             }
         }
         .padding(20)

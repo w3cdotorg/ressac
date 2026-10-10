@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// What a key or button asks the Garden to do (mirrors `ressac garden`, crates/ressac/src/tui/state.rs).
 enum GardenCommand: Equatable {
@@ -70,19 +71,24 @@ enum GardenModel {
     static func visibleRows(_ rows: [GardenRow], scope: GardenScope, seenInQueue: Set<Int64>) -> [GardenRow] {
         switch scope {
         case .needsTriage: rows.filter { $0.needsTriage || seenInQueue.contains($0.feedId) }
-        case .all: rows
+        // Active feeds, plus the ones buried during this visit (kept in place, dimmed).
+        case .all: rows.filter { !isBuried($0) || seenInQueue.contains($0.feedId) }
         case .cemetery: rows.filter(isBuried)
         }
     }
 
     static func isDimmed(_ row: GardenRow, scope: GardenScope, seenInQueue: Set<Int64>) -> Bool {
-        scope == .needsTriage && !row.needsTriage && seenInQueue.contains(row.feedId)
+        switch scope {
+        case .needsTriage: !row.needsTriage && seenInQueue.contains(row.feedId)
+        case .all: isBuried(row) && seenInQueue.contains(row.feedId)
+        case .cemetery: false
+        }
     }
 
-    /// One section per status in urgency order; buried feeds last (in the queue, a feed buried
-    /// during the visit stays dimmed in its status section instead).
+    /// One section per status in urgency order. The Cemetery lists buried feeds alone; elsewhere a
+    /// feed buried during the visit stays dimmed in its status section.
     static func sections(_ rows: [GardenRow], scope: GardenScope) -> [Section] {
-        let splitBuried = scope != .needsTriage
+        let splitBuried = scope == .cemetery
         let buried = splitBuried ? rows.filter(isBuried) : []
         let live = splitBuried ? rows.filter { !isBuried($0) } : rows
         let extra = Set(live.map(status(of:))).subtracting(urgencyOrder).sorted()
@@ -154,8 +160,10 @@ enum GardenModel {
         return after.first(where: \.needsTriage)?.feedId ?? selected
     }
 
-    /// Keys of the terminal garden. `nil` means the key is not the Garden's.
-    static func command(for key: String, row: GardenRow?, safeRepairCount: Int) -> GardenCommand? {
+    /// Keys of the terminal garden. `nil` means the key is not the Garden's. Chords with ⌘, ⌃
+    /// or ⌥ never are (Shift stays: ⇧R), so a stray ⌘B cannot bury a feed.
+    static func command(for key: String, modifiers: EventModifiers = [], row: GardenRow?, safeRepairCount: Int) -> GardenCommand? {
+        guard modifiers.isDisjoint(with: [.command, .control, .option]) else { return nil }
         switch key {
         case "u":
             return .undo
@@ -209,6 +217,7 @@ enum GardenModel {
         case .adoptDiscovered: return "adopt"
         case .mergeInto: return "merge"
         case .bury: return "bury"
+        case .unknown: return nil
         case nil: return triageStatuses.contains(status(of: row)) ? "wait" : nil
         }
     }

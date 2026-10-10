@@ -59,7 +59,7 @@ struct Queries {
                     """),
                 unread: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v_entry WHERE NOT is_read") ?? 0,
                 today: try Int.fetchOne(
-                    db, sql: "SELECT COUNT(*) FROM v_entry WHERE NOT is_read AND published_at >= ?",
+                    db, sql: "SELECT COUNT(*) FROM v_entry WHERE published_at >= ?",
                     arguments: [midnight]) ?? 0,
                 starred: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v_entry WHERE is_starred") ?? 0,
                 needsTriage: try Int.fetchOne(

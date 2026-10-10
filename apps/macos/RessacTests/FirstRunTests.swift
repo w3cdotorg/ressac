@@ -92,6 +92,11 @@ private func stubDirectory() throws -> URL {
     }
 }
 
+@MainActor private final class Flag {
+    var value: Bool
+    init(_ value: Bool) { self.value = value }
+}
+
 @Suite @MainActor struct OPMLFlowTests {
     private let file = URL(filePath: "/tmp/vienna.opml")
 
@@ -114,6 +119,21 @@ private func stubDirectory() throws -> URL {
         await flow.confirm()
         #expect(recorder.requests == [.importOPML(file, dryRun: false), .fetch(feeds: [])])
         #expect(flow.step == .idle)
+    }
+
+    @Test func importIsBlockedWithAMessageWhileARefreshRuns() async {
+        let recorder = Recorder()
+        let running = Flag(true)
+        let flow = OPMLFlow(preview: { _ in sampleReport }, submit: recorder.submit, isRefreshRunning: { running.value })
+        await flow.open([file])
+        #expect(flow.importBlockedMessage == "A refresh is running; try again when it ends.")
+        await flow.confirm()
+        #expect(recorder.requests.isEmpty)
+        #expect(flow.step == .confirming(file, sampleReport))
+        running.value = false
+        #expect(flow.importBlockedMessage == nil)
+        await flow.confirm()
+        #expect(recorder.requests == [.importOPML(file, dryRun: false), .fetch(feeds: [])])
     }
 
     @Test func aFailedImportDoesNotFetch() async {

@@ -80,6 +80,8 @@ enum PendingPanel: Equatable, Sendable {
     }
     /// Mirrors the search field's focus: single-letter shortcuts are off while typing.
     var isSearchFocused = false
+    /// False while another window or a panel has the keyboard (see `windowDidChangeKey`).
+    private(set) var readingWindowIsKey = true
     var readerShowsFullText = false
     /// The feed selected in the Garden table (phase 12); garden commands act on it.
     var selectedFeedId: Int64?
@@ -109,6 +111,9 @@ enum PendingPanel: Equatable, Sendable {
     /// Set by the reader (phase 10): scrolls one page and returns false at the bottom.
     @ObservationIgnored var readerPageDown: (@MainActor () async -> Bool)?
 
+    @ObservationIgnored private var externalChanges: ExternalChangeMonitor?
+    @ObservationIgnored private var systemObservers: [any NSObjectProtocol] = []
+    @ObservationIgnored private weak var readingWindow: NSWindow?
     @ObservationIgnored private var sidebarObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var listObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var entryObservation: AnyDatabaseCancellable?
@@ -125,11 +130,62 @@ enum PendingPanel: Equatable, Sendable {
         runs.onDatabaseChange = { [database] in
             Task { try? await database.notifyExternalChanges() }
         }
-        sidebarObservation = Queries.sidebar().start(
+        startSidebarObservation()
+        listDidChange()
+    }
+
+    private func startSidebarObservation() {
+        sidebarObservation = Queries.sidebar(now: now()).start(
             in: database.reader, scheduling: .immediate,
             onError: { [weak self] in self?.report($0) },
             onChange: { [weak self] in self?.sidebar = $0 })
+    }
+
+    // MARK: System events
+
+    /// Starts what the running app needs from the system: refreshing on activation and polling
+    /// for terminal writes (`ExternalChangeMonitor`), the midnight restart of the date-based
+    /// queries, and tracking which window has the keyboard. Not started in unit tests.
+    func startSystemObservers() {
+        guard externalChanges == nil else { return }
+        let monitor = ExternalChangeMonitor(database: database)
+        monitor.start()
+        externalChanges = monitor
+        let center = NotificationCenter.default
+        systemObservers = [
+            center.addObserver(forName: .NSCalendarDayChanged, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.dayDidChange() }
+            },
+            center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] note in
+                let window = note.object as? NSWindow
+                MainActor.assumeIsolated { self?.windowDidChangeKey(window, isKey: true) }
+            },
+            center.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
+                let window = note.object as? NSWindow
+                MainActor.assumeIsolated { self?.windowDidChangeKey(window, isKey: false) }
+            },
+        ]
+    }
+
+    /// Midnight passed: "Today" counts and lists were built around the previous day's start.
+    func dayDidChange() {
+        startSidebarObservation()
         listDidChange()
+    }
+
+    /// Single-letter shortcuts belong to the reading window: while a panel or another window has
+    /// the keyboard (Export…, New…, Settings), typing "jams" must stay typing.
+    func windowDidChangeKey(_ window: NSWindow?, isKey: Bool) {
+        guard let readingWindow else { return }
+        if window === readingWindow { readingWindowIsKey = isKey }
+        else if isKey { readingWindowIsKey = false }
+    }
+
+    /// Registered by the main view (`.trackingReadingWindow`).
+    func registerReadingWindow(_ window: NSWindow?) {
+        guard window !== readingWindow else { return }
+        readingWindow = window
+        readingWindowIsKey = window?.isKeyWindow ?? true
     }
 
     var sidebarTree: [SidebarNode] { SidebarNode.tree(from: sidebar) }
@@ -142,7 +198,7 @@ enum PendingPanel: Equatable, Sendable {
 
     // MARK: Command availability (menus disable what does nothing, spec §7)
 
-    var letterShortcutsEnabled: Bool { !isSearchFocused }
+    var letterShortcutsEnabled: Bool { !isSearchFocused && readingWindowIsKey }
     var canNavigateEntries: Bool { letterShortcutsEnabled && !selection.isGarden && !entries.isEmpty }
     var canToggleEntry: Bool { letterShortcutsEnabled && !selection.isGarden && selectedEntry != nil }
     var canMarkAllRead: Bool { !selection.isGarden && searchText.isEmpty && entries.contains { !$0.isRead } }
@@ -260,7 +316,7 @@ enum PendingPanel: Equatable, Sendable {
         fullTextNotice = nil
         let entryId = entry.entryId
         let run = runs.start(.extract(entryId: entryId)) { [weak self] event in
-            if case let .extracted(id, false, error) = event, id == entryId {
+            if case let .extracted(id, false, error) = event, id == entryId, self?.selectedEntryId == entryId {
                 self?.fullTextNotice = "Full article unavailable: \(error ?? "unknown error")"
             }
         }
@@ -506,7 +562,9 @@ enum PendingPanel: Equatable, Sendable {
             case .ok:
                 break
             }
-            phase = .ready(AppState(database: try AppDatabase.open(at: url), runs: runs))
+            let state = AppState(database: try AppDatabase.open(at: url), runs: runs)
+            state.startSystemObservers()
+            phase = .ready(state)
         } catch {
             phase = .failed("Cannot open \(url.path): \(error.localizedDescription)")
         }
