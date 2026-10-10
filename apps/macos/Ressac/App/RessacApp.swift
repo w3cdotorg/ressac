@@ -11,10 +11,14 @@ struct RessacApp: App {
                 .task {
                     // The unit-test host must not open the real database.
                     guard !Launcher.isRunningTests else { return }
-                    await launcher.launch(database: AppDatabase.defaultURL(), executable: RessacCLI.bundledExecutable())
+                    await launcher.launch(database: DatabaseLocation.current(), executable: RessacCLI.bundledExecutable())
                 }
         }
         .commands { RessacCommands(state: launcher.state) }
+
+        Settings {
+            SettingsView()
+        }
     }
 }
 
@@ -38,6 +42,7 @@ struct LaunchView: View {
             .padding(40)
         case let .ready(state):
             MainView(state: state)
+                .libraryChrome(state)
                 .environment(state)
         }
     }
