@@ -148,6 +148,38 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(paragraphs == "<p>one &amp; two</p>\n<p>three &lt;x&gt;</p>")
     }
 
+    @Test func misnestedEndTagsAreBoundedByTheSizeCapAndBudget() {
+        let big = String(repeating: "<b><div></b>", count: 100_000)
+        let start = Date()
+        let clean = ArticleTemplate.sanitize(big)
+        #expect(Date().timeIntervalSince(start) < 1.5)
+        #expect(!clean.contains("<div"))
+        // 200 KB of the same shape: within the cap, so it returns within the budget (parsed or fallback).
+        let medium = String(repeating: "<b><div>x</b>", count: 15_000)
+        let mediumStart = Date()
+        _ = ArticleTemplate.sanitize(medium)
+        #expect(Date().timeIntervalSince(mediumStart) < 1.5)
+    }
+
+    @Test func optionalEndTagsStayOnTheParsedPath() {
+        let rows = String(repeating: "<tr><td>a<td>b", count: 150)
+        let defs = String(repeating: "<dt>t<dd>d", count: 150)
+        let items = String(repeating: "<li><p>item", count: 150)
+        for html in [rows, defs, items] {
+            #expect(ArticleTemplate.estimatedNestingDepth(html) < 10)
+        }
+    }
+
+    @Test func sanitiseIsMemoised() {
+        let html = "<p>memo test \(UUID().uuidString)</p>"
+        let first = ArticleTemplate.sanitize(html)
+        let before = ArticleTemplate.cacheStats()
+        #expect(ArticleTemplate.sanitize(html) == first)
+        let after = ArticleTemplate.cacheStats()
+        // Other tests may use the cache concurrently, so the counters can only be bounded from below.
+        #expect(after.hits >= before.hits + 1)
+    }
+
     @Test func parseRunsOnTheLargeStackThread() {
         let probe = ArticleTemplate.onLargeStack { "\(Thread.isMainThread)" }
         #expect(probe == "false")

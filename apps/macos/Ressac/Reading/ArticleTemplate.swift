@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Synchronization
 import WebKit
 
 /// Builds the reader's HTML page. Feed and extracted HTML are untrusted: `sanitize` keeps an
@@ -44,12 +45,60 @@ enum ArticleTemplate {
     /// address), since `<base>` is removed; links and images keep only http(s) addresses
     /// (images may also be `data:image/…`, except SVG).
     static func sanitize(_ html: String, baseURL: URL? = nil) -> String {
-        // Tidy and the recursive renderer overflow the stack on pathological nesting, so such
-        // input (or anything huge) skips the parser and is shown as escaped plain text.
-        if html.utf8.count > maxInputBytes || estimatedNestingDepth(html) > maxNestingDepth {
-            return plainTextFallback(html)
+        let key = CacheKey(html: html, baseURL: baseURL)
+        if let cached = cache.withLock({ $0.lookup(key) }) { return cached }
+        let result = sanitizeUncached(html, baseURL: baseURL)
+        if html.utf8.count <= maxParsedBytes { cache.withLock { $0.store(key, result) } }
+        return result
+    }
+
+    private static func sanitizeUncached(_ html: String, baseURL: URL?) -> String {
+        // Tidy and the recursive renderer overflow the stack on pathological nesting, and libxml's
+        // repair of misnested end tags is quadratic, so such input (or anything big) skips the
+        // parser and is shown as escaped plain text.
+        let size = html.utf8.count
+        if size > maxParsedBytes || estimatedNestingDepth(html) > maxNestingDepth {
+            return size > maxInputBytes ? plainTextFallback(String(decoding: html.utf8.prefix(maxInputBytes), as: UTF8.self)) : plainTextFallback(html)
         }
-        return onLargeStack { parseAndRender(html, baseURL: baseURL) }
+        return onLargeStack(timeout: parseBudget) { parseAndRender(html, baseURL: baseURL) } ?? plainTextFallback(html)
+    }
+
+    // MARK: Memo
+
+    private struct CacheKey: Hashable, Sendable {
+        let html: String
+        let baseURL: URL?
+    }
+
+    private struct Memo: Sendable {
+        var values: [CacheKey: String] = [:]
+        var order: [CacheKey] = []
+        var hits = 0
+        var misses = 0
+
+        mutating func lookup(_ key: CacheKey) -> String? {
+            guard let value = values[key] else { misses += 1; return nil }
+            hits += 1
+            if let index = order.firstIndex(of: key) { order.remove(at: index) }
+            order.append(key)
+            return value
+        }
+
+        mutating func store(_ key: CacheKey, _ value: String) {
+            if values[key] == nil {
+                order.append(key)
+                if order.count > ArticleTemplate.cacheCapacity { values[order.removeFirst()] = nil }
+            }
+            values[key] = value
+        }
+    }
+
+    static let cacheCapacity = 32
+    private static let cache = Mutex(Memo())
+
+    /// Cache hit and miss counts, for tests.
+    static func cacheStats() -> (hits: Int, misses: Int) {
+        cache.withLock { ($0.hits, $0.misses) }
     }
 
     private static func parseAndRender(_ html: String, baseURL: URL?) -> String {
@@ -70,7 +119,9 @@ enum ArticleTemplate {
 
     /// Runs `work` on a thread with a 256 MB stack (a virtual reservation) and waits for it, so
     /// libxml's recursive parser cannot exhaust the stack on input the depth guard let through.
-    static func onLargeStack(_ work: @escaping @Sendable () -> String) -> String {
+    /// Returns `nil` when `timeout` passes first. The worker cannot be cancelled: it finishes in
+    /// the background and its late result is discarded; its cost is bounded by `maxParsedBytes`.
+    static func onLargeStack(timeout: TimeInterval = .infinity, _ work: @escaping @Sendable () -> String) -> String? {
         let box = ResultBox()
         let done = DispatchSemaphore(value: 0)
         let thread = Thread {
@@ -78,11 +129,14 @@ enum ArticleTemplate {
             done.signal()
         }
         thread.stackSize = 256 << 20
+        thread.qualityOfService = .userInteractive
         thread.start()
-        done.wait()
-        return box.value
+        let deadline: DispatchTime = timeout.isFinite ? .now() + timeout : .distantFuture
+        return done.wait(timeout: deadline) == .success ? box.value : nil
     }
 
+    static let parseBudget: TimeInterval = 1.0
+    static let maxParsedBytes = 256 * 1024
     static let maxNestingDepth = 256
     static let maxInputBytes = 2_000_000
     private static let voidTags: Set<String> = [
@@ -126,7 +180,7 @@ enum ArticleTemplate {
                     pop()
                 }
             } else if !voidTags.contains(tag) {
-                if impliedClose.contains(tag), stack.last == tag { pop() }
+                closeOptionalEndTags(before: tag, stack: stack, pop: pop)
                 stack.append(tag)
                 open[tag, default: 0] += 1
                 deepest = max(deepest, stack.count)
@@ -136,7 +190,28 @@ enum ArticleTemplate {
         return deepest
     }
 
-    private static let impliedClose: Set<String> = ["p", "li", "dt", "dd", "tr", "td", "th", "option"]
+    /// HTML's optional end tags: what an opening tag closes when it sits on top of the stack.
+    private static func closeOptionalEndTags(before tag: String, stack: [String], pop: () -> Void) {
+        var top = stack.count - 1
+        func topIs(_ names: Set<String>) -> Bool { top >= 0 && names.contains(stack[top]) }
+        switch tag {
+        case "td", "th":
+            if topIs(["td", "th"]) { pop() }
+        case "tr":
+            while topIs(["td", "th", "tr"]) { pop(); top -= 1 }
+        case "dt", "dd":
+            if topIs(["dt", "dd"]) { pop() }
+        case "li":
+            if topIs(["p"]) { pop(); top -= 1 }
+            if topIs(["li"]) { pop() }
+        case "p":
+            if topIs(["p"]) { pop() }
+        case "option":
+            if topIs(["option"]) { pop() }
+        default:
+            break
+        }
+    }
 
     private static func indexAfter(_ pattern: [UInt8], in bytes: [UInt8], from start: Int) -> Int {
         var i = start
