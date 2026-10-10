@@ -1,0 +1,7 @@
+/target
+.DS_Store
+*.sqlite
+*.sqlite-*
+# OPML réels : jamais dans le dépôt
+*.opml
+!tests/fixtures/**/*.opml
