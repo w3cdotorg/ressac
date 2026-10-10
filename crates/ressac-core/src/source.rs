@@ -84,7 +84,8 @@ pub struct FetchAttempt {
 pub trait Source {
     /// Fetches every feed and sends one attempt per feed on `tx`.
     /// Stops scheduling new requests once `stop` is set; in-flight ones complete.
-    /// Callers must drain the receiver concurrently with this future.
+    /// Callers must drain the receiver concurrently with this future; a slow consumer
+    /// deliberately throttles fetching (a permit is held until its attempt is sent).
     fn refresh(
         &self,
         feeds: Vec<FeedRef>,
@@ -269,9 +270,11 @@ impl Source for LocalSource {
                         break;
                     }
                     let attempt = source.fetch_one(feed).await;
-                    // Release the permit before a possibly slow send.
+                    // The permit is held through the send: a slow consumer throttles fetching,
+                    // which bounds in-memory results to the permit count plus channel capacity.
+                    let sent = tx.send(attempt).await;
                     drop(permit);
-                    if tx.send(attempt).await.is_err() {
+                    if sent.is_err() {
                         break;
                     }
                 }
