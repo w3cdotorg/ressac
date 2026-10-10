@@ -366,14 +366,20 @@ mod tests {
         assert_eq!(undo_text(None), "Nothing to undo.");
         assert_eq!(apply_safe_text(2, &[]), "Applied 2 safe repairs.");
         assert_eq!(
-            apply_safe_text(1, &["#7: Feed #2 already uses x; merge into it instead.".into()]),
+            apply_safe_text(
+                1,
+                &["#7: Feed #2 already uses x; merge into it instead.".into()]
+            ),
             "Applied 1 safe repairs. Skipped 1: #7: Feed #2 already uses x; merge into it instead."
         );
     }
 
     #[test]
     fn extraction_and_migration_texts() {
-        assert_eq!(extracted_text(5, None), "Saved the full article of entry #5.");
+        assert_eq!(
+            extracted_text(5, None),
+            "Saved the full article of entry #5."
+        );
         assert_eq!(
             extracted_text(5, Some("HTTP 404.")),
             "Full article unavailable: HTTP 404."
