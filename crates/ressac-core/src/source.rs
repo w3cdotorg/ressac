@@ -16,7 +16,7 @@ use url::Url;
 
 use crate::error::Result;
 use crate::model::{ErrorKind, FeedId, Hop};
-use crate::parse::{ParsedFeed, parse_feed};
+use crate::parse::{CHALLENGE_SNIFF_BYTES, ParsedFeed, is_challenge_page, parse_feed};
 
 pub const USER_AGENT: &str = concat!("Ressac/", env!("CARGO_PKG_VERSION"));
 
@@ -27,8 +27,8 @@ pub struct FetchLimits {
     pub timeout: Duration,
     pub max_bytes: usize,
     /// Higher cap for podcast feeds (see `looks_like_podcast`), whose full-history
-    /// feeds can run far past `max_bytes`. 16 in flight x 32 MB bounds worst-case
-    /// memory at 512 MB.
+    /// feeds can run far past `max_bytes`. 16 in flight x 32 MB makes the body buffers
+    /// alone about 512 MB; parsing and repair copies come on top.
     pub max_podcast_bytes: usize,
     pub max_redirects: usize,
 }
@@ -194,27 +194,23 @@ impl LocalSource {
                 return;
             }
             if !(200..300).contains(&status) {
-                out.error = Some(ErrorKind::Http(status));
+                out.error = Some(
+                    if matches!(status, 401 | 403 | 429 | 503) && is_challenge_response(resp).await
+                    {
+                        ErrorKind::Challenge
+                    } else {
+                        ErrorKind::Http(status)
+                    },
+                );
                 return;
             }
             let mut resp = resp;
+            let mut cap = CapDecision::default();
             loop {
                 match resp.chunk().await {
                     Ok(Some(chunk)) => {
-                        let total = out.body.len() + chunk.len();
-                        // The feed's head is what is buffered; a single oversized first
-                        // chunk is its own head.
-                        let head = if out.body.is_empty() {
-                            &chunk[..]
-                        } else {
-                            &out.body[..]
-                        };
-                        let cap = if total > self.limits.max_bytes && looks_like_podcast(head) {
-                            self.limits.max_podcast_bytes
-                        } else {
-                            self.limits.max_bytes
-                        };
-                        if total > cap {
+                        let allowed = cap.cap(&self.limits, &out.body, &chunk);
+                        if out.body.len() + chunk.len() > allowed {
                             out.body.clear();
                             out.error = Some(ErrorKind::TooLarge);
                             return;
@@ -323,6 +319,62 @@ impl Source for LocalSource {
     }
 }
 
+/// How much of a feed is searched for podcast markers: they sit in the channel head.
+const PODCAST_PROBE_BYTES: usize = 1024 * 1024;
+
+/// The body cap in force: podcasts get the higher one.
+fn body_cap(limits: &FetchLimits, podcast: bool) -> usize {
+    if podcast {
+        limits.max_podcast_bytes.max(limits.max_bytes)
+    } else {
+        limits.max_bytes
+    }
+}
+
+/// Decides once per response whether the feed is a podcast, the first time the body
+/// outgrows `max_bytes`, then reuses the answer for every later chunk.
+#[derive(Debug, Default)]
+struct CapDecision {
+    podcast: Option<bool>,
+}
+
+impl CapDecision {
+    /// The cap that applies once `chunk` is appended to `buffered`.
+    fn cap(&mut self, limits: &FetchLimits, buffered: &[u8], chunk: &[u8]) -> usize {
+        if buffered.len() + chunk.len() <= limits.max_bytes {
+            return limits.max_bytes;
+        }
+        let podcast = *self.podcast.get_or_insert_with(|| {
+            let mut head =
+                Vec::with_capacity(PODCAST_PROBE_BYTES.min(buffered.len() + chunk.len()));
+            head.extend_from_slice(&buffered[..buffered.len().min(PODCAST_PROBE_BYTES)]);
+            let room = PODCAST_PROBE_BYTES - head.len();
+            head.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            looks_like_podcast(&head)
+        });
+        body_cap(limits, podcast)
+    }
+}
+
+/// True for the answer of an anti-bot gate on a non-2xx status: the `cf-mitigated:
+/// challenge` header, or (reading at most 64 KB, errors ignored) a challenge page body.
+async fn is_challenge_response(mut resp: reqwest::Response) -> bool {
+    if header(&resp, HeaderName::from_static("cf-mitigated"))
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("challenge"))
+    {
+        return true;
+    }
+    let mut head = Vec::new();
+    while head.len() < CHALLENGE_SNIFF_BYTES {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => head.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    head.truncate(CHALLENGE_SNIFF_BYTES);
+    is_challenge_page(&head)
+}
+
 /// True when the head of a feed (what is buffered so far) carries a podcast marker:
 /// an iTunes/Podcasting 2.0 namespace or tag, or an audio/video `<enclosure>`.
 fn looks_like_podcast(head: &[u8]) -> bool {
@@ -339,7 +391,15 @@ fn looks_like_podcast(head: &[u8]) -> bool {
     while let Some(i) = rest.windows(10).position(|w| w == b"<enclosure") {
         rest = &rest[i + 10..];
         let tag = &rest[..rest.iter().position(|&b| b == b'>').unwrap_or(rest.len())];
-        if contains(tag, b"type=\"audio/") || contains(tag, b"type=\"video/") {
+        if [
+            &b"type=\"audio/"[..],
+            b"type=\"video/",
+            b"type='audio/",
+            b"type='video/",
+        ]
+        .iter()
+        .any(|m| contains(tag, m))
+        {
             return true;
         }
     }
@@ -677,6 +737,132 @@ mod tests {
             b"<enclosure url=\"a.jpg\" type=\"image/jpeg\"/> audio/ type=\"audio/\""
         ));
         assert!(!looks_like_podcast(b""));
+        assert!(looks_like_podcast(
+            b"<enclosure url='a.mp3' type='audio/mpeg'/>"
+        ));
+        assert!(looks_like_podcast(b"<enclosure type='video/mp4' url='a'/>"));
+    }
+
+    fn cap_limits() -> FetchLimits {
+        FetchLimits {
+            max_bytes: 100,
+            max_podcast_bytes: 1000,
+            ..FetchLimits::default()
+        }
+    }
+
+    #[test]
+    fn body_cap_picks_the_podcast_cap_only_for_podcasts() {
+        assert_eq!(body_cap(&cap_limits(), false), 100);
+        assert_eq!(body_cap(&cap_limits(), true), 1000);
+    }
+
+    #[test]
+    fn cap_is_not_decided_under_max_bytes() {
+        let mut d = CapDecision::default();
+        assert_eq!(d.cap(&cap_limits(), b"", &[b'x'; 100]), 100);
+        assert_eq!(d.podcast, None);
+    }
+
+    #[test]
+    fn marker_only_in_the_overflowing_chunk_counts() {
+        let mut d = CapDecision::default();
+        let limits = cap_limits();
+        let first = vec![b'x'; 90];
+        assert_eq!(
+            d.cap(&limits, &first, b"<enclosure type=\"audio/mpeg\">"),
+            1000
+        );
+        assert_eq!(d.podcast, Some(true));
+        let mut d = CapDecision::default();
+        assert_eq!(
+            d.cap(&limits, &first, b"<enclosure type='audio/mpeg'>"),
+            1000
+        );
+    }
+
+    #[test]
+    fn marker_in_the_buffered_head_counts_and_decision_is_kept() {
+        let mut d = CapDecision::default();
+        let limits = cap_limits();
+        let mut buffered = b"<rss xmlns:itunes=\"x\">".to_vec();
+        buffered.resize(90, b' ');
+        assert_eq!(d.cap(&limits, &buffered, &[b'y'; 20]), 1000);
+        // Later chunks reuse the answer, whatever they hold.
+        assert_eq!(d.cap(&limits, &buffered, &[b'p'; 50]), 1000);
+    }
+
+    #[test]
+    fn non_podcast_decision_is_not_flipped_by_a_later_marker() {
+        let mut d = CapDecision::default();
+        let limits = cap_limits();
+        assert_eq!(d.cap(&limits, &[b'x'; 90], &[b'y'; 20]), 100);
+        assert_eq!(d.podcast, Some(false));
+        let late = b"<enclosure type=\"audio/mpeg\">";
+        assert_eq!(d.cap(&limits, &[b'x'; 110], late), 100);
+    }
+
+    #[test]
+    fn podcast_probe_looks_at_the_first_megabyte_only() {
+        let mut d = CapDecision::default();
+        let limits = FetchLimits {
+            max_bytes: 10,
+            max_podcast_bytes: 1 << 30,
+            ..FetchLimits::default()
+        };
+        let mut buffered = vec![b' '; PODCAST_PROBE_BYTES];
+        buffered.extend_from_slice(b"<itunes:author>");
+        assert_eq!(d.cap(&limits, &buffered, b"more"), 10);
+    }
+
+    async fn serve_status(
+        status: u16,
+        body: &str,
+        header_pair: Option<(&str, &str)>,
+    ) -> FetchAttempt {
+        let server = MockServer::start().await;
+        let mut t = ResponseTemplate::new(status).set_body_raw(body.to_string(), "text/html");
+        if let Some((k, v)) = header_pair {
+            t = t.insert_header(k, v);
+        }
+        Mock::given(method("GET"))
+            .respond_with(t)
+            .mount(&server)
+            .await;
+        LocalSource::new(fast())
+            .unwrap()
+            .fetch_one(&feed(1, format!("{}/feed", server.uri())))
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_403_challenge_page_is_a_challenge() {
+        let a = serve_status(
+            403,
+            "<html><script>window._cf_chl_opt={cvId:'3'}</script></html>",
+            None,
+        )
+        .await;
+        assert_eq!(a.error, Some(ErrorKind::Challenge));
+        assert_eq!(a.http_status, Some(403));
+    }
+
+    #[tokio::test]
+    async fn a_plain_403_stays_http_403() {
+        let a = serve_status(403, "<html><body>Forbidden</body></html>", None).await;
+        assert_eq!(a.error, Some(ErrorKind::Http(403)));
+    }
+
+    #[tokio::test]
+    async fn a_cf_mitigated_header_alone_is_a_challenge() {
+        let a = serve_status(403, "", Some(("cf-mitigated", "challenge"))).await;
+        assert_eq!(a.error, Some(ErrorKind::Challenge));
+    }
+
+    #[tokio::test]
+    async fn a_404_with_a_challenge_looking_body_stays_http_404() {
+        let a = serve_status(404, "<script>window._cf_chl_opt={}</script>", None).await;
+        assert_eq!(a.error, Some(ErrorKind::Http(404)));
     }
 
     #[tokio::test]

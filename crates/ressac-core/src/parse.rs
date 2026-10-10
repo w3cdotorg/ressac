@@ -47,7 +47,7 @@ pub fn looks_like_html(content_type: Option<&str>, body: &[u8]) -> bool {
     declared_html && !looks_like_feed
 }
 
-const CHALLENGE_SNIFF_BYTES: usize = 64 * 1024;
+pub(crate) const CHALLENGE_SNIFF_BYTES: usize = 64 * 1024;
 
 /// Fingerprints of anti-bot interstitials (lowercase): Akamai/Anubis-style "Client
 /// Challenge", Cloudflare, DDoS-Guard, DataDome and PerimeterX. `challenge-platform` is
