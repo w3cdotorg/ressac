@@ -16,7 +16,7 @@ mod reading;
 pub use decisions::{DecisionRecord, FeedSnapshot};
 pub use feeds::{FeedRow, FolderRow, ImportReport};
 pub use fetch::{AttemptRecord, BACKLOG_DAYS, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
-pub use reading::plain_text;
+pub use reading::{FulltextRow, plain_text};
 
 /// Highest schema version this binary knows.
 pub const SCHEMA_VERSION: i64 = 2;

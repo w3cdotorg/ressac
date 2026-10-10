@@ -38,7 +38,7 @@ pub struct EntryRecord {
     pub fetched_at: DateTime<Utc>,
 }
 
-fn bad_timestamp(col: usize) -> rusqlite::Error {
+pub(super) fn bad_timestamp(col: usize) -> rusqlite::Error {
     rusqlite::Error::InvalidColumnType(col, "timestamp".into(), rusqlite::types::Type::Text)
 }
 
