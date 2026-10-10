@@ -13,8 +13,21 @@ ressac garden                          # triage: k keep, r repair, b bury, u und
 ressac export -o clean.opml            # --cemetery for buried feeds
 ```
 
+More subcommands (the Mac app drives them too):
+
+```sh
+ressac fetch --feed 12                 # repeatable; or --folder 3: refetch only those (the two conflict)
+ressac extract 4521                    # fetch and extract the full article of an entry
+ressac garden decide 12 keep           # keep | repair | bury, without the terminal UI
+ressac garden undo                     # revert the latest decision
+ressac garden apply-safe               # apply every undecided safe repair
+ressac migrate                         # bring the database to the current schema (v2)
+```
+
 Global flags: `--db <file>` (or `RESSAC_DB`), `--json`, `--ascii`, `-v`.
 The database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs in `~/Library/Logs/Ressac/`.
+
+**Schema v2.** The Mac app migrates the shared database to schema v2 on first launch (after a backup). A `ressac` built before the app refuses a v2 database ("database created by a newer Ressac"). Get a v2 CLI with `cargo install --path crates/ressac`, or use the app's own copy at `Ressac.app/Contents/Helpers/ressac`.
 
 ## The Mac app
 
