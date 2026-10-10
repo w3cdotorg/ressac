@@ -2,6 +2,7 @@
 .DS_Store
 *.sqlite
 *.sqlite-*
+!tests/fixtures/contract.sqlite
 # OPML réels : jamais dans le dépôt
 *.opml
 !tests/fixtures/**/*.opml
