@@ -1,0 +1,28 @@
+---
+source: crates/ressac/src/tui/ui.rs
+expression: "draw(&GardenState::new(sample_rows(), false), 110, 24)"
+---
+"Ressac · Garden   6 feeds  🦠 1 🚚 1 🪦 1 🦴 1 🌙 1 🌿 1   triage: 0 / 4                                      " Hidden by multi-width symbols: [(28, " "), (33, " "), (38, " "), (43, " "), (48, " "), (53, " ")]
+"┌ To triage (4) ─────────────────────────────┐┌ Bibliobsession 2.0 ──────────────────────────────────────────┐"
+"│▶🦠 Bibliobsession 2.0       Biblis vie ⚠   ││🦠 Hijacked · score 0.86   Biblis                             │" Hidden by multi-width symbols: [(3, " "), (48, " ")]
+"│ 🚚 Slashdot                 Infos  301     ││The site now seems to serve unrelated or spam content.        │" Hidden by multi-width symbols: [(3, " ")]
+"│ 🪦 Re/code                  Infos  410     ││                                                              │" Hidden by multi-width symbols: [(3, " ")]
+"│ 🦴 Heading East             Blogs  2011    ││Feed  https://feed1.example.org/rss                           │" Hidden by multi-width symbols: [(3, " ")]
+"│                                            ││Site  https://feed1.example.org/                              │"
+"│                                            ││                                                              │"
+"│                                            ││Evidence                                                      │"
+"│                                            ││ • Description is in vie (0.97) while the feed is in fra.     │"
+"│                                            ││ • Spam vocabulary: "xóc đĩa", "trúng lớn".                   │"
+"│                                            ││ • The feed address now returns an HTML page.                 │"
+"│                                            ││                                                              │"
+"│                                            ││Last entries                                                  │"
+"│                                            ││ 2019-04-02  Bibliothèques et communs numériques              │"
+"│                                            ││ 2019-02-11  Le grand débat en bibliothèque ?                 │"
+"│                                            ││                                                              │"
+"│                                            ││Wayback                                                       │"
+"│                                            ││http://web.archive.org/web/20210612000000/https://bibliobsessi│"
+"│                                            ││on.net/  [w]                                                  │"
+"│                                            ││Proposed  bury → cemetery                                     │"
+"└────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────┘"
+"k keep  r repair  b bury  ↵ details  o site  w wayback  u undo  f filter  R safe repairs  ? help  q quit      "
+"                                                                                                              "

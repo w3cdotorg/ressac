@@ -1,0 +1,24 @@
+---
+source: crates/ressac/src/tui/ui.rs
+expression: "draw(&GardenState::new(rows, false), 60, 20)"
+---
+"Ressac · Garden   6 feeds  🦠 1 🚚 1 🪦 1 🦴 1 🌙 1 🌿 1   t" Hidden by multi-width symbols: [(28, " "), (33, " "), (38, " "), (43, " "), (48, " "), (53, " ")]
+"┌ To triage (4) ────────┐┌ A very long feed title that will┐"
+"│▶🦠 A very … Biblis vie││🦠 Hijacked · score 0.86   Biblis│" Hidden by multi-width symbols: [(3, " "), (27, " ")]
+"│ 🚚 Slashdot Infos  301││The site now seems to serve      │" Hidden by multi-width symbols: [(3, " ")]
+"│ 🪦 Re/code  Infos  410││unrelated or spam content.       │" Hidden by multi-width symbols: [(3, " ")]
+"│ 🦴 Heading… Blogs  201││                                 │" Hidden by multi-width symbols: [(3, " ")]
+"│                       ││Feed                             │"
+"│                       ││https://feed1.example.org/rss    │"
+"│                       ││Site  https://feed1.example.org/ │"
+"│                       ││                                 │"
+"│                       ││Evidence                         │"
+"│                       ││ • Description is in vie (0.97)  │"
+"│                       ││while the feed is in fra.        │"
+"│                       ││ • Spam vocabulary: "xóc đĩa",   │"
+"│                       ││"trúng lớn".                     │"
+"│                       ││ • The feed address now returns  │"
+"│                       ││an HTML page.                    │"
+"└───────────────────────┘└─────────────────────────────────┘"
+"k keep  r repair  b bury  ↵ details  o site  w wayback  u   "
+"undo  f filter  R safe repairs  ? help  q quit              "

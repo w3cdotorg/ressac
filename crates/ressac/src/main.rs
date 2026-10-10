@@ -60,6 +60,8 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Triage feeds in a full-screen garden
+    Garden,
     /// Export active feeds (or the cemetery) as OPML
     Export {
         /// Write to this file instead of stdout
@@ -180,6 +182,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             } else {
                 writeln!(out, "{}", output::summary_text(&summary, cli.ascii))?;
             }
+        }
+        Command::Garden => {
+            let app = open()?;
+            tui::run(&app, cli.ascii)?;
         }
         Command::Export { output, cemetery } => {
             let app = open()?;
