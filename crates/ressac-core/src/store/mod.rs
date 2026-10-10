@@ -8,8 +8,10 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 mod feeds;
+mod fetch;
 
 pub use feeds::{FeedRow, FolderRow, ImportReport};
+pub use fetch::{AttemptRecord, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
 
 /// Highest schema version this binary knows.
 pub const SCHEMA_VERSION: i64 = 1;
