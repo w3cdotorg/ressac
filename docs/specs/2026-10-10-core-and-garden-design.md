@@ -238,7 +238,7 @@ Full-screen ratatui app. Layout:
 
 | Key | Effect |
 |---|---|
-| `k` | Keep: record the decision and move to the next feed. |
+| `k` | Keep: record the decision and move to the next feed. On a buried feed (shown dimmed, clue `buried`, under status and folder filters), Keep restores it, unless another active feed now uses its address; `r` and `b` refuse until then. |
 | `r` | Repair: apply the proposed repair action. Disabled when there is none. |
 | `b` | Bury: record the decision and set `state = buried`. |
 | `u` | Undo the last decision, restoring `previous` (so repairs and burials are reverted too). |

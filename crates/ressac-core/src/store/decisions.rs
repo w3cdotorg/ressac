@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::Store;
@@ -30,7 +30,20 @@ pub struct DecisionRecord {
     pub decided_at: DateTime<Utc>,
 }
 
+/// Another active feed already using `key`, which forbids giving it to `feed_id`.
+fn active_clash(tx: &Connection, key: &str, feed_id: FeedId) -> Result<Option<FeedId>> {
+    Ok(tx
+        .query_row(
+            "SELECT id FROM feed WHERE url_key = ?1 AND state = 'active' AND id <> ?2",
+            params![key, feed_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 impl Store {
+    /// Applies a decision and records it with a snapshot for undo. Keep on a buried feed
+    /// restores it (unbury), unless another active feed now uses its address.
     pub fn record_decision(
         &self,
         feed_id: FeedId,
@@ -53,6 +66,18 @@ impl Store {
             },
         )?;
         match (decision, action) {
+            (Decision::Keep, _) if before.state == "buried" => {
+                if let Some(other) = active_clash(&tx, &before.url_key, feed_id)? {
+                    return Err(Error::Invalid(format!(
+                        "Feed #{other} already uses {}; cannot restore.",
+                        before.xml_url
+                    )));
+                }
+                tx.execute(
+                    "UPDATE feed SET state = 'active', merged_into_id = NULL WHERE id = ?1",
+                    [feed_id],
+                )?;
+            }
             (Decision::Keep, _) => {}
             (Decision::Bury, _) => {
                 tx.execute("UPDATE feed SET state = 'buried' WHERE id = ?1", [feed_id])?;
@@ -66,14 +91,7 @@ impl Store {
                 ),
             ) => {
                 let key = url_key(url);
-                let clash: Option<FeedId> = tx
-                    .query_row(
-                        "SELECT id FROM feed WHERE url_key = ?1 AND state = 'active' AND id <> ?2",
-                        params![key, feed_id],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if let Some(other) = clash {
+                if let Some(other) = active_clash(&tx, &key, feed_id)? {
                     return Err(Error::Invalid(format!(
                         "Feed #{other} already uses {url}; merge into it instead."
                     )));
@@ -123,20 +141,13 @@ impl Store {
             return Ok(None);
         };
         let snap: FeedSnapshot = serde_json::from_str(&previous)?;
-        if snap.state == "active" {
-            let clash: Option<FeedId> = tx
-                .query_row(
-                    "SELECT id FROM feed WHERE url_key = ?1 AND state = 'active' AND id <> ?2",
-                    params![snap.url_key, feed_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if let Some(other) = clash {
-                return Err(Error::Invalid(format!(
-                    "Feed #{other} already uses {}; cannot undo.",
-                    snap.xml_url
-                )));
-            }
+        if snap.state == "active"
+            && let Some(other) = active_clash(&tx, &snap.url_key, feed_id)?
+        {
+            return Err(Error::Invalid(format!(
+                "Feed #{other} already uses {}; cannot undo.",
+                snap.xml_url
+            )));
         }
         tx.execute(
             "UPDATE feed SET xml_url = ?2, url_key = ?3, state = ?4, merged_into_id = ?5 WHERE id = ?1",
@@ -265,6 +276,52 @@ mod tests {
         .unwrap();
         let f = s.feed(1).unwrap();
         assert_eq!((f.state.as_str(), f.merged_into_id), ("buried", Some(2)));
+    }
+
+    #[test]
+    fn keep_on_a_buried_feed_unburies_it_and_undo_buries_it_again() {
+        let s = store();
+        s.record_decision(
+            1,
+            Decision::Repair,
+            Status::Duplicate,
+            Some(&Action::MergeInto { feed_id: 2 }),
+            now(),
+        )
+        .unwrap();
+        s.record_decision(1, Decision::Keep, Status::Duplicate, None, now())
+            .unwrap();
+        let f = s.feed(1).unwrap();
+        assert_eq!((f.state.as_str(), f.merged_into_id), ("active", None));
+        assert_eq!(s.latest_decisions().unwrap()[&1].decision, Decision::Keep);
+        assert_eq!(s.undo_last_decision().unwrap(), Some(1));
+        let f = s.feed(1).unwrap();
+        assert_eq!((f.state.as_str(), f.merged_into_id), ("buried", Some(2)));
+        assert_eq!(s.latest_decisions().unwrap()[&1].decision, Decision::Repair);
+    }
+
+    #[test]
+    fn unbury_refuses_when_the_address_is_taken() {
+        let s = store();
+        s.record_decision(1, Decision::Bury, Status::Dead, None, now())
+            .unwrap();
+        s.conn()
+            .execute(
+                "INSERT INTO feed (position, title, xml_url, xml_url_original, url_key, added_at) \
+                 VALUES (9, 'A2', 'https://a.example.org/feed', 'https://a.example.org/feed', \
+                 'a.example.org/feed', '2026-10-10T08:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        match s.record_decision(1, Decision::Keep, Status::Dead, None, now()) {
+            Err(Error::Invalid(msg)) => assert_eq!(
+                msg,
+                "Feed #3 already uses http://a.example.org/feed; cannot restore."
+            ),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+        assert_eq!(s.feed(1).unwrap().state, "buried");
+        assert_eq!(s.latest_decisions().unwrap()[&1].decision, Decision::Bury);
     }
 
     #[test]

@@ -173,6 +173,9 @@ impl GardenState {
             KeyCode::Esc if self.mode == Mode::Detail => self.mode = Mode::Queue,
             KeyCode::Esc | KeyCode::Char('q') => return Command::Quit,
             KeyCode::Char('k') => return self.decide(Decision::Keep),
+            KeyCode::Char('b' | 'r') if self.selected_row().is_some_and(|r| r.buried) => {
+                self.message = Some("This feed is buried; press k to restore it first.".into());
+            }
             KeyCode::Char('b') => return self.decide(Decision::Bury),
             KeyCode::Char('r') => {
                 let repairable = self
@@ -342,6 +345,25 @@ pub(crate) fn sample_rows() -> Vec<GardenRow> {
     ]
 }
 
+/// `sample_rows()` with Re/code (#3, Dead) buried on 2026-10-09.
+#[cfg(test)]
+pub(crate) fn sample_rows_with_buried() -> Vec<GardenRow> {
+    use ressac_core::store::DecisionRecord;
+
+    let mut rows = sample_rows();
+    let recode = rows.iter_mut().find(|r| r.feed_id == 3).unwrap();
+    recode.buried = true;
+    recode.decision = Some(DecisionRecord {
+        id: 1,
+        feed_id: 3,
+        decision: Decision::Bury,
+        status_at_decision: Status::Dead,
+        action: None,
+        decided_at: "2026-10-09T18:30:00Z".parse().unwrap(),
+    });
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +407,28 @@ mod tests {
         assert_eq!(
             s.message.as_deref(),
             Some("Nothing to repair for this feed.")
+        );
+    }
+
+    #[test]
+    fn buried_feeds_refuse_repair_and_bury_but_keep_restores_them() {
+        let mut s = GardenState::new(sample_rows_with_buried(), false);
+        for _ in 0..3 {
+            s.on_key(key(KeyCode::Char('f')));
+        }
+        assert_eq!(s.filter, Filter::Status(Status::Dead));
+        assert_eq!(s.selected_row().unwrap().feed_id, 3);
+        for k in ['r', 'b'] {
+            assert_eq!(s.on_key(key(KeyCode::Char(k))), Command::None, "{k}");
+            assert_eq!(
+                s.message.as_deref(),
+                Some("This feed is buried; press k to restore it first."),
+                "{k}"
+            );
+        }
+        assert_eq!(
+            s.on_key(key(KeyCode::Char('k'))),
+            Command::Decide(3, Decision::Keep)
         );
     }
 

@@ -83,18 +83,22 @@ fn render_list(frame: &mut Frame, state: &GardenState, area: Rect) {
         .iter()
         .map(|&i| {
             let r = &state.rows[i];
-            let clue = r
-                .diagnosis
-                .as_ref()
-                .map(|d| d.evidence.clue.clone())
-                .unwrap_or_default();
-            ListItem::new(format!(
+            let clue = if r.buried {
+                "buried".to_string()
+            } else {
+                r.diagnosis
+                    .as_ref()
+                    .map(|d| d.evidence.clue.clone())
+                    .unwrap_or_default()
+            };
+            let item = ListItem::new(format!(
                 "{} {} {} {}",
                 glyph(r.status(), state.ascii),
                 truncate(&r.title, title_width),
                 truncate(&r.top_folder, 6),
                 clue
-            ))
+            ));
+            if r.buried { item.dim() } else { item }
         })
         .collect();
     let title = format!(
@@ -149,6 +153,14 @@ fn detail_lines(row: &GardenRow, ascii: bool) -> Vec<Line<'static>> {
         Span::raw(head).bold(),
         Span::raw(format!("   {}", row.folder_path)),
     ]));
+    if row.buried {
+        let on = row
+            .decision
+            .as_ref()
+            .map(|d| format!(" on {}", d.decided_at.format("%Y-%m-%d")))
+            .unwrap_or_default();
+        lines.push(Line::from(format!("Buried{on}. Press k to restore it.")).bold());
+    }
     if let Some(d) = &row.diagnosis {
         lines.push(Line::from(d.reason.clone()));
     }
@@ -184,7 +196,7 @@ fn detail_lines(row: &GardenRow, ascii: bool) -> Vec<Line<'static>> {
     if let Some(w) = &row.wayback_url {
         lines.push(Line::from(format!("Wayback   {w}  [w]")));
     }
-    if let Some(action) = row.action() {
+    if let Some(action) = row.action().filter(|_| !row.buried) {
         lines.push(Line::from(format!("Proposed  {}", action.label())));
     }
     if let Some(dec) = &row.decision {
@@ -256,7 +268,7 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'static>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::state::{GardenState, sample_rows};
+    use crate::tui::state::{GardenState, sample_rows, sample_rows_with_buried};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -308,6 +320,23 @@ mod tests {
         rows[0].title =
             "A very long feed title that will never fit in a narrow terminal column".into();
         insta::assert_snapshot!(draw(&GardenState::new(rows, false), 60, 20));
+    }
+
+    #[test]
+    fn garden_buried_under_status_filter() {
+        let mut s = GardenState::new(sample_rows_with_buried(), false);
+        for _ in 0..3 {
+            press(&mut s, KeyCode::Char('f'));
+        }
+        insta::assert_snapshot!(draw(&s, 110, 24));
+        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        terminal.draw(|f| render(f, &s)).unwrap();
+        let title_cell = &terminal.backend().buffer()[(5, 2)];
+        assert_eq!(title_cell.symbol(), "R");
+        assert!(
+            title_cell.modifier.contains(Modifier::DIM),
+            "buried rows are dimmed"
+        );
     }
 
     #[test]
