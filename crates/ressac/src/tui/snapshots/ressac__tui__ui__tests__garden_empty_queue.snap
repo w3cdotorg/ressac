@@ -1,0 +1,16 @@
+---
+source: crates/ressac/src/tui/ui.rs
+expression: "draw(&GardenState::new(rows, false), 80, 12)"
+---
+"Ressac · Garden   2 feeds  🌙 1 🌿 1   triage: 0 / 0                            " Hidden by multi-width symbols: [(28, " "), (33, " ")]
+"┌ To triage (0) ─────────────────┐┌────────────────────────────────────────────┐"
+"│                                ││Nothing to triage here. Press f to browse   │"
+"│                                ││other feeds, q to quit.                     │"
+"│                                ││                                            │"
+"│                                ││                                            │"
+"│                                ││                                            │"
+"│                                ││                                            │"
+"│                                ││                                            │"
+"└────────────────────────────────┘└────────────────────────────────────────────┘"
+"k keep  r repair  b bury  ↵ details  o site  w wayback  u undo  f filter  R safe"
+"repairs (1)  ? help  q quit                                                     "

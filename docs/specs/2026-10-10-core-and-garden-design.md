@@ -108,7 +108,7 @@ ressac/
 - **Escaping repair:** double-escaped ampersands in URLs (`&amp;amp;` → `&`) are repaired.
 - **URL key:** lowercase host, strip leading `www.`, strip trailing `/`, ignore scheme. Used only for comparison; original URLs are kept.
 - **Exact duplicates** (same `url_key`) collapse into the first occurrence. Same-name feeds with different URLs are **not** merged (Vienna's `(1)` suffixes are homonyms).
-- **Idempotent:** re-importing the same file changes nothing.
+- **Idempotent:** re-importing the same file changes nothing, even after triage: a feed already exists when any feed, buried or not, has its URL key as current or original address. New feeds and folders go after the existing items of their folder.
 - **`--dry-run`:** prints added / merged / skipped counts and lists, and writes nothing.
 
 ### Fetch
@@ -137,8 +137,8 @@ ressac/
 - **Human mode:** an `indicatif` progress bar, then a summary.
 - **`--json` mode:** one JSON object per line on stdout:
   - `{"event":"started","total":187}`
-  - `{"event":"feed_done","feed_id":…,"status":"Alive","error":null}`
-  - `{"event":"finished","summary":{…}}`
+  - `{"event":"feed_done","feed_id":…,"title":"…","error":null|"HTTP 404"}`
+  - `{"event":"finished","summary":{…}}`: the diagnosis comes here, once every feed is fetched.
 
 ## 7. Diagnosis
 
@@ -148,7 +148,7 @@ ressac/
 |---|---|---|
 | 1 | 👯 **Duplicate** | Another active feed has the same normalized `final_url`, **or** ≥ 80 % of this feed's last 20 entry GUIDs/links appear in another active feed. The older feed (lower `id`) is canonical; the other is the Duplicate. |
 | 2 | 🦠 **Hijacked** | `hijack_score ≥ 0.6` (see below). |
-| 3 | 🚚 **Moved** | A `301`/`308` hop leads to a different `url_key` that parses as a feed, **or** the feed meets the Dead conditions below and autodiscovery found a different, parseable feed. |
+| 3 | 🚚 **Moved** | The leading run of `301`/`308` hops ends on a different `url_key` that parses as a feed (a temporary hop ends the run), **or** the feed meets the Dead conditions below and autodiscovery found a different, parseable feed. |
 | 4 | 🪦 **Dead** | Last attempt returned `404`/`410` or NXDOMAIN, **or** ≥ 5 consecutive failures spanning ≥ 14 days. Failures discounted by the network guard (§8) don't count. |
 | 5 | 🤒 **Ailing** | Last attempt failed with a transient error (`5xx`, `429`, `403`, `Timeout`, `Tls`, `Parse`, `Encoding`, `TooLarge`). |
 | 6 | 🦴 **Fossil** | Responding, last entry > 2 years ago. |
@@ -166,6 +166,8 @@ A feed that has never been fetched has status `Unchecked`.
 | Language of the 5 newest entries ≠ language of the older stored entries (when there are any) | 0.4 |
 | Redirect chain ends on a different registrable domain | 0.3 |
 | `HtmlInsteadOfFeed` on a URL that used to serve a feed | 0.3 |
+
+*Calibrated 2026-10-10 on the real Vienna run, pending user confirmation:* the redirect and `HtmlInsteadOfFeed` signals count only alongside lexicon or language evidence; alone they describe a site its owner closed (FiveThirtyEight → ABC News), not spam. Lexicon terms match at a word start, optionally plural, then a word end or a number (`casinos`, `casino88`, `togel4d`); `slot` counts only when numbered (`slot88`).
 
 **Remarks** (secondary, any status):
 
@@ -195,9 +197,9 @@ A feed that has never been fetched has status `Unchecked`.
   - database locked or unwritable;
   - schema newer than binary;
   - unreadable OPML (with line and column).
-- **Exit codes:** `0` success (sick feeds are not a failure), `1` fatal, `2` usage.
+- **Exit codes:** `0` success (sick feeds are not a failure), `1` fatal, `2` usage, `130` interrupted (Ctrl-C).
 - **Network guard:** if a run attempts at least 4 feeds and > 50 % of them fail with `Dns` or `Connect`, the run prints `Network looks unreachable — results not recorded as failures`. Those attempts are logged with a `network_suspect` flag and excluded from Dead counting.
-- **Ctrl-C:** stop scheduling, finish in-flight transactions, exit cleanly.
+- **Ctrl-C:** stop scheduling, finish in-flight transactions, print `Interrupted: N feeds were not fetched.` on stderr and exit `130`. A second Ctrl-C exits at once.
 - **Logging:** `tracing` to `~/Library/Logs/Ressac/ressac.log` (daily rotation); `-v` mirrors to stderr.
 
 ## 9. Garden UI
@@ -229,14 +231,14 @@ Full-screen ratatui app. Layout:
 
 - **Order:** status urgency, then folder, then title.
 - **List columns:** status glyph, title, top-level folder, and one short clue (language flag, HTTP code, last-entry year, months asleep, `= #id` for duplicates).
-- **What needs triage:** an active feed whose status is Duplicate, Hijacked, Moved, Dead, Ailing or Fossil, **and** that has no decision yet, **or** whose current status ranks strictly more urgent (§7 order) than its `status_at_decision`. Example: a Fossil you kept comes back if it turns Dead; it does not come back if it turns Dormant.
+- **What needs triage:** an active feed whose status is Duplicate, Hijacked, Moved, Dead, Ailing or Fossil, **and** that has no decision yet, **or** whose current status ranks strictly more urgent (§7 order) than its `status_at_decision`. Example: a Fossil you kept comes back if it turns Dead; it does not come back if it turns Dormant. A repair is measured against Alive instead, once the feed has been fetched again: any problem status after a repair brings it back.
 - **Defaults:** Alive and Dormant feeds count as kept. They stay browsable but never enter the queue, so the counter reads `decided / needing triage`.
 
 **Keys:**
 
 | Key | Effect |
 |---|---|
-| `k` | Keep: record the decision and move to the next feed. |
+| `k` | Keep: record the decision and move to the next feed. On a buried feed (shown dimmed, clue `buried`, under status and folder filters), Keep restores it, unless another active feed now uses its address; `r` and `b` refuse until then. |
 | `r` | Repair: apply the proposed repair action. Disabled when there is none. |
 | `b` | Bury: record the decision and set `state = buried`. |
 | `u` | Undo the last decision, restoring `previous` (so repairs and burials are reverted too). |

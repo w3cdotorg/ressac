@@ -27,6 +27,52 @@ Trouvailles, décisions et pièges rencontrés en route. Le plus récent en haut
 - **Formats** : un JSON Feed (Six Colors, `feed.json`, et son `htmlUrl` pointe vers `?feed=json`), un RDF (`index.rdf`), 13 flux YouTube, des flux GitHub releases (Atom), des flux générés (raw.githubusercontent.com Olshansk).
 - Sites probablement fermés : Recode, longform.org, FiveThirtyEight. À confirmer par `ressac check`.
 
+## Premier essai réel (10/10/2026)
+
+Base jetable dans le scratchpad (`--db …/vienna-run.sqlite`, `HOME` redirigé pour les journaux), OPML lu en lecture seule. Aucune décision de jardin prise : le tri reste à faire.
+
+- **Import** : 186 flux dans 16 dossiers, 1 fusion (« Daring Fireball (1) » → « Daring Fireball »), conforme à l'attendu.
+- **Durée** : premier `check` en 1 min 12 s (les 186 récupérations en 22 s, le reste en sondes https, autodécouverte et Wayback à 1 requête/s). Un `check` relancé dans les 30 min ne refait que le diagnostic et les Wayback manquants : 20 s.
+- **Avant calibrage** : Alive 91, Fossil 63, Dormant 13, Ailing 6, Dead 6, Moved 5, Hijacked 1, Duplicate 1. 88 réparations sûres (83 https, 5 redirections).
+- **Après calibrage** : Alive 92, Fossil 63, Dormant 13, Ailing 7, Dead 6, Moved 4, Hijacked 0, Duplicate 1. 87 réparations sûres (83 https, 4 redirections). Aucun `Unchecked`, aucun 429.
+- **Export** : `ressac export | grep -c xmlUrl` = 186 ; `--cemetery` = 0 (rien n'est enterré).
+
+### Verdicts notables
+
+- **Dead** : Bibliobsession 2.0 (404 après passage en https ; score de détournement 0,4 grâce au lexique vietnamien de la description OPML), Blog de veille bm et Renaissance du cinéma (410 WordPress.com), Bom Bom (410 Canalblog), Technologies du Langage (blog.veronis.fr ne résout plus), action button dot net (301 vers innisfreehouseschool.com puis cinderellaaffair.org, qui ne résout pas : le domaine a été revendu ; motif désormais « The site it redirects to no longer resolves. », voir la reprise ci-dessous).
+- **Moved (vrais positifs)** : Libération (rss.liberation.fr → outboundfeeds Arc), Schneier on Security (atom.xml → /feed/atom/), Morgane Tual (?feed=rss2 → www…/feed/), **Six Colors** : le serveur répond bien `301` de `/feed.json` vers `/?feed=json` (JSON Feed valide, `application/feed+json`), donc vrai positif.
+- **Ailing** : **Unphotographable** : le serveur sert bien `index.rdf` (200, `application/rdf+xml`, 23 Ko) mais le XML est invalide (`&` nus dans les descriptions, `xmllint` : « xmlParseEntityRef: no name »), donc vrai positif ; Re/code (500 « Fastly error: unknown domain » : le site n'existe plus) ; FiveThirtyEight (301 vers abcnews.com/politics, page HTML) ; POLICEtcetera (blog Le Monde : 301 vers lemonde.fr/blog/moreas/feed/, qui renvoie une page « Client Challenge » anti-robots) ; ioudgine (Typepad fermé : 302 vers networksolutions.com puis 403) ; UnderwaterTimes.com (403 Cloudflare, y compris avec un User-Agent de navigateur) ; Slate's Culture Gabfest (12 018 024 octets, au-dessus du plafond de 10 Mo).
+- **Duplicate** : Google Blog: Research (#158) : ses 20 entrées figurent toutes dans Google Blog: Innovation & AI (#156). C'est une sous-catégorie, donc un sous-ensemble : conforme à la règle, mais la fusion reste au choix de l'utilisateur.
+- **Fossil** : 63 flux, dernière entrée entre 2008 et 2024. longform.org (fermé en 2024) répond toujours avec ses anciennes entrées : Fossil 2024, pas Dead. Orange Drenka (2014) et Orange-Drenka (2013) sont tous deux Fossil : pas de remarque `similar_title`, qui exige un côté Alive/Dormant.
+- **Remarques** : 84 `https_available` et 16 `http_only` sur les 100 flux en `http://`. 2 `blocked` (403 : ioudgine, UnderwaterTimes.com).
+- **Témoins vivants** : BBC News, Le Monde.fr, Le Monde diplomatique, xkcd, les deux flux de Simon Willison, Daring Fireball : tous Alive, sans faux positif.
+- **Scores de détournement résiduels** (sous le seuil, statut inchangé) : ReadWriteWeb 0,4 (« betting », « sportsbook » : le site publie réellement du contenu de paris en ligne), cpb news et Girl on the Couch 0,4 (description en anglais, billets en français : autrices bilingues).
+
+### Faux positifs corrigés (commit d4da65c)
+
+1. **Lexique de spam en sous-chaîne** : « cialis » trouvé dans « socialist », « specialist », « écosocialiste », « specialising ». Score 0,4 à tort sur Libération, Pluralistic, OpenAI News, Bookride, ANIMALS TALKING IN ALL CAPS, Smoke & a Coke. Corrigé : le terme doit commencer un mot (`lexicon_matches_whole_words_only`) ; voir la reprise ci-dessous pour les pluriels et les numéros. Effet de bord utile : l'export OPML ne supprime plus les descriptions qui contiennent « specialist ».
+2. **FiveThirtyEight classé Hijacked** : redirection vers un autre domaine (0,3) + page HTML (0,3) = 0,6 sans aucun indice de contenu. C'est la signature d'un site fermé par son propriétaire, pas d'un spam. Corrigé : la redirection et la page HTML ne comptent qu'en appui d'un signal de contenu (lexique ou langue) (`redirect_to_html_without_content_signal_is_not_a_hijack`, `owner_shutdown_redirect_is_ailing_not_hijacked`). Résout aussi l'écart spec/plan de la phase 5 sur `HtmlInsteadOfFeed` : sans signal de contenu, la page HTML ne pèse plus rien. Seuil `HIJACK_THRESHOLD` inchangé, poids inchangés.
+3. **Actualitté classé Moved** : `301` www → domaine nu (même `url_key`), puis `302` vers `/rss-main.rss` ; la cible temporaire était proposée comme réparation « sûre ». Corrigé : seule la suite initiale de sauts permanents (301/308) peut déplacer un flux (`temporary_hop_after_a_permanent_one_is_not_a_move`, `move_target_is_the_end_of_the_permanent_hops`).
+
+### Reprise après revue (même jour)
+
+- **Rappel du lexique** : le mot entier strict ratait « casinos », « casino88 », « togel4d ». Désormais le terme commence un mot, accepte un « s » de pluriel, puis une fin de mot ou un numéro. « slot » seul (« time slot ») ne compte pas, seulement numéroté (« slot88 ») ; « slotted » ne compte pas. Simulation hors ligne sur les 186 flux : aucun résultat du lexique ne change.
+- **Mécanisme du correctif FiveThirtyEight épinglé** : lexique + redirection = 0,7 ; langue + HTML = 0,7 ; page parquée (redirection + HTML, sans contenu) = 0,0, compromis accepté (elle reste Ailing puis Dead).
+- **Motif Dead DNS** : quand l'échec DNS porte sur la cible d'une redirection vers un autre hôte, le motif dit « The site it redirects to no longer resolves. » (action button dot net). Technologies du Langage garde « The domain no longer resolves. ».
+- **Dérive de la base de contrat** : un test compare le schéma de `tests/fixtures/contract.sqlite` (ouvert en lecture seule) à celui de la base vivante.
+- **Spec §7** mise à jour (Moved par la suite initiale de 301/308, note de calibrage du détournement en attente de confirmation).
+- Re-diagnostic par `ressac fetch` dans la fenêtre de 30 min, sans réseau (toujours 186 lignes de `fetch_log`, 1 passage) : comptes inchangés (Alive 92, Fossil 63, Dormant 13, Ailing 7, Dead 6, Moved 4, Hijacked 0, Duplicate 1).
+
+### Questions ouvertes pour l'utilisateur
+
+- **Détournements non détectés** : apps & stacks (description vietnamienne sur des urinoirs), Publishers Weekly (avocate brésilienne, 0 entrée) et HIPSTAMATIC SKYRIM (recettes en anglais avec fermes de liens) restent Fossil avec un score de 0. La langue de la description n'a rien à quoi se comparer (titre trop court, pas ou presque pas d'entrées), et les recettes sont dans la même langue que le titre. Faut-il un nouveau signal (par exemple la langue des autres flux du dossier) ? Ils apparaîtront de toute façon dans le jardin comme Fossil.
+- **Sites fermés vus comme Ailing au premier passage** : Re/code (500 Fastly « unknown domain »), FiveThirtyEight (301 vers une page ABC News), ioudgine (Typepad fermé) ne deviendront Dead qu'après 5 échecs sur 14 jours. Faut-il un raccourci (redirection vers un autre domaine qui finit en erreur ou en HTML) ?
+- **Page anti-robots** : POLICEtcetera reçoit une page « Client Challenge » de Le Monde, classée `HtmlInsteadOfFeed`. La traiter comme un blocage (`blocked`) ?
+- **Plafond de 10 Mo** : Slate's Culture Gabfest pèse 12 Mo (podcast). Relever le plafond pour les podcasts, ou les laisser Ailing ?
+- **XML invalide** : Unphotographable (`&` nus, dernière entrée en 2017) ; NetNewsWire et Vienna tolèrent ce genre de flux. Ajouter une relecture tolérante, ou laisser Ailing ?
+- **Google Blog: Research** est un sous-ensemble de Google Blog: Innovation & AI : fusion ou garder les deux ?
+- **Bibliobsession 2.0** : Dead, mais l'indice de spam (0,4) n'apparaît pas dans les preuves affichées, seulement le 404. Faut-il l'y montrer ?
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
@@ -51,3 +97,23 @@ Trouvailles, décisions et pièges rencontrés en route. Le plus récent en haut
 - **ratatui 0.30.2** : `ratatui::init()` / `ratatui::restore()`, `DefaultTerminal`, crossterm réexporté (`ratatui::crossterm`). `TestBackend` affiche les émojis sur deux cellules.
 - **rusqlite 0.40.2** (bundled) : SQLite 3.53.2.
 - **Ambiguïté de types** : avec ratatui dans le même binaire, `x.as_ref() == b"..."` ne compile plus (compact_str ajoute des `AsRef`) ; comparer des `&str` explicitement.
+
+- **rusqlite 0.40.2, phase 2** : le code du plan compile tel quel (`query_row("PRAGMA journal_mode = WAL")`, `VACUUM INTO ?1`, `busy_timeout`, `transaction()` sur `&mut Connection`). Seul ajustement : `Store::conn` n'est utilisé que par les tests tant que les modules de requêtes n'existent pas, donc `#[allow(dead_code)]` temporaire pour clippy `-D warnings` (à retirer quand un module l'utilise).
+- **quick-xml 0.42.0, phase 3** : le code du plan compile tel quel (`reader.error_position()` existe, `normalized_value(XmlVersion::Implicit1_0)`, `e.name().0 == "outline"`). Aucun ajustement. rusqlite : `unchecked_transaction()`, `params![Option<i64>, ..]` et `IS ?1` fonctionnent tels quels. `#[allow(dead_code)]` de `Store::conn` retiré (utilisé par `store/feeds.rs`).
+- **feed-rs 3.0.0, phase 4** : `Person::name` est un `Option<String>` (le plan supposait `String`) : `e.authors.first().and_then(|p| p.name.clone())`. `XmlError` a bien un `Display` (le test `Encoding` du plan compile tel quel).
+- **reqwest 0.13.5 / DNS, phase 4** : sur macOS, `unknown_domain_is_a_dns_error` (domaine `.invalid`) passe avec les chaînes de `classify` du plan (« dns error » / « failed to lookup address »), aucune extension nécessaire.
+- **Clippy `manual_async_fn`, phase 4** : le trait `Source` garde `-> impl Future<Output = ()> + Send`, mais l'impl de `LocalSource` s'écrit `async fn refresh(...)` (clippy `-D warnings` refuse la forme `impl Future` + `async move`). Le futur reste `Send`, les tests `refresh_*` passent.
+- **rusqlite 0.40.2, phase 4** : le SQL et les `params!` de `store/fetch.rs` compilent tels quels (`unchecked_transaction`, booléens liés directement, `Option<u16>`).
+
+### Phase 5 (diagnostic pur)
+- whatlang 0.18 : aucune phrase des tests de détournement n'a été mal détectée, `MIN_DETECT_CONFIDENCE = 0.8` conservé sans allonger de phrase. Les 7 tests `hijack` passent du premier coup.
+- clippy (rustc 1.99) : `manual_is_multiple_of` refuse `len % 2 == 0` ; utiliser `len.is_multiple_of(2)` dans la médiane.
+- Test planifié `age_of_last_entry_decides_alive_dormant_fossil` : 1000 jours avant 2026-10-10 donne 2024-01-14, pas 2023. Attendu corrigé en "2024" (le code suit la spec : indice = année de la dernière entrée).
+- Écart spec/plan : la spec exige `HtmlInsteadOfFeed` « sur une URL qui servait un flux » ; le plan pèse 0.3 dès que la dernière tentative est en `HtmlInsteadOfFeed`, sans vérifier l'historique. Gardé tel quel (à calibrer au vrai run).
+
+### Vague finale de corrections (10/10/2026)
+- **reqwest 0.13.5 / classification** : `is_connect()` est vrai aussi pour les échecs DNS et pour les échecs de poignée de main TLS (rustls). Tester `is_connect()` avant tout renverrait donc DNS et TLS en `Connect`. Ordre retenu : délai, DNS (texte), TLS (texte et `is_connect()`), corps/décodage, sinon `Connect`.
+- **rustls** : un serveur HTTP en clair interrogé en `https://` donne « received corrupt message of type InvalidContentType », sans le mot « tls » ; le classement le rangeait en `Connect`. Marqueurs rustls ajoutés (« received corrupt message », « peer is incompatible », « peer misbehaved », « received fatal alert »).
+- **`reqwest::Error::without_url()`** consomme l'erreur : `classify` prend désormais l'erreur par valeur. Le message de premier niveau contient l'URL complète (« error sending request for url (…) ») ; les sources de la chaîne, elles, ne la contiennent pas.
+- **Délai total** : `tokio::time::timeout` autour d'une boucle qui écrit dans un `&mut RawResponse` ; à l'échéance, le futur est abandonné, l'emprunt se termine et la chaîne de redirections déjà vue reste lisible.
+- **Ctrl-C en mode TUI** : en mode brut, crossterm désactive ISIG, Ctrl-C arrive comme touche et non comme signal ; le second Ctrl-C (sortie 130) ne concerne donc que `fetch` et `check`.
