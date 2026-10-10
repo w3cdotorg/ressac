@@ -8,7 +8,7 @@ pub use cadence::cadence;
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::model::{Action, Cadence, Diagnosis, ErrorKind, Evidence, FeedId, Remark, Status};
+use crate::model::{Action, Cadence, Diagnosis, ErrorKind, Evidence, FeedId, Hop, Remark, Status};
 use crate::store::{AttemptRecord, EntryRecord};
 use crate::url_key::{https_variant, url_key};
 
@@ -199,14 +199,17 @@ fn verdict(
     v
 }
 
-/// The first permanent hop status and the final URL, when the chain ends on another feed.
+/// The first hop status and the URL reached by the leading run of permanent hops
+/// (`301`/`308`), when that URL is another feed. A temporary hop ends the run: its
+/// target may change again, so it is never proposed as the new address.
 fn permanent_redirect(last: &AttemptRecord, own_key: &str) -> Option<(u16, String)> {
-    let permanent = last
+    let hops: Vec<&Hop> = last
         .redirect_chain
         .iter()
-        .find(|h| h.status == 301 || h.status == 308)?;
-    let target = &last.redirect_chain.last()?.url;
-    (url_key(target) != own_key).then(|| (permanent.status, target.clone()))
+        .take_while(|h| h.status == 301 || h.status == 308)
+        .collect();
+    let target = &hops.last()?.url;
+    (url_key(target) != own_key).then(|| (hops[0].status, target.clone()))
 }
 
 /// Dead rule (spec §7): 404/410/NXDOMAIN on the last meaningful attempt, or a long
@@ -448,6 +451,63 @@ mod tests {
             url: "https://newblog.example.org/rss".into(),
         }];
         assert_eq!(diagnose(&ev(vec![a], vec![entry(1)])).status, Status::Alive);
+    }
+
+    /// Real run 2026-10-10: Actualitté answers 301 (www → bare domain, same url_key),
+    /// then 302 to /rss-main.rss. Only the permanent hops may move a feed.
+    #[test]
+    fn temporary_hop_after_a_permanent_one_is_not_a_move() {
+        let mut e = ev(vec![], vec![entry(1)]);
+        e.xml_url = "https://www.actualitte.com/flux/rss/actualites.xml".into();
+        e.url_key = url_key(&e.xml_url);
+        let mut a = ok(0);
+        a.redirect_chain = vec![
+            Hop {
+                status: 301,
+                url: "https://actualitte.com/flux/rss/actualites.xml".into(),
+            },
+            Hop {
+                status: 302,
+                url: "https://actualitte.com/rss-main.rss".into(),
+            },
+        ];
+        e.attempts = vec![a];
+        assert_eq!(diagnose(&e).status, Status::Alive);
+    }
+
+    #[test]
+    fn move_target_is_the_end_of_the_permanent_hops() {
+        let mut a = ok(0);
+        a.redirect_chain = vec![
+            Hop {
+                status: 301,
+                url: "https://newblog.example.org/rss".into(),
+            },
+            Hop {
+                status: 302,
+                url: "https://cdn.example.net/newblog/rss?sig=1".into(),
+            },
+        ];
+        let d = diagnose(&ev(vec![a], vec![entry(1)]));
+        assert_eq!(d.status, Status::Moved);
+        assert_eq!(
+            d.action,
+            Some(Action::FollowRedirect {
+                url: "https://newblog.example.org/rss".into()
+            })
+        );
+    }
+
+    /// Real run 2026-10-10: FiveThirtyEight (301 to an ABC News HTML page) was Hijacked.
+    #[test]
+    fn owner_shutdown_redirect_is_ailing_not_hijacked() {
+        let mut a = failed(0, ErrorKind::HtmlInsteadOfFeed);
+        a.redirect_chain = vec![Hop {
+            status: 301,
+            url: "https://abcnews.com/politics".into(),
+        }];
+        let d = diagnose(&ev(vec![a], vec![]));
+        assert_eq!(d.status, Status::Ailing);
     }
 
     #[test]

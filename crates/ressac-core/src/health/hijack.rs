@@ -56,8 +56,18 @@ fn spam_hits(text: &str) -> Vec<&'static str> {
     SPAM_LEXICON
         .iter()
         .copied()
-        .filter(|w| lower.contains(w))
+        .filter(|w| contains_word(&lower, w))
         .collect()
+}
+
+/// `needle` appears in `haystack` as a whole word or phrase: not inside a longer
+/// word ("cialis" must not match "socialist").
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(i, _)| {
+        let before = haystack[..i].chars().next_back();
+        let after = haystack[i + needle.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 fn detect(text: &str) -> Option<(String, f64)> {
@@ -130,7 +140,10 @@ pub fn assess(ev: &FeedEvidence) -> HijackAssessment {
         ));
     }
 
-    if let Some(last) = ev.attempts.iter().find(|a| !a.network_suspect) {
+    // A redirect elsewhere or an HTML page also describes a site its owner closed
+    // (FiveThirtyEight → ABC News): they only corroborate a content signal.
+    let content_signal = out.score > 0.0;
+    if content_signal && let Some(last) = ev.attempts.iter().find(|a| !a.network_suspect) {
         if let Some(Hop { url, .. }) = last.redirect_chain.last()
             && site_of(url) != site_of(&ev.xml_url)
         {
@@ -305,5 +318,47 @@ mod tests {
     fn has_spam_is_case_insensitive() {
         assert!(has_spam("Best CASINO bonuses"));
         assert!(!has_spam("A blog about libraries"));
+    }
+
+    /// Real run 2026-10-10: "cialis" matched inside "socialist", "specialist" and
+    /// "écosocialiste" (Libération, Pluralistic, OpenAI News, Bookride…).
+    #[test]
+    fn lexicon_matches_whole_words_only() {
+        for text in [
+            "the socialist lizard people who put obama in office",
+            "an all-out rush to a specialist at noon",
+            "un road trip et une utopie écosocialiste",
+            "specialising in modern firsts",
+        ] {
+            assert!(!has_spam(text), "{text}");
+        }
+        assert!(has_spam("Buy Cialis online"));
+        assert!(has_spam("casino, slots and betting"));
+        assert!(has_spam("Xóc đĩa online là sân chơi mới"));
+    }
+
+    /// Real run 2026-10-10: FiveThirtyEight was shut down by its owner and its feed
+    /// now 301-redirects to https://abcnews.com/politics (an HTML page). Redirect and
+    /// HTML alone say "gone", not "spam": without any content signal it is no hijack.
+    #[test]
+    fn redirect_to_html_without_content_signal_is_not_a_hijack() {
+        let mut e = ev();
+        e.title = "FiveThirtyEight | Features".into();
+        e.xml_url = "https://fivethirtyeight.com/features/feed/".into();
+        e.url_key = url_key(&e.xml_url);
+        e.attempts = vec![attempt(
+            Some(ErrorKind::HtmlInsteadOfFeed),
+            vec![Hop {
+                status: 301,
+                url: "https://abcnews.com/politics".into(),
+            }],
+        )];
+        let a = assess(&e);
+        assert!(
+            a.score < crate::health::HIJACK_THRESHOLD,
+            "{} {:?}",
+            a.score,
+            a.bullets
+        );
     }
 }
