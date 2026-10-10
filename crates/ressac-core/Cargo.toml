@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+dom_smoothie.workspace = true
 feed-rs.workspace = true
 futures.workspace = true
 quick-xml.workspace = true
