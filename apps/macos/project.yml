@@ -24,6 +24,15 @@ targets:
     platform: macOS
     sources:
       - path: Ressac
+        excludes:
+          - "Resources/Fonts"
+      - path: Ressac/Resources/Fonts
+        type: folder
+        buildPhase: resources
+    info:
+      path: build/Info.plist
+      properties:
+        ATSApplicationFontsPath: Fonts
     dependencies:
       - package: GRDB
     settings:
