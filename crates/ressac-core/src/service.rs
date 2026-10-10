@@ -409,7 +409,10 @@ impl Ressac {
                 }
             }
             let outcome = fetch_article(&self.articles, &url).await;
-            self.save_extraction(entry_id, &outcome, sink)?;
+            if let Err(e) = self.save_extraction(entry_id, &outcome, sink) {
+                // One entry's store error must not end the pass or the refresh.
+                tracing::warn!(entry_id, error = %e, "storing a full article failed");
+            }
             previous_host = host;
         }
         Ok(())
@@ -522,7 +525,6 @@ impl Ressac {
         Ok(found)
     }
 
-    /// Status counts and safe repairs over active feeds (decisions are not considered).
     /// Fetches the entry's page, extracts the article and stores the outcome (spec §6).
     /// A failure is stored too, as one English sentence; a later call retries.
     pub async fn extract_entry(
@@ -561,6 +563,7 @@ impl Ressac {
         Ok(error)
     }
 
+    /// Status counts and safe repairs over active feeds (decisions are not considered).
     pub fn summary(&self) -> Result<Summary> {
         let diags = self.store.diagnoses()?;
         let mut summary = Summary::default();
@@ -1168,6 +1171,49 @@ mod tests {
             app.extract_entry(linked, &NullSink).await.unwrap(),
             ExtractOutcome::Failed("Anti-bot challenge page.".into())
         );
+    }
+
+    /// A store error on one entry is logged; the pass goes on with the next entries.
+    #[tokio::test]
+    async fn a_store_error_on_one_entry_does_not_end_the_full_text_pass() {
+        let server = MockServer::start().await;
+        serve(&server, "/article", 200, &article_page(), "text/html").await;
+        let (app, linked, _) = app_with_entries(&server.uri());
+        let more = ParsedFeed {
+            title: Some("T".into()),
+            description: None,
+            site_url: None,
+            entries: vec![parsed_entry(
+                "second",
+                Some(format!("{}/article", server.uri())),
+                Some("Second"),
+            )],
+        };
+        app.store()
+            .record_attempt("r2", &attempt(Some(more), None))
+            .unwrap();
+        let second: i64 = app
+            .store()
+            .conn()
+            .query_row("SELECT id FROM entry WHERE guid = 'second'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        app.store().set_prefer_full_text(1, true).unwrap();
+        app.store()
+            .conn()
+            .execute_batch(&format!(
+                "CREATE TRIGGER boom BEFORE INSERT ON entry_fulltext WHEN NEW.entry_id = {linked} \
+                 BEGIN SELECT RAISE(ABORT, 'disk on fire'); END;"
+            ))
+            .unwrap();
+        let stop = AtomicBool::new(false);
+        let since = "2000-01-01T00:00:00Z".parse().unwrap();
+        app.fetch_full_texts(&[1], since, &NullSink, &stop)
+            .await
+            .expect("the pass survives a store error");
+        assert!(app.store().fulltext(linked).unwrap().is_none());
+        assert!(app.store().fulltext(second).unwrap().is_some());
     }
 
     /// Review Focus 1: an entry with no link (and no title) cannot be extracted; nothing is

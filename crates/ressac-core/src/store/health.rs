@@ -49,13 +49,21 @@ fn health_row(r: &Row<'_>) -> rusqlite::Result<(FeedId, Diagnosis)> {
     ))
 }
 
+fn write_triage(conn: &rusqlite::Connection, flags: &HashMap<FeedId, bool>) -> Result<()> {
+    let mut stmt = conn.prepare("UPDATE feed_health SET needs_triage = ?2 WHERE feed_id = ?1")?;
+    for (feed_id, flag) in flags {
+        stmt.execute(params![feed_id, flag])?;
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn save_diagnoses(
         &self,
         diags: &HashMap<FeedId, Diagnosis>,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO feed_health (feed_id, status, reason, evidence, remarks, proposed_action, hijack_score, \
@@ -90,14 +98,23 @@ impl Store {
     /// Stores the garden's triage verdicts in `feed_health.needs_triage`. A feed without
     /// a diagnosis has no row and reads as 0 through `v_garden_row`.
     pub fn save_triage(&self, flags: &HashMap<FeedId, bool>) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
-        {
-            let mut stmt =
-                tx.prepare("UPDATE feed_health SET needs_triage = ?2 WHERE feed_id = ?1")?;
-            for (feed_id, flag) in flags {
-                stmt.execute(params![feed_id, flag])?;
-            }
-        }
+        let tx = self.write_tx()?;
+        write_triage(&tx, flags)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Computes the triage verdicts and stores them in ONE immediate transaction: a
+    /// decision committed by another process cannot slip between the read and the write
+    /// and have its verdict overwritten by a stale one. `compute` reads through this store
+    /// (the same connection, hence inside the transaction).
+    pub fn update_triage<F>(&self, compute: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<HashMap<FeedId, bool>>,
+    {
+        let tx = self.write_tx()?;
+        let flags = compute()?;
+        write_triage(&tx, &flags)?;
         tx.commit()?;
         Ok(())
     }

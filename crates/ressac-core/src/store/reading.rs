@@ -151,7 +151,7 @@ impl Store {
         outcome: &std::result::Result<Article, ExtractError>,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         match outcome {
             Ok(article) => {
                 tx.execute(

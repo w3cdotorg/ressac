@@ -93,7 +93,7 @@ impl Store {
         dry_run: bool,
         now: DateTime<Utc>,
     ) -> Result<ImportReport> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let mut report = ImportReport::default();
         let known = known_keys(&tx)?;
         let mut seen: HashMap<String, String> = HashMap::new();
@@ -156,7 +156,6 @@ impl Store {
         Ok(rows)
     }
 
-    /// Folder id → "Parent / Child" path, from the `v_folder_path` contract view.
     /// Active feeds of a folder and of its sub-folders, recursively, in id order. An
     /// unknown folder has none.
     pub fn feeds_in_folder(&self, folder_id: FolderId) -> Result<Vec<FeedId>> {
@@ -170,6 +169,7 @@ impl Store {
         Ok(ids)
     }
 
+    /// Folder id → "Parent / Child" path, from the `v_folder_path` contract view.
     pub fn folder_paths(&self) -> Result<HashMap<FolderId, String>> {
         let mut stmt = self
             .conn()

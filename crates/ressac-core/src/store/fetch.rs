@@ -47,7 +47,7 @@ impl Store {
     /// fields, entries and their search rows. On a feed's first fill, entries published
     /// more than `BACKLOG_DAYS` before the fetch arrive read. Returns how many entries were new.
     pub fn record_attempt(&self, run_id: &str, a: &FetchAttempt) -> Result<usize> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let error_json = a.error.as_ref().map(serde_json::to_string).transpose()?;
         tx.execute(
             "INSERT INTO fetch_log (feed_id, run_id, at, http_status, error_kind, redirect_chain, content_type, \

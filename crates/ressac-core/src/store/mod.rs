@@ -146,6 +146,16 @@ impl Store {
         &self.conn
     }
 
+    /// Starts a write transaction holding the write lock from the first statement
+    /// (IMMEDIATE), so a transaction that reads before it writes never meets
+    /// `SQLITE_BUSY_SNAPSHOT` when another process commits in between: it waits instead.
+    pub(crate) fn write_tx(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(rusqlite::Transaction::new_unchecked(
+            self.conn(),
+            TransactionBehavior::Immediate,
+        )?)
+    }
+
     /// Entry ids whose search row matches an FTS5 query, in id order.
     #[cfg(test)]
     pub(crate) fn search_ids(&self, query: &str) -> Result<Vec<i64>> {

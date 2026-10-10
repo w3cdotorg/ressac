@@ -185,8 +185,9 @@ fn is_broken_pipe(e: &anyhow::Error) -> bool {
 
 fn open(db: &Path) -> anyhow::Result<Ressac> {
     let app = Ressac::open(db).with_context(|| format!("cannot open database {}", db.display()))?;
-    // Test hook: the CLI tests serve article pages from a local mock server.
-    if std::env::var_os("RESSAC_ALLOW_PRIVATE_ARTICLES").is_some() {
+    // Test hook: the CLI tests serve article pages from a local mock server. Debug builds
+    // only: a release binary never lifts the private-address guard.
+    if cfg!(debug_assertions) && std::env::var_os("RESSAC_ALLOW_PRIVATE_ARTICLES").is_some() {
         return Ok(app.allow_private_articles()?);
     }
     Ok(app)
