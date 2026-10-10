@@ -136,3 +136,107 @@ private func row(_ id: Int64, _ title: String, status: String?, folder: String? 
         #expect(GardenModel.errorLabel("Timeout") == "Timeout")
     }
 }
+
+@Suite struct GardenDecodingTests {
+    /// A private copy of the **full** contract fixture (Phase 7's `TestDatabase` clears the
+    /// diagnoses and decisions this test needs), so the test may add rows.
+    private func fixtureCopy() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "ressac-garden-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let copy = dir.appending(path: "ressac.sqlite")
+        try FileManager.default.copyItem(at: TestDatabase.fixture, to: copy)
+        return copy
+    }
+
+    private func firstValue<Reducer: ValueReducer>(_ observation: ValueObservation<Reducer>,
+                                                   in reader: any DatabaseReader) async throws -> Reducer.Value
+        where Reducer.Value: Sendable {
+        for try await value in observation.values(in: reader) {
+            return value
+        }
+        throw CancellationError()
+    }
+
+    /// The JSON written by core `model.rs` (evidence, remarks, proposed_action, fetch_log) must
+    /// decode into the Swift records. The fixture covers follow_redirect, bury, http_only and a
+    /// fetch log with a hop; the other shapes are added here on feeds the fixture leaves undiagnosed.
+    @Test func gardenRowsDecodeTheCoreJSONShapes() async throws {
+        let url = try fixtureCopy()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        do {
+            let queue = try DatabaseQueue(path: url.path(percentEncoded: false))
+            try await queue.write { db in
+                try db.execute(sql: """
+                    INSERT OR REPLACE INTO feed_health (feed_id, status, reason, evidence, remarks, proposed_action, computed_at, needs_triage)
+                    SELECT id, 'Alive', 'Fine.', '{"bullets":["Feed language: eng."],"clue":"","language":"eng"}',
+                           '[{"type":"https_available"},{"type":"date_fallback"},{"type":"blocked"}]',
+                           '{"type":"upgrade_https","url":"https://sixcolors.example/feed.json"}', '2026-10-10T08:00:00.000Z', 0
+                    FROM feed WHERE title = 'Six Colors';
+                    INSERT OR REPLACE INTO feed_health (feed_id, status, reason, evidence, remarks, proposed_action, computed_at, needs_triage)
+                    SELECT f.id, 'Duplicate', 'Same entries as another feed.', '{"bullets":[],"clue":"= #' || k.id || '","language":null}', '[]',
+                           '{"type":"merge_into","feed_id":' || k.id || '}', '2026-10-10T08:00:00.000Z', 1
+                    FROM feed f, feed k WHERE f.title = 'Center for Humane Technology (1)' AND k.title = 'Center for Humane Technology';
+                    INSERT OR REPLACE INTO feed_health (feed_id, status, reason, evidence, remarks, proposed_action, computed_at, needs_triage)
+                    SELECT f.id, 'Fossil', 'Nothing new since 2013.', '{"bullets":[],"clue":"2013","language":null}',
+                           '[{"type":"similar_title","feed_id":' || k.id || '}]',
+                           '{"type":"adopt_discovered","url":"https://orange.example.org/feed"}', '2026-10-10T08:00:00.000Z', 1
+                    FROM feed f, feed k WHERE f.title = 'Orange-Drenka' AND k.title = 'Orange Drenka';
+                    """)
+            }
+        }
+        let database = try AppDatabase.open(at: url)
+        let rows = try await firstValue(Queries.garden(scope: .all), in: database.reader)
+        let byTitle = Dictionary(uniqueKeysWithValues: rows.map { ($0.title, $0) })
+        let id = { (title: String) in byTitle[title]?.feedId ?? -1 }
+
+        let girl = try #require(byTitle["Girl on the Couch"])
+        #expect(girl.status == "Moved")
+        #expect(girl.clue == "301")
+        #expect(girl.evidence?.bullets == ["Clue: 301."])
+        #expect(girl.remarks == [.httpOnly])
+        #expect(girl.proposedAction == .followRedirect(url: "https://girl.example.org/feed"))
+        #expect(girl.needsTriage)
+
+        let biblio = try #require(byTitle["Bibliobsession 2.0"])
+        #expect(biblio.status == "Hijacked")
+        #expect(biblio.clue == "vie ⚠")
+        #expect(biblio.proposedAction == .bury)
+
+        let unphoto = try #require(byTitle["Unphotographable"])
+        #expect(unphoto.lastDecision == "keep")
+        #expect(!unphoto.needsTriage)
+        #expect(unphoto.waybackUrl == "http://web.archive.org/web/2019/http://www.unphotographable.com/")
+
+        #expect(byTitle["Photos from bouquiniste"] == nil, "All feeds lists active feeds only")
+
+        let undiagnosed = try #require(byTitle["Center for Humane Technology"])
+        #expect(undiagnosed.status == nil)
+        #expect(undiagnosed.evidence == nil)
+        #expect(undiagnosed.remarks.isEmpty)
+        #expect(undiagnosed.proposedAction == nil)
+
+        let six = try #require(byTitle["Six Colors"])
+        #expect(six.evidence?.language == "eng")
+        #expect(six.remarks == [.httpsAvailable, .dateFallback, .blocked])
+        #expect(six.proposedAction == .upgradeHttps(url: "https://sixcolors.example/feed.json"))
+        #expect(byTitle["Center for Humane Technology (1)"]?.proposedAction == .mergeInto(feedId: id("Center for Humane Technology")))
+        #expect(byTitle["Orange-Drenka"]?.remarks == [.similarTitle(feedId: id("Orange Drenka"))])
+        #expect(byTitle["Orange-Drenka"]?.proposedAction == .adoptDiscovered(url: "https://orange.example.org/feed"))
+
+        let queue = try await firstValue(Queries.garden(scope: .needsTriage), in: database.reader)
+        #expect(Set(queue.map(\.title)) == ["Girl on the Couch", "Bibliobsession 2.0", "Orange Drenka",
+                                             "Center for Humane Technology (1)", "Orange-Drenka"])
+        let cemetery = try await firstValue(Queries.garden(scope: .cemetery), in: database.reader)
+        #expect(cemetery.map(\.title) == ["Photos from bouquiniste"])
+        #expect(cemetery.first?.state == "buried")
+        #expect(cemetery.first?.lastDecision == "bury")
+
+        let log = try await firstValue(Queries.fetchLog(feedId: unphoto.feedId), in: database.reader)
+        let latest = try #require(log.first)
+        #expect(latest.at == Date(timeIntervalSince1970: 1_791_615_600))
+        #expect(latest.httpStatus == 410)
+        #expect(GardenModel.outcome(of: latest) == "HTTP 410")
+        #expect(latest.redirectChain.map(\.status) == [301])
+        #expect(latest.redirectChain.map(\.url) == ["https://www.unphotographable.com/index.rdf"])
+    }
+}
