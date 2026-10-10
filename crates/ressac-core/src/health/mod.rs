@@ -75,7 +75,18 @@ pub fn diagnose(ev: &FeedEvidence) -> Diagnosis {
         .then(|| Action::UpgradeHttps {
             url: https_target(ev),
         });
-    let v = verdict(ev, &cadence, &hijack, upgrade);
+    let mut v = verdict(ev, &cadence, &hijack, upgrade);
+    let assessed = !matches!(
+        v.status,
+        Status::Hijacked | Status::Duplicate | Status::Unchecked
+    );
+    if assessed && hijack.score > 0.0 {
+        v.bullets.push(format!(
+            "Possible spam signs (score {:.1}, below the {HIJACK_THRESHOLD:.1} threshold):",
+            hijack.score
+        ));
+        v.bullets.extend(hijack.bullets.iter().cloned());
+    }
     let language = (v.status == Status::Hijacked)
         .then(|| hijack.language.clone())
         .flatten();
@@ -774,6 +785,32 @@ mod tests {
         assert!(d.remarks.contains(&Remark::Blocked));
         let plain = diagnose(&ev(vec![failed(0, ErrorKind::Http(503))], vec![]));
         assert!(!plain.remarks.contains(&Remark::Blocked));
+    }
+
+    /// Real run 2026-10-10: Bibliobsession 2.0 is Dead on a 404 with a hijack score of 0.4.
+    #[test]
+    fn spam_hint_below_the_threshold_is_shown_in_the_evidence() {
+        let mut e = ev(vec![failed(0, ErrorKind::Http(404))], vec![]);
+        e.description = Some("Les meilleurs casino en ligne pour les joueurs français.".into());
+        let d = diagnose(&e);
+        assert_eq!(d.status, Status::Dead);
+        assert_eq!(d.reason, "The server says the feed is gone (HTTP 404).");
+        assert_eq!(d.evidence.clue, "404");
+        assert_eq!(d.evidence.language, None);
+        let at = d
+            .evidence
+            .bullets
+            .iter()
+            .position(|b| b == "Possible spam signs (score 0.4, below the 0.6 threshold):")
+            .unwrap_or_else(|| panic!("{:?}", d.evidence.bullets));
+        assert!(d.evidence.bullets[at + 1].contains("casino"));
+    }
+
+    #[test]
+    fn clean_feed_gets_no_spam_hint() {
+        let d = diagnose(&ev(vec![ok(0)], vec![entry(3)]));
+        assert_eq!(d.status, Status::Alive);
+        assert!(d.evidence.bullets.iter().all(|b| !b.contains("spam")));
     }
 
     #[test]
