@@ -148,7 +148,7 @@ ressac/
 |---|---|---|
 | 1 | 👯 **Duplicate** | Another active feed has the same normalized `final_url`, **or** ≥ 80 % of this feed's last 20 entry GUIDs/links appear in another active feed. The older feed (lower `id`) is canonical; the other is the Duplicate. |
 | 2 | 🦠 **Hijacked** | `hijack_score ≥ 0.6` (see below). |
-| 3 | 🚚 **Moved** | A `301`/`308` hop leads to a different `url_key` that parses as a feed, **or** the feed meets the Dead conditions below and autodiscovery found a different, parseable feed. |
+| 3 | 🚚 **Moved** | The leading run of `301`/`308` hops ends on a different `url_key` that parses as a feed (a temporary hop ends the run), **or** the feed meets the Dead conditions below and autodiscovery found a different, parseable feed. |
 | 4 | 🪦 **Dead** | Last attempt returned `404`/`410` or NXDOMAIN, **or** ≥ 5 consecutive failures spanning ≥ 14 days. Failures discounted by the network guard (§8) don't count. |
 | 5 | 🤒 **Ailing** | Last attempt failed with a transient error (`5xx`, `429`, `403`, `Timeout`, `Tls`, `Parse`, `Encoding`, `TooLarge`). |
 | 6 | 🦴 **Fossil** | Responding, last entry > 2 years ago. |
@@ -166,6 +166,8 @@ A feed that has never been fetched has status `Unchecked`.
 | Language of the 5 newest entries ≠ language of the older stored entries (when there are any) | 0.4 |
 | Redirect chain ends on a different registrable domain | 0.3 |
 | `HtmlInsteadOfFeed` on a URL that used to serve a feed | 0.3 |
+
+*Calibrated 2026-10-10 on the real Vienna run, pending user confirmation:* the redirect and `HtmlInsteadOfFeed` signals count only alongside lexicon or language evidence; alone they describe a site its owner closed (FiveThirtyEight → ABC News), not spam. Lexicon terms match at a word start, optionally plural, then a word end or a number (`casinos`, `casino88`, `togel4d`); `slot` counts only when numbered (`slot88`).
 
 **Remarks** (secondary, any status):
 

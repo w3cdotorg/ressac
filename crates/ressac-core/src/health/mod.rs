@@ -226,10 +226,17 @@ pub fn dead_reason(ev: &FeedEvidence) -> Option<(String, String)> {
             ));
         }
         Some(ErrorKind::Dns) => {
-            return Some((
-                "The domain no longer resolves.".to_string(),
-                "DNS".to_string(),
-            ));
+            // The failing lookup is the last hop's host when the chain left our own.
+            let redirected_away = last
+                .redirect_chain
+                .last()
+                .is_some_and(|h| host_of(&h.url) != host_of(&ev.xml_url));
+            let reason = if redirected_away {
+                "The site it redirects to no longer resolves."
+            } else {
+                "The domain no longer resolves."
+            };
+            return Some((reason.to_string(), "DNS".to_string()));
         }
         _ => {}
     }
@@ -251,6 +258,13 @@ pub fn dead_reason(ev: &FeedEvidence) -> Option<(String, String)> {
         }
     }
     None
+}
+
+fn host_of(raw: &str) -> Option<String> {
+    url::Url::parse(raw)
+        .ok()?
+        .host_str()
+        .map(str::to_ascii_lowercase)
 }
 
 fn remarks(ev: &FeedEvidence) -> Vec<Remark> {
@@ -496,6 +510,30 @@ mod tests {
                 url: "https://newblog.example.org/rss".into()
             })
         );
+    }
+
+    /// Real run 2026-10-10: action button dot net resolves, but redirects through
+    /// innisfreehouseschool.com to cinderellaaffair.org, which does not.
+    #[test]
+    fn dns_failure_on_a_redirect_target_says_so() {
+        let mut a = failed(0, ErrorKind::Dns);
+        a.http_status = Some(301);
+        a.redirect_chain = vec![
+            Hop {
+                status: 301,
+                url: "https://innisfreehouseschool.com/".into(),
+            },
+            Hop {
+                status: 301,
+                url: "https://cinderellaaffair.org/".into(),
+            },
+        ];
+        let d = diagnose(&ev(vec![a], vec![]));
+        assert_eq!(d.status, Status::Dead);
+        assert_eq!(d.reason, "The site it redirects to no longer resolves.");
+        assert_eq!(d.evidence.clue, "DNS");
+        let own = diagnose(&ev(vec![failed(0, ErrorKind::Dns)], vec![]));
+        assert_eq!(own.reason, "The domain no longer resolves.");
     }
 
     /// Real run 2026-10-10: FiveThirtyEight (301 to an ABC News HTML page) was Hijacked.

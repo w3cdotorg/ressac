@@ -51,22 +51,42 @@ pub fn has_spam(text: &str) -> bool {
     !spam_hits(text).is_empty()
 }
 
+/// Lowercase terms that are ordinary words alone ("a time slot") but spam brands
+/// when a number follows them ("slot88", "slot777").
+pub const SPAM_NUMBERED: &[&str] = &["slot"];
+
 fn spam_hits(text: &str) -> Vec<&'static str> {
     let lower = text.to_lowercase();
-    SPAM_LEXICON
+    let plain = SPAM_LEXICON
         .iter()
         .copied()
-        .filter(|w| contains_word(&lower, w))
-        .collect()
+        .filter(|w| contains_term(&lower, w, false));
+    let numbered = SPAM_NUMBERED
+        .iter()
+        .copied()
+        .filter(|w| contains_term(&lower, w, true));
+    plain.chain(numbered).collect()
 }
 
-/// `needle` appears in `haystack` as a whole word or phrase: not inside a longer
-/// word ("cialis" must not match "socialist").
-fn contains_word(haystack: &str, needle: &str) -> bool {
-    haystack.match_indices(needle).any(|(i, _)| {
-        let before = haystack[..i].chars().next_back();
-        let after = haystack[i + needle.len()..].chars().next();
-        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+/// `term` starts a word in `haystack` (never inside one: "cialis" must not match
+/// "socialist"), optionally followed by a plural `s`. Then either a number follows
+/// (a spam brand like "casino88" or "togel4d") or the word ends. With
+/// `needs_number`, only the numbered form counts.
+fn contains_term(haystack: &str, term: &str, needs_number: bool) -> bool {
+    haystack.match_indices(term).any(|(i, _)| {
+        if haystack[..i]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+        {
+            return false;
+        }
+        let rest = &haystack[i + term.len()..];
+        let rest = rest.strip_prefix('s').unwrap_or(rest);
+        match rest.chars().next() {
+            Some(c) if c.is_ascii_digit() => true,
+            next => !needs_number && !next.is_some_and(char::is_alphanumeric),
+        }
     })
 }
 
@@ -335,6 +355,86 @@ mod tests {
         assert!(has_spam("Buy Cialis online"));
         assert!(has_spam("casino, slots and betting"));
         assert!(has_spam("Xóc đĩa online là sân chơi mới"));
+    }
+
+    /// Spam brands pluralise and append numbers ("casino88", "togel4d"); the leading
+    /// boundary still keeps "socialist" out.
+    #[test]
+    fn lexicon_accepts_plural_and_numbered_spam_terms() {
+        for text in [
+            "best casinos of the year",
+            "daftar casino88 sekarang",
+            "free slots every day",
+            "slot88 bonus new member",
+            "situs togel4d terpercaya",
+            "Xóc đĩa online là sân chơi mới",
+            "judi online terbaik",
+            "payday loans fast",
+        ] {
+            assert!(has_spam(text), "{text}");
+        }
+        for text in [
+            "the socialist lizard people",
+            "a rush to a specialist",
+            "une utopie écosocialiste",
+            "the slotted spoon",
+            "a new time slot for the podcast",
+        ] {
+            assert!(!has_spam(text), "{text}");
+        }
+    }
+
+    fn hop(status: u16, url: &str) -> Hop {
+        Hop {
+            status,
+            url: url.into(),
+        }
+    }
+
+    #[test]
+    fn lexicon_plus_cross_domain_redirect_is_exactly_point_seven() {
+        let mut e = ev();
+        e.description = Some(VI_SPAM.into());
+        e.attempts = vec![attempt(
+            None,
+            vec![hop(301, "https://casino.example.com/feed")],
+        )];
+        let a = assess(&e);
+        assert!((a.score - 0.7).abs() < 1e-6, "{} {:?}", a.score, a.bullets);
+    }
+
+    #[test]
+    fn language_plus_html_page_is_exactly_point_seven() {
+        let mut e = ev();
+        // Vietnamese, no lexicon term: only the description-language signal fires.
+        e.description = Some(
+            "Bồn tiểu nam Caesar được nhiều gia đình lựa chọn bởi sự đa dạng trong thiết kế cùng những tính năng nổi bật."
+                .into(),
+        );
+        e.entries = EN
+            .iter()
+            .enumerate()
+            .map(|(i, t)| entry(i as i64, t))
+            .collect();
+        e.attempts = vec![attempt(Some(ErrorKind::HtmlInsteadOfFeed), vec![])];
+        let a = assess(&e);
+        assert!(!has_spam(e.description.as_deref().unwrap()));
+        assert!((a.score - 0.7).abs() < 1e-6, "{} {:?}", a.score, a.bullets);
+    }
+
+    /// Accepted trade-off (real run 2026-10-10): a domain parked on another site
+    /// that serves HTML, with no content evidence, scores nothing here. It still
+    /// shows up as Ailing, then Dead.
+    #[test]
+    fn parked_page_without_content_signal_scores_zero() {
+        let mut e = ev();
+        e.attempts = vec![attempt(
+            Some(ErrorKind::HtmlInsteadOfFeed),
+            vec![hop(302, "https://parked.example.net/lander")],
+        )];
+        let a = assess(&e);
+        assert_eq!(a.score, 0.0);
+        assert!(a.bullets.is_empty());
     }
 
     /// Real run 2026-10-10: FiveThirtyEight was shut down by its owner and its feed

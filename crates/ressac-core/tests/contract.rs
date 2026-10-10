@@ -4,7 +4,7 @@ use std::path::Path;
 
 use ressac_core::model::{Decision, Status};
 use ressac_core::store::Store;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -42,6 +42,21 @@ fn store_schema_equals_the_sql_files() {
         raw.execute_batch(&sql).unwrap();
     }
     assert_eq!(live, schema_of(&raw));
+}
+
+/// The committed fixture must not drift from the schema the store creates.
+#[test]
+fn contract_fixture_schema_matches_the_live_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("live.sqlite");
+    drop(Store::open(&path).unwrap());
+    let live = schema_of(&Connection::open(&path).unwrap());
+    let fixture = Connection::open_with_flags(
+        Path::new(ROOT).join("tests/fixtures/contract.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(schema_of(&fixture), live);
 }
 
 #[test]
