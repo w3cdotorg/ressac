@@ -306,3 +306,90 @@ struct TimeoutError: Error {}
         #expect(try await seen.value.count == 1)
     }
 }
+
+// MARK: - Writes
+
+@Suite struct WriteTests {
+    let now = Timestamp.date(from: "2026-10-10T09:00:00.000Z")!
+
+    func readAt(_ test: TestDatabase, _ id: Int64) throws -> String? {
+        try test.one(String.self, "SELECT read_at FROM entry WHERE id = ?", [id])
+    }
+
+    @Test func read_and_star_marks_round_trip() async throws {
+        let test = try TestDatabase()
+        let a = try test.entry(feed: 1)
+        let b = try test.entry(feed: 1, read: true)
+        let writes = Writes(db: try test.open())
+        try await writes.setRead([a, b], read: true, at: now)
+        #expect(try readAt(test, a) == "2026-10-10T09:00:00.000Z")
+        #expect(try readAt(test, b) == "2026-10-10T08:00:00.000Z")  // first read time kept
+        try await writes.setRead([a], read: false, at: now)
+        #expect(try readAt(test, a) == nil)
+        try await writes.setStarred(a, starred: true, at: now)
+        let starred = try test.one(String.self, "SELECT starred_at FROM entry WHERE id = ?", [a])
+        #expect(starred == "2026-10-10T09:00:00.000Z")
+        try await writes.setStarred(a, starred: false, at: now)
+        #expect(try test.one(Int.self, "SELECT COUNT(*) FROM entry WHERE starred_at IS NOT NULL") == 0)
+    }
+
+    @Test func mark_all_read_is_scoped_to_the_source() async throws {
+        let test = try TestDatabase()
+        let inFolder = try test.entry(feed: 2)  // folder 2, a subfolder of 1
+        let alsoInFolder = try test.entry(feed: 5)
+        let elsewhere = try test.entry(feed: 8)
+        let writes = Writes(db: try test.open())
+        #expect(try await writes.markAllRead(in: .folder(1), at: now) == 2)
+        #expect(try readAt(test, inFolder) != nil && readAt(test, alsoInFolder) != nil)
+        #expect(try readAt(test, elsewhere) == nil)
+        #expect(try await writes.markAllRead(in: .folder(1), at: now) == 0)
+        #expect(try await writes.markAllRead(in: .garden(.all), at: now) == 0)
+        #expect(try await writes.markAllRead(in: .unread, at: now) == 1)
+    }
+
+    @Test func prefer_full_text_is_written() async throws {
+        let test = try TestDatabase()
+        let writes = Writes(db: try test.open())
+        try await writes.setPreferFullText(feedId: 4, on: true)
+        #expect(try test.one(Bool.self, "SELECT prefer_full_text FROM feed WHERE id = 4") == true)
+    }
+
+    /// Review Focus #2: the core holds a write transaction for 1 s while the app marks entries read.
+    @Test func concurrent_writer_does_not_lose_read_marks() async throws {
+        let test = try TestDatabase()
+        let ids = try (0..<50).map { _ in try test.entry(feed: 1) }
+        let writes = Writes(db: try test.open())
+        let (locked, lockedSignal) = AsyncStream<Void>.makeStream()
+        let core = Task.detached {
+            try test.holdWriteLock(for: 1, sql: "UPDATE feed SET title = 'Renamed by the core' WHERE id = 1") {
+                lockedSignal.yield()
+            }
+        }
+        for await _ in locked { break }
+        let start = ContinuousClock.now
+        try await writes.setRead(ids, read: true, at: now)
+        #expect(ContinuousClock.now - start > .milliseconds(500))  // it waited for the lock
+        try await core.value
+        let unread = try test.one(Int.self, "SELECT COUNT(*) FROM entry WHERE read_at IS NULL")
+        let title = try test.one(String.self, "SELECT title FROM feed WHERE id = 1")
+        #expect(unread == 0)
+        #expect(title == "Renamed by the core")
+    }
+
+    @Test func busy_timeout_surfaces_as_a_busy_error() async throws {
+        let test = try TestDatabase()
+        let id = try test.entry(feed: 1)
+        let writes = Writes(db: try test.open(busyTimeout: 0.2))
+        let (locked, lockedSignal) = AsyncStream<Void>.makeStream()
+        let core = Task.detached {
+            try test.holdWriteLock(for: 1) { lockedSignal.yield() }
+        }
+        for await _ in locked { break }
+        let error = await #expect(throws: DatabaseError.self) {
+            try await writes.setRead([id], read: true, at: now)
+        }
+        #expect(error.map(AppDatabase.isBusy) == true)
+        try await core.value
+        #expect(try readAt(test, id) == nil)
+    }
+}
