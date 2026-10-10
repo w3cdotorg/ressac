@@ -123,6 +123,89 @@ enum ArticleTemplate {
     static func escapeAttribute(_ text: String) -> String {
         escapeText(text).replacingOccurrences(of: "\"", with: "&quot;")
     }
+
+    // MARK: Page
+
+    /// No scripts, frames, objects, forms or base URL; images from the web; fonts and styles inline.
+    static let contentSecurityPolicy =
+        "default-src 'none'; img-src http: https: data:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'"
+
+    static func page(for entry: EntryRow, fulltext: FulltextRow?, showFull: Bool, style: ReaderStyle, colorScheme: ColorScheme) -> String {
+        let base = LinkPolicy.webURL(entry.url)
+        let full = showFull ? fulltext.flatMap { $0.entryId == entry.entryId ? $0 : nil } : nil
+        let fullHTML = full?.html
+        let source = fullHTML ?? [entry.contentHtml, entry.summaryHtml]
+            .compactMap { $0 }
+            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
+        let body = sanitize(source, baseURL: base)
+
+        var meta = [escapeText(entry.feedTitle), escapeText(entry.publishedAt.formatted(date: .long, time: .shortened))]
+        if fullHTML != nil { meta.append(#"<span class="badge">full article</span>"#) }
+
+        let title = escapeText(entry.displayTitle)
+        let heading = base.map { #"<a href="\#(escapeAttribute($0.absoluteString))">\#(title)</a>"# } ?? title
+        let byline = (fullHTML != nil ? full?.byline : nil) ?? entry.author
+        let notice = showFull ? full?.error.map { "Full article unavailable: \($0)" } : nil
+        let emptyText = base == nil ? "This entry has no text." : "This entry has no text. Open it in the browser to read it."
+
+        return """
+        <!doctype html>
+        <html lang="en" data-scheme="\(colorScheme == .dark ? "dark" : "light")">
+        <head>
+        <meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy)">
+        <meta name="referrer" content="no-referrer">
+        <style>
+        \(fontFaces(for: style.font))
+        \(readerCSS)
+        :root { --reader-font: \(style.font.cssFamily); --reader-size: \(Int(ReaderStyle.clampedSize(style.size)))px; --reader-measure: \(style.width.maxCh)ch; }
+        </style>
+        </head>
+        <body>
+        <article>
+        <p class="meta">\(meta.joined(separator: #"<span class="dot">·</span>"#))</p>
+        <h1 class="title">\(heading)</h1>
+        \(byline.map { #"<p class="byline">\#(escapeText($0))</p>"# } ?? "")
+        \(notice.map { #"<p class="notice">\#(escapeText($0))</p>"# } ?? "")
+        <div class="content">\(body.isEmpty ? #"<p class="empty">\#(emptyText)</p>"# : body)</div>
+        </article>
+        </body>
+        </html>
+        """
+    }
+
+    // MARK: Resources
+
+    /// `reader.css` from the app bundle (unit tests run hosted in the app, so `Bundle.main` is it).
+    static let readerCSS: String = Bundle.main.url(forResource: "reader", withExtension: "css")
+        .flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+
+    private static let newsreaderFaces = makeFontFaces(for: .newsreader)
+    private static let atkinsonFaces = makeFontFaces(for: .atkinson)
+
+    static func fontFaces(for font: ReaderFont) -> String {
+        switch font {
+        case .newsreader: newsreaderFaces
+        case .atkinson: atkinsonFaces
+        case .sfPro, .newYork, .charter: ""
+        }
+    }
+
+    /// `@font-face` rules with the font files inlined as `data:` URLs (about 1.3 MB of base64 for
+    /// Newsreader), built once per process. Missing files yield no rule and the CSS fallback applies.
+    private static func makeFontFaces(for font: ReaderFont) -> String {
+        let family = font.displayName
+        return font.bundledFaces.compactMap { face -> String? in
+            guard let url = Bundle.main.url(forResource: face.file, withExtension: "ttf", subdirectory: "Fonts"),
+                  let data = try? Data(contentsOf: url)
+            else { return nil }
+            return """
+            @font-face { font-family: "\(family)"; font-style: \(face.italic ? "italic" : "normal"); \
+            font-weight: \(face.weights.lowerBound) \(face.weights.upperBound); \
+            src: url("data:font/ttf;base64,\(data.base64EncodedString())") format("truetype"); }
+            """
+        }.joined(separator: "\n")
+    }
 }
 
 /// Which navigations the reader allows. Only the page we load ourselves (about:blank, since

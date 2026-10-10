@@ -141,3 +141,72 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(LinkPolicy.webURL(nil) == nil)
     }
 }
+
+@Suite struct ArticlePageTests {
+    private let full = FulltextRow(entryId: 1, html: "<p>Full body</p>", title: "Full title", byline: "Ada Lovelace", error: nil)
+
+    @Test func showsTheFullArticleOnlyWhenToggledAndCached() {
+        let feed = entry(content: "<p>Feed body</p>")
+        let on = ArticleTemplate.page(for: feed, fulltext: full, showFull: true, style: ReaderStyle(), colorScheme: .light)
+        #expect(on.contains("Full body"))
+        #expect(!on.contains("Feed body"))
+        #expect(on.contains(#"<span class="badge">full article</span>"#))
+        #expect(on.contains("Ada Lovelace"))
+        let off = ArticleTemplate.page(for: feed, fulltext: full, showFull: false, style: ReaderStyle(), colorScheme: .light)
+        #expect(off.contains("Feed body"))
+        #expect(!off.contains("Full body"))
+        #expect(!off.contains(#"<span class="badge">"#))
+        let otherEntry = ArticleTemplate.page(for: entry(id: 2, content: "<p>Feed body</p>"), fulltext: full, showFull: true, style: ReaderStyle(), colorScheme: .light)
+        #expect(!otherEntry.contains("Full body"))
+    }
+
+    @Test func fallsBackFromContentToSummary() {
+        let page = ArticleTemplate.page(for: entry(summary: "<p>Feed summary</p>", content: "  "), fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .light)
+        #expect(page.contains("Feed summary"))
+    }
+
+    @Test func failedExtractionKeepsTheFeedContentWithANotice() {
+        let failed = FulltextRow(entryId: 1, html: nil, title: nil, byline: nil, error: "HTTP 404.")
+        let page = ArticleTemplate.page(for: entry(content: "<p>Feed body</p>"), fulltext: failed, showFull: true, style: ReaderStyle(), colorScheme: .light)
+        #expect(page.contains(#"<p class="notice">Full article unavailable: HTTP 404.</p>"#))
+        #expect(page.contains("Feed body"))
+    }
+
+    /// Review Focus #1, rendering side: no url, no title, only summary_html.
+    @Test func untitledEntryWithoutLinkRenders() {
+        let page = ArticleTemplate.page(for: entry(title: nil, url: nil, summary: "<p>Only a summary</p>"), fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .light)
+        #expect(page.contains(#"<h1 class="title">Untitled</h1>"#))
+        #expect(page.contains("Only a summary"))
+    }
+
+    @Test func emptyEntrySaysSo() {
+        let page = ArticleTemplate.page(for: entry(summary: nil, content: nil), fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .light)
+        #expect(page.contains("This entry has no text. Open it in the browser to read it."))
+    }
+
+    @Test func escapesEntryMetadata() {
+        let page = ArticleTemplate.page(for: entry(title: "<script>x()</script> & co"), fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .light)
+        #expect(page.contains("&lt;script&gt;x()&lt;/script&gt; &amp; co"))
+        #expect(!page.contains("<script>"))
+    }
+
+    @Test func appliesStyleSchemeAndPolicy() {
+        let style = ReaderStyle(font: .charter, size: 20, width: .wide)
+        let page = ArticleTemplate.page(for: entry(), fulltext: nil, showFull: false, style: style, colorScheme: .dark)
+        #expect(page.contains(#"data-scheme="dark""#))
+        #expect(page.contains("--reader-size: 20px"))
+        #expect(page.contains("--reader-measure: 80ch"))
+        #expect(page.contains("--reader-font: Charter"))
+        #expect(page.contains("default-src 'none'"))
+        #expect(!page.contains("@font-face"))
+        #expect(page.contains(#"<a href="https://blog.example.org/2026/10/post.html">A title</a>"#))
+        let light = ArticleTemplate.page(for: entry(), fulltext: nil, showFull: false, style: style, colorScheme: .light)
+        #expect(light.contains(#"data-scheme="light""#))
+    }
+
+    @Test func embedsTheBundledStylesheet() {
+        #expect(ArticleTemplate.readerCSS.contains(#":root[data-scheme="dark"]"#))
+        let page = ArticleTemplate.page(for: entry(), fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .light)
+        #expect(page.contains("--paper"))
+    }
+}

@@ -1,0 +1,279 @@
+/*
+ * Ressac reader stylesheet. ArticleTemplate inlines it and sets, on :root,
+ * --reader-font, --reader-size and --reader-measure (Settings), and
+ * data-scheme="light|dark" (the window's appearance).
+ *
+ * The two palettes are tuned separately, not inverted: dark mode spreads its
+ * greys further apart, softens the text to avoid glare, brightens links and
+ * dims images slightly.
+ */
+
+:root {
+  --ui-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --mono-font: ui-monospace, "SF Mono", Menlo, monospace;
+  --reader-font: var(--ui-font);
+  --reader-size: 17px;
+  --reader-measure: 68ch;
+}
+
+:root[data-scheme="light"] {
+  color-scheme: light;
+  --paper: #FFFFFF;
+  --ink: #1D1D1F;
+  --ink-secondary: #6E6E73;
+  --ink-tertiary: #8E8E93;
+  --link: #0066CC;
+  --link-underline: rgba(0, 102, 204, 0.35);
+  --rule: rgba(0, 0, 0, 0.10);
+  --code-bg: #F5F5F7;
+  --quote-bar: #D2D2D7;
+  --mark: #FFF1A8;
+  --badge-bg: rgba(0, 0, 0, 0.05);
+  --notice-bg: #FFF4E5;
+  --notice-ink: #8A4B00;
+  --selection: rgba(0, 122, 255, 0.18);
+  --image-filter: none;
+  --leading: 1.55;
+  --smoothing: auto;
+}
+
+:root[data-scheme="dark"] {
+  color-scheme: dark;
+  --paper: #1C1C1E;
+  --ink: #E3E3E8;
+  --ink-secondary: #A1A1A6;
+  --ink-tertiary: #7C7C80;
+  --link: #6CB4FF;
+  --link-underline: rgba(108, 180, 255, 0.40);
+  --rule: rgba(255, 255, 255, 0.14);
+  --code-bg: #2C2C2E;
+  --quote-bar: #48484A;
+  --mark: #5E4B00;
+  --badge-bg: rgba(255, 255, 255, 0.09);
+  --notice-bg: #3A2A12;
+  --notice-ink: #FFC56B;
+  --selection: rgba(10, 132, 255, 0.38);
+  --image-filter: brightness(0.9) contrast(1.05);
+  --leading: 1.6;
+  --smoothing: antialiased;
+}
+
+html {
+  background: var(--paper);
+}
+
+body {
+  margin: 0;
+  padding: 28px 40px 96px;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--reader-font);
+  font-size: var(--reader-size);
+  line-height: var(--leading);
+  -webkit-font-smoothing: var(--smoothing);
+  -webkit-text-size-adjust: none;
+  text-rendering: optimizeLegibility;
+  font-kerning: normal;
+  font-variant-ligatures: common-ligatures;
+  hanging-punctuation: first;
+  overflow-wrap: break-word;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+article {
+  max-width: var(--reader-measure);
+  margin: 0 auto;
+}
+
+/* Header: meta line and byline stay in the interface font. */
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  margin: 0 0 8px;
+  font-family: var(--ui-font);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-secondary);
+}
+
+.meta .dot {
+  color: var(--ink-tertiary);
+}
+
+.meta .badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--badge-bg);
+  font-size: 11px;
+}
+
+h1.title {
+  margin: 0 0 6px;
+  font-size: 1.62em;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+h1.title a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.byline {
+  margin: 0 0 4px;
+  font-family: var(--ui-font);
+  font-size: 13px;
+  color: var(--ink-secondary);
+}
+
+.notice {
+  margin: 14px 0 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--notice-bg);
+  color: var(--notice-ink);
+  font-family: var(--ui-font);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.content {
+  margin-top: 22px;
+}
+
+.content > :first-child {
+  margin-top: 0;
+}
+
+.empty {
+  color: var(--ink-tertiary);
+  font-style: italic;
+}
+
+/* Body text. */
+
+p, ul, ol, dl, pre, blockquote, table {
+  margin: 0 0 1em;
+}
+
+h2, h3, h4, h5, h6 {
+  margin: 1.6em 0 0.5em;
+  line-height: 1.25;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.content h1 { font-size: 1.35em; margin: 1.6em 0 0.5em; line-height: 1.25; }
+h2 { font-size: 1.25em; }
+h3 { font-size: 1.1em; }
+h4, h5, h6 { font-size: 1em; }
+
+a {
+  color: var(--link);
+  text-decoration-line: underline;
+  text-decoration-color: var(--link-underline);
+  text-decoration-thickness: 0.06em;
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  text-decoration-color: currentColor;
+}
+
+ul, ol {
+  padding-left: 1.4em;
+}
+
+li + li {
+  margin-top: 0.25em;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1.2em auto;
+  border-radius: 6px;
+  filter: var(--image-filter);
+}
+
+p img, a img, li img {
+  display: inline-block;
+  margin: 0;
+  vertical-align: middle;
+}
+
+blockquote {
+  margin-left: 0;
+  padding-left: 1em;
+  border-left: 3px solid var(--quote-bar);
+  color: var(--ink-secondary);
+}
+
+code, kbd, samp, pre {
+  font-family: var(--mono-font);
+  font-size: 0.86em;
+}
+
+code {
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: var(--code-bg);
+}
+
+pre {
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--code-bg);
+  line-height: 1.45;
+  overflow-x: auto;
+}
+
+pre code {
+  padding: 0;
+  background: none;
+  font-size: 1em;
+}
+
+hr {
+  margin: 2em 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+}
+
+table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+th, td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+mark {
+  background: var(--mark);
+  color: inherit;
+}
+
+small, sub, sup {
+  font-size: 0.8em;
+}
+
+@media (max-width: 560px) {
+  body {
+    padding: 20px 20px 80px;
+  }
+}
