@@ -444,9 +444,12 @@ fn https_verdict(attempt: &FetchAttempt, http: &ParsedFeed) -> Option<bool> {
     }
 }
 
-/// Failures that say nothing about the site itself.
+/// Failures that say nothing about the site itself (a challenge page hides it from us).
 fn is_transient(e: &ErrorKind) -> bool {
-    matches!(e, ErrorKind::Dns | ErrorKind::Connect | ErrorKind::Timeout)
+    matches!(
+        e,
+        ErrorKind::Dns | ErrorKind::Connect | ErrorKind::Timeout | ErrorKind::Challenge
+    )
 }
 
 /// `Some(found)` once the site was checked (`found` is `None` when it announces nothing new);
@@ -553,7 +556,12 @@ mod tests {
                 "{e:?}"
             );
         }
-        for e in [ErrorKind::Dns, ErrorKind::Connect, ErrorKind::Timeout] {
+        for e in [
+            ErrorKind::Dns,
+            ErrorKind::Connect,
+            ErrorKind::Timeout,
+            ErrorKind::Challenge,
+        ] {
             assert_eq!(
                 https_verdict(&attempt(None, Some(e.clone())), &http),
                 None,

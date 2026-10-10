@@ -47,6 +47,30 @@ pub fn looks_like_html(content_type: Option<&str>, body: &[u8]) -> bool {
     declared_html && !looks_like_feed
 }
 
+const CHALLENGE_SNIFF_BYTES: usize = 64 * 1024;
+
+/// Fingerprints of anti-bot interstitials (lowercase): Akamai/Anubis-style "Client
+/// Challenge", Cloudflare, DDoS-Guard, DataDome and PerimeterX.
+const CHALLENGE_MARKERS: [&[u8]; 9] = [
+    b"<title>client challenge",
+    b"<title>just a moment",
+    b"attention required! | cloudflare",
+    b"cf-chl-",
+    b"challenge-platform",
+    b"_cf_chl_opt",
+    b"<title>ddos-guard",
+    b"captcha-delivery.com",
+    b"px-captcha",
+];
+
+/// True when an HTML head (case-insensitive) is an anti-bot challenge, not a real page.
+fn is_challenge_page(head: &[u8]) -> bool {
+    let lower = head.to_ascii_lowercase();
+    CHALLENGE_MARKERS
+        .iter()
+        .any(|m| lower.windows(m.len()).any(|w| w == *m))
+}
+
 fn trim_leading(body: &[u8]) -> &[u8] {
     let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
     let start = body
@@ -147,7 +171,13 @@ pub fn parse_feed(
 ) -> Result<ParsedFeed, ErrorKind> {
     let body = trim_leading(body);
     if looks_like_html(content_type, body) {
-        return Err(ErrorKind::HtmlInsteadOfFeed);
+        return Err(
+            if is_challenge_page(&body[..body.len().min(CHALLENGE_SNIFF_BYTES)]) {
+                ErrorKind::Challenge
+            } else {
+                ErrorKind::HtmlInsteadOfFeed
+            },
+        );
     }
     let feed = match parse_xml(body, base_url) {
         Ok(feed) => feed,
@@ -284,6 +314,41 @@ mod tests {
             Err(ErrorKind::HtmlInsteadOfFeed)
         );
         assert!(looks_like_html(None, b"  <HTML><body></body></HTML>"));
+    }
+
+    #[test]
+    fn challenge_pages_are_recognised() {
+        for page in [
+            "<html><head><title>Client Challenge</title></head>",
+            "<html><title>Just a moment...</title>",
+            "<title>Attention Required! | Cloudflare</title>",
+            "<div id=\"cf-chl-widget-abc\"></div>",
+            "<script src=\"/cdn-cgi/challenge-platform/h/b/orchestrate\"></script>",
+            "<script>window._cf_chl_opt={}</script>",
+            "<TITLE>DDoS-Guard</TITLE>",
+            "<iframe src=\"https://geo.captcha-delivery.com/captcha/\">",
+            "<div id=\"px-captcha\"></div>",
+        ] {
+            assert!(is_challenge_page(page.as_bytes()), "{page}");
+        }
+        assert!(!is_challenge_page(
+            b"<!DOCTYPE html><html><head><title>My blog</title></head><body>Posts</body></html>"
+        ));
+    }
+
+    #[test]
+    fn challenge_html_is_a_challenge_and_plain_html_is_not() {
+        let challenge = b"<!DOCTYPE html><html><head><title>Client Challenge</title></head></html>";
+        assert_eq!(
+            parse_feed(challenge, Some("text/html"), "http://x.org/feed", now()),
+            Err(ErrorKind::Challenge)
+        );
+        let blog =
+            b"<!DOCTYPE html><html><head><title>My blog</title></head><body>hi</body></html>";
+        assert_eq!(
+            parse_feed(blog, Some("text/html"), "http://x.org/feed", now()),
+            Err(ErrorKind::HtmlInsteadOfFeed)
+        );
     }
 
     #[test]
