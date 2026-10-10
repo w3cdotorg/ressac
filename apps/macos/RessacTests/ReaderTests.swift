@@ -210,3 +210,16 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(page.contains("--paper"))
     }
 }
+
+@Suite struct ReaderViewTests {
+    @Test func pageIdentityIgnoresReadAndStarFlags() {
+        var read = entry()
+        read.isRead = true
+        read.isStarred = true
+        let a = ArticlePage(entry: entry(), fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .light)
+        let b = ArticlePage(entry: read, fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .light)
+        let c = ArticlePage(entry: entry(), fulltext: nil, showFull: true, style: ReaderStyle(), colorScheme: .light)
+        #expect(a == b)
+        #expect(a != c)
+    }
+}
