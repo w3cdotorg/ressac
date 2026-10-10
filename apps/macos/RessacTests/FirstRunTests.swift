@@ -19,3 +19,19 @@ import Testing
     }
 }
 
+
+@Suite struct DatabaseLocationTests {
+    @Test func environmentThenSettingThenTheSharedDefault() throws {
+        let suite = "ressac.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let shared = URL.homeDirectory.appending(path: "Library/Application Support/Ressac/ressac.sqlite")
+        #expect(DatabaseLocation.current(environment: [:], defaults: defaults) == shared)
+        defaults.set("  ", forKey: DatabaseLocation.defaultsKey)
+        #expect(DatabaseLocation.current(environment: [:], defaults: defaults) == shared)
+        defaults.set("~/Feeds/other.sqlite", forKey: DatabaseLocation.defaultsKey)
+        #expect(DatabaseLocation.current(environment: [:], defaults: defaults) == URL.homeDirectory.appending(path: "Feeds/other.sqlite"))
+        #expect(DatabaseLocation.current(environment: ["RESSAC_DB": "/tmp/copy.sqlite"], defaults: defaults) == URL(filePath: "/tmp/copy.sqlite"))
+        #expect(DatabaseLocation.current(environment: ["RESSAC_DB": ""], defaults: defaults) == URL.homeDirectory.appending(path: "Feeds/other.sqlite"))
+    }
+}
