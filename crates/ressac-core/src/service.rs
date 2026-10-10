@@ -35,6 +35,10 @@ const LINK_GUIDS: usize = 20;
 pub const DISCOVERY_RECHECK_DAYS: i64 = 30;
 const PROBE_CONCURRENCY: usize = 8;
 pub const PRODUCTION_WAYBACK: &str = "https://archive.org";
+/// New entries extracted per `prefer_full_text` feed and refresh (spec §6).
+pub const FULLTEXT_PER_FEED_PER_RUN: usize = 20;
+/// The `what` of the `Probing` event announcing the full-article pass of a refresh.
+pub const FULL_ARTICLES: &str = "full articles";
 
 #[derive(Debug, Clone, Default)]
 pub struct RefreshOptions {
@@ -70,6 +74,21 @@ pub enum Event {
     Finished {
         summary: Summary,
     },
+    /// One full-article extraction, stored either way. `error` is the stored sentence.
+    Extracted {
+        entry_id: i64,
+        ok: bool,
+        error: Option<String>,
+    },
+    /// A garden decision recorded by `ressac garden decide` (`keep`, `repair` or `bury`).
+    Decided {
+        feed_id: FeedId,
+        decision: String,
+    },
+    /// `ressac garden undo`: the feed whose decision was undone, `None` when nothing was left.
+    Undone {
+        feed_id: Option<FeedId>,
+    },
 }
 
 pub trait EventSink {
@@ -80,6 +99,19 @@ pub struct NullSink;
 
 impl EventSink for NullSink {
     fn emit(&self, _: &Event) {}
+}
+
+/// What `Ressac::extract_entry` did. `NoUrl` and `UnknownEntry` store nothing and emit nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtractOutcome {
+    /// The article was extracted and stored.
+    Saved,
+    /// The failure sentence that was stored (for example "HTTP 404.").
+    Failed(String),
+    /// The entry has no link to fetch.
+    NoUrl,
+    /// No entry has this id.
+    UnknownEntry,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -767,5 +799,44 @@ mod tests {
             )
             .unwrap();
         assert!(flag, "diagnose_all stores the triage flags");
+    }
+
+    #[test]
+    fn reading_and_garden_events_have_stable_json() {
+        let json = |e: Event| serde_json::to_value(e).unwrap();
+        assert_eq!(
+            json(Event::Extracted {
+                entry_id: 3,
+                ok: false,
+                error: Some("HTTP 404.".into()),
+            }),
+            serde_json::json!({"event": "extracted", "entry_id": 3, "ok": false, "error": "HTTP 404."})
+        );
+        assert_eq!(
+            json(Event::Extracted {
+                entry_id: 4,
+                ok: true,
+                error: None,
+            }),
+            serde_json::json!({"event": "extracted", "entry_id": 4, "ok": true, "error": null})
+        );
+        assert_eq!(
+            json(Event::Decided {
+                feed_id: 2,
+                decision: "bury".into(),
+            }),
+            serde_json::json!({"event": "decided", "feed_id": 2, "decision": "bury"})
+        );
+        assert_eq!(
+            json(Event::Undone { feed_id: None }),
+            serde_json::json!({"event": "undone", "feed_id": null})
+        );
+        assert_eq!(
+            json(Event::Probing {
+                what: FULL_ARTICLES.into(),
+                total: FULLTEXT_PER_FEED_PER_RUN,
+            }),
+            serde_json::json!({"event": "probing", "what": "full articles", "total": 20})
+        );
     }
 }

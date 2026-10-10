@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use ressac_core::model::Status;
-use ressac_core::service::{Event, EventSink, Summary};
+use ressac_core::service::{Event, EventSink, FULL_ARTICLES, Summary};
 use ressac_core::store::ImportReport;
 
 /// Order of the `check` summary grid (three per line).
@@ -127,10 +127,23 @@ impl EventSink for Sink {
                 Event::NetworkUnreachable { failed, attempted } => bar.println(format!(
                     "Network looks unreachable ({failed}/{attempted} feeds could not connect) — results not recorded as failures."
                 )),
-                Event::Probing { what, total } => bar.set_message(format!("probing {what} for {total} feeds…")),
-                Event::WaybackDone { .. } | Event::Finished { .. } => {}
+                Event::Probing { what, total } => bar.set_message(probing_message(what, *total)),
+                Event::WaybackDone { .. }
+                | Event::Finished { .. }
+                | Event::Extracted { .. }
+                | Event::Decided { .. }
+                | Event::Undone { .. } => {}
             },
         }
+    }
+}
+
+/// Progress-bar message for a probe phase. The full-article pass counts entries, not feeds.
+fn probing_message(what: &str, total: usize) -> String {
+    if what == FULL_ARTICLES {
+        format!("fetching {total} full articles…")
+    } else {
+        format!("probing {what} for {total} feeds…")
     }
 }
 
@@ -278,5 +291,14 @@ mod tests {
         );
         assert!(text.contains("run `ressac garden` to triage"), "{text}");
         assert!(!text.contains("Unchecked"), "zero Unchecked is hidden");
+    }
+
+    #[test]
+    fn probing_message_names_full_articles_by_count() {
+        assert_eq!(probing_message("https", 3), "probing https for 3 feeds…");
+        assert_eq!(
+            probing_message(ressac_core::service::FULL_ARTICLES, 20),
+            "fetching 20 full articles…"
+        );
     }
 }
