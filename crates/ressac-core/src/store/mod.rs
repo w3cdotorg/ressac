@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 
 mod feeds;
 mod fetch;
+mod health;
 
 pub use feeds::{FeedRow, FolderRow, ImportReport};
 pub use fetch::{AttemptRecord, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
