@@ -337,7 +337,7 @@ fn remarks(ev: &FeedEvidence) -> Vec<Remark> {
             out.push(Remark::HttpOnly);
         }
     }
-    if last.is_some_and(|a| a.error == Some(ErrorKind::Http(403))) {
+    if last.is_some_and(|a| matches!(a.error, Some(ErrorKind::Http(403) | ErrorKind::Challenge))) {
         out.push(Remark::Blocked);
     }
     let fallback = ev.entries.iter().filter(|e| e.is_fallback).count();
@@ -764,6 +764,16 @@ mod tests {
         let d = diagnose(&ev(vec![failed(0, ErrorKind::Http(403))], vec![]));
         assert_eq!(d.status, Status::Ailing);
         assert!(d.remarks.contains(&Remark::Blocked));
+    }
+
+    #[test]
+    fn challenge_page_is_ailing_and_blocked() {
+        let d = diagnose(&ev(vec![failed(0, ErrorKind::Challenge)], vec![]));
+        assert_eq!(d.status, Status::Ailing);
+        assert_eq!(d.reason, "Last fetch failed: anti-bot challenge page.");
+        assert!(d.remarks.contains(&Remark::Blocked));
+        let plain = diagnose(&ev(vec![failed(0, ErrorKind::Http(503))], vec![]));
+        assert!(!plain.remarks.contains(&Remark::Blocked));
     }
 
     #[test]
