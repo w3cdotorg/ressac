@@ -2,6 +2,7 @@
 
 pub mod discover;
 pub mod error;
+pub mod garden;
 pub mod health;
 pub mod model;
 pub mod opml;
