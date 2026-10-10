@@ -442,3 +442,55 @@ enum PendingPanel: Equatable, Sendable {
         }).sorted { ($0.publishedAt, $0.entryId) > ($1.publishedAt, $1.entryId) }
     }
 }
+
+/// Opens the database the way spec §8 asks: helper present, schema checked, `ressac
+/// migrate` first when the schema is older or the file does not exist yet.
+@MainActor @Observable final class Launcher {
+    enum Phase {
+        case starting
+        /// Creating (no file yet) or upgrading the database with `ressac migrate`.
+        case migrating
+        case tooNew(Int)
+        case failed(String)
+        case ready(AppState)
+    }
+
+    private(set) var phase = Phase.starting
+
+    var state: AppState? {
+        if case let .ready(state) = phase { state } else { nil }
+    }
+
+    /// True inside the unit-test host, where the app must not open the real database.
+    static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
+    func launch(database url: URL, executable: URL?) async {
+        guard let executable else {
+            phase = .failed("The ressac helper is missing from the app bundle. Rebuild the app.")
+            return
+        }
+        let runs = RunCoordinator(cli: RessacCLI(executable: executable, database: url))
+        do {
+            switch try AppDatabase.check(at: url) {
+            case let .tooNew(version):
+                phase = .tooNew(version)
+                return
+            case .missing, .needsMigration:
+                // A missing file is created by `migrate` too: the first-run screen then
+                // deals with "no feeds" only (phase 11).
+                phase = .migrating
+                guard await runs.submit(.migrate()), try AppDatabase.check(at: url) == .ok else {
+                    phase = .failed(runs.banner?.message ?? "The database could not be migrated.")
+                    return
+                }
+            case .ok:
+                break
+            }
+            phase = .ready(AppState(database: try AppDatabase.open(at: url), runs: runs))
+        } catch {
+            phase = .failed("Cannot open \(url.path): \(error.localizedDescription)")
+        }
+    }
+}

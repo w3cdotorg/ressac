@@ -254,3 +254,71 @@ func calls(_ stub: Stub) throws -> [String] {
         ])
     }
 }
+
+@MainActor @Suite struct LauncherTests {
+    /// Review Focus #4 (app side): a v1 database goes through `ressac migrate`, then opens.
+    @Test func v1_database_is_migrated_before_opening() async throws {
+        let test = try TestDatabase()
+        let v1 = test.dir.appending(path: "v1.sqlite")
+        try TestDatabase.makeV1(at: v1)
+        // The stub "migrates" by copying the v2 fixture over the --db file.
+        let stub = try Stub("""
+            [ "$4" = migrate ] || exit 2
+            cp "\(TestDatabase.fixture.path)" "$2"
+            echo '{"event":"finished"}'
+            """)
+        let launcher = Launcher()
+        await launcher.launch(database: v1, executable: stub.executable)
+        #expect(launcher.state != nil)
+        #expect(try AppDatabase.check(at: v1) == .ok)
+    }
+
+    @Test func failed_migration_is_reported() async throws {
+        let test = try TestDatabase()
+        let v1 = test.dir.appending(path: "v1.sqlite")
+        try TestDatabase.makeV1(at: v1)
+        let stub = try Stub("echo 'error: disk full' >&2; exit 1")
+        let launcher = Launcher()
+        await launcher.launch(database: v1, executable: stub.executable)
+        guard case let .failed(message) = launcher.phase else {
+            Issue.record("expected a failure, got \(launcher.phase)")
+            return
+        }
+        #expect(message == "error: disk full")
+    }
+
+    @Test func newer_database_is_refused() async throws {
+        let test = try TestDatabase()
+        try test.execute("UPDATE schema_meta SET version = 3")
+        let launcher = Launcher()
+        await launcher.launch(database: test.url, executable: try Stub("exit 0").executable)
+        guard case .tooNew(3) = launcher.phase else {
+            Issue.record("expected tooNew(3), got \(launcher.phase)")
+            return
+        }
+    }
+
+    @Test func missing_database_is_created_by_migrate() async throws {
+        let test = try TestDatabase()
+        let fresh = test.dir.appending(path: "new/ressac.sqlite")
+        let stub = try Stub("""
+            [ "$4" = migrate ] || exit 2
+            mkdir -p "$(dirname "$2")" && cp "\(TestDatabase.fixture.path)" "$2"
+            echo '{"event":"finished"}'
+            """)
+        let launcher = Launcher()
+        await launcher.launch(database: fresh, executable: stub.executable)
+        #expect(launcher.state != nil)
+    }
+
+    @Test func missing_helper_is_fatal() async throws {
+        let test = try TestDatabase()
+        let launcher = Launcher()
+        await launcher.launch(database: test.url, executable: nil)
+        guard case let .failed(message) = launcher.phase else {
+            Issue.record("expected a failure, got \(launcher.phase)")
+            return
+        }
+        #expect(message.hasPrefix("The ressac helper is missing"))
+    }
+}
