@@ -124,7 +124,7 @@ time ./target/release/ressac --db "$DB" check
 ```
 
 Expected:
-- **Import:** 186 feeds added (187 minus the Daring Fireball duplicate) in 13 folders, with 1 merge.
+- **Import:** 186 feeds added (187 minus the Daring Fireball duplicate) in 16 folders, with 1 merge.
 - **Check:** runs for a few minutes, then prints the summary.
 
 - [ ] **Step 2: Inspect the results**

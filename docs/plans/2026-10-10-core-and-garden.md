@@ -15,7 +15,7 @@
 
 ## Phase files
 
-Each phase touches at most 5 files (project rule). Execute in order. Each phase ends with the verification gate below, and with a **stop for the user's explicit approval** before the next phase (project CLAUDE.md), unless the user waives it.
+Each phase touches at most 5 files (project rule). Execute in order. Each phase ends with the verification gate below. The user waived the stop between phases on 2026-10-10 ("continue unless you need a decision from me"): report progress and continue; stop only for a genuine decision.
 
 | Phase | File | Deliverable |
 |---|---|---|
@@ -60,7 +60,9 @@ Each phase touches at most 5 files (project rule). Execute in order. Each phase 
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`
 - Before any cargo command: `export PATH="/opt/homebrew/bin:$PATH"`.
-- Commit after each task. Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- Commit after each task. Commit messages end with these two lines (overriding the single line shown in phase files):
+  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
+  `Claude-Session: https://claude.ai/code/session_01SCujX8NRvCZ5dpWQPiKUDm`
 - Push with `git -c credential.helper= -c credential.helper='!gh auth git-credential' push` (no global git config change).
 - Log surprises and API findings in `notes.md` (French) as they happen.
 
@@ -88,7 +90,7 @@ These names are fixed across phases. Each phase restates the ones it uses.
   - lifecycle: `open`, `open_in_memory`, `schema_version`;
   - feeds and import: `import_outlines`, `feeds`, `feed`, `folders`, `folder_paths`;
   - fetching: `record_attempt`, `mark_network_suspect`, `feeds_to_fetch`, `attempts`, `entries`;
-  - health and probes: `save_diagnosis`, `diagnosis`, `diagnoses`, `set_https_available`, `set_discovery`, `set_wayback`;
+  - health and probes: `save_diagnoses`, `diagnosis`, `diagnoses`, `set_https_available`, `set_discovery`, `set_wayback`;
   - decisions: `record_decision`, `undo_last_decision`, `latest_decisions`.
 - **`store` free items and records:** `default_path()`, `SCHEMA_VERSION`. Records: `FeedRow`, `FolderRow`, `ImportReport`, `AttemptRecord`, `EntryRecord`, `DecisionRecord`, `FeedSnapshot`.
 - **`opml`:** `Outline`, `OpmlFeed`, `parse`, `clean_description`, `export`.
@@ -100,5 +102,5 @@ These names are fixed across phases. Each phase restates the ones it uses.
   - `links::{LinkInput, find_duplicates, apply_similar_titles}`.
 - **`discover`:** `alternate_feeds`, `same_feed`.
 - **`wayback`:** `Wayback::{new, closest}`.
-- **`service`:** `Ressac` (`open`, `with_parts`, `store`, `import_opml`, `refresh`, `diagnose_all`, `lookup_wayback`, `summary`, `export_opml`), `RefreshOptions`, `Event`, `EventSink`, `NullSink`, `Summary`.
+- **`service`:** `Ressac` (`open`, `with_parts`, `store`, `import_opml`, `refresh`, `diagnose_all`, `lookup_wayback`, `summary`). OPML export is `opml::export(&Store, cemetery)`, `RefreshOptions`, `Event`, `EventSink`, `NullSink`, `Summary`.
 - **`garden`:** `GardenRow`, `needs_triage`, `load_rows`, `Progress`, `progress`, `safe_repairs`, `decide`, `undo`, `apply_safe_repairs`.
