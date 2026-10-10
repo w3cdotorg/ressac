@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{Error, Result};
 
@@ -29,6 +29,19 @@ const MIGRATIONS: &[(i64, &str)] = &[
 
 /// The migration after which existing entries get their search rows.
 const FTS_MIGRATION: i64 = 2;
+
+/// `schema_meta.version`, or 0 for a database without it.
+fn read_version(conn: &Connection) -> Result<i64> {
+    let has_meta: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_meta == 0 {
+        return Ok(0);
+    }
+    Ok(conn.query_row("SELECT version FROM schema_meta", [], |r| r.get(0))?)
+}
 
 pub struct Store {
     conn: Connection,
@@ -78,17 +91,7 @@ impl Store {
     }
 
     pub fn schema_version(&self) -> Result<i64> {
-        let has_meta: i64 = self.conn.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
-            [],
-            |r| r.get(0),
-        )?;
-        if has_meta == 0 {
-            return Ok(0);
-        }
-        Ok(self
-            .conn
-            .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))?)
+        read_version(&self.conn)
     }
 
     fn migrate(&mut self) -> Result<()> {
@@ -99,15 +102,21 @@ impl Store {
                 known: SCHEMA_VERSION,
             });
         }
-        let pending: Vec<&(i64, &str)> = MIGRATIONS.iter().filter(|(v, _)| *v > current).collect();
-        if pending.is_empty() {
+        if MIGRATIONS.iter().all(|(v, _)| *v <= current) {
             return Ok(());
         }
         if current > 0 {
             self.backup(current)?;
         }
-        for (version, sql) in pending {
-            let tx = self.conn.transaction()?;
+        for (version, sql) in MIGRATIONS {
+            // The write lock is taken first and the version re-read under it, so a second
+            // process migrating at the same time finds the work done instead of failing.
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if read_version(&tx)? >= *version {
+                continue;
+            }
             tx.execute_batch(sql)?;
             if *version == FTS_MIGRATION {
                 reading::backfill_fts(&tx)?;
@@ -118,10 +127,15 @@ impl Store {
         Ok(())
     }
 
-    /// Copies the database to `ressac.sqlite.bak-v<version>` before migrating it.
+    /// Copies the database to `ressac.sqlite.bak-v<version>` before migrating it. An
+    /// existing copy is kept: it is a snapshot of the same version from an earlier attempt.
     fn backup(&self, version: i64) -> Result<()> {
         if let Some(path) = &self.path {
             let dest = path.with_extension(format!("sqlite.bak-v{version}"));
+            if dest.exists() {
+                tracing::info!(backup = %dest.display(), "backup already exists, keeping it");
+                return Ok(());
+            }
             self.conn
                 .execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])?;
         }
@@ -245,7 +259,11 @@ mod tests {
                  (1, 1, 'a', 'Tides', NULL, '2020-01-01T00:00:00.000Z', '<p>harbour</p>', NULL, NULL, \
                  '2026-01-01T00:00:00.000Z'), \
                  (2, 1, 'b', NULL, 'Ada', '2020-01-02T00:00:00.000Z', '<p>short</p>', \
-                 '<p>Lighthouse &amp; pier</p>', '2026-01-05T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
+                 '<p>Lighthouse &amp; pier</p>', '2026-01-05T00:00:00.000Z', '2026-01-01T00:00:00.000Z'), \
+                 (3, 1, 'c', NULL, NULL, '2020-01-03T00:00:00.000Z', NULL, NULL, NULL, \
+                 '2026-01-01T00:00:00.000Z'), \
+                 (4, 1, 'd', 'Menu', NULL, '2020-01-04T00:00:00.000Z', '<p>un caf\u{e9}</p>', NULL, NULL, \
+                 '2026-01-01T00:00:00.000Z');",
             )
             .unwrap();
         }
@@ -262,14 +280,23 @@ mod tests {
             .collect();
         assert_eq!(
             read,
-            [None, Some("2026-01-05T00:00:00.000Z".to_string())],
+            [
+                None,
+                Some("2026-01-05T00:00:00.000Z".to_string()),
+                None,
+                None
+            ],
             "no backlog rule on migration"
         );
         let indexed: i64 = store
             .conn()
             .query_row("SELECT count(*) FROM entry_fts", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(indexed, 2);
+        assert_eq!(
+            indexed, 4,
+            "NULL title, summary and content still get a row"
+        );
+        assert_eq!(store.search_ids("cafe").unwrap(), [4], "remove_diacritics");
         assert_eq!(store.search_ids("harbour").unwrap(), [1]);
         assert_eq!(store.search_ids("lighthouse").unwrap(), [2]);
         assert_eq!(store.search_ids("author:ada").unwrap(), [2]);
@@ -277,5 +304,59 @@ mod tests {
             store.search_ids("short").unwrap().is_empty(),
             "content_html wins over summary_html"
         );
+    }
+
+    #[test]
+    fn migration_survives_an_existing_backup_and_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        {
+            let v1 = Connection::open(&path).unwrap();
+            v1.execute_batch(MIGRATIONS[0].1).unwrap();
+        }
+        let bak = path.with_extension("sqlite.bak-v1");
+        std::fs::write(&bak, b"earlier attempt").unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(std::fs::read(&bak).unwrap(), b"earlier attempt");
+        drop(store);
+        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 2);
+    }
+
+    #[test]
+    fn a_failing_migration_leaves_v1_untouched_and_is_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        {
+            let v1 = Connection::open(&path).unwrap();
+            v1.execute_batch(MIGRATIONS[0].1).unwrap();
+            // Poison: 0002 creates this table, after its ALTERs have already run.
+            v1.execute_batch("CREATE TABLE entry_fulltext (x)").unwrap();
+        }
+        assert!(Store::open(&path).is_err());
+        let raw = Connection::open(&path).unwrap();
+        let version: i64 = raw
+            .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let leftovers: i64 = raw
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name IN ('entry_fts', 'v_entry', 'entry_unread')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftovers, 0, "no partial v2 objects");
+        let columns: i64 = raw
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('feed') WHERE name = 'prefer_full_text'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 0, "ALTER rolled back");
+        raw.execute_batch("DROP TABLE entry_fulltext").unwrap();
+        drop(raw);
+        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 2);
     }
 }

@@ -122,26 +122,23 @@ pub(super) fn index_entry(
 pub(super) fn backfill_fts(conn: &Connection) -> rusqlite::Result<usize> {
     let mut stmt =
         conn.prepare("SELECT id, title, author, COALESCE(content_html, summary_html) FROM entry")?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, title, author, html) in &rows {
+    let mut rows = stmt.query([])?;
+    let mut count = 0;
+    while let Some(r) = rows.next()? {
+        let id: i64 = r.get(0)?;
+        let title: Option<String> = r.get(1)?;
+        let author: Option<String> = r.get(2)?;
+        let html: Option<String> = r.get(3)?;
         index_entry(
             conn,
-            *id,
+            id,
             title.as_deref(),
             author.as_deref(),
             html.as_deref(),
         )?;
+        count += 1;
     }
-    Ok(rows.len())
+    Ok(count)
 }
 
 impl Store {
