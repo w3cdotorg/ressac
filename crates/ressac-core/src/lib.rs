@@ -9,5 +9,6 @@ pub mod parse;
 pub mod source;
 pub mod store;
 pub mod url_key;
+pub mod wayback;
 
 pub use error::{Error, Result};
