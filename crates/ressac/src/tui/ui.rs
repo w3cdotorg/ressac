@@ -11,7 +11,11 @@ use ressac_core::model::Status;
 use crate::output::glyph;
 use crate::tui::state::{GardenState, Mode};
 
-const KEYS: &str = "k keep  r repair  b bury  ↵ details  o site  w wayback  u undo  f filter  R safe repairs  ? help  q quit";
+fn keys_hint(repairs: usize) -> String {
+    format!(
+        "k keep  r repair  b bury  ↵ details  o site  w wayback  u undo  f filter  R safe repairs ({repairs})  ? help  q quit"
+    )
+}
 
 pub fn render(frame: &mut Frame, state: &GardenState) {
     let [header, body, footer] = Layout::vertical([
@@ -32,7 +36,7 @@ pub fn render(frame: &mut Frame, state: &GardenState) {
     }
     let footer_text = match &state.message {
         Some(msg) => Line::from(msg.clone()).bold(),
-        None => Line::from(KEYS).dim(),
+        None => Line::from(keys_hint(state.safe_repair_count())).dim(),
     };
     frame.render_widget(
         Paragraph::new(footer_text).wrap(Wrap { trim: true }),

@@ -14,6 +14,7 @@ indicatif.workspace = true
 open.workspace = true
 ratatui.workspace = true
 ressac-core = { path = "../ressac-core" }
+url.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -215,7 +215,11 @@ impl GardenState {
 
     fn open(&mut self, pick: impl Fn(&GardenRow) -> Option<String>, missing: &str) -> Command {
         match self.selected_row().map(pick) {
-            Some(Some(url)) => Command::Open(url),
+            Some(Some(url)) if is_web_url(&url) => Command::Open(url),
+            Some(Some(_)) => {
+                self.message = Some("Refusing to open a non-web address.".into());
+                Command::None
+            }
             Some(None) => {
                 self.message = Some(missing.to_string());
                 Command::None
@@ -223,6 +227,11 @@ impl GardenState {
             None => Command::None,
         }
     }
+}
+
+/// Feed and OPML content is untrusted: only http(s) addresses may reach the system opener.
+fn is_web_url(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
 }
 
 #[cfg(test)]
@@ -386,6 +395,28 @@ mod tests {
         assert_eq!(s.selected, 0);
         s.on_key(key(KeyCode::PageDown));
         assert_eq!(s.selected, 3);
+    }
+
+    #[test]
+    fn open_refuses_non_web_addresses() {
+        let mut s = state();
+        s.rows[0].html_url = Some("file:///etc/passwd".into());
+        assert_eq!(s.on_key(key(KeyCode::Char('o'))), Command::None);
+        assert_eq!(
+            s.message.as_deref(),
+            Some("Refusing to open a non-web address.")
+        );
+        s.rows[0].wayback_url = Some("x-custom://run".into());
+        assert_eq!(s.on_key(key(KeyCode::Char('w'))), Command::None);
+        assert_eq!(
+            s.message.as_deref(),
+            Some("Refusing to open a non-web address.")
+        );
+        s.rows[0].html_url = Some("https://example.org/".into());
+        assert_eq!(
+            s.on_key(key(KeyCode::Char('o'))),
+            Command::Open("https://example.org/".into())
+        );
     }
 
     #[test]
