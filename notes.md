@@ -27,6 +27,43 @@ Trouvailles, décisions et pièges rencontrés en route. Le plus récent en haut
 - **Formats** : un JSON Feed (Six Colors, `feed.json`, et son `htmlUrl` pointe vers `?feed=json`), un RDF (`index.rdf`), 13 flux YouTube, des flux GitHub releases (Atom), des flux générés (raw.githubusercontent.com Olshansk).
 - Sites probablement fermés : Recode, longform.org, FiveThirtyEight. À confirmer par `ressac check`.
 
+## Premier essai réel (10/10/2026)
+
+Base jetable dans le scratchpad (`--db …/vienna-run.sqlite`, `HOME` redirigé pour les journaux), OPML lu en lecture seule. Aucune décision de jardin prise : le tri reste à faire.
+
+- **Import** : 186 flux dans 16 dossiers, 1 fusion (« Daring Fireball (1) » → « Daring Fireball »), conforme à l'attendu.
+- **Durée** : premier `check` en 1 min 12 s (les 186 récupérations en 22 s, le reste en sondes https, autodécouverte et Wayback à 1 requête/s). Un `check` relancé dans les 30 min ne refait que le diagnostic et les Wayback manquants : 20 s.
+- **Avant calibrage** : Alive 91, Fossil 63, Dormant 13, Ailing 6, Dead 6, Moved 5, Hijacked 1, Duplicate 1. 88 réparations sûres (83 https, 5 redirections).
+- **Après calibrage** : Alive 92, Fossil 63, Dormant 13, Ailing 7, Dead 6, Moved 4, Hijacked 0, Duplicate 1. 87 réparations sûres (83 https, 4 redirections). Aucun `Unchecked`, aucun 429.
+- **Export** : `ressac export | grep -c xmlUrl` = 186 ; `--cemetery` = 0 (rien n'est enterré).
+
+### Verdicts notables
+
+- **Dead** : Bibliobsession 2.0 (404 après passage en https ; score de détournement 0,4 grâce au lexique vietnamien de la description OPML), Blog de veille bm et Renaissance du cinéma (410 WordPress.com), Bom Bom (410 Canalblog), Technologies du Langage (blog.veronis.fr ne résout plus), action button dot net (301 vers innisfreehouseschool.com puis cinderellaaffair.org, qui ne résout pas : le domaine a été revendu ; le libellé « The domain no longer resolves » parle du dernier saut).
+- **Moved (vrais positifs)** : Libération (rss.liberation.fr → outboundfeeds Arc), Schneier on Security (atom.xml → /feed/atom/), Morgane Tual (?feed=rss2 → www…/feed/), **Six Colors** : le serveur répond bien `301` de `/feed.json` vers `/?feed=json` (JSON Feed valide, `application/feed+json`), donc vrai positif.
+- **Ailing** : **Unphotographable** : le serveur sert bien `index.rdf` (200, `application/rdf+xml`, 23 Ko) mais le XML est invalide (`&` nus dans les descriptions, `xmllint` : « xmlParseEntityRef: no name »), donc vrai positif ; Re/code (500 « Fastly error: unknown domain » : le site n'existe plus) ; FiveThirtyEight (301 vers abcnews.com/politics, page HTML) ; POLICEtcetera (blog Le Monde : 301 vers lemonde.fr/blog/moreas/feed/, qui renvoie une page « Client Challenge » anti-robots) ; ioudgine (Typepad fermé : 302 vers networksolutions.com puis 403) ; UnderwaterTimes.com (403 Cloudflare, y compris avec un User-Agent de navigateur) ; Slate's Culture Gabfest (12 018 024 octets, au-dessus du plafond de 10 Mo).
+- **Duplicate** : Google Blog: Research (#158) : ses 20 entrées figurent toutes dans Google Blog: Innovation & AI (#156). C'est une sous-catégorie, donc un sous-ensemble : conforme à la règle, mais la fusion reste au choix de l'utilisateur.
+- **Fossil** : 63 flux, dernière entrée entre 2008 et 2024. longform.org (fermé en 2024) répond toujours avec ses anciennes entrées : Fossil 2024, pas Dead. Orange Drenka (2014) et Orange-Drenka (2013) sont tous deux Fossil : pas de remarque `similar_title`, qui exige un côté Alive/Dormant.
+- **Remarques** : 84 `https_available` et 16 `http_only` sur les 100 flux en `http://`. 2 `blocked` (403 : ioudgine, UnderwaterTimes.com).
+- **Témoins vivants** : BBC News, Le Monde.fr, Le Monde diplomatique, xkcd, les deux flux de Simon Willison, Daring Fireball : tous Alive, sans faux positif.
+- **Scores de détournement résiduels** (sous le seuil, statut inchangé) : ReadWriteWeb 0,4 (« betting », « sportsbook » : le site publie réellement du contenu de paris en ligne), cpb news et Girl on the Couch 0,4 (description en anglais, billets en français : autrices bilingues).
+
+### Faux positifs corrigés (commit d4da65c)
+
+1. **Lexique de spam en sous-chaîne** : « cialis » trouvé dans « socialist », « specialist », « écosocialiste », « specialising ». Score 0,4 à tort sur Libération, Pluralistic, OpenAI News, Bookride, ANIMALS TALKING IN ALL CAPS, Smoke & a Coke. Corrigé : correspondance par mot entier (`lexicon_matches_whole_words_only`). Effet de bord utile : l'export OPML ne supprime plus les descriptions qui contiennent « specialist ».
+2. **FiveThirtyEight classé Hijacked** : redirection vers un autre domaine (0,3) + page HTML (0,3) = 0,6 sans aucun indice de contenu. C'est la signature d'un site fermé par son propriétaire, pas d'un spam. Corrigé : la redirection et la page HTML ne comptent qu'en appui d'un signal de contenu (lexique ou langue) (`redirect_to_html_without_content_signal_is_not_a_hijack`, `owner_shutdown_redirect_is_ailing_not_hijacked`). Résout aussi l'écart spec/plan de la phase 5 sur `HtmlInsteadOfFeed` : sans signal de contenu, la page HTML ne pèse plus rien. Seuil `HIJACK_THRESHOLD` inchangé, poids inchangés.
+3. **Actualitté classé Moved** : `301` www → domaine nu (même `url_key`), puis `302` vers `/rss-main.rss` ; la cible temporaire était proposée comme réparation « sûre ». Corrigé : seule la suite initiale de sauts permanents (301/308) peut déplacer un flux (`temporary_hop_after_a_permanent_one_is_not_a_move`, `move_target_is_the_end_of_the_permanent_hops`).
+
+### Questions ouvertes pour l'utilisateur
+
+- **Détournements non détectés** : apps & stacks (description vietnamienne sur des urinoirs), Publishers Weekly (avocate brésilienne, 0 entrée) et HIPSTAMATIC SKYRIM (recettes en anglais avec fermes de liens) restent Fossil avec un score de 0. La langue de la description n'a rien à quoi se comparer (titre trop court, pas ou presque pas d'entrées), et les recettes sont dans la même langue que le titre. Faut-il un nouveau signal (par exemple la langue des autres flux du dossier) ? Ils apparaîtront de toute façon dans le jardin comme Fossil.
+- **Sites fermés vus comme Ailing au premier passage** : Re/code (500 Fastly « unknown domain »), FiveThirtyEight (301 vers une page ABC News), ioudgine (Typepad fermé) ne deviendront Dead qu'après 5 échecs sur 14 jours. Faut-il un raccourci (redirection vers un autre domaine qui finit en erreur ou en HTML) ?
+- **Page anti-robots** : POLICEtcetera reçoit une page « Client Challenge » de Le Monde, classée `HtmlInsteadOfFeed`. La traiter comme un blocage (`blocked`) ?
+- **Plafond de 10 Mo** : Slate's Culture Gabfest pèse 12 Mo (podcast). Relever le plafond pour les podcasts, ou les laisser Ailing ?
+- **XML invalide** : Unphotographable (`&` nus, dernière entrée en 2017) ; NetNewsWire et Vienna tolèrent ce genre de flux. Ajouter une relecture tolérante, ou laisser Ailing ?
+- **Google Blog: Research** est un sous-ensemble de Google Blog: Innovation & AI : fusion ou garder les deux ?
+- **Bibliobsession 2.0** : Dead, mais l'indice de spam (0,4) n'apparaît pas dans les preuves affichées, seulement le 404. Faut-il l'y montrer ?
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
