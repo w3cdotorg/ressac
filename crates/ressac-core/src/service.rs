@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::discover::{alternate_feeds, same_feed};
 use crate::error::Result;
+use crate::garden;
 use crate::health::links::{LinkInput, apply_similar_titles, find_duplicates};
 use crate::health::{FeedEvidence, diagnose};
 use crate::model::{Action, Diagnosis, ErrorKind, FeedId, Status, parse_ts, ts};
@@ -35,9 +36,13 @@ pub const DISCOVERY_RECHECK_DAYS: i64 = 30;
 const PROBE_CONCURRENCY: usize = 8;
 pub const PRODUCTION_WAYBACK: &str = "https://archive.org";
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RefreshOptions {
+    /// Ignore the 30-minute freshness rule.
     pub force: bool,
+    /// Restrict the fetch to these feeds (buried ones are still skipped). Diagnosis
+    /// always covers every feed, because duplicate detection is cross-feed.
+    pub only: Option<Vec<FeedId>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -133,8 +138,9 @@ impl Ressac {
         self.store.import_outlines(&outlines, dry_run, Utc::now())
     }
 
-    /// Fetches due feeds (writing each attempt as it arrives), applies the network guard,
-    /// probes https variants and autodiscovery, then diagnoses every active feed.
+    /// Fetches due feeds, or the due feeds among `opts.only` (writing each attempt as it
+    /// arrives), applies the network guard, probes https variants and autodiscovery, then
+    /// diagnoses every active feed.
     pub async fn refresh(
         &self,
         opts: RefreshOptions,
@@ -143,7 +149,10 @@ impl Ressac {
     ) -> Result<Summary> {
         let started = Utc::now();
         let run_id = ts(started);
-        let due = self.store.feeds_to_fetch(started, opts.force)?;
+        let mut due = self.store.feeds_to_fetch(started, opts.force)?;
+        if let Some(only) = &opts.only {
+            due.retain(|f| only.contains(&f.id));
+        }
         let titles: HashMap<FeedId, String> = self
             .store
             .feeds()?
@@ -303,7 +312,7 @@ impl Ressac {
         Ok(())
     }
 
-    /// Diagnoses every active feed and stores the results.
+    /// Diagnoses every active feed, stores the results and the garden's triage flags.
     pub fn diagnose_all(&self, now: DateTime<Utc>) -> Result<Summary> {
         let feeds: Vec<FeedRow> = self
             .store
@@ -355,6 +364,7 @@ impl Ressac {
             .collect();
         apply_similar_titles(&inputs, &mut diags);
         self.store.save_diagnoses(&diags, now)?;
+        garden::recompute_triage(&self.store)?;
         self.summary()
     }
 
@@ -685,5 +695,77 @@ mod tests {
                 "{e:?}"
             );
         }
+    }
+
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<Event>>);
+
+    impl EventSink for Recorder {
+        fn emit(&self, event: &Event) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subset_refresh_fetches_only_the_named_active_feeds_and_diagnoses_all() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        serve(&server, "/gone.xml", 410, "", "text/plain").await;
+        serve(&server, "/other.xml", 200, RSS, "application/rss+xml").await;
+        serve(&server, "/buried.xml", 200, RSS, "application/rss+xml").await;
+        let limits = FetchLimits {
+            per_host_gap: Duration::ZERO,
+            timeout: Duration::from_secs(5),
+            ..FetchLimits::default()
+        };
+        let app = Ressac::with_parts(Store::open_in_memory().unwrap(), limits, &base).unwrap();
+        let opml = format!(
+            r#"<opml><body><outline text="Gone" xmlUrl="{base}/gone.xml"/>
+            <outline text="Other" xmlUrl="{base}/other.xml"/>
+            <outline text="Buried" xmlUrl="{base}/buried.xml"/></body></opml>"#
+        );
+        app.import_opml(&opml, false).unwrap();
+        garden::decide(app.store(), 3, crate::model::Decision::Bury, Utc::now()).unwrap();
+
+        let recorder = Recorder::default();
+        let opts = RefreshOptions {
+            force: false,
+            only: Some(vec![1, 3]),
+        };
+        app.refresh(opts, &recorder, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap();
+
+        let events = recorder.0.lock().unwrap().clone();
+        assert!(matches!(events.first(), Some(Event::Started { total: 1 })));
+        let done: Vec<FeedId> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::FeedDone { feed_id, .. } => Some(*feed_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(done, [1], "the buried feed is skipped even when named");
+        assert!(app.store().attempts(2, 1).unwrap().is_empty());
+        assert!(app.store().attempts(3, 1).unwrap().is_empty());
+        assert_eq!(
+            app.store().diagnosis(1).unwrap().map(|d| d.status),
+            Some(Status::Dead)
+        );
+        assert_eq!(
+            app.store().diagnosis(2).unwrap().map(|d| d.status),
+            Some(Status::Unchecked),
+            "diagnosis covers every active feed"
+        );
+        let flag: bool = app
+            .store()
+            .conn()
+            .query_row(
+                "SELECT needs_triage FROM v_garden_row WHERE feed_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(flag, "diagnose_all stores the triage flags");
     }
 }

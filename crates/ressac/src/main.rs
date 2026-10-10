@@ -186,7 +186,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             };
             let sink = output::sink(cli.json);
             let result = app
-                .refresh(RefreshOptions { force }, &sink, stop.clone())
+                .refresh(RefreshOptions { force, only: None }, &sink, stop.clone())
                 .await;
             sink.finish();
             let summary = result?;
@@ -201,7 +201,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             };
             let sink = output::sink(cli.json);
             let refreshed = app
-                .refresh(RefreshOptions { force }, &sink, stop.clone())
+                .refresh(RefreshOptions { force, only: None }, &sink, stop.clone())
                 .await;
             let refreshed = match refreshed {
                 Ok(s) => s,
