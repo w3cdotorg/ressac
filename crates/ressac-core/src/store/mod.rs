@@ -7,6 +7,10 @@ use rusqlite::Connection;
 
 use crate::error::{Error, Result};
 
+mod feeds;
+
+pub use feeds::{FeedRow, FolderRow, ImportReport};
+
 /// Highest schema version this binary knows.
 pub const SCHEMA_VERSION: i64 = 1;
 
@@ -108,8 +112,6 @@ impl Store {
         Ok(())
     }
 
-    // Unused outside tests until the query modules arrive in later phases.
-    #[allow(dead_code)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
