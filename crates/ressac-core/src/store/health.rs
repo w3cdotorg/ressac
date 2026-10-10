@@ -87,6 +87,21 @@ impl Store {
         Ok(())
     }
 
+    /// Stores the garden's triage verdicts in `feed_health.needs_triage`. A feed without
+    /// a diagnosis has no row and reads as 0 through `v_garden_row`.
+    pub fn save_triage(&self, flags: &HashMap<FeedId, bool>) -> Result<()> {
+        let tx = self.conn().unchecked_transaction()?;
+        {
+            let mut stmt =
+                tx.prepare("UPDATE feed_health SET needs_triage = ?2 WHERE feed_id = ?1")?;
+            for (feed_id, flag) in flags {
+                stmt.execute(params![feed_id, flag])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn diagnosis(&self, feed_id: FeedId) -> Result<Option<Diagnosis>> {
         let mut stmt = self.conn().prepare(&format!(
             "SELECT {HEALTH_COLUMNS} FROM feed_health WHERE feed_id = ?1"
@@ -226,5 +241,35 @@ mod tests {
             b.wayback_url.as_deref(),
             Some("http://web.archive.org/web/2019/x")
         );
+    }
+
+    fn triage_flags(s: &Store) -> Vec<(FeedId, bool)> {
+        s.conn()
+            .prepare("SELECT feed_id, needs_triage FROM v_garden_row ORDER BY feed_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn triage_flags_are_stored_and_survive_a_new_diagnosis() {
+        let s = store();
+        s.save_diagnoses(&HashMap::from([(1, sample())]), now())
+            .unwrap();
+        assert_eq!(triage_flags(&s), [(1, false), (2, false)]);
+        s.save_triage(&HashMap::from([(1, true), (2, true)]))
+            .unwrap();
+        assert_eq!(
+            triage_flags(&s),
+            [(1, true), (2, false)],
+            "feed 2 has no diagnosis row"
+        );
+        s.save_diagnoses(&HashMap::from([(1, sample())]), now())
+            .unwrap();
+        assert_eq!(triage_flags(&s)[0], (1, true));
+        s.save_triage(&HashMap::from([(1, false)])).unwrap();
+        assert_eq!(triage_flags(&s)[0], (1, false));
     }
 }
