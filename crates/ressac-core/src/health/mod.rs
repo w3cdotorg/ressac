@@ -10,7 +10,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::model::{Action, Cadence, Diagnosis, ErrorKind, Evidence, FeedId, Hop, Remark, Status};
 use crate::store::{AttemptRecord, EntryRecord};
-use crate::url_key::{https_variant, url_key};
+use crate::url_key::{https_variant, site_of, url_key};
 
 pub const ALIVE_WITHIN_DAYS: i64 = 90;
 pub const FOSSIL_AFTER_DAYS: i64 = 730;
@@ -145,12 +145,20 @@ fn verdict(
         v.bullets.push(format!("{} → {url}", ev.xml_url));
         return v;
     }
-    if let Some((reason, clue)) = dead_reason(ev) {
-        if let Some(url) = ev
-            .discovered_url
-            .as_ref()
-            .filter(|u| url_key(u) != ev.url_key)
-        {
+    if let Some(dead) = dead_reason(ev) {
+        let DeadReason {
+            reason,
+            clue,
+            off_site_target,
+        } = dead;
+        // A feed announced by the new owner's site is not a replacement.
+        let adoptable = |u: &&String| {
+            url_key(u) != ev.url_key
+                && off_site_target
+                    .as_ref()
+                    .is_none_or(|target| site_of(u) != site_of(target))
+        };
+        if let Some(url) = ev.discovered_url.as_ref().filter(adoptable) {
             let mut v = Verdict::new(
                 Status::Moved,
                 "The feed is gone, but its site now announces another one.",
@@ -160,7 +168,11 @@ fn verdict(
             v.bullets = vec![reason, format!("The site links to {url}.")];
             return v;
         }
-        return Verdict::new(Status::Dead, reason, clue, Some(Action::Bury));
+        let mut v = Verdict::new(Status::Dead, reason, clue, Some(Action::Bury));
+        if let Some(target) = off_site_target {
+            v.bullets.push(format!("{} → {target}", ev.xml_url));
+        }
+        return v;
     }
     if let Some(err) = &last.error {
         return Verdict::new(
@@ -212,15 +224,48 @@ fn permanent_redirect(last: &AttemptRecord, own_key: &str) -> Option<(u16, Strin
     (url_key(target) != own_key).then(|| (hops[0].status, target.clone()))
 }
 
-/// Dead rule (spec §7): 404/410/NXDOMAIN on the last meaningful attempt, or a long
-/// enough streak of failures. Returns (reason, clue).
-pub fn dead_reason(ev: &FeedEvidence) -> Option<(String, String)> {
+/// Why a feed is Dead, with the redirect target when the feed was shut down for good
+/// by sending it to another site.
+pub struct DeadReason {
+    pub reason: String,
+    pub clue: String,
+    pub off_site_target: Option<String>,
+}
+
+impl DeadReason {
+    fn new(reason: impl Into<String>, clue: impl Into<String>) -> Self {
+        DeadReason {
+            reason: reason.into(),
+            clue: clue.into(),
+            off_site_target: None,
+        }
+    }
+}
+
+/// The last hop's URL when the chain left the feed's own site.
+fn off_site_hop<'a>(last: &'a AttemptRecord, xml_url: &str) -> Option<&'a str> {
+    let hop = last.redirect_chain.last()?;
+    (site_of(&hop.url)? != site_of(xml_url)?).then_some(hop.url.as_str())
+}
+
+/// HTML where a feed should be, or a client error other than 408/429.
+fn is_definitive_off_site(err: &ErrorKind) -> bool {
+    match err {
+        ErrorKind::HtmlInsteadOfFeed => true,
+        ErrorKind::Http(code) => (400..500).contains(code) && !matches!(code, 408 | 429),
+        _ => false,
+    }
+}
+
+/// Dead rule (spec §7): 404/410/NXDOMAIN on the last meaningful attempt, a redirect to
+/// another site that serves no feed, or a long enough streak of failures.
+pub fn dead_reason(ev: &FeedEvidence) -> Option<DeadReason> {
     let meaningful: Vec<&AttemptRecord> =
         ev.attempts.iter().filter(|a| !a.network_suspect).collect();
     let last = meaningful.first()?;
     match &last.error {
         Some(ErrorKind::Http(code @ (404 | 410))) => {
-            return Some((
+            return Some(DeadReason::new(
                 format!("The server says the feed is gone (HTTP {code})."),
                 code.to_string(),
             ));
@@ -236,7 +281,18 @@ pub fn dead_reason(ev: &FeedEvidence) -> Option<(String, String)> {
             } else {
                 "The domain no longer resolves."
             };
-            return Some((reason.to_string(), "DNS".to_string()));
+            return Some(DeadReason::new(reason, "DNS"));
+        }
+        // Only a definitive answer from the other site counts: 5xx, timeouts, TLS,
+        // challenge pages and the like may be transient or fixable.
+        Some(err) if is_definitive_off_site(err) => {
+            if let Some(target) = off_site_hop(last, &ev.xml_url) {
+                return Some(DeadReason {
+                    reason: "The feed now redirects to another site that serves no feed.".into(),
+                    clue: "→ off".into(),
+                    off_site_target: Some(target.to_string()),
+                });
+            }
         }
         _ => {}
     }
@@ -247,7 +303,7 @@ pub fn dead_reason(ev: &FeedEvidence) -> Option<(String, String)> {
     if streak.len() >= DEAD_FAILURE_STREAK {
         let span = streak[0].at - streak[streak.len() - 1].at;
         if span >= Duration::days(DEAD_STREAK_MIN_DAYS) {
-            return Some((
+            return Some(DeadReason::new(
                 format!(
                     "{} failed fetches in a row over {} days.",
                     streak.len(),
@@ -536,16 +592,95 @@ mod tests {
         assert_eq!(own.reason, "The domain no longer resolves.");
     }
 
+    fn redirected(kind: ErrorKind, hops: &[(u16, &str)]) -> AttemptRecord {
+        let mut a = failed(0, kind);
+        a.redirect_chain = hops
+            .iter()
+            .map(|(status, url)| Hop {
+                status: *status,
+                url: (*url).into(),
+            })
+            .collect();
+        a
+    }
+
     /// Real run 2026-10-10: FiveThirtyEight (301 to an ABC News HTML page) was Hijacked.
     #[test]
-    fn owner_shutdown_redirect_is_ailing_not_hijacked() {
-        let mut a = failed(0, ErrorKind::HtmlInsteadOfFeed);
-        a.redirect_chain = vec![Hop {
-            status: 301,
-            url: "https://abcnews.com/politics".into(),
-        }];
+    fn owner_shutdown_redirect_is_dead_not_hijacked() {
+        let a = redirected(
+            ErrorKind::HtmlInsteadOfFeed,
+            &[(301, "https://abcnews.com/politics")],
+        );
         let d = diagnose(&ev(vec![a], vec![]));
-        assert_eq!(d.status, Status::Ailing);
+        assert_eq!(d.status, Status::Dead);
+        assert_ne!(d.status, Status::Hijacked);
+        assert_eq!(
+            d.reason,
+            "The feed now redirects to another site that serves no feed."
+        );
+        assert_eq!(d.evidence.clue, "→ off");
+        assert_eq!(
+            d.evidence.bullets.last().unwrap(),
+            "https://blog.example.org/feed → https://abcnews.com/politics"
+        );
+        assert_eq!(d.action, Some(Action::Bury));
+    }
+
+    /// Real run 2026-10-10: ioudgine (Typepad closed) goes 302 to networksolutions.com, 403.
+    #[test]
+    fn closed_host_redirect_ending_in_403_is_dead() {
+        let a = redirected(
+            ErrorKind::Http(403),
+            &[(302, "https://www.networksolutions.com/typepad")],
+        );
+        let d = diagnose(&ev(vec![a], vec![]));
+        assert_eq!(d.status, Status::Dead);
+        assert_eq!(d.evidence.clue, "→ off");
+    }
+
+    #[test]
+    fn same_site_redirect_ending_in_html_stays_ailing() {
+        let mut e = ev(vec![], vec![]);
+        e.xml_url = "https://www.example.com/feed".into();
+        e.url_key = url_key(&e.xml_url);
+        e.attempts = vec![redirected(
+            ErrorKind::HtmlInsteadOfFeed,
+            &[(301, "https://example.com/blog")],
+        )];
+        assert_eq!(diagnose(&e).status, Status::Ailing);
+    }
+
+    #[test]
+    fn off_site_redirect_ending_in_a_transient_error_stays_ailing() {
+        for kind in [
+            ErrorKind::Http(503),
+            ErrorKind::Http(500),
+            ErrorKind::Http(429),
+            ErrorKind::Http(408),
+            ErrorKind::Timeout,
+            ErrorKind::Challenge,
+        ] {
+            let a = redirected(kind.clone(), &[(301, "https://publisher.example.net/rss")]);
+            let d = diagnose(&ev(vec![a], vec![]));
+            assert_eq!(d.status, Status::Ailing, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn off_site_shutdown_does_not_adopt_a_feed_of_the_new_owner() {
+        let a = redirected(
+            ErrorKind::HtmlInsteadOfFeed,
+            &[(301, "https://abcnews.com/politics")],
+        );
+        let mut e = ev(vec![a], vec![]);
+        e.discovered_url = Some("https://abcnews.com/rss.xml".into());
+        let d = diagnose(&e);
+        assert_eq!(d.status, Status::Dead);
+        assert_eq!(d.action, Some(Action::Bury));
+        // A feed found on the feed's own site is still a replacement.
+        e.discovered_url = Some("https://blog.example.org/new.xml".into());
+        let d = diagnose(&e);
+        assert_eq!(d.status, Status::Moved);
     }
 
     #[test]
