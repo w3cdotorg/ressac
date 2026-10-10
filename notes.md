@@ -37,3 +37,7 @@ Trouvailles, décisions et pièges rencontrés en route. Le plus récent en haut
 
 - Swift 6.4, Xcode, cargo, go, python3. `gh` connecté au compte w3cdotorg.
 - Noms vérifiés le 10/10 : `ressac` libre sur crates.io et Homebrew.
+
+## Pièges d'outillage
+
+- `git push` échoue (« could not read Username ») : aucun credential helper global pour GitHub. Pousser avec `git -c credential.helper= -c credential.helper='!gh auth git-credential' push`, sans modifier la config git globale.
