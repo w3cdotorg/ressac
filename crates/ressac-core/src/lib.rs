@@ -4,6 +4,7 @@ pub mod error;
 pub mod model;
 pub mod opml;
 pub mod parse;
+pub mod source;
 pub mod store;
 pub mod url_key;
 
