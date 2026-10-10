@@ -4,10 +4,12 @@ use chrono::{DateTime, Utc};
 
 use crate::error::Result;
 use crate::model::{Action, Decision, Diagnosis, FeedId, Status};
-use crate::store::{DecisionRecord, Store};
+use crate::store::{AttemptRecord, DecisionRecord, Store};
 
 /// Entries shown in the detail pane.
 const RECENT_ENTRIES: usize = 3;
+/// Fetch attempts shown in the expanded detail pane.
+const RECENT_ATTEMPTS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GardenRow {
@@ -22,6 +24,8 @@ pub struct GardenRow {
     pub diagnosis: Option<Diagnosis>,
     pub decision: Option<DecisionRecord>,
     pub recent: Vec<(DateTime<Utc>, String)>,
+    /// Last fetch attempts, newest first.
+    pub attempts: Vec<AttemptRecord>,
 }
 
 impl GardenRow {
@@ -87,6 +91,7 @@ pub fn load_rows(store: &Store) -> Result<Vec<GardenRow>> {
             diagnosis: diags.remove(&f.id),
             decision: decisions.remove(&f.id),
             recent,
+            attempts: store.attempts(f.id, RECENT_ATTEMPTS)?,
         });
     }
     rows.sort_by(|a, b| {
@@ -290,6 +295,49 @@ mod tests {
         assert!(
             safe_repairs(&load_rows(&s).unwrap()).is_empty(),
             "decided feeds are not offered again"
+        );
+    }
+
+    fn failed_attempt(feed_id: FeedId, at: DateTime<Utc>) -> crate::source::FetchAttempt {
+        crate::source::FetchAttempt {
+            feed_id,
+            at,
+            requested_url: "http://z.example.org/feed".into(),
+            final_url: "https://z.example.org/feed".into(),
+            http_status: Some(404),
+            error: Some(crate::model::ErrorKind::Http(404)),
+            redirect_chain: vec![crate::model::Hop {
+                status: 301,
+                url: "https://z.example.org/feed".into(),
+            }],
+            content_type: None,
+            bytes: 0,
+            duration_ms: 5,
+            not_modified: false,
+            etag: None,
+            last_modified: None,
+            feed: None,
+        }
+    }
+
+    #[test]
+    fn rows_carry_the_last_five_attempts_newest_first() {
+        let s = store();
+        for i in 0..7 {
+            s.record_attempt("r", &failed_attempt(1, now() + chrono::Duration::hours(i)))
+                .unwrap();
+        }
+        let rows = load_rows(&s).unwrap();
+        let zed = rows.iter().find(|r| r.feed_id == 1).unwrap();
+        assert_eq!(zed.attempts.len(), 5);
+        assert_eq!(zed.attempts[0].at, now() + chrono::Duration::hours(6));
+        assert_eq!(zed.attempts[0].redirect_chain[0].status, 301);
+        assert!(
+            rows.iter()
+                .find(|r| r.feed_id == 2)
+                .unwrap()
+                .attempts
+                .is_empty()
         );
     }
 

@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ressac_core::garden::{GardenRow, safe_repairs};
 use ressac_core::model::Status;
+use ressac_core::store::AttemptRecord;
 
 use crate::output::glyph;
 use crate::tui::state::{GardenState, Mode};
@@ -133,14 +134,15 @@ fn render_detail(frame: &mut Frame, state: &GardenState, area: Rect) {
         return;
     };
     frame.render_widget(
-        Paragraph::new(detail_lines(row, state.ascii))
+        Paragraph::new(detail_lines(row, state.ascii, state.mode == Mode::Detail))
             .block(Block::bordered().title(format!(" {} ", row.title)))
             .wrap(Wrap { trim: false }),
         area,
     );
 }
 
-fn detail_lines(row: &GardenRow, ascii: bool) -> Vec<Line<'static>> {
+/// The side pane; `expanded` (↵) adds the redirect chain and the fetch log (spec §9).
+fn detail_lines(row: &GardenRow, ascii: bool, expanded: bool) -> Vec<Line<'static>> {
     let status = row.status();
     let mut lines = Vec::new();
     let mut head = format!("{} {}", glyph(status, ascii), status.as_str());
@@ -206,7 +208,59 @@ fn detail_lines(row: &GardenRow, ascii: bool) -> Vec<Line<'static>> {
             dec.decided_at.format("%Y-%m-%d")
         )));
     }
+    if expanded {
+        lines.extend(fetch_history_lines(row));
+    }
     lines
+}
+
+/// "Redirects" (the latest attempt's chain) and "Fetch log" (newest first).
+fn fetch_history_lines(row: &GardenRow) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(latest) = row.attempts.first()
+        && !latest.redirect_chain.is_empty()
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Redirects").bold());
+        lines.extend(
+            latest
+                .redirect_chain
+                .iter()
+                .map(|hop| Line::from(format!(" {} → {}", hop.status, hop.url))),
+        );
+    }
+    if !row.attempts.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Fetch log").bold());
+        lines.extend(row.attempts.iter().map(|a| {
+            Line::from(format!(
+                " {}  {}",
+                a.at.format("%Y-%m-%d %H:%M"),
+                attempt_outcome(a)
+            ))
+        }));
+    }
+    lines
+}
+
+/// `HTTP 200 · 14 entries`, `HTTP 304 · not modified`, or the error label.
+fn attempt_outcome(a: &AttemptRecord) -> String {
+    let mut out = match (&a.error, a.http_status) {
+        (Some(e), _) => e.label(),
+        (None, Some(code)) => format!("HTTP {code}"),
+        (None, None) => "no response".to_string(),
+    };
+    if a.error.is_none() {
+        if a.not_modified {
+            out.push_str(" · not modified");
+        } else if let Some(n) = a.entry_count {
+            out.push_str(&format!(" · {n} entries"));
+        }
+    }
+    if a.network_suspect {
+        out.push_str(" (network?)");
+    }
+    out
 }
 
 fn confirm_lines(state: &GardenState) -> Vec<Line<'static>> {
@@ -297,7 +351,7 @@ mod tests {
     fn garden_detail() {
         let mut s = GardenState::new(sample_rows(), false);
         press(&mut s, KeyCode::Enter);
-        insta::assert_snapshot!(draw(&s, 110, 24));
+        insta::assert_snapshot!(draw(&s, 110, 34));
     }
 
     #[test]

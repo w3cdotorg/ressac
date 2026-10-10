@@ -240,7 +240,8 @@ fn is_web_url(url: &str) -> bool {
 #[cfg(test)]
 pub(crate) fn sample_rows() -> Vec<GardenRow> {
     use chrono::{DateTime, Utc};
-    use ressac_core::model::{Action, Cadence, Diagnosis, Evidence};
+    use ressac_core::model::{Action, Cadence, Diagnosis, ErrorKind, Evidence, Hop};
+    use ressac_core::store::AttemptRecord;
 
     let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
     let row = |id: FeedId,
@@ -272,6 +273,7 @@ pub(crate) fn sample_rows() -> Vec<GardenRow> {
         }),
         decision: None,
         recent: vec![],
+        attempts: vec![],
     };
     let mut biblio = row(
         1,
@@ -291,6 +293,57 @@ pub(crate) fn sample_rows() -> Vec<GardenRow> {
         ];
         d.evidence.language = Some("vie".into());
     }
+    biblio.attempts = vec![
+        AttemptRecord {
+            at: at("2026-10-10T09:05:00Z"),
+            http_status: Some(200),
+            error: Some(ErrorKind::HtmlInsteadOfFeed),
+            redirect_chain: vec![
+                Hop {
+                    status: 301,
+                    url: "https://bibliobsession.net/feed/".into(),
+                },
+                Hop {
+                    status: 302,
+                    url: "https://bibliobsession.net/xoc-dia/".into(),
+                },
+            ],
+            content_type: Some("text/html".into()),
+            network_suspect: false,
+            not_modified: false,
+            entry_count: None,
+        },
+        AttemptRecord {
+            at: at("2026-10-09T08:00:00Z"),
+            http_status: None,
+            error: Some(ErrorKind::Dns),
+            redirect_chain: vec![],
+            content_type: None,
+            network_suspect: true,
+            not_modified: false,
+            entry_count: None,
+        },
+        AttemptRecord {
+            at: at("2026-10-08T08:00:00Z"),
+            http_status: Some(304),
+            error: None,
+            redirect_chain: vec![],
+            content_type: None,
+            network_suspect: false,
+            not_modified: true,
+            entry_count: None,
+        },
+        AttemptRecord {
+            at: at("2026-10-07T08:00:00Z"),
+            http_status: Some(200),
+            error: None,
+            redirect_chain: vec![],
+            content_type: Some("application/rss+xml".into()),
+            network_suspect: false,
+            not_modified: false,
+            entry_count: Some(14),
+        },
+    ];
     biblio.wayback_url =
         Some("http://web.archive.org/web/20210612000000/https://bibliobsession.net/".into());
     biblio.recent = vec![
