@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<opml version="1.0">
+    <head>
+        <title>Vienna Subscriptions</title>
+        <dateCreated>2026-04-15 10:02:51 +0000</dateCreated>
+    </head>
+    <body>
+        <outline text="Blogs">
+            <outline htmlUrl="https://xkcd.com/" xmlUrl="https://www.xkcd.com/rss.xml" type="rss" description="xkcd.com: A webcomic of romance and math humor." text="xkcd.com"/>
+            <outline text="potes">
+                <outline htmlUrl="https://orange.example.org" xmlUrl="https://orange.example.org/feed/" type="rss" description="" text="Orange Drenka"/>
+                <outline htmlUrl="http://orange-drenka.example.net/" xmlUrl="http://orange-drenka.example.net/feeds/posts/default?alt=rss" type="rss" description="" text="Orange-Drenka"/>
+                <outline htmlUrl="https://www.flickr.com/photos/bouquiniste/" xmlUrl="http://api.flickr.com/services/feeds/photos_public.gne?id=48609153@N00&amp;amp;lang=en-us&amp;format=rss_200" type="rss" description="" text="Photos from bouquiniste"/>
+            </outline>
+            <outline htmlUrl="https://girl.example.org/" xmlUrl="http://girl.example.org/rss" type="rss" description="A book is a loaded gun in the house next door
+
+
+
+
+var sc_project=6114696; 
+var sc_invisible=1; 
+var sc_security=&quot;618df32f&quot;; 
+
+
+
+" text="Girl on the Couch"/>
+        </outline>
+        <outline text="Biblis">
+            <outline htmlUrl="https://biblio.example.org/" xmlUrl="http://www.biblio.example.org/feed/" type="rss" description="Xóc đĩa online là sân chơi mới với cơ hội trúng lớn mỗi ngày. Tham gia ngay để thử thách bản thân và nhận ngay phần thưởng cực hấp dẫn!" text="Bibliobsession 2.0"/>
+            <outline htmlUrl="http://www.unphotographable.com/" xmlUrl="http://www.unphotographable.com/index.rdf" type="rss" description="" text="Unphotographable"/>
+        </outline>
+        <outline text="Infos">
+            <outline htmlUrl="https://daringfireball.net/" xmlUrl="http://daringfireball.net/feeds/main" type="rss" description="By John Gruber" text="Daring Fireball"/>
+            <outline htmlUrl="https://daringfireball.net/" xmlUrl="https://daringfireball.net/feeds/main" type="rss" description="By John Gruber" text="Daring Fireball (1)"/>
+            <outline htmlUrl="https://sixcolors.com/?feed=json" xmlUrl="https://sixcolors.com/feed.json" type="rss" description="Apple, technology, and other stuff by Jason Snell &amp;amp; Dan Moren" text="Six Colors"/>
+            <outline text="Science">
+                <outline htmlUrl="https://cht.example.org" xmlUrl="https://cht.example.org/feed" type="rss" description="Ensuring that the most consequential technologies serve humanity" text="Center for Humane Technology"/>
+            </outline>
+        </outline>
+        <outline text="Jon">
+            <outline text="YouTube">
+                <outline htmlUrl="https://www.youtube.com/channel/UCFECM-p3CF81Tp_l2sJsiyg" xmlUrl="https://www.youtube.com/feeds/videos.xml?channel_id=UCFECM-p3CF81Tp_l2sJsiyg" type="rss" description="" text="Center for Humane Technology (1)"/>
+            </outline>
+        </outline>
+    </body>
+</opml>
