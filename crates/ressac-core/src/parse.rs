@@ -56,6 +56,89 @@ fn trim_leading(body: &[u8]) -> &[u8] {
     &body[start..]
 }
 
+fn parse_xml(body: &[u8], base_url: &str) -> Result<feed_rs::model::Feed, ErrorKind> {
+    let parser = feed_rs::parser::Builder::new()
+        .base_uri(Some(base_url))
+        .build();
+    parser.parse(body).map_err(|e| match e {
+        feed_rs::parser::ParseFeedError::XmlReader(x) if x.to_string().contains("Encoding") => {
+            ErrorKind::Encoding
+        }
+        _ => ErrorKind::Parse,
+    })
+}
+
+/// Repairs the usual ways feeds are not well-formed XML: bare `&`, HTML entities XML does
+/// not declare (`&nbsp;`, `&eacute;`) and control bytes XML 1.0 forbids. Both kinds of
+/// entity become literal text (`&amp;nbsp;`), which renders right later because summaries
+/// are HTML. `<![CDATA[ ... ]]>` sections are copied untouched.
+fn sanitize_xml(body: &[u8]) -> Vec<u8> {
+    const CDATA_OPEN: &[u8] = b"<![CDATA[";
+    const CDATA_CLOSE: &[u8] = b"]]>";
+    let mut out = Vec::with_capacity(body.len() + 64);
+    let mut i = 0;
+    while i < body.len() {
+        let rest = &body[i..];
+        if rest.starts_with(CDATA_OPEN) {
+            let end = rest
+                .windows(CDATA_CLOSE.len())
+                .position(|w| w == CDATA_CLOSE)
+                .map_or(rest.len(), |p| p + CDATA_CLOSE.len());
+            out.extend_from_slice(&rest[..end]);
+            i += end;
+            continue;
+        }
+        match body[i] {
+            b'&' => match entity_len(rest) {
+                Some((len, true)) => {
+                    out.extend_from_slice(&rest[..len]);
+                    i += len;
+                }
+                Some((len, false)) => {
+                    out.extend_from_slice(b"&amp;");
+                    out.extend_from_slice(&rest[1..len]);
+                    i += len;
+                }
+                None => {
+                    out.extend_from_slice(b"&amp;");
+                    i += 1;
+                }
+            },
+            0x00..=0x08 | 0x0B | 0x0C | 0x0E..=0x1F => i += 1,
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Length of the well-formed reference at the start of `s` (which begins with `&`), and
+/// whether XML itself defines it. `None` when no valid reference starts here.
+fn entity_len(s: &[u8]) -> Option<(usize, bool)> {
+    let semi = s.iter().position(|&b| b == b';')?;
+    let name = &s[1..semi];
+    let defined = match name {
+        [b'#', b'x', digits @ ..] if !digits.is_empty() => {
+            digits.iter().all(u8::is_ascii_hexdigit).then_some(true)?
+        }
+        [b'#', digits @ ..] if !digits.is_empty() => {
+            digits.iter().all(u8::is_ascii_digit).then_some(true)?
+        }
+        [first, tail @ ..]
+            if (first.is_ascii_alphabetic() || *first == b'_')
+                && tail
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) =>
+        {
+            matches!(name, b"amp" | b"lt" | b"gt" | b"quot" | b"apos")
+        }
+        _ => return None,
+    };
+    Some((semi + 1, defined))
+}
+
 pub fn parse_feed(
     body: &[u8],
     content_type: Option<&str>,
@@ -66,15 +149,18 @@ pub fn parse_feed(
     if looks_like_html(content_type, body) {
         return Err(ErrorKind::HtmlInsteadOfFeed);
     }
-    let parser = feed_rs::parser::Builder::new()
-        .base_uri(Some(base_url))
-        .build();
-    let feed = parser.parse(body).map_err(|e| match e {
-        feed_rs::parser::ParseFeedError::XmlReader(x) if x.to_string().contains("Encoding") => {
-            ErrorKind::Encoding
+    let feed = match parse_xml(body, base_url) {
+        Ok(feed) => feed,
+        Err(ErrorKind::Parse) => {
+            // Be lenient like NetNewsWire and Vienna: one retry on a repaired copy, and the
+            // original error stands when that fails too.
+            let repaired = sanitize_xml(body);
+            let feed = parse_xml(&repaired, base_url).map_err(|_| ErrorKind::Parse)?;
+            tracing::debug!(base_url, "feed parsed only after XML repair");
+            feed
         }
-        _ => ErrorKind::Parse,
-    })?;
+        Err(e) => return Err(e),
+    };
     let latest_plausible = fetched_at + Duration::days(1);
     let entries = feed
         .entries
@@ -234,6 +320,88 @@ mod tests {
     fn garbage_is_a_parse_error() {
         assert_eq!(
             parse_feed(b"not a feed", None, "http://x.org", now()),
+            Err(ErrorKind::Parse)
+        );
+    }
+
+    const BARE_AMP: &str = r#"<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Photos &amp; more</title><link>https://u.example/</link>
+<description>d</description>
+<item><guid>1</guid><title>Fish & Chips</title><description>caf&eacute; &nbsp;au lait &#233; &#xE9; &lt;b&gt;</description></item>
+<item><guid>2</guid><title>AT&T&nbsp;news</title></item>
+</channel></rss>"#;
+
+    #[test]
+    fn broken_xml_is_read_leniently() {
+        assert!(parse_xml(BARE_AMP.as_bytes(), "https://u.example/feed").is_err());
+        let f = parse_feed(BARE_AMP.as_bytes(), None, "https://u.example/feed", now()).unwrap();
+        assert_eq!(f.title.as_deref(), Some("Photos & more"));
+        assert_eq!(f.entries[0].title.as_deref(), Some("Fish & Chips"));
+        assert_eq!(f.entries[1].title.as_deref(), Some("AT&T&nbsp;news"));
+        let summary = f.entries[0].summary_html.as_deref().unwrap();
+        assert!(
+            summary.contains("&eacute;") && summary.contains("&nbsp;"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn sanitizer_fixes_ampersands_and_entities() {
+        let fixed = |s: &str| String::from_utf8(sanitize_xml(s.as_bytes())).unwrap();
+        assert_eq!(fixed("a & b"), "a &amp; b");
+        assert_eq!(fixed("a &"), "a &amp;");
+        assert_eq!(fixed("&;&#;&#x;&1a;"), "&amp;;&amp;#;&amp;#x;&amp;1a;");
+        assert_eq!(
+            fixed("&amp;&lt;&gt;&quot;&apos;"),
+            "&amp;&lt;&gt;&quot;&apos;"
+        );
+        assert_eq!(fixed("&#38;&#x26;&#X26;"), "&#38;&#x26;&amp;#X26;");
+        assert_eq!(
+            fixed("&nbsp;&eacute;&_a.b-c;"),
+            "&amp;nbsp;&amp;eacute;&amp;_a.b-c;"
+        );
+        assert_eq!(fixed("AT&T; x"), "AT&amp;T; x");
+    }
+
+    #[test]
+    fn sanitizer_drops_illegal_control_bytes_only() {
+        let body = b"a\x00b\x08c\x0Bd\x0Ce\x0Ef\x1Fg\th\ni\rj\x7F";
+        assert_eq!(sanitize_xml(body), b"abcdefg\th\ni\rj\x7F");
+    }
+
+    #[test]
+    fn sanitizer_leaves_cdata_alone() {
+        let body = "<d><![CDATA[a & b &nbsp; \u{1}x]]> & <![CDATA[ unterminated &";
+        let out = String::from_utf8(sanitize_xml(body.as_bytes())).unwrap();
+        assert_eq!(
+            out,
+            "<d><![CDATA[a & b &nbsp; \u{1}x]]> &amp; <![CDATA[ unterminated &"
+        );
+    }
+
+    #[test]
+    fn sanitizer_keeps_non_ascii_bytes() {
+        assert_eq!(sanitize_xml("é & ü".as_bytes()), "é &amp; ü".as_bytes());
+        assert_eq!(
+            sanitize_xml(&[0xE9, b'&']),
+            [0xE9, b'&', b'a', b'm', b'p', b';']
+        );
+    }
+
+    #[test]
+    fn cdata_content_survives_the_lenient_retry() {
+        let rss = BARE_AMP.replace(
+            "<description>d</description>",
+            "<description><![CDATA[<p>Q&A &nbsp;</p>]]></description>",
+        );
+        let f = parse_feed(rss.as_bytes(), None, "https://u.example/feed", now()).unwrap();
+        assert_eq!(f.description.as_deref(), Some("<p>Q&A &nbsp;</p>"));
+    }
+
+    #[test]
+    fn unrepairable_xml_keeps_the_original_error() {
+        assert_eq!(
+            parse_feed(b"<rss><channel><title>x & y", None, "http://x.org", now()),
             Err(ErrorKind::Parse)
         );
     }
