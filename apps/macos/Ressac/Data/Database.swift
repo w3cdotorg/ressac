@@ -43,6 +43,8 @@ final class AppDatabase: Sendable {
     /// `schema_meta.version`, or nil when the file does not exist.
     static func schemaVersion(at url: URL) throws -> Int? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        // An empty file (a fresh "New…" target) is treated as missing: `migrate` fills it.
+        if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int, size == 0 { return nil }
         var config = Configuration()
         config.readonly = true
         let queue = try DatabaseQueue(path: url.path, configuration: config)

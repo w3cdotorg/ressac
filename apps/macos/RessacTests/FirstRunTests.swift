@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import GRDB
 import Testing
 @testable import Ressac
 
@@ -148,5 +149,77 @@ private func stubDirectory() throws -> URL {
         let target = URL(filePath: "/tmp/Ressac.opml")
         #expect(await flow.export(to: target))
         #expect(recorder.requests == [.export(to: target, cemetery: false)])
+    }
+}
+
+@Suite @MainActor struct DatabaseChoiceTests {
+    private func temp() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "ressac-choice-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func defaults() throws -> (UserDefaults, () -> Void) {
+        let suite = "ressac.tests.\(UUID().uuidString)"
+        let d = try #require(UserDefaults(suiteName: suite))
+        return (d, { d.removePersistentDomain(forName: suite) })
+    }
+
+    @Test func aNonSQLiteFileIsRefusedAndTheSettingStays() throws {
+        let dir = try temp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (d, cleanup) = try defaults()
+        defer { cleanup() }
+        d.set("/old/path.sqlite", forKey: DatabaseLocation.defaultsKey)
+        let junk = dir.appending(path: "junk.sqlite")
+        try Data("this is not sqlite, just some text padding".utf8).write(to: junk)
+        #expect(DatabaseLocation.choose(junk, defaults: d) != nil)
+        #expect(d.string(forKey: DatabaseLocation.defaultsKey) == "/old/path.sqlite")
+    }
+
+    @Test func aV1FileAndAMissingPathAreAccepted() throws {
+        let dir = try temp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (d, cleanup) = try defaults()
+        defer { cleanup() }
+        let v1 = dir.appending(path: "v1.sqlite")
+        let queue = try DatabaseQueue(path: v1.path(percentEncoded: false))
+        try queue.write { db in
+            try db.execute(sql: "CREATE TABLE schema_meta (version INTEGER NOT NULL); INSERT INTO schema_meta VALUES (1)")
+        }
+        #expect(DatabaseLocation.choose(v1, defaults: d) == nil)
+        #expect(d.string(forKey: DatabaseLocation.defaultsKey) == v1.path(percentEncoded: false))
+        let fresh = dir.appending(path: "new.sqlite")
+        #expect(DatabaseLocation.choose(fresh, defaults: d) == nil)
+        #expect(d.string(forKey: DatabaseLocation.defaultsKey) == fresh.path(percentEncoded: false))
+        let empty = dir.appending(path: "empty.sqlite")
+        try Data().write(to: empty)
+        #expect(DatabaseLocation.choose(empty, defaults: d) == nil)
+    }
+
+    @Test func aNewerSchemaIsRefused() throws {
+        let dir = try temp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (d, cleanup) = try defaults()
+        defer { cleanup() }
+        let future = dir.appending(path: "future.sqlite")
+        let queue = try DatabaseQueue(path: future.path(percentEncoded: false))
+        try queue.write { db in
+            try db.execute(sql: "CREATE TABLE schema_meta (version INTEGER NOT NULL); INSERT INTO schema_meta VALUES (99)")
+        }
+        #expect(DatabaseLocation.choose(future, defaults: d) != nil)
+        #expect(d.string(forKey: DatabaseLocation.defaultsKey) == nil)
+    }
+
+    @Test func theFailureScreenOffersTheResetAndItClearsThePath() async throws {
+        let (d, cleanup) = try defaults()
+        defer { cleanup() }
+        d.set("/bad/place.sqlite", forKey: DatabaseLocation.defaultsKey)
+        let launcher = Launcher()
+        #expect(!launcher.offersDefaultDatabase)
+        // No helper: the relaunch ends in `.failed` without touching any database.
+        await launcher.useDefaultDatabase(defaults: d, environment: ["RESSAC_DB": "/tmp/ressac-unused.sqlite"], executable: nil)
+        #expect(launcher.offersDefaultDatabase)
+        #expect(d.string(forKey: DatabaseLocation.defaultsKey) == nil)
     }
 }

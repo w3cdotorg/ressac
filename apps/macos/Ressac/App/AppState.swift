@@ -466,6 +466,24 @@ enum PendingPanel: Equatable, Sendable {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
 
+    /// The launch failed or the database is unusable: Settings may hold a bad location.
+    var offersDefaultDatabase: Bool {
+        switch phase {
+        case .failed, .tooNew: true
+        case .starting, .migrating, .ready: false
+        }
+    }
+
+    /// Clears the Settings location and launches again in-process (no app restart).
+    /// `RESSAC_DB` still wins, as at any launch.
+    func useDefaultDatabase(defaults: UserDefaults = .standard,
+                            environment: [String: String] = ProcessInfo.processInfo.environment,
+                            executable: URL? = RessacCLI.bundledExecutable()) async {
+        DatabaseLocation.resetToDefault(defaults: defaults)
+        phase = .starting
+        await launch(database: DatabaseLocation.current(environment: environment, defaults: defaults), executable: executable)
+    }
+
     func launch(database url: URL, executable: URL?) async {
         guard let executable else {
             phase = .failed("The ressac helper is missing from the app bundle. Rebuild the app.")

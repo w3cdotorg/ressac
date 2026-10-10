@@ -28,6 +28,34 @@ enum DatabaseLocation {
         }
         return resolve(defaults.string(forKey: defaultsKey))
     }
+
+    /// Why `url` cannot be the database, or nil when launch can use it: a missing or empty
+    /// file is fine (launch creates it), an older schema is migrated, a newer one or a file
+    /// that is not SQLite is refused.
+    static func problem(with url: URL) -> String? {
+        do {
+            if case .tooNew = try AppDatabase.check(at: url) {
+                return "This database was created by a newer Ressac."
+            }
+            return nil
+        } catch {
+            return "This file is not a usable Ressac database."
+        }
+    }
+
+    /// Stores `url` as the Settings choice after checking it. Returns the refusal message
+    /// (and leaves the setting unchanged), or nil when it was stored.
+    @discardableResult
+    static func choose(_ url: URL, defaults: UserDefaults = .standard) -> String? {
+        if let problem = problem(with: url) { return problem }
+        defaults.set(url.path(percentEncoded: false), forKey: defaultsKey)
+        return nil
+    }
+
+    /// Clears the Settings choice, so the default location is used again.
+    static func resetToDefault(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: defaultsKey)
+    }
 }
 
 extension UTType {
@@ -107,6 +135,7 @@ private struct ReadingSettings: View {
 private struct DataSettings: View {
     @AppStorage(DatabaseLocation.defaultsKey) private var databasePath = ""
     @State private var needsRelaunch = false
+    @State private var refusal: String?
 
     private var databaseURL: URL { DatabaseLocation.resolve(databasePath) }
 
@@ -135,6 +164,11 @@ private struct DataSettings: View {
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
+                    if let refusal {
+                        Label(refusal, systemImage: "exclamationmark.triangle")
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                    }
                     if needsRelaunch {
                         HStack {
                             Text("Ressac opens the new database after a relaunch.")
@@ -152,7 +186,12 @@ private struct DataSettings: View {
     }
 
     private func update(_ path: String) {
+        refusal = nil
         guard path != databasePath else { return }
+        if !path.isEmpty, let problem = DatabaseLocation.problem(with: DatabaseLocation.resolve(path)) {
+            refusal = problem
+            return
+        }
         databasePath = path
         needsRelaunch = true
     }

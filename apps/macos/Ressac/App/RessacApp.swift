@@ -33,11 +33,17 @@ struct LaunchView: View {
         case .migrating:
             ProgressView("Updating the database…")
         case .tooNew:
-            Text("This database was created by a newer Ressac").font(.title3)
+            VStack(spacing: 12) {
+                Text("This database was created by a newer Ressac").font(.title3)
+                Button("Use Default Database") { Task { await launcher.useDefaultDatabase() } }
+            }
         case let .failed(message):
             VStack(spacing: 12) {
                 Text(message).multilineTextAlignment(.center)
-                Button("Quit Ressac") { NSApplication.shared.terminate(nil) }
+                HStack {
+                    Button("Use Default Database") { Task { await launcher.useDefaultDatabase() } }
+                    Button("Quit Ressac") { NSApplication.shared.terminate(nil) }
+                }
             }
             .padding(40)
         case let .ready(state):
