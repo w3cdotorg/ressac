@@ -11,22 +11,18 @@ struct MainView: View {
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 320)
         } content: {
             Group {
-                if state.selection.isGarden {
-                    // Phase 12 replaces this with the Garden table.
-                    Text("Garden").foregroundStyle(.secondary)
+                if case let .garden(scope) = state.selection {
+                    GardenTable(state: state, scope: scope)
                 } else {
                     EntryListView(state: state)
                 }
             }
             .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 480)
         } detail: {
-            if state.selection.isGarden {
-                // Phase 12 replaces this with the Garden inspector.
-                Text("No feed selected").foregroundStyle(.secondary)
+            if case let .garden(scope) = state.selection {
+                GardenInspector(state: state, scope: scope)
             } else {
-                // Phase 10 replaces this with the WKWebView reader. Pass the complete
-                // row (`selectedEntry`), never a list row: list rows carry no content.
-                ReaderPlaceholder(entry: state.selectedEntry)
+                ReaderView(state: state)
             }
         }
         .searchable(text: $state.searchText, placement: .toolbar, prompt: "Search")
@@ -194,26 +190,5 @@ struct EntryRowView: View {
             }
         }
         .padding(.vertical, 3)
-    }
-}
-
-/// Stand-in for the reader column until phase 10.
-struct ReaderPlaceholder: View {
-    let entry: EntryRow?
-
-    var body: some View {
-        if let entry {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(entry.displayTitle).font(.title)
-                    Text(entry.feedTitle).foregroundStyle(.secondary)
-                    Text(HTMLText.plain(entry.contentHtml ?? entry.summaryHtml ?? "", limit: 20_000))
-                }
-                .padding(24)
-                .frame(maxWidth: 680, alignment: .leading)
-            }
-        } else {
-            Text("No entry selected").foregroundStyle(.secondary)
-        }
     }
 }
