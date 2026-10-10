@@ -133,8 +133,25 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(ArticleTemplate.sanitize(ok).contains("<blockquote>"))
         // Void tags and comments do not count as depth.
         #expect(ArticleTemplate.estimatedNestingDepth("<p>a<br>b<img src=\"x>\"><!-- <div><div> --></p>") == 1)
+        // Bypass shapes: stray close tags, and a quote inside an unquoted attribute value.
+        let stray = String(repeating: "<div></p>", count: 40_000) + "stray text"
+        #expect(ArticleTemplate.estimatedNestingDepth(stray) > ArticleTemplate.maxNestingDepth)
+        #expect(ArticleTemplate.sanitize(stray).contains("stray text"))
+        let quote = "<p x=a'b>" + String(repeating: "<div>", count: 60_000) + "quote text'>"
+        #expect(ArticleTemplate.estimatedNestingDepth(quote) > ArticleTemplate.maxNestingDepth)
+        #expect(ArticleTemplate.sanitize(quote).contains("quote text"))
+        // A normal article with unclosed paragraphs stays on the parsed path.
+        let loose = (0..<500).map { "<p>para \($0)" }.joined() + "<ul><li>a<li>b<li>c</ul>"
+        #expect(ArticleTemplate.estimatedNestingDepth(loose) < 10)
+        #expect(ArticleTemplate.sanitize(loose).contains("<ul>"))
         let paragraphs = ArticleTemplate.plainTextFallback("<p>one &amp; two</p>\n\n<p>three &lt;x&gt;</p>")
         #expect(paragraphs == "<p>one &amp; two</p>\n<p>three &lt;x&gt;</p>")
+    }
+
+    @Test func parseRunsOnTheLargeStackThread() {
+        let probe = ArticleTemplate.onLargeStack { "\(Thread.isMainThread)" }
+        #expect(probe == "false")
+        #expect(ArticleTemplate.sanitize("<p>hi</p>").contains("<p>hi"))
     }
 
     @Test func survivesGarbage() {

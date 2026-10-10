@@ -49,6 +49,10 @@ enum ArticleTemplate {
         if html.utf8.count > maxInputBytes || estimatedNestingDepth(html) > maxNestingDepth {
             return plainTextFallback(html)
         }
+        return onLargeStack { parseAndRender(html, baseURL: baseURL) }
+    }
+
+    private static func parseAndRender(_ html: String, baseURL: URL?) -> String {
         let wrapped = "<html><body>\(html)</body></html>"
         guard let document = try? XMLDocument(xmlString: wrapped, options: [.documentTidyHTML, .nodeLoadExternalEntitiesNever]),
               let body = document.rootElement()?.children?.first(where: { name(of: $0) == "body" })
@@ -62,6 +66,23 @@ enum ArticleTemplate {
         return out
     }
 
+    private final class ResultBox: @unchecked Sendable { var value = "" }
+
+    /// Runs `work` on a thread with a 256 MB stack (a virtual reservation) and waits for it, so
+    /// libxml's recursive parser cannot exhaust the stack on input the depth guard let through.
+    static func onLargeStack(_ work: @escaping @Sendable () -> String) -> String {
+        let box = ResultBox()
+        let done = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            box.value = work()
+            done.signal()
+        }
+        thread.stackSize = 256 << 20
+        thread.start()
+        done.wait()
+        return box.value
+    }
+
     static let maxNestingDepth = 256
     static let maxInputBytes = 2_000_000
     private static let voidTags: Set<String> = [
@@ -72,7 +93,14 @@ enum ArticleTemplate {
     /// tags, ignoring void and self-closing tags, comments, `<!…>` and `<?…>`.
     static func estimatedNestingDepth(_ html: String) -> Int {
         let bytes = Array(html.utf8)
-        var depth = 0, deepest = 0, i = 0
+        // Conservative: it may overestimate, never underestimate. A close tag pops only down to a
+        // matching open name (a stray one pops nothing), and a tag ends at the first `>`.
+        var stack: [String] = []
+        var open: [String: Int] = [:]
+        var deepest = 0, i = 0
+        func pop() {
+            if let name = stack.popLast() { open[name, default: 1] -= 1 }
+        }
         while i < bytes.count {
             guard bytes[i] == 0x3C else { i += 1; continue }  // <
             let next = i + 1 < bytes.count ? bytes[i + 1] : 0
@@ -90,25 +118,25 @@ enum ArticleTemplate {
             while j < bytes.count, isASCIILetterOrDigit(bytes[j]) { j += 1 }
             guard j > nameStart, isASCIILetter(bytes[nameStart]) else { i += 1; continue }
             let tag = String(decoding: bytes[nameStart..<j], as: UTF8.self).lowercased()
-            // Find the end of the tag, skipping quoted attribute values.
-            var quote: UInt8 = 0
             var k = j
-            while k < bytes.count {
-                let c = bytes[k]
-                if quote != 0 { if c == quote { quote = 0 } } else if c == 0x22 || c == 0x27 { quote = c } else if c == 0x3E { break }
-                k += 1
-            }
-            let selfClosing = k > 0 && k < bytes.count && bytes[k - 1] == 0x2F
+            while k < bytes.count, bytes[k] != 0x3E { k += 1 }
             if closing {
-                depth = max(0, depth - 1)
-            } else if !voidTags.contains(tag) && !selfClosing {
-                depth += 1
-                deepest = max(deepest, depth)
+                if open[tag, default: 0] > 0 {
+                    while let top = stack.last, top != tag { pop() }
+                    pop()
+                }
+            } else if !voidTags.contains(tag) {
+                if impliedClose.contains(tag), stack.last == tag { pop() }
+                stack.append(tag)
+                open[tag, default: 0] += 1
+                deepest = max(deepest, stack.count)
             }
             i = k + 1
         }
         return deepest
     }
+
+    private static let impliedClose: Set<String> = ["p", "li", "dt", "dd", "tr", "td", "th", "option"]
 
     private static func indexAfter(_ pattern: [UInt8], in bytes: [UInt8], from start: Int) -> Int {
         var i = start
