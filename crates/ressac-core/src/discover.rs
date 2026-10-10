@@ -17,9 +17,15 @@ pub fn alternate_feeds(html: &str, base: &str) -> Vec<String> {
     let base = Url::parse(base).ok();
     doc.select(&selector)
         .filter(|link| {
-            link.value()
-                .attr("type")
-                .is_some_and(|t| FEED_TYPES.contains(&t.trim().to_ascii_lowercase().as_str()))
+            link.value().attr("type").is_some_and(|t| {
+                let mime = t
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                FEED_TYPES.contains(&mime.as_str())
+            })
         })
         .filter_map(|link| link.value().attr("href"))
         .filter_map(|href| match &base {
@@ -31,7 +37,8 @@ pub fn alternate_feeds(html: &str, base: &str) -> Vec<String> {
 }
 
 pub fn same_feed(a: &ParsedFeed, b: &ParsedFeed) -> bool {
-    a.title == b.title
+    a.title.is_some()
+        && a.title == b.title
         && a.entries.iter().any(|x| {
             b.entries
                 .iter()
@@ -99,5 +106,23 @@ mod tests {
         ));
         assert!(!same_feed(&feed("Blog", &["1"]), &feed("Other", &["1"])));
         assert!(!same_feed(&feed("Blog", &["1"]), &feed("Blog", &["9"])));
+    }
+
+    #[test]
+    fn untitled_feeds_are_never_the_same() {
+        let mut a = feed("x", &["1"]);
+        let mut b = feed("x", &["1"]);
+        a.title = None;
+        b.title = None;
+        assert!(!same_feed(&a, &b));
+    }
+
+    #[test]
+    fn mime_parameters_are_ignored() {
+        let html = r#"<link rel="alternate" type="Application/RSS+XML; charset=utf-8" href="/f">"#;
+        assert_eq!(
+            alternate_feeds(html, "https://x.org/"),
+            vec!["https://x.org/f".to_string()]
+        );
     }
 }

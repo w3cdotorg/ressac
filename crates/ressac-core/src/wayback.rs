@@ -120,4 +120,20 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn non_json_body_is_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("not json", "text/plain"))
+            .mount(&server)
+            .await;
+        assert!(
+            Wayback::new(server.uri())
+                .unwrap()
+                .closest("https://x.org/", None)
+                .await
+                .is_err()
+        );
+    }
 }

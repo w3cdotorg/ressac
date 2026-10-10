@@ -26,7 +26,7 @@ pub fn find_duplicates(feeds: &[LinkInput]) -> HashMap<FeedId, FeedId> {
     sorted.sort_by_key(|f| f.feed_id);
     let mut dups = HashMap::new();
     let mut by_key: HashMap<&str, FeedId> = HashMap::new();
-    for f in &sorted {
+    for f in sorted.iter().filter(|f| !f.final_key.is_empty()) {
         match by_key.get(f.final_key.as_str()) {
             Some(&canonical) => {
                 dups.insert(f.feed_id, canonical);
@@ -53,9 +53,12 @@ fn overlap(a: &[String], b: &[String]) -> f64 {
     if a.len() < MIN_ENTRIES_FOR_OVERLAP || b.len() < MIN_ENTRIES_FOR_OVERLAP {
         return 0.0;
     }
-    let set: HashSet<&String> = a.iter().collect();
-    let common = b.iter().filter(|g| set.contains(g)).count();
-    common as f64 / a.len().min(b.len()) as f64
+    let a: HashSet<&String> = a.iter().collect();
+    let b: HashSet<&String> = b.iter().collect();
+    if a.len() < MIN_ENTRIES_FOR_OVERLAP || b.len() < MIN_ENTRIES_FOR_OVERLAP {
+        return 0.0;
+    }
+    a.intersection(&b).count() as f64 / a.len().min(b.len()) as f64
 }
 
 fn normalized(title: &str) -> String {
@@ -69,40 +72,56 @@ fn normalized(title: &str) -> String {
 /// Marks Dead/Fossil feeds that look like an Alive/Dormant feed of the same folder
 /// (a blog that moved platforms) and proposes merging them into the living one.
 pub fn apply_similar_titles(feeds: &[LinkInput], diags: &mut HashMap<FeedId, Diagnosis>) {
-    for gone in feeds {
-        for alive in feeds {
-            if gone.feed_id == alive.feed_id || gone.folder_id != alive.folder_id {
-                continue;
-            }
-            let (a, b) = (normalized(&gone.title), normalized(&alive.title));
-            if a.chars().count() < MIN_TITLE_CHARS
-                || strsim::levenshtein(&a, &b) > SIMILAR_TITLE_DISTANCE
-            {
-                continue;
-            }
-            let gone_status = diags.get(&gone.feed_id).map(|d| d.status);
-            let alive_status = diags.get(&alive.feed_id).map(|d| d.status);
-            if !matches!(gone_status, Some(Status::Dead | Status::Fossil))
-                || !matches!(alive_status, Some(Status::Alive | Status::Dormant))
-            {
-                continue;
-            }
-            if let Some(d) = diags.get_mut(&gone.feed_id) {
-                d.remarks.push(Remark::SimilarTitle {
-                    feed_id: alive.feed_id,
-                });
-                d.action = Some(Action::MergeInto {
-                    feed_id: alive.feed_id,
-                });
-                d.evidence.bullets.push(format!(
-                    "Looks like the same site as #{} \"{}\", which is still active.",
-                    alive.feed_id, alive.title
-                ));
-            }
-            if let Some(d) = diags.get_mut(&alive.feed_id) {
-                d.remarks.push(Remark::SimilarTitle {
-                    feed_id: gone.feed_id,
-                });
+    let is_gone = |id: FeedId| {
+        matches!(
+            diags.get(&id).map(|d| d.status),
+            Some(Status::Dead | Status::Fossil)
+        )
+    };
+    let is_alive = |id: FeedId| {
+        matches!(
+            diags.get(&id).map(|d| d.status),
+            Some(Status::Alive | Status::Dormant)
+        )
+    };
+    let mut pairs: Vec<(FeedId, FeedId, String)> = Vec::new();
+    for gone in feeds.iter().filter(|f| is_gone(f.feed_id)) {
+        let a = normalized(&gone.title);
+        if a.chars().count() < MIN_TITLE_CHARS {
+            continue;
+        }
+        let best = feeds
+            .iter()
+            .filter(|alive| {
+                alive.feed_id != gone.feed_id
+                    && alive.folder_id == gone.folder_id
+                    && is_alive(alive.feed_id)
+            })
+            .filter_map(|alive| {
+                let b = normalized(&alive.title);
+                if b.chars().count() < MIN_TITLE_CHARS {
+                    return None;
+                }
+                let d = strsim::levenshtein(&a, &b);
+                (d <= SIMILAR_TITLE_DISTANCE).then_some((d, alive))
+            })
+            .min_by_key(|(d, alive)| (*d, alive.feed_id));
+        if let Some((_, alive)) = best {
+            pairs.push((gone.feed_id, alive.feed_id, alive.title.clone()));
+        }
+    }
+    for (gone, alive, alive_title) in pairs {
+        if let Some(d) = diags.get_mut(&gone) {
+            d.remarks.push(Remark::SimilarTitle { feed_id: alive });
+            d.action = Some(Action::MergeInto { feed_id: alive });
+            d.evidence.bullets.push(format!(
+                "Looks like the same site as #{alive} \"{alive_title}\", which is still active."
+            ));
+        }
+        if let Some(d) = diags.get_mut(&alive) {
+            let remark = Remark::SimilarTitle { feed_id: gone };
+            if !d.remarks.contains(&remark) {
+                d.remarks.push(remark);
             }
         }
     }
@@ -222,5 +241,55 @@ mod tests {
         let mut diags = HashMap::from([(1, diag(Status::Alive)), (2, diag(Status::Alive))]);
         apply_similar_titles(&both_alive, &mut diags);
         assert!(diags[&2].remarks.is_empty());
+    }
+
+    #[test]
+    fn short_alive_title_is_never_compared() {
+        let feeds = [
+            input(1, Some(1), "Orang", "a", &[]),
+            input(2, Some(1), "Orange Drenka", "b", &[]),
+        ];
+        let mut diags = HashMap::from([(1, diag(Status::Alive)), (2, diag(Status::Dead))]);
+        apply_similar_titles(&feeds, &mut diags);
+        assert!(diags[&2].remarks.is_empty());
+        assert!(diags[&1].remarks.is_empty());
+    }
+
+    #[test]
+    fn dead_feed_picks_one_closest_target() {
+        let feeds = [
+            input(1, Some(1), "Orange Drenkaaa", "a", &[]),
+            input(2, Some(1), "Orange Drenkaa", "b", &[]),
+            input(3, Some(1), "Orange Drenka", "c", &[]),
+        ];
+        let mut diags = HashMap::from([
+            (1, diag(Status::Alive)),
+            (2, diag(Status::Alive)),
+            (3, diag(Status::Dead)),
+        ]);
+        apply_similar_titles(&feeds, &mut diags);
+        assert_eq!(diags[&3].action, Some(Action::MergeInto { feed_id: 2 }));
+        assert_eq!(diags[&3].remarks, vec![Remark::SimilarTitle { feed_id: 2 }]);
+        assert_eq!(diags[&3].evidence.bullets.len(), 1);
+        assert_eq!(diags[&1].remarks, vec![]);
+        assert_eq!(diags[&2].remarks, vec![Remark::SimilarTitle { feed_id: 3 }]);
+    }
+
+    #[test]
+    fn empty_final_keys_are_not_duplicates() {
+        let dups = find_duplicates(&[input(1, None, "A", "", &[]), input(2, None, "B", "", &[])]);
+        assert!(dups.is_empty());
+    }
+
+    #[test]
+    fn repeated_guids_cannot_inflate_overlap() {
+        let a: Vec<String> = ["1", "1", "1", "1"].iter().map(|s| s.to_string()).collect();
+        let b: Vec<String> = ["1", "2", "3"].iter().map(|s| s.to_string()).collect();
+        assert!(overlap(&a, &b) <= 1.0);
+        assert_eq!(
+            overlap(&a, &b),
+            0.0,
+            "one distinct guid is below the minimum"
+        );
     }
 }
