@@ -84,6 +84,7 @@ pub struct FetchAttempt {
 pub trait Source {
     /// Fetches every feed and sends one attempt per feed on `tx`.
     /// Stops scheduling new requests once `stop` is set; in-flight ones complete.
+    /// Callers must drain the receiver concurrently with this future.
     fn refresh(
         &self,
         feeds: Vec<FeedRef>,
@@ -256,11 +257,20 @@ impl Source for LocalSource {
                     }
                     if i > 0 {
                         tokio::time::sleep(source.limits.per_host_gap).await;
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
                     }
-                    let Ok(_permit) = permits.acquire().await else {
+                    let Ok(permit) = permits.acquire().await else {
                         break;
                     };
+                    // `stop` may have been set while this lane waited for the gap or a permit.
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let attempt = source.fetch_one(feed).await;
+                    // Release the permit before a possibly slow send.
+                    drop(permit);
                     if tx.send(attempt).await.is_err() {
                         break;
                     }
@@ -535,5 +545,43 @@ mod tests {
             .refresh(feeds, tx, Arc::new(AtomicBool::new(true)))
             .await;
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_set_mid_run_halts_queued_requests() {
+        let server = MockServer::start().await;
+        let paths = ["/a", "/b", "/c", "/d"];
+        for p in paths {
+            serve_rss(&server, p).await;
+        }
+        let feeds = paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| feed(i as FeedId + 1, format!("{}{p}", server.uri())))
+            .collect();
+        let limits = FetchLimits {
+            max_in_flight: 1,
+            per_host_gap: Duration::from_millis(150),
+            ..fast()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = mpsc::channel(8);
+        let consumer_stop = stop.clone();
+        let consumer = tokio::spawn(async move {
+            let mut got = 0;
+            while rx.recv().await.is_some() {
+                got += 1;
+                // Stop lands while the lane is already waiting out the per-host gap.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                consumer_stop.store(true, Ordering::Relaxed);
+            }
+            got
+        });
+        LocalSource::new(limits)
+            .unwrap()
+            .refresh(feeds, tx, stop)
+            .await;
+        let got = consumer.await.unwrap();
+        assert_eq!(got, 1, "no request may start after stop is set");
     }
 }
