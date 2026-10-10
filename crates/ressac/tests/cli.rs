@@ -17,6 +17,7 @@ fn ressac(home: &Path, args: &[&str]) -> Output {
         .args(["--db", home.join("db.sqlite").to_str().unwrap()])
         .args(args)
         .env("HOME", home)
+        .env("RESSAC_ALLOW_PRIVATE_ARTICLES", "1")
         .output()
         .expect("binary runs")
 }

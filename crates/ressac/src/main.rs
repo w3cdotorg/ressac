@@ -184,7 +184,12 @@ fn is_broken_pipe(e: &anyhow::Error) -> bool {
 }
 
 fn open(db: &Path) -> anyhow::Result<Ressac> {
-    Ressac::open(db).with_context(|| format!("cannot open database {}", db.display()))
+    let app = Ressac::open(db).with_context(|| format!("cannot open database {}", db.display()))?;
+    // Test hook: the CLI tests serve article pages from a local mock server.
+    if std::env::var_os("RESSAC_ALLOW_PRIVATE_ARTICLES").is_some() {
+        return Ok(app.allow_private_articles()?);
+    }
+    Ok(app)
 }
 
 /// Opens the database for a command that needs feeds. With none (or no database yet),

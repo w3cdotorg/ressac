@@ -27,6 +27,8 @@ pub enum ExtractError {
     NoContent,
     LoginWall,
     Challenge,
+    /// The page address is local or private (loopback, LAN, link-local...): never fetched.
+    PrivateAddress,
     Fetch(ErrorKind),
 }
 
@@ -37,6 +39,9 @@ impl ExtractError {
             ExtractError::NoContent => "No article text found.".to_string(),
             ExtractError::LoginWall => "The page is behind a login.".to_string(),
             ExtractError::Challenge => "Anti-bot challenge page.".to_string(),
+            ExtractError::PrivateAddress => {
+                "The page is on a local or private network.".to_string()
+            }
             ExtractError::Fetch(kind) => format!("{}.", capitalised(&kind.label())),
         }
     }

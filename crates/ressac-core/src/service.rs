@@ -142,6 +142,9 @@ impl Summary {
 pub struct Ressac {
     store: Store,
     source: LocalSource,
+    /// Fetches article pages, whose URLs come from feeds: refuses local and private targets.
+    articles: LocalSource,
+    limits: FetchLimits,
     wayback: Wayback,
     /// Pause between two requests to the same host: Wayback lookups and consecutive
     /// article pages (1 request per second in production).
@@ -161,10 +164,19 @@ impl Ressac {
         let host_gap = limits.per_host_gap;
         Ok(Self {
             store,
-            source: LocalSource::new(limits)?,
+            source: LocalSource::new(limits.clone())?,
+            articles: LocalSource::for_articles(limits.clone(), false)?,
+            limits,
             wayback: Wayback::new(wayback_base)?,
             host_gap,
         })
+    }
+
+    /// Lets article pages be fetched from local and private addresses. For tests against a
+    /// local mock server and for the `RESSAC_ALLOW_PRIVATE_ARTICLES` test hook of the CLI.
+    pub fn allow_private_articles(mut self) -> Result<Self> {
+        self.articles = LocalSource::for_articles(self.limits.clone(), true)?;
+        Ok(self)
     }
 
     pub fn store(&self) -> &Store {
@@ -396,7 +408,7 @@ impl Ressac {
                     break;
                 }
             }
-            let outcome = fetch_article(&self.source, &url).await;
+            let outcome = fetch_article(&self.articles, &url).await;
             self.save_extraction(entry_id, &outcome, sink)?;
             previous_host = host;
         }
@@ -524,7 +536,7 @@ impl Ressac {
         let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
             return Ok(ExtractOutcome::NoUrl);
         };
-        let outcome = fetch_article(&self.source, &url).await;
+        let outcome = fetch_article(&self.articles, &url).await;
         Ok(match self.save_extraction(entry_id, &outcome, sink)? {
             None => ExtractOutcome::Saved,
             Some(sentence) => ExtractOutcome::Failed(sentence),
@@ -602,8 +614,8 @@ fn is_challenged(raw: &RawResponse) -> bool {
             && is_challenge_page(&raw.body[..raw.body.len().min(CHALLENGE_SNIFF_BYTES)]))
 }
 
-/// Fetches an article page through the feed source: same client, user agent, body cap and
-/// timeout (the whole exchange, redirects included).
+/// Fetches an article page through the article source: the feed client's user agent, body
+/// cap and timeout (the whole exchange, redirects included), plus the public-address guard.
 async fn fetch_article(source: &LocalSource, url: &str) -> Extraction {
     article_from(&source.fetch_raw(url, None, None).await)
 }
@@ -616,6 +628,9 @@ fn page_host(url: &str) -> Option<String> {
 /// Maps a page fetch to an extraction outcome. A 401 asks for credentials, so it reads as a
 /// login wall; other fetch errors keep their kind ("HTTP 404.", "Timeout.").
 fn article_from(raw: &RawResponse) -> Extraction {
+    if raw.refused {
+        return Err(ExtractError::PrivateAddress);
+    }
     if is_challenged(raw) {
         return Err(ExtractError::Challenge);
     }
@@ -994,6 +1009,12 @@ mod tests {
     /// An app whose feed #1 holds `linked` (→ `{base}/article`) and `bare` (no link, no
     /// title, only a summary). Returns the app and both entry ids.
     fn app_with_entries(base: &str) -> (Ressac, i64, i64) {
+        let (app, linked, bare) = guarded_app_with_entries(base);
+        (app.allow_private_articles().unwrap(), linked, bare)
+    }
+
+    /// Like `app_with_entries`, with the production public-address guard still on.
+    fn guarded_app_with_entries(base: &str) -> (Ressac, i64, i64) {
         let store = Store::open_in_memory().unwrap();
         let xml =
             r#"<opml><body><outline text="T" xmlUrl="https://t.example/feed"/></body></opml>"#;
@@ -1161,6 +1182,45 @@ mod tests {
         );
         assert!(app.store().fulltext(bare).unwrap().is_none());
         assert!(recorder.0.lock().unwrap().is_empty());
+    }
+
+    /// SSRF guard: a feed-controlled entry URL on a local address is never requested.
+    #[tokio::test]
+    async fn extract_refuses_local_addresses_without_sending_a_request() {
+        let server = MockServer::start().await;
+        serve(&server, "/article", 200, &article_page(), "text/html").await;
+        let (app, linked, _) = guarded_app_with_entries(&server.uri());
+        let recorder = Recorder::default();
+        assert_eq!(
+            app.extract_entry(linked, &recorder).await.unwrap(),
+            ExtractOutcome::Failed("The page is on a local or private network.".into())
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let row = app.store().fulltext(linked).unwrap().unwrap();
+        assert_eq!(
+            row.error.as_deref(),
+            Some("The page is on a local or private network.")
+        );
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![Event::Extracted {
+                entry_id: linked,
+                ok: false,
+                error: Some("The page is on a local or private network.".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn article_from_maps_a_refused_fetch() {
+        let refused = RawResponse {
+            refused: true,
+            ..RawResponse::default()
+        };
+        assert_eq!(
+            article_from(&refused).err(),
+            Some(ExtractError::PrivateAddress)
+        );
     }
 
     #[tokio::test]

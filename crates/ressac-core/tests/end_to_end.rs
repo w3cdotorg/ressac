@@ -314,7 +314,10 @@ async fn full_text_app(server: &MockServer) -> (Ressac, FeedId, FeedId) {
     let opml = format!(
         r#"<opml><body><outline text="Long" xmlUrl="{base}/long.xml"/><outline text="Short" xmlUrl="{base}/short.xml"/></body></opml>"#
     );
-    let app = Ressac::with_parts(Store::open_in_memory().unwrap(), limits(), &base).unwrap();
+    let app = Ressac::with_parts(Store::open_in_memory().unwrap(), limits(), &base)
+        .unwrap()
+        .allow_private_articles()
+        .unwrap();
     app.import_opml(&opml, false).unwrap();
     let id = |title: &str| {
         app.store()
