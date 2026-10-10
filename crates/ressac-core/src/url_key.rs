@@ -30,8 +30,15 @@ pub fn repair_url(raw: &str) -> String {
     s
 }
 
+/// Second-level labels that act as a public suffix under a country TLD.
+const SECOND_LEVELS: [&str; 20] = [
+    "co", "com", "net", "org", "gov", "edu", "ac", "ne", "or", "go", "gob", "gv", "nic", "mil",
+    "ltd", "plc", "sch", "nom", "gouv", "asso",
+];
+
 /// Approximate registrable domain: the last two host labels, or the last three
-/// when the domain ends like `co.uk` / `com.au` (short label + 2-letter TLD).
+/// when the domain ends like `co.uk` / `com.au` (a known second-level label under a
+/// 2-letter TLD). Short names such as `rfi.fr` or `nos.nl` stay at two labels.
 pub fn site_of(raw: &str) -> Option<String> {
     let host = Url::parse(raw).ok()?.host_str()?.to_ascii_lowercase();
     let labels: Vec<&str> = host.split('.').collect();
@@ -39,7 +46,7 @@ pub fn site_of(raw: &str) -> Option<String> {
     if n < 2 {
         return Some(host);
     }
-    let take = if n >= 3 && labels[n - 2].len() <= 3 && labels[n - 1].len() == 2 {
+    let take = if n >= 3 && labels[n - 1].len() == 2 && SECOND_LEVELS.contains(&labels[n - 2]) {
         3
     } else {
         2
@@ -118,5 +125,24 @@ mod tests {
             Some("https://a.org/f")
         );
         assert_eq!(https_variant("https://a.org/f"), None);
+    }
+
+    #[test]
+    fn site_of_keeps_three_labels_only_for_known_second_levels() {
+        let cases = [
+            ("https://www.rfi.fr/x", "rfi.fr"),
+            ("https://rfi.fr/x", "rfi.fr"),
+            ("https://feeds.nos.nl/a", "nos.nl"),
+            ("https://nos.nl/", "nos.nl"),
+            ("https://www.ard.de/", "ard.de"),
+            ("https://news.bbc.co.uk/", "bbc.co.uk"),
+            ("https://www.bbc.co.uk/", "bbc.co.uk"),
+            ("https://x.example.com.au/", "example.com.au"),
+            ("https://blog.example.com/", "example.com"),
+            ("https://sante.gouv.fr/", "sante.gouv.fr"),
+        ];
+        for (url, site) in cases {
+            assert_eq!(site_of(url).as_deref(), Some(site), "{url}");
+        }
     }
 }
