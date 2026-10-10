@@ -27,6 +27,10 @@ fn dry_run_import_reports_and_writes_nothing() {
     let out = ressac(home.path(), &["import", FIXTURE, "--dry-run"]);
     assert!(out.status.success(), "{out:?}");
     assert!(stdout(&out).contains("Imported 11 feeds in 7 new folders."));
+    assert!(
+        !home.path().join("db.sqlite").exists(),
+        "dry run on a fresh home writes no db"
+    );
     let export = ressac(home.path(), &["export"]);
     assert!(!stdout(&export).contains("xkcd"));
 }
@@ -66,6 +70,30 @@ fn fatal_errors_exit_1_with_a_message() {
     let malformed = ressac(home.path(), &["import", bad.to_str().unwrap()]);
     assert_eq!(malformed.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&malformed.stderr).contains("cannot read OPML at line"));
+    assert!(
+        !home.path().join("db.sqlite").exists(),
+        "malformed OPML creates no db"
+    );
+}
+
+#[test]
+fn closed_stdout_does_not_panic() {
+    use std::process::Stdio;
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ressac"))
+        .args([
+            "--db",
+            home.path().join("db.sqlite").to_str().unwrap(),
+            "export",
+        ])
+        .env("HOME", home.path())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let code = child.wait().unwrap().code();
+    assert!(matches!(code, Some(0) | Some(1)), "{code:?}");
 }
 
 #[test]

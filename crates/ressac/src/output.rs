@@ -1,5 +1,7 @@
 //! Human and JSON output for the CLI commands.
 
+use std::io::Write;
+
 use indicatif::{ProgressBar, ProgressStyle};
 use ressac_core::model::Status;
 use ressac_core::service::{Event, EventSink, Summary};
@@ -71,7 +73,14 @@ impl Sink {
 impl EventSink for Sink {
     fn emit(&self, event: &Event) {
         match self {
-            Sink::Json => println!("{}", serde_json::to_string(event).unwrap_or_default()),
+            Sink::Json => {
+                // A closed stdout (BrokenPipe) must not panic; the final write reports it.
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "{}",
+                    serde_json::to_string(event).unwrap_or_default()
+                );
+            }
             Sink::Progress(bar) => match event {
                 Event::Started { total } => bar.set_length(*total as u64),
                 Event::FeedDone { title, .. } => {

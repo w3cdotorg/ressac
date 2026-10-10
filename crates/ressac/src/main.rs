@@ -2,6 +2,7 @@
 
 mod output;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -10,7 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ressac_core::opml;
-use ressac_core::service::{RefreshOptions, Ressac};
+use ressac_core::service::{PRODUCTION_WAYBACK, RefreshOptions, Ressac};
+use ressac_core::source::FetchLimits;
+use ressac_core::store::Store;
 
 #[derive(Parser)]
 #[command(
@@ -73,6 +76,7 @@ async fn main() -> ExitCode {
     let _log_guard = init_logging(cli.verbose);
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) if is_broken_pipe(&e) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
             ExitCode::from(1)
@@ -80,17 +84,21 @@ async fn main() -> ExitCode {
     }
 }
 
+/// True when an io `BrokenPipe` (closed stdout, e.g. `| head -1`) sits anywhere in the chain.
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
+}
+
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    if let Command::Import { file, .. } = &cli.command {
-        // Read before opening the database so a typo does not create an empty one.
-        std::fs::metadata(file).with_context(|| format!("cannot read {}", file.display()))?;
-    }
     let db = cli
         .db
         .clone()
         .unwrap_or_else(ressac_core::store::default_path);
-    let app =
-        Ressac::open(&db).with_context(|| format!("cannot open database {}", db.display()))?;
+    let open =
+        || Ressac::open(&db).with_context(|| format!("cannot open database {}", db.display()));
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
@@ -100,13 +108,27 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         });
     }
+    let mut out = std::io::stdout().lock();
     match cli.command {
         Command::Import { file, dry_run } => {
+            // Read and parse before touching the database, so a bad input never creates one.
             let xml = std::fs::read_to_string(&file)
                 .with_context(|| format!("cannot read {}", file.display()))?;
+            opml::parse(&xml)?;
+            let app = if dry_run && !db.exists() {
+                // Nothing to compare against and nothing may be written: use a throwaway database.
+                Ressac::with_parts(
+                    Store::open_in_memory()?,
+                    FetchLimits::default(),
+                    PRODUCTION_WAYBACK,
+                )?
+            } else {
+                open()?
+            };
             let report = app.import_opml(&xml, dry_run)?;
             if cli.json {
-                println!(
+                writeln!(
+                    out,
                     "{}",
                     serde_json::json!({
                         "dry_run": dry_run,
@@ -115,41 +137,56 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         "merged": report.merged,
                         "skipped_existing": report.skipped_existing,
                     })
-                );
+                )?;
             } else {
-                println!("{}", output::import_text(&report, dry_run));
+                writeln!(out, "{}", output::import_text(&report, dry_run))?;
             }
         }
         Command::Fetch { force } => {
+            let app = open()?;
             let sink = output::sink(cli.json);
-            let summary = app.refresh(RefreshOptions { force }, &sink, stop).await?;
+            let result = app.refresh(RefreshOptions { force }, &sink, stop).await;
             sink.finish();
+            let summary = result?;
             if !cli.json {
-                println!("{}", output::summary_text(&summary, cli.ascii));
+                writeln!(out, "{}", output::summary_text(&summary, cli.ascii))?;
             }
         }
         Command::Check { force } => {
+            let app = open()?;
             let sink = output::sink(cli.json);
-            app.refresh(RefreshOptions { force }, &sink, stop.clone())
-                .await?;
-            app.lookup_wayback(&sink, stop).await?;
+            let refreshed = app
+                .refresh(RefreshOptions { force }, &sink, stop.clone())
+                .await;
+            let refreshed = match refreshed {
+                Ok(s) => s,
+                Err(e) => {
+                    sink.finish();
+                    return Err(e.into());
+                }
+            };
+            let looked_up = app.lookup_wayback(&sink, stop).await;
             sink.finish();
-            let summary = app.summary()?;
+            looked_up?;
+            let mut summary = app.summary()?;
+            summary.network_unreachable |= refreshed.network_unreachable;
             if cli.json {
-                println!(
+                writeln!(
+                    out,
                     "{}",
                     serde_json::json!({ "event": "report", "summary": summary })
-                );
+                )?;
             } else {
-                println!("{}", output::summary_text(&summary, cli.ascii));
+                writeln!(out, "{}", output::summary_text(&summary, cli.ascii))?;
             }
         }
         Command::Export { output, cemetery } => {
+            let app = open()?;
             let xml = opml::export(app.store(), cemetery)?;
             match output {
                 Some(path) => std::fs::write(&path, xml)
                     .with_context(|| format!("cannot write {}", path.display()))?,
-                None => print!("{xml}"),
+                None => write!(out, "{xml}")?,
             }
         }
     }
