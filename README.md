@@ -33,6 +33,8 @@ The database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs
 
 `Ressac.app` (macOS 27) reads the same database as the terminal and runs its own copy of `ressac`, bundled at `Ressac.app/Contents/Helpers/ressac`, for everything that fetches or decides. Reading state (read, starred) is written by the app directly; the garden's decisions go through `ressac garden decide`, so the terminal garden sees them, and `u` / `⌘Z` undo in either place.
 
+The app icon source is `apps/macos/Ressac/Resources/AppIcon.svg` (a 1024 squircle-template drawing; the PNGs in `Assets.xcassets/AppIcon.appiconset` are exported from it).
+
 Build it with Xcode 27 and XcodeGen:
 
 ```sh

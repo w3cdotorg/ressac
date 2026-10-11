@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <clipPath id="sq"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FDF4E3"/><stop offset="1" stop-color="#F6D9B0"/></linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2369A0"/><stop offset="1" stop-color="#1A5584"/></linearGradient>
+    <path id="crestIn" d="M80,642 C220,552 340,552 470,622 C600,692 720,682 944,552" fill="none"/>
+  </defs>
+  <g clip-path="url(#sq)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#sky)"/>
+    <circle cx="720" cy="280" r="92" fill="#F28C38" opacity="0.92"/>
+    <path d="M80,560 C220,470 340,470 470,540 C600,610 720,600 944,470 L944,944 L80,944 Z" fill="url(#sea)"/>
+    <path d="M80,560 C220,470 340,470 470,540 C600,610 720,600 944,470" fill="none" stroke="#FDF4E3" stroke-width="12" stroke-linecap="round"/>
+    <text font-family="SF Mono, Menlo, monospace" font-weight="800" font-size="84" fill="#FFFFFF">
+      <textPath href="#crestIn" startOffset="58" textLength="836" lengthAdjust="spacingAndGlyphs">&lt;rss&gt;&lt;item&gt;&lt;title&gt;</textPath>
+    </text>
+    <path d="M80,770 C230,715 360,725 500,780 C640,835 780,815 944,735 L944,944 L80,944 Z" fill="#164A73"/>
+    <path d="M80,860 C240,825 380,835 520,870 C660,905 800,890 944,840 L944,944 L80,944 Z" fill="#0F3757"/>
+  </g>
+</svg>
