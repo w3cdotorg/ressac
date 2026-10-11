@@ -86,6 +86,29 @@ Une revue du lot de calibrage a donné six points importants et dix mineurs, tou
 - **Indice de spam (M8)** : aucun changement de comportement, l'utilisateur voulait l'indice. Sur le run réel, 5 flux l'affichent : Bibliobsession (le cas visé), ReadWriteWeb (Alive, vocabulaire de paris dans un site tech) et trois flux Fossil avec une langue incohérente. On pourra le restreindre plus tard (statuts non Alive, ou termes du lexique seulement).
 - **Identifiants d'articles (R3)** : les entrées sans GUID dont le titre contenait une entité non déclarée changent d'identifiant une fois après la mise à jour (le titre est désormais haché avec le vrai caractère), donc quelques doublons d'articles apparaissent dans une base existante au premier relevé. C'est ponctuel, et la vraie base de Clément n'existe pas encore.
 
+## Appli Mac (sous-projet 2a)
+
+### Recette manuelle (10 et 11/10/2026)
+
+Base : construite depuis l'OPML Vienna (import puis check) dans un dossier temporaire, ouverte par `RESSAC_DB` (appli) et `--db` (terminal). La vraie base n'existe pas encore : rien n'a été créé dans `~/Library/Application Support/Ressac/`. Appli : build Release, `ressac` embarqué. Un petit script `recette.sh` (`app`, `garden`, `first-run`) a remplacé les variables du protocole, trop pénibles à recopier.
+
+- Point de départ : schéma 2, 186 flux actifs, 10 224 entrées dont 1 083 non lues (règle des 7 jours), 80 flux à trier.
+
+| # | Vérification (spec §9) | Résultat | Observations |
+|---|---|---|---|
+| 1 | Lancement sur la vraie base | OK | dossiers, compteurs, pastilles et jardin affichés d'emblée |
+| 2 | Lecture au clavier seul | KO puis OK | `j`/`k`/Espace gardés par la vue qui avait le focus (sélection par frappe de la barre latérale, liste, WebKit) ; corrigé par un routeur de touches au niveau de la fenêtre, flèches à la NetNewsWire, liste qui suit la sélection |
+| 3 | Article complet d'un flux tronqué | KO puis OK | le bouton existait mais s'affichait en petite icône sans titre ; désormais bouton titré, éteint après un échec avec la raison affichée |
+| 4 | Tri de trois flux, une annulation | OK | |
+| 5 | Mêmes décisions dans `ressac garden` | OK | et une décision prise dans le terminal remonte dans l'appli ouverte (veille sur `data_version`) |
+| 6 | Clair et sombre, polices, tailles | OK | |
+| 7 | Export OPML | OK | |
+| 8 | Premier lancement (dépôt d'OPML) | KO puis OK | « SQLite error 14 » : ouverture en lecture seule d'une base WAL sans fichier `-shm` ; les ouvertures de vérification passent en lecture-écriture |
+
+- **Icône** : vague dont la crête porte `<rss><item><title>` (piste B1 retenue par Clément) ; source `apps/macos/Ressac/Resources/AppIcon.svg`. Après une recompilation au même chemin, le Dock gardait l'ancienne icône : `touch` du paquet puis `lsregister -f`.
+- **Incident** : pendant le débogage du clavier, un sous-agent a envoyé 4 ou 5 frappes `j` par System Events à l'application au premier plan (vers 10 h 00, le 11/10). Règle désormais : aucune frappe simulée vers une appli que Clément utilise, seulement des tests en processus.
+- **À surveiller** : l'avertissement « reentrant operation in its NSTableView delegate » vient en partie du défilement de la liste vers la sélection (corrigé) ; une autre source possible n'est pas reproduite.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
