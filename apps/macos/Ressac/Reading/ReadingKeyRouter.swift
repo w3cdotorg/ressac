@@ -4,7 +4,8 @@ import WebKit
 /// What a reading key asks `AppState` to do (spec §7, Keyboard).
 enum ReadingCommand: Equatable, Sendable {
     case nextEntry, previousEntry, advance, toggleRead, toggleStar
-    /// `→` in the sidebar: the list takes the keyboard, on its first entry when none is selected.
+    /// `→` in the sidebar: the list takes the keyboard, on its first entry when none is selected
+    /// (in a Garden scope, the Garden table takes it).
     case focusEntryList
     /// `←` in the list: back to the sidebar.
     case focusSidebar
@@ -81,6 +82,10 @@ enum ReadingKeys {
         self.state = state
     }
 
+    isolated deinit {
+        stop()
+    }
+
     /// Starts routing the application's key presses (only this window's are taken).
     func start() {
         guard monitor == nil else { return }
@@ -101,7 +106,7 @@ enum ReadingKeys {
         guard let window, event.type == .keyDown, event.windowNumber == window.windowNumber,
               let key = ReadingKeys.key(for: event),
               let command = ReadingKeys.command(for: key, in: focus(of: window.firstResponder)),
-              state.perform(command)
+              state.perform(command, isRepeat: event.isARepeat)
         else { return false }
         switch command {
         case .focusEntryList: focusTable(inColumn: Column.list)

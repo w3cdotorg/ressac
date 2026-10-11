@@ -207,14 +207,14 @@ func calls(_ stub: Stub) throws -> [String] {
         #expect(await eventually { state.entries.count == 2 })
         state.selectedEntryId = first
         var pages = 2
-        state.readerPageDown = {
+        state.readerPageDown = { _ in
             pages -= 1
             return pages >= 0
         }
-        await state.advance()
-        await state.advance()
+        await state.advance()?.value
+        await state.advance()?.value
         #expect(state.selectedEntryId == first)
-        await state.advance()
+        await state.advance()?.value
         #expect(state.selectedEntryId == second)
     }
 

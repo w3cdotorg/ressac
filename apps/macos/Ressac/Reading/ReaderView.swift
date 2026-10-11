@@ -23,7 +23,7 @@ struct ReaderView: View {
             }
         }
         .toolbar { toolbarContent }
-        .onAppear { state.readerPageDown = { [controller] in await controller.pageDown() } }
+        .onAppear { state.readerPageDown = { [controller] id in await controller.pageDown(entryId: id) } }
         .onDisappear { state.readerPageDown = nil }
     }
 
@@ -58,13 +58,13 @@ struct ReaderView: View {
                 if state.isExtracting {
                     ProgressView().controlSize(.small)
                 }
-                Toggle(isOn: Binding(get: { state.readerShowsFullText }, set: { _ in state.requestFullText() })) {
+                Toggle(isOn: Binding(get: { state.isShowingFullText }, set: { _ in state.requestFullText() })) {
                     Label("Full Article", systemImage: "doc.plaintext")
                 }
                 .toggleStyle(.button)
                 .labelStyle(.titleAndIcon)
-                .help(Self.fullArticleHelp(for: state.selectedEntry, showsFullText: state.readerShowsFullText,
-                                           isExtracting: state.isExtracting))
+                .help(Self.fullArticleHelp(for: state.selectedEntry, isShowingFullText: state.isShowingFullText,
+                                           isExtracting: state.isExtracting, failure: state.fullTextFailure))
                 .disabled(!state.canRequestFullText)
             }
         }
@@ -95,11 +95,13 @@ struct ReaderView: View {
 
 extension ReaderView {
     /// The Full Article button's tooltip, which also explains why it is disabled.
-    static func fullArticleHelp(for entry: EntryRow?, showsFullText: Bool, isExtracting: Bool) -> String {
+    static func fullArticleHelp(for entry: EntryRow?, isShowingFullText: Bool, isExtracting: Bool,
+                                failure: String?) -> String {
         guard let entry else { return "Select an entry to read its full article" }
         guard entry.link != nil else { return "This entry has no web page to fetch the full article from" }
         if isExtracting { return "Fetching the full article…" }
-        return showsFullText
+        if let failure { return failure + (failure.hasSuffix(".") ? " " : ". ") + "Click to try again" }
+        return isShowingFullText
             ? "Showing the full article. Click to show the feed's text"
             : "Show the full article, fetched from the site"
     }
@@ -129,11 +131,30 @@ struct ArticlePage: Equatable {
 /// Lets `AppState.advance()` scroll the reader with Space (through `readerPageDown`).
 @MainActor final class ReaderController {
     weak var webView: WKWebView?
+    /// The entry whose page has finished loading; nil while a page loads.
+    private(set) var loadedEntryId: Int64?
+    private var loadingEntryId: Int64?
+    private var navigation: WKNavigation?
 
-    /// Scrolls one screen down. Returns `false` when the article already shows its end, so
-    /// `AppState` moves on to the next unread entry.
-    func pageDown() async -> Bool {
+    func load(entryId: Int64, html: String) {
+        loadedEntryId = nil
+        loadingEntryId = entryId
+        navigation = webView?.loadHTMLString(html, baseURL: nil)
+    }
+
+    /// Called by the navigation delegate. A failed load counts too, or Space would stay spent.
+    func navigationEnded(_ ended: WKNavigation?) {
+        guard ended === navigation else { return }  // a load that a newer one replaced
+        loadedEntryId = loadingEntryId
+    }
+
+    /// Scrolls one screen of `entryId`'s page down. Returns `false` when the article already shows
+    /// its end, so `AppState` moves on to the next unread entry, and `true` without scrolling
+    /// while that entry's page is not loaded yet: Space must not read the previous page's
+    /// position (acceptance fix, review round 1).
+    func pageDown(entryId: Int64) async -> Bool {
         guard let webView else { return false }
+        guard loadedEntryId == entryId, !webView.isLoading else { return true }
         let script = """
         const page = document.scrollingElement;
         if (page.scrollTop + window.innerHeight >= page.scrollHeight - 2) { return false; }
@@ -150,7 +171,7 @@ struct ArticleWebView: NSViewRepresentable {
     let page: ArticlePage
     let controller: ReaderController
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(controller: controller) }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -173,11 +194,28 @@ struct ArticleWebView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         guard context.coordinator.page != page else { return }
         context.coordinator.page = page
-        webView.loadHTMLString(page.html(), baseURL: nil)
+        controller.load(entryId: page.entry.entryId, html: page.html())
     }
 
     @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
         var page: ArticlePage?
+        let controller: ReaderController
+
+        init(controller: ReaderController) {
+            self.controller = controller
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            controller.navigationEnded(navigation)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
+            controller.navigationEnded(navigation)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
+            controller.navigationEnded(navigation)
+        }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {

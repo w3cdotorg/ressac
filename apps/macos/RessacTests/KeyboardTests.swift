@@ -163,6 +163,21 @@ import WebKit
         #expect(state.selectedEntryId == nil)
     }
 
+    @Test func heldKeysNeitherToggleNorCrossToTheNextEntry() async throws {
+        let (router, h, state, test, ids) = try await makeRouter()
+        state.selectedEntryId = ids[0]
+        #expect(await eventually { state.selectedEntry != nil })
+        state.readerPageDown = { _ in false }  // at the bottom
+        #expect(h.window.makeFirstResponder(h.reader))
+        for key in ["m", "s", " "] {
+            #expect(router.handle(keyEvent(key, window: h.window, isARepeat: true)))  // spent, so no menu acts
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(state.selectedEntryId == ids[0])
+        #expect(try test.one(String.self, "SELECT read_at FROM entry WHERE id = ?", [ids[0]]) == nil)
+        #expect(state.selectedEntry?.isStarred == false)
+    }
+
     @Test func theGardenKeepsItsOwnKeys() async throws {
         let (router, h, state, _, _) = try await makeRouter()
         state.selection = .garden(.needsTriage)
@@ -171,16 +186,22 @@ import WebKit
                       arrowEvent(NSDownArrowFunctionKey, window: h.window)] {
             #expect(!router.handle(event))  // `k` is Keep, the arrows move in the table
         }
+        // The arrows between the columns work in the Garden too (Minor 5).
         #expect(h.window.makeFirstResponder(h.sidebar))
-        #expect(!router.handle(arrowEvent(NSRightArrowFunctionKey, window: h.window)))
+        #expect(router.handle(arrowEvent(NSRightArrowFunctionKey, window: h.window)))
+        #expect(h.window.firstResponder === h.list)
+        #expect(state.selectedEntryId == nil)  // no entry to pick in a Garden scope
+        #expect(router.handle(arrowEvent(NSLeftArrowFunctionKey, window: h.window)))
+        #expect(h.window.firstResponder === h.sidebar)
     }
 }
 
 @MainActor
-func keyEvent(_ characters: String, modifiers: NSEvent.ModifierFlags = [], window: NSWindow? = nil) -> NSEvent {
+func keyEvent(_ characters: String, modifiers: NSEvent.ModifierFlags = [], window: NSWindow? = nil,
+              isARepeat: Bool = false) -> NSEvent {
     NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
                      windowNumber: window?.windowNumber ?? 0, context: nil, characters: characters,
-                     charactersIgnoringModifiers: characters, isARepeat: false, keyCode: 0)!
+                     charactersIgnoringModifiers: characters, isARepeat: isARepeat, keyCode: 0)!
 }
 
 @MainActor

@@ -77,9 +77,7 @@ private struct GoMenuItems: View {
         Button("Previous Entry") { state?.selectPrevious() }
             .keyboardShortcut(letter("k", when: state?.canNavigateEntries))
             .disabled(state?.canNavigateEntries != true)
-        Button("Scroll Down or Next Unread") {
-            if let state { Task { await state.advance() } }
-        }
+        Button("Scroll Down or Next Unread") { state?.advance() }
         .keyboardShortcut(letter(.space, when: state?.canNavigateEntries))
         .disabled(state?.canNavigateEntries != true)
     }

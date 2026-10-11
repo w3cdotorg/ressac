@@ -82,6 +82,9 @@ enum PendingPanel: Equatable, Sendable {
     var isSearchFocused = false
     /// False while another window or a panel has the keyboard (see `windowDidChangeKey`).
     private(set) var readingWindowIsKey = true
+    /// The full article was asked for the selected entry. It stays true after a failed
+    /// extraction, so that the page keeps its "Full article unavailable" notice until the
+    /// selection changes; `isShowingFullText` says whether the article is on screen.
     var readerShowsFullText = false
     /// The feed selected in the Garden table (phase 12); garden commands act on it.
     var selectedFeedId: Int64?
@@ -95,7 +98,8 @@ enum PendingPanel: Equatable, Sendable {
     /// The selected entry with its full content, for the reader.
     private(set) var selectedEntry: EntryRow?
     private(set) var selectedFulltext: FulltextRow?
-    private(set) var isExtracting = false
+    /// Entries whose full article is being fetched.
+    private(set) var extractingEntryIds: Set<Int64> = []
     /// "Full article unavailable: …" for the selected entry (shown inline, spec §8).
     private(set) var fullTextNotice: String?
     /// Garden rows decided since the scope was entered, dimmed by the table.
@@ -108,12 +112,16 @@ enum PendingPanel: Equatable, Sendable {
     @ObservationIgnored var autoReadDelay: Duration = .seconds(1)
     @ObservationIgnored var now: @MainActor () -> Date = { Date() }
     @ObservationIgnored var openURL: @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
-    /// Set by the reader (phase 10): scrolls one page and returns false at the bottom.
-    @ObservationIgnored var readerPageDown: (@MainActor () async -> Bool)?
+    /// Set by the reader (phase 10): scrolls one page of the given entry and returns false at
+    /// its bottom. True, with nothing done, while that entry's page is still loading.
+    @ObservationIgnored var readerPageDown: (@MainActor (Int64) async -> Bool)?
 
     @ObservationIgnored private var externalChanges: ExternalChangeMonitor?
     @ObservationIgnored private var systemObservers: [any NSObjectProtocol] = []
-    @ObservationIgnored private weak var readingWindow: NSWindow?
+    /// The windows showing `MainView`, each registered by its own view.
+    @ObservationIgnored private let readingWindows = NSHashTable<NSWindow>.weakObjects()
+    /// One Space at a time: a second press while the first runs is spent without effect.
+    @ObservationIgnored private var isAdvancing = false
     @ObservationIgnored private var sidebarObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var listObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var entryObservation: AnyDatabaseCancellable?
@@ -176,16 +184,23 @@ enum PendingPanel: Equatable, Sendable {
     /// Single-letter shortcuts belong to the reading window: while a panel or another window has
     /// the keyboard (Export…, New…, Settings), typing "jams" must stay typing.
     func windowDidChangeKey(_ window: NSWindow?, isKey: Bool) {
-        guard let readingWindow else { return }
-        if window === readingWindow { readingWindowIsKey = isKey }
+        guard readingWindows.count > 0 else { return }
+        if let window, readingWindows.contains(window) { readingWindowIsKey = isKey }
         else if isKey { readingWindowIsKey = false }
     }
 
-    /// Registered by the main view (`ReadingWindowReader`) when it enters or leaves its window.
-    func registerReadingWindow(_ window: NSWindow?) {
-        guard window !== readingWindow else { return }
-        readingWindow = window
-        readingWindowIsKey = window?.isKeyWindow ?? true
+    /// Called by the main view (`ReadingWindowReader`) when it enters a window.
+    func registerReadingWindow(_ window: NSWindow) {
+        readingWindows.add(window)
+        readingWindowIsKey = window.isKeyWindow
+    }
+
+    /// Called by the main view when it leaves `window`. Another window's registration stays,
+    /// and with no reading window left the letters are off.
+    func unregisterReadingWindow(_ window: NSWindow) {
+        guard readingWindows.contains(window) else { return }
+        readingWindows.remove(window)
+        readingWindowIsKey = readingWindows.allObjects.contains { $0.isKeyWindow }
     }
 
     var sidebarTree: [SidebarNode] { SidebarNode.tree(from: sidebar) }
@@ -205,6 +220,20 @@ enum PendingPanel: Equatable, Sendable {
     var canRefresh: Bool { !runs.isLongRunActive }
     var canOpenInBrowser: Bool { selectedEntry?.link != nil }
     var canRequestFullText: Bool { selectedEntry?.link != nil && !isExtracting }
+    /// The selected entry's full article is being fetched.
+    var isExtracting: Bool { selectedEntryId.map(extractingEntryIds.contains) ?? false }
+    /// The full article is on screen: the Full Article button is on only then.
+    var isShowingFullText: Bool {
+        readerShowsFullText && selectedFulltext?.html != nil && selectedFulltext?.entryId == selectedEntryId
+    }
+    /// Why the full article asked for is not shown, while its notice is on screen.
+    var fullTextFailure: String? {
+        guard readerShowsFullText, !isExtracting, !isShowingFullText else { return nil }
+        if let error = selectedFulltext?.error, selectedFulltext?.entryId == selectedEntryId {
+            return "Full article unavailable: \(error)"
+        }
+        return fullTextNotice
+    }
     var canGardenDecide: Bool { selection.isGarden && selectedFeedId != nil }
 
     // MARK: Reading commands
@@ -235,17 +264,29 @@ enum PendingPanel: Equatable, Sendable {
         selectedEntryId = next.entryId
     }
 
-    /// Space: scroll the reader; at the bottom, next unread.
-    func advance() async {
-        if let readerPageDown, await readerPageDown() { return }
-        selectNextUnread()
+    /// Space: scroll the reader; at the bottom, next unread. One at a time: nil (nothing done)
+    /// while the previous one runs. A held Space (`isRepeat`) scrolls but never moves on, so
+    /// that holding it through an article cannot sweep past entries unseen.
+    @discardableResult
+    func advance(isRepeat: Bool = false) -> Task<Void, Never>? {
+        guard canNavigateEntries, !isAdvancing else { return nil }
+        isAdvancing = true
+        let entryId = selectedEntryId
+        return Task {
+            defer { isAdvancing = false }
+            if let readerPageDown, let entryId, await readerPageDown(entryId) { return }
+            // Not when the selection changed meanwhile (a click): that entry is the one to read.
+            guard !isRepeat, selectedEntryId == entryId else { return }
+            selectNextUnread()
+        }
     }
 
     /// A key routed by the reading window (`ReadingKeyRouter`). False when the command cannot
     /// act here, so that the key goes on to the focused view (the Garden's own keys, the arrows
     /// of an empty list).
+    /// `isRepeat`: the key is held. A held toggle is spent without toggling again.
     @discardableResult
-    func perform(_ command: ReadingCommand) -> Bool {
+    func perform(_ command: ReadingCommand, isRepeat: Bool = false) -> Bool {
         switch command {
         case .nextEntry:
             guard canNavigateEntries else { return false }
@@ -255,14 +296,14 @@ enum PendingPanel: Equatable, Sendable {
             selectPrevious()
         case .advance:
             guard canNavigateEntries else { return false }
-            Task { await advance() }
+            advance(isRepeat: isRepeat)
         case .toggleRead:
-            return toggleRead() != nil
+            return isRepeat ? canToggleEntry : toggleRead() != nil
         case .toggleStar:
-            return toggleStar() != nil
+            return isRepeat ? canToggleEntry : toggleStar() != nil
         case .focusEntryList:
-            guard !selection.isGarden else { return false }
-            if selectedEntryId == nil { selectedEntryId = entries.first?.entryId }
+            // In a Garden scope the list column is the Garden table: focus only.
+            if !selection.isGarden, selectedEntryId == nil { selectedEntryId = entries.first?.entryId }
         case .focusSidebar:
             break
         }
@@ -332,15 +373,21 @@ enum PendingPanel: Equatable, Sendable {
 
     /// The reader's Full article toggle (spec §7, Reader).
     @discardableResult
+    /// On: back to the feed's text. Off with a stored article: show it. Otherwise fetch it,
+    /// which after a failure is a retry.
     func requestFullText() -> Task<Void, Never>? {
         guard let entry = selectedEntry, entry.link != nil else { return nil }
-        if readerShowsFullText || entry.hasFulltext {
-            readerShowsFullText.toggle()
+        if isShowingFullText {
+            readerShowsFullText = false
+            return nil
+        }
+        if entry.hasFulltext {
+            readerShowsFullText = true
             return nil
         }
         guard !isExtracting else { return nil }
         readerShowsFullText = true
-        isExtracting = true
+        extractingEntryIds.insert(entry.entryId)
         fullTextNotice = nil
         let entryId = entry.entryId
         let run = runs.start(.extract(entryId: entryId)) { [weak self] event in
@@ -350,7 +397,7 @@ enum PendingPanel: Equatable, Sendable {
         }
         return Task {
             let outcome = await run.value
-            isExtracting = false
+            extractingEntryIds.remove(entryId)
             if case let .failed(failure) = outcome, fullTextNotice == nil, selectedEntryId == entryId {
                 fullTextNotice = "Full article unavailable: \(failure.message)"
             }

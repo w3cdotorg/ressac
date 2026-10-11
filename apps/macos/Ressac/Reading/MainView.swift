@@ -212,6 +212,7 @@ private struct ReadingWindowReader: NSViewRepresentable {
 
     static func dismantleNSView(_ view: WindowView, coordinator: ()) {
         view.router.stop()
+        if let window = view.window { view.router.state.unregisterReadingWindow(window) }
     }
 
     final class WindowView: NSView {
@@ -225,11 +226,20 @@ private struct ReadingWindowReader: NSViewRepresentable {
         @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            super.viewWillMove(toWindow: newWindow)
+            if let window, newWindow !== window { router.state.unregisterReadingWindow(window) }
+        }
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             router.window = window
-            router.state.registerReadingWindow(window)
-            if window == nil { router.stop() } else { router.start() }
+            if let window {
+                router.state.registerReadingWindow(window)
+                router.start()
+            } else {
+                router.stop()
+            }
         }
     }
 }
