@@ -162,9 +162,11 @@ struct EntryListView: View {
                     }
             }
             // `j`, `k` and Space select from the keyboard: the list follows, or the selection
-            // would move out of sight.
+            // would move out of sight. On the next turn: a click changes the selection from
+            // inside the table's delegate, where scrolling the table is a reentrant operation.
             .onChange(of: state.selectedEntryId) { _, id in
-                if let id { proxy.scrollTo(id) }
+                guard let id else { return }
+                Task { @MainActor in proxy.scrollTo(id) }
             }
         }
         .overlay {
