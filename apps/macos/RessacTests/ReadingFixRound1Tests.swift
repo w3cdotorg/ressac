@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import GRDB
 import Testing
 import WebKit
 
@@ -194,5 +195,56 @@ import WebKit
         #expect(state.letterShortcutsEnabled)
         state.unregisterReadingWindow(second)
         #expect(!state.letterShortcutsEnabled)  // no reading window: no letters
+    }
+}
+
+/// Acceptance finding A: `ressac migrate` leaves a WAL database with no `-wal` or `-shm` file,
+/// which a read-only connection cannot open (SQLITE_CANTOPEN, "unable to open database file").
+@MainActor @Suite struct FirstRunWALTests {
+    /// A schema v2 database in WAL mode, closed so that its `-wal` and `-shm` files are gone.
+    func makeClosedWAL(in dir: URL) throws -> URL {
+        let url = dir.appending(path: "template.sqlite")
+        try FileManager.default.copyItem(at: TestDatabase.fixture, to: url)
+        var queue: DatabaseQueue? = try DatabaseQueue(path: url.path)
+        let mode = try queue?.writeWithoutTransaction { db in try String.fetchOne(db, sql: "PRAGMA journal_mode = WAL") }
+        #expect(mode == "wal")
+        queue = nil  // the last connection closes: SQLite removes -wal and -shm, as after `ressac migrate`
+        #expect(!FileManager.default.fileExists(atPath: url.path + "-shm"))
+        #expect(!FileManager.default.fileExists(atPath: url.path + "-wal"))
+        return url
+    }
+
+    @Test func aClosedWALDatabaseChecksAndOpens() async throws {
+        let test = try TestDatabase()
+        let template = try makeClosedWAL(in: test.dir)
+        #expect(try AppDatabase.check(at: template) == .ok)
+        let watcher = try DataVersionWatcher(url: template)
+        try watcher.prime()
+    }
+
+    @Test func theFirstRunOpensWhatMigrateCreated() async throws {
+        let test = try TestDatabase()
+        let template = try makeClosedWAL(in: test.dir)
+        let fresh = test.dir.appending(path: "empty.sqlite")
+        let stub = try Stub("""
+            [ "$4" = migrate ] || exit 2
+            cp "\(template.path)" "$2"
+            echo '{"event":"finished"}'
+            """)
+        let launcher = Launcher()
+        await launcher.launch(database: fresh, executable: stub.executable)
+        if case let .failed(message) = launcher.phase { Issue.record("launch failed: \(message)") }
+        #expect(launcher.state != nil)
+    }
+}
+
+extension FirstRunWALTests {
+    @Test func theReadingConnectionsRefuseWrites() throws {
+        let test = try TestDatabase()
+        let queue = try DatabaseQueue(path: test.url.path, configuration: AppDatabase.readingConfiguration(label: "test"))
+        #expect(throws: (any Error).self) {
+            try queue.write { try $0.execute(sql: "UPDATE schema_meta SET version = 9") }
+        }
+        #expect(try AppDatabase.check(at: test.url) == .ok)
     }
 }

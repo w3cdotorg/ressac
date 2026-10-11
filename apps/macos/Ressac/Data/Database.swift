@@ -43,14 +43,23 @@ final class AppDatabase: Sendable {
         return AppDatabase(writer: try DatabasePool(path: url.path, configuration: config), url: url)
     }
 
+    /// For a connection of ours that only reads. Not `readonly`: a read-only connection cannot
+    /// open a WAL database whose `-shm` file is gone, which is how `ressac migrate` leaves a new
+    /// database (SQLITE_CANTOPEN, "unable to open database file"). The file is opened read-write,
+    /// so SQLite can recreate `-shm`, and `query_only` refuses any write.
+    static func readingConfiguration(label: String) -> Configuration {
+        var config = Configuration()
+        config.label = label
+        config.prepareDatabase { db in try db.execute(sql: "PRAGMA query_only = ON") }
+        return config
+    }
+
     /// `schema_meta.version`, or nil when the file does not exist.
     static func schemaVersion(at url: URL) throws -> Int? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         // An empty file (a fresh "New…" target) is treated as missing: `migrate` fills it.
         if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int, size == 0 { return nil }
-        var config = Configuration()
-        config.readonly = true
-        let queue = try DatabaseQueue(path: url.path, configuration: config)
+        let queue = try DatabaseQueue(path: url.path, configuration: readingConfiguration(label: "Ressac schema check"))
         return try queue.read { db in
             try Int.fetchOne(db, sql: "SELECT version FROM schema_meta")
         }

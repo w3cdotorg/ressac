@@ -13,10 +13,7 @@ final class DataVersionWatcher: Sendable {
     private let last = Mutex<Int?>(nil)
 
     init(url: URL) throws {
-        var config = Configuration()
-        config.readonly = true
-        config.label = "Ressac data_version"
-        queue = try DatabaseQueue(path: url.path, configuration: config)
+        queue = try DatabaseQueue(path: url.path, configuration: AppDatabase.readingConfiguration(label: "Ressac data_version"))
     }
 
     private func version() throws -> Int {
