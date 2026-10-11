@@ -131,6 +131,13 @@ Une revue du lot de calibrage a donné six points importants et dix mineurs, tou
 - **Délai total** : `tokio::time::timeout` autour d'une boucle qui écrit dans un `&mut RawResponse` ; à l'échéance, le futur est abandonné, l'emprunt se termine et la chaîne de redirections déjà vue reste lisible.
 - **Ctrl-C en mode TUI** : en mode brut, crossterm désactive ISIG, Ctrl-C arrive comme touche et non comme signal ; le second Ctrl-C (sortie 130) ne concerne donc que `fetch` et `check`.
 
+### Recette de l'appli Mac (11/10/2026)
+- **Raccourcis sans modificateur dans les menus SwiftUI** : AppKit ne les essaie qu'après la vue qui a le clavier. La barre latérale et la liste (`SwiftUIOutlineListView`, sous-classe de `NSOutlineView`) prennent la barre d'espace et font de la sélection par frappe : `j` dans la barre latérale saute au dossier « Jon ». Le `WKWebView` du lecteur garde la barre d'espace pour son propre défilement, même tout en bas. Les touches de lecture passent donc par un moniteur local (`ReadingKeyRouter`), avant la vue, comme le fait NetNewsWire ; les menus gardent leurs raccourcis pour l'affichage et le clic.
+- **Drapeaux des événements clavier** : un événement posté par `CGEvent.postToPid` porte un bit privé (1 << 29) dans `modifierFlags`, en plus de `.numericPad` et `.function` sur les flèches. On ne regarde que Maj, Contrôle, Option et Commande.
+- **Barre d'outils (macOS 27)** : un `Label` y est affiché en icône seule, fondu dans la même capsule de verre que ses voisins. `.labelStyle(.titleAndIcon)` et un `ToolbarSpacer(.fixed)` de chaque côté donnent au bouton Full Article sa propre capsule, avec son titre.
+- **`callAsyncJavaScript`** fonctionne avec `allowsContentJavaScript = false` : seul le JavaScript de la page est coupé, pas celui de l'appli (défilement par la barre d'espace vérifié sur un long article).
+- **Liste et sélection au clavier** : une `List` SwiftUI ne fait pas défiler jusqu'à une sélection changée par le code ; `ScrollViewReader.scrollTo` sur `selectedEntryId`.
+
 ## Extraction d'articles : essai de `dom_smoothie` 0.18.2 (phase 1 du sous-projet 2a)
 
 Essai du 10/10/2026 sur 10 pages réelles tirées des flux de l'utilisateur (base jetable du calibrage, liste d'URL gardée hors du dépôt), récupérées par `LocalSource::fetch_raw`. Commande : `RESSAC_SPIKE_URLS=… cargo test -p ressac-core extract::spike -- --ignored --nocapture`.

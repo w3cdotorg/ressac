@@ -181,7 +181,7 @@ enum PendingPanel: Equatable, Sendable {
         else if isKey { readingWindowIsKey = false }
     }
 
-    /// Registered by the main view (`.trackingReadingWindow`).
+    /// Registered by the main view (`ReadingWindowReader`) when it enters or leaves its window.
     func registerReadingWindow(_ window: NSWindow?) {
         guard window !== readingWindow else { return }
         readingWindow = window
@@ -239,6 +239,34 @@ enum PendingPanel: Equatable, Sendable {
     func advance() async {
         if let readerPageDown, await readerPageDown() { return }
         selectNextUnread()
+    }
+
+    /// A key routed by the reading window (`ReadingKeyRouter`). False when the command cannot
+    /// act here, so that the key goes on to the focused view (the Garden's own keys, the arrows
+    /// of an empty list).
+    @discardableResult
+    func perform(_ command: ReadingCommand) -> Bool {
+        switch command {
+        case .nextEntry:
+            guard canNavigateEntries else { return false }
+            selectNext()
+        case .previousEntry:
+            guard canNavigateEntries else { return false }
+            selectPrevious()
+        case .advance:
+            guard canNavigateEntries else { return false }
+            Task { await advance() }
+        case .toggleRead:
+            return toggleRead() != nil
+        case .toggleStar:
+            return toggleStar() != nil
+        case .focusEntryList:
+            guard !selection.isGarden else { return false }
+            if selectedEntryId == nil { selectedEntryId = entries.first?.entryId }
+        case .focusSidebar:
+            break
+        }
+        return true
     }
 
     @discardableResult

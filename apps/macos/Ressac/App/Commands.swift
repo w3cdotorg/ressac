@@ -16,7 +16,8 @@ struct RessacCommands: Commands {
 
 /// A modifier-free shortcut, or none when the command cannot act. AppKit swallows a menu
 /// key equivalent even when its item is disabled, so a bound `j` would never reach the
-/// search field, and of two items sharing a key only the first is ever tried.
+/// search field, and of two items sharing a key only the first is ever tried. In the reading
+/// window these keys are taken earlier by `ReadingKeyRouter`; the menus show them and act on a click.
 private func letter(_ key: KeyEquivalent, when enabled: Bool?) -> KeyboardShortcut? {
     enabled == true ? KeyboardShortcut(key, modifiers: []) : nil
 }

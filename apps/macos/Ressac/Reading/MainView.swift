@@ -150,15 +150,22 @@ struct EntryListView: View {
     @Bindable var state: AppState
 
     var body: some View {
-        List(state.entries, selection: $state.selectedEntryId) { entry in
-            EntryRowView(entry: entry)
-                .tag(entry.entryId)
-                .onDrag {
-                    guard let link = entry.link else { return NSItemProvider() }
-                    let provider = NSItemProvider(object: link as NSURL)
-                    provider.suggestedName = entry.displayTitle
-                    return provider
-                }
+        ScrollViewReader { proxy in
+            List(state.entries, selection: $state.selectedEntryId) { entry in
+                EntryRowView(entry: entry)
+                    .tag(entry.entryId)
+                    .onDrag {
+                        guard let link = entry.link else { return NSItemProvider() }
+                        let provider = NSItemProvider(object: link as NSURL)
+                        provider.suggestedName = entry.displayTitle
+                        return provider
+                    }
+            }
+            // `j`, `k` and Space select from the keyboard: the list follows, or the selection
+            // would move out of sight.
+            .onChange(of: state.selectedEntryId) { _, id in
+                if let id { proxy.scrollTo(id) }
+            }
         }
         .overlay {
             if state.entries.isEmpty {
@@ -194,14 +201,35 @@ struct EntryRowView: View {
     }
 }
 
-/// Tells `AppState` which window is the reading window, to gate single-letter shortcuts.
+/// Tells `AppState` which window is the reading window, to gate single-letter shortcuts, and
+/// routes that window's keys (`ReadingKeyRouter`).
 private struct ReadingWindowReader: NSViewRepresentable {
     let state: AppState
 
-    func makeNSView(context: Context) -> NSView { NSView() }
+    func makeNSView(context: Context) -> WindowView { WindowView(router: ReadingKeyRouter(state: state)) }
 
-    func updateNSView(_ view: NSView, context: Context) {
-        // The view has no window yet while SwiftUI builds it.
-        Task { @MainActor [weak view] in state.registerReadingWindow(view?.window) }
+    func updateNSView(_ view: WindowView, context: Context) {}
+
+    static func dismantleNSView(_ view: WindowView, coordinator: ()) {
+        view.router.stop()
+    }
+
+    final class WindowView: NSView {
+        let router: ReadingKeyRouter
+
+        init(router: ReadingKeyRouter) {
+            self.router = router
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            router.window = window
+            router.state.registerReadingWindow(window)
+            if window == nil { router.stop() } else { router.start() }
+        }
     }
 }
