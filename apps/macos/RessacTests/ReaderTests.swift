@@ -291,3 +291,19 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(a != c)
     }
 }
+
+/// Acceptance fix 2: the Full Article button says what it does, and why it is off.
+@Suite struct FullArticleButtonTests {
+    @MainActor @Test func theTooltipGivesTheStateAndWhyTheButtonIsOff() {
+        #expect(ReaderView.fullArticleHelp(for: nil, showsFullText: false, isExtracting: false)
+            == "Select an entry to read its full article")
+        #expect(ReaderView.fullArticleHelp(for: entry(url: nil), showsFullText: false, isExtracting: false)
+            == "This entry has no web page to fetch the full article from")
+        #expect(ReaderView.fullArticleHelp(for: entry(), showsFullText: true, isExtracting: true)
+            == "Fetching the full article…")
+        #expect(ReaderView.fullArticleHelp(for: entry(), showsFullText: false, isExtracting: false)
+            == "Show the full article, fetched from the site")
+        #expect(ReaderView.fullArticleHelp(for: entry(), showsFullText: true, isExtracting: false)
+            == "Showing the full article. Click to show the feed's text")
+    }
+}

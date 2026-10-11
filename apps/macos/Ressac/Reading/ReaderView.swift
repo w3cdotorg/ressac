@@ -50,17 +50,26 @@ struct ReaderView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // Its own item, titled: an icon alone in the toolbar's glass group went unnoticed
+        // (acceptance fix 2). The button's tint tells on from off; the tooltip says why it is off.
+        ToolbarSpacer(.fixed, placement: .primaryAction)
+        ToolbarItem(placement: .primaryAction) {
+            HStack(spacing: 6) {
+                if state.isExtracting {
+                    ProgressView().controlSize(.small)
+                }
+                Toggle(isOn: Binding(get: { state.readerShowsFullText }, set: { _ in state.requestFullText() })) {
+                    Label("Full Article", systemImage: "doc.plaintext")
+                }
+                .toggleStyle(.button)
+                .labelStyle(.titleAndIcon)
+                .help(Self.fullArticleHelp(for: state.selectedEntry, showsFullText: state.readerShowsFullText,
+                                           isExtracting: state.isExtracting))
+                .disabled(!state.canRequestFullText)
+            }
+        }
+        ToolbarSpacer(.fixed, placement: .primaryAction)
         ToolbarItemGroup(placement: .primaryAction) {
-            if state.isExtracting {
-                ProgressView().controlSize(.small)
-            }
-            Toggle(isOn: Binding(get: { state.readerShowsFullText }, set: { _ in state.requestFullText() })) {
-                Label("Full Article", systemImage: "doc.plaintext")
-            }
-            .toggleStyle(.button)
-            .help("Show the full article, fetched from the site")
-            .disabled(state.selectedEntry?.link == nil || state.isExtracting)
-
             Button {
                 state.toggleStar()
             } label: {
@@ -81,6 +90,18 @@ struct ReaderView: View {
                     .help("Share")
             }
         }
+    }
+}
+
+extension ReaderView {
+    /// The Full Article button's tooltip, which also explains why it is disabled.
+    static func fullArticleHelp(for entry: EntryRow?, showsFullText: Bool, isExtracting: Bool) -> String {
+        guard let entry else { return "Select an entry to read its full article" }
+        guard entry.link != nil else { return "This entry has no web page to fetch the full article from" }
+        if isExtracting { return "Fetching the full article…" }
+        return showsFullText
+            ? "Showing the full article. Click to show the feed's text"
+            : "Show the full article, fetched from the site"
     }
 }
 
