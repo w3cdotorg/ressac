@@ -2,6 +2,7 @@
 //! a future sync source (FreshRSS, Miniflux) implements the same `Source` trait.
 
 use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -66,6 +67,9 @@ pub struct RawResponse {
     pub last_modified: Option<String>,
     pub not_modified: bool,
     pub body: Vec<u8>,
+    /// The fetch was refused because the address (start URL, a redirect hop or a resolved
+    /// name) is not public. Only set by a `LocalSource::for_articles` source.
+    pub refused: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,20 +103,149 @@ pub trait Source {
     ) -> impl Future<Output = ()> + Send;
 }
 
+/// True for an address a public web page can live at. Everything local is refused:
+/// loopback, private, link-local, unique-local, CGNAT, unspecified, multicast, broadcast,
+/// reserved, and the IPv4-mapped / IPv4-compatible / NAT64 forms of those.
+pub fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_public_v4(v4),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_v4(v4);
+            }
+            let s = v6.segments();
+            let embedded = |hi: u16, lo: u16| {
+                is_public_v4(Ipv4Addr::new(
+                    (hi >> 8) as u8,
+                    hi as u8,
+                    (lo >> 8) as u8,
+                    lo as u8,
+                ))
+            };
+            // ::a.b.c.d (IPv4-compatible, includes :: and ::1) and 64:ff9b::/96 (NAT64).
+            if s[..6].iter().all(|x| *x == 0) {
+                return embedded(s[6], s[7]);
+            }
+            if s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|x| *x == 0) {
+                return embedded(s[6], s[7]);
+            }
+            !(v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                || s[0] & 0xfe00 == 0xfc00 // unique-local fc00::/7
+                || s[0] & 0xffc0 == 0xfe80 // link-local fe80::/10
+                || s[0] & 0xffc0 == 0xfec0) // deprecated site-local fec0::/10
+        }
+    }
+}
+
+fn is_public_v4(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    !(ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || o[0] == 0 // 0.0.0.0/8
+        || (o[0] == 100 && o[1] & 0xc0 == 64) // CGNAT 100.64.0.0/10
+        || o[0] >= 240) // reserved 240.0.0.0/4
+}
+
+/// True when `url` may be fetched as an article page: http(s) only, and a host that is
+/// not local. Literal IPs are classified; names are checked again after resolution.
+pub fn is_public_url(url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => is_public_ip(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => is_public_ip(IpAddr::V6(ip)),
+        Some(url::Host::Domain(d)) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            !(d == "localhost" || d.ends_with(".localhost") || d.ends_with(".local"))
+        }
+        None => false,
+    }
+}
+
+/// Marker error: every address a name resolved to was non-public.
+#[derive(Debug)]
+struct PrivateAddress;
+
+impl std::fmt::Display for PrivateAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("host resolves only to non-public addresses")
+    }
+}
+
+impl std::error::Error for PrivateAddress {}
+
+/// DNS resolver that drops non-public addresses, closing DNS rebinding of a public name
+/// to a private IP. Used by the article client only.
+struct PublicOnlyResolver;
+
+impl reqwest::dns::Resolve for PublicOnlyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let public: Vec<_> = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .filter(|a| is_public_ip(a.ip()))
+                .collect();
+            if public.is_empty() {
+                return Err(Box::new(PrivateAddress) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// True when `e` failed because of `PrivateAddress` from the resolver.
+fn is_private_refusal(e: &reqwest::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = source {
+        if err.is::<PrivateAddress>() {
+            return true;
+        }
+        source = err.source();
+    }
+    false
+}
+
 #[derive(Clone)]
 pub struct LocalSource {
     client: reqwest::Client,
     limits: FetchLimits,
+    /// Refuse non-public targets (article pages). Feed fetching leaves this off.
+    public_only: bool,
 }
 
 impl LocalSource {
     pub fn new(limits: FetchLimits) -> Result<Self> {
-        let client = reqwest::Client::builder()
+        Self::build(limits, false)
+    }
+
+    /// A source for article pages, whose URLs come from feeds: http(s) only, and local or
+    /// private targets are refused at the start URL, at every redirect hop and after DNS
+    /// resolution. `allow_private` turns that off (tests against a local mock server).
+    pub fn for_articles(limits: FetchLimits, allow_private: bool) -> Result<Self> {
+        Self::build(limits, !allow_private)
+    }
+
+    fn build(limits: FetchLimits, public_only: bool) -> Result<Self> {
+        let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(limits.timeout)
-            .user_agent(USER_AGENT)
-            .build()?;
-        Ok(Self { client, limits })
+            .user_agent(USER_AGENT);
+        if public_only {
+            builder = builder.dns_resolver(Arc::new(PublicOnlyResolver));
+        }
+        Ok(Self {
+            client: builder.build()?,
+            limits,
+            public_only,
+        })
     }
 
     /// GET `url`, following up to `max_redirects` redirects by hand to record every hop.
@@ -149,6 +282,10 @@ impl LocalSource {
     ) {
         let mut current = url.to_string();
         loop {
+            if self.public_only && !Url::parse(&current).is_ok_and(|u| is_public_url(&u)) {
+                out.refused = true;
+                return;
+            }
             let mut req = self.client.get(&current);
             if out.chain.is_empty() {
                 if let Some(e) = etag {
@@ -161,6 +298,9 @@ impl LocalSource {
             let resp = match req.send().await {
                 Ok(r) => r,
                 Err(e) => {
+                    if self.public_only && is_private_refusal(&e) {
+                        out.refused = true;
+                    }
                     out.error = Some(classify(e));
                     return;
                 }
@@ -463,6 +603,89 @@ const TLS_MARKERS: [&str; 7] = [
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn non_public_addresses_are_classified() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        for private in [
+            "127.0.0.1",
+            "127.255.255.254",
+            "10.0.0.1",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "100.127.255.255",
+            "0.0.0.0",
+            "0.1.2.3",
+            "224.0.0.1",
+            "239.255.255.255",
+            "255.255.255.255",
+            "240.0.0.1",
+            "::1",
+            "::",
+            "fe80::1",
+            "febf::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.1.2.3",
+            "::ffff:192.168.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:100.64.0.1",
+            "::ffff:0.0.0.0",
+            "::ffff:255.255.255.255",
+            "::ffff:224.0.0.1",
+            "::127.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+        ] {
+            assert!(!is_public_ip(ip(private)), "{private} must be refused");
+        }
+        for public in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "172.15.255.255",
+            "172.32.0.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "169.253.0.1",
+            "193.0.0.1",
+            "2606:4700:4700::1111",
+            "::ffff:8.8.8.8",
+            "64:ff9b::808:808",
+        ] {
+            assert!(is_public_ip(ip(public)), "{public} must be allowed");
+        }
+    }
+
+    #[test]
+    fn only_public_http_urls_are_allowed() {
+        let ok = |s: &str| is_public_url(&Url::parse(s).unwrap());
+        assert!(ok("https://blog.example.org/a"));
+        assert!(ok("http://8.8.8.8/a"));
+        assert!(ok("http://[2606:4700:4700::1111]/"));
+        for refused in [
+            "file:///etc/passwd",
+            "ftp://example.org/a",
+            "http://127.0.0.1:8080/x",
+            "http://2130706433/",
+            "http://0x7f.0.0.1/",
+            "http://[::1]/",
+            "http://[::ffff:192.168.1.1]/",
+            "http://192.168.1.1/admin",
+            "http://169.254.169.254/latest/meta-data",
+            "http://localhost/",
+            "http://LocalHost./",
+            "http://app.localhost/",
+            "http://printer.local/",
+            "http://printer.local./",
+        ] {
+            assert!(!ok(refused), "{refused} must be refused");
+        }
+    }
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

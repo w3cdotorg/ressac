@@ -52,7 +52,7 @@ impl Store {
         action: Option<&Action>,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let before = tx.query_row(
             "SELECT xml_url, url_key, state, merged_into_id FROM feed WHERE id = ?1",
             [feed_id],
@@ -143,7 +143,7 @@ impl Store {
 
     /// Reverts the most recent decision (any feed) and deletes it.
     pub fn undo_last_decision(&self) -> Result<Option<FeedId>> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let last: Option<(i64, FeedId, String)> = tx
             .query_row(
                 "SELECT id, feed_id, previous FROM garden_decision ORDER BY id DESC LIMIT 1",

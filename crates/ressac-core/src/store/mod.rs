@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{Error, Result};
 
@@ -11,16 +11,37 @@ mod decisions;
 mod feeds;
 mod fetch;
 mod health;
+mod reading;
 
 pub use decisions::{DecisionRecord, FeedSnapshot};
 pub use feeds::{FeedRow, FolderRow, ImportReport};
-pub use fetch::{AttemptRecord, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
+pub use fetch::{AttemptRecord, BACKLOG_DAYS, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
+pub use reading::{FulltextRow, plain_text};
 
 /// Highest schema version this binary knows.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Ordered migrations, embedded at compile time from the repository's `schema/` folder.
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../../../../schema/0001_init.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../../../../schema/0001_init.sql")),
+    (2, include_str!("../../../../schema/0002_reading.sql")),
+];
+
+/// The migration after which existing entries get their search rows.
+const FTS_MIGRATION: i64 = 2;
+
+/// `schema_meta.version`, or 0 for a database without it.
+fn read_version(conn: &Connection) -> Result<i64> {
+    let has_meta: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_meta == 0 {
+        return Ok(0);
+    }
+    Ok(conn.query_row("SELECT version FROM schema_meta", [], |r| r.get(0))?)
+}
 
 pub struct Store {
     conn: Connection,
@@ -70,17 +91,7 @@ impl Store {
     }
 
     pub fn schema_version(&self) -> Result<i64> {
-        let has_meta: i64 = self.conn.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
-            [],
-            |r| r.get(0),
-        )?;
-        if has_meta == 0 {
-            return Ok(0);
-        }
-        Ok(self
-            .conn
-            .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))?)
+        read_version(&self.conn)
     }
 
     fn migrate(&mut self) -> Result<()> {
@@ -91,26 +102,40 @@ impl Store {
                 known: SCHEMA_VERSION,
             });
         }
-        let pending: Vec<&(i64, &str)> = MIGRATIONS.iter().filter(|(v, _)| *v > current).collect();
-        if pending.is_empty() {
+        if MIGRATIONS.iter().all(|(v, _)| *v <= current) {
             return Ok(());
         }
         if current > 0 {
             self.backup(current)?;
         }
-        for (version, sql) in pending {
-            let tx = self.conn.transaction()?;
+        for (version, sql) in MIGRATIONS {
+            // The write lock is taken first and the version re-read under it, so a second
+            // process migrating at the same time finds the work done instead of failing.
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if read_version(&tx)? >= *version {
+                continue;
+            }
             tx.execute_batch(sql)?;
+            if *version == FTS_MIGRATION {
+                reading::backfill_fts(&tx)?;
+            }
             tx.execute("UPDATE schema_meta SET version = ?1", [version])?;
             tx.commit()?;
         }
         Ok(())
     }
 
-    /// Copies the database to `ressac.sqlite.bak-v<version>` before migrating it.
+    /// Copies the database to `ressac.sqlite.bak-v<version>` before migrating it. An
+    /// existing copy is kept: it is a snapshot of the same version from an earlier attempt.
     fn backup(&self, version: i64) -> Result<()> {
         if let Some(path) = &self.path {
             let dest = path.with_extension(format!("sqlite.bak-v{version}"));
+            if dest.exists() {
+                tracing::info!(backup = %dest.display(), "backup already exists, keeping it");
+                return Ok(());
+            }
             self.conn
                 .execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])?;
         }
@@ -119,6 +144,28 @@ impl Store {
 
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Starts a write transaction holding the write lock from the first statement
+    /// (IMMEDIATE), so a transaction that reads before it writes never meets
+    /// `SQLITE_BUSY_SNAPSHOT` when another process commits in between: it waits instead.
+    pub(crate) fn write_tx(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(rusqlite::Transaction::new_unchecked(
+            self.conn(),
+            TransactionBehavior::Immediate,
+        )?)
+    }
+
+    /// Entry ids whose search row matches an FTS5 query, in id order.
+    #[cfg(test)]
+    pub(crate) fn search_ids(&self, query: &str) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?1 ORDER BY rowid")?;
+        let ids = stmt
+            .query_map([query], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
     }
 }
 
@@ -138,20 +185,25 @@ mod tests {
     }
 
     #[test]
-    fn fresh_store_has_schema_v1() {
+    fn fresh_store_has_schema_v2() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 1);
+        assert_eq!(store.schema_version().unwrap(), 2);
         let names = object_names(&store);
         for expected in [
             "entry",
+            "entry_fts",
+            "entry_fulltext",
             "feed",
             "feed_health",
             "fetch_log",
             "folder",
             "garden_decision",
             "schema_meta",
+            "v_entry",
             "v_feed_overview",
             "v_folder_path",
+            "v_garden_row",
+            "v_unread_count",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
@@ -163,7 +215,7 @@ mod tests {
         let path = dir.path().join("sub/ressac.sqlite");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 1);
+        assert_eq!(store.schema_version().unwrap(), 2);
         let mode: String = store
             .conn()
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
@@ -184,7 +236,7 @@ mod tests {
         match Store::open(&path) {
             Err(Error::SchemaTooNew {
                 found: 99,
-                known: 1,
+                known: SCHEMA_VERSION,
             }) => {}
             Err(other) => panic!("unexpected error {other}"),
             Ok(_) => panic!("newer schema was accepted"),
@@ -198,5 +250,123 @@ mod tests {
             p.ends_with("Library/Application Support/Ressac/ressac.sqlite"),
             "{p:?}"
         );
+    }
+
+    /// Review Focus 4: a sub-project 1 database opens at v2 with every entry searchable.
+    #[test]
+    fn migration_from_v1_backfills_fts_and_keeps_read_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        {
+            let v1 = Connection::open(&path).unwrap();
+            v1.execute_batch(MIGRATIONS[0].1).unwrap();
+            v1.execute_batch(
+                "INSERT INTO feed (id, position, title, xml_url, xml_url_original, url_key, added_at) \
+                 VALUES (1, 0, 'F', 'https://f.example.org/feed', 'https://f.example.org/feed', \
+                 'f.example.org/feed', '2026-01-01T00:00:00.000Z');
+                 INSERT INTO entry (id, feed_id, guid, title, author, published_at, summary_html, \
+                 content_html, read_at, fetched_at) VALUES \
+                 (1, 1, 'a', 'Tides', NULL, '2020-01-01T00:00:00.000Z', '<p>harbour</p>', NULL, NULL, \
+                 '2026-01-01T00:00:00.000Z'), \
+                 (2, 1, 'b', NULL, 'Ada', '2020-01-02T00:00:00.000Z', '<p>short</p>', \
+                 '<p>Lighthouse &amp; pier</p>', '2026-01-05T00:00:00.000Z', '2026-01-01T00:00:00.000Z'), \
+                 (3, 1, 'c', NULL, NULL, '2020-01-03T00:00:00.000Z', NULL, NULL, NULL, \
+                 '2026-01-01T00:00:00.000Z'), \
+                 (4, 1, 'd', 'Menu', NULL, '2020-01-04T00:00:00.000Z', '<p>un caf\u{e9}</p>', NULL, NULL, \
+                 '2026-01-01T00:00:00.000Z');",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 2);
+        assert!(path.with_extension("sqlite.bak-v1").exists());
+        let read: Vec<Option<String>> = store
+            .conn()
+            .prepare("SELECT read_at FROM entry ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            read,
+            [
+                None,
+                Some("2026-01-05T00:00:00.000Z".to_string()),
+                None,
+                None
+            ],
+            "no backlog rule on migration"
+        );
+        let indexed: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM entry_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            indexed, 4,
+            "NULL title, summary and content still get a row"
+        );
+        assert_eq!(store.search_ids("cafe").unwrap(), [4], "remove_diacritics");
+        assert_eq!(store.search_ids("harbour").unwrap(), [1]);
+        assert_eq!(store.search_ids("lighthouse").unwrap(), [2]);
+        assert_eq!(store.search_ids("author:ada").unwrap(), [2]);
+        assert!(
+            store.search_ids("short").unwrap().is_empty(),
+            "content_html wins over summary_html"
+        );
+    }
+
+    #[test]
+    fn migration_survives_an_existing_backup_and_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        {
+            let v1 = Connection::open(&path).unwrap();
+            v1.execute_batch(MIGRATIONS[0].1).unwrap();
+        }
+        let bak = path.with_extension("sqlite.bak-v1");
+        std::fs::write(&bak, b"earlier attempt").unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(std::fs::read(&bak).unwrap(), b"earlier attempt");
+        drop(store);
+        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 2);
+    }
+
+    #[test]
+    fn a_failing_migration_leaves_v1_untouched_and_is_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        {
+            let v1 = Connection::open(&path).unwrap();
+            v1.execute_batch(MIGRATIONS[0].1).unwrap();
+            // Poison: 0002 creates this table, after its ALTERs have already run.
+            v1.execute_batch("CREATE TABLE entry_fulltext (x)").unwrap();
+        }
+        assert!(Store::open(&path).is_err());
+        let raw = Connection::open(&path).unwrap();
+        let version: i64 = raw
+            .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let leftovers: i64 = raw
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name IN ('entry_fts', 'v_entry', 'entry_unread')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftovers, 0, "no partial v2 objects");
+        let columns: i64 = raw
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('feed') WHERE name = 'prefer_full_text'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 0, "ALTER rolled back");
+        raw.execute_batch("DROP TABLE entry_fulltext").unwrap();
+        drop(raw);
+        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 2);
     }
 }

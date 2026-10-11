@@ -14,3 +14,51 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+  macos:
+    name: macOS app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for Xcode 27 and the macOS 27 SDK
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=27
+          major() { xcodebuild -version | awk 'NR == 1 { split($2, v, "."); print v[1] }'; }
+          if [ "$(major)" -lt "$required" ]; then
+            candidate=$(ls -d /Applications/Xcode_"$required"*.app 2>/dev/null | sort -V | tail -n 1 || true)
+            if [ -n "$candidate" ]; then
+              sudo xcode-select -s "$candidate/Contents/Developer"
+            fi
+          fi
+          xcode=$(xcodebuild -version | head -n 1)
+          sdk=$(xcrun --sdk macosx --show-sdk-version)
+          if [ "$(major)" -ge "$required" ] && [ "${sdk%%.*}" -ge "$required" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Using $xcode with the macOS $sdk SDK."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Xcode $required missing::This runner has $xcode with the macOS $sdk SDK; the app needs Xcode $required and the macOS $required SDK. Build and tests are skipped (spec §9, notes.md)."
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.xcode.outputs.available == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.xcode.outputs.available == 'true'
+      - name: Install XcodeGen
+        if: steps.xcode.outputs.available == 'true'
+        run: brew install xcodegen
+      - name: Generate the Xcode project
+        if: steps.xcode.outputs.available == 'true'
+        working-directory: apps/macos
+        run: xcodegen generate
+      - name: Build and test the app
+        if: steps.xcode.outputs.available == 'true'
+        working-directory: apps/macos
+        run: xcodebuild -project Ressac.xcodeproj -scheme Ressac -destination 'platform=macOS' test
+      - name: Allowed failure, no Xcode 27 on this runner
+        if: steps.xcode.outputs.available != 'true'
+        continue-on-error: true
+        run: |
+          echo "::error title=Xcode 27 missing::The macOS app was not built or tested on this runner (allowed to fail, see notes.md)."
+          exit 1

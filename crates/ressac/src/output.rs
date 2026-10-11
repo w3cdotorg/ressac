@@ -4,8 +4,8 @@ use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indicatif::{ProgressBar, ProgressStyle};
-use ressac_core::model::Status;
-use ressac_core::service::{Event, EventSink, Summary};
+use ressac_core::model::{Decision, FeedId, Status};
+use ressac_core::service::{Event, EventSink, FULL_ARTICLES, Summary};
 use ressac_core::store::ImportReport;
 
 /// Order of the `check` summary grid (three per line).
@@ -112,11 +112,7 @@ impl EventSink for Sink {
         match &self.display {
             Display::Json => {
                 // A closed stdout (BrokenPipe) must not panic; the final write reports it.
-                let _ = writeln!(
-                    std::io::stdout().lock(),
-                    "{}",
-                    serde_json::to_string(event).unwrap_or_default()
-                );
+                let _ = writeln!(std::io::stdout().lock(), "{}", event_json(event));
             }
             Display::Progress(bar) => match event {
                 Event::Started { total } => bar.set_length(*total as u64),
@@ -127,11 +123,83 @@ impl EventSink for Sink {
                 Event::NetworkUnreachable { failed, attempted } => bar.println(format!(
                     "Network looks unreachable ({failed}/{attempted} feeds could not connect) — results not recorded as failures."
                 )),
-                Event::Probing { what, total } => bar.set_message(format!("probing {what} for {total} feeds…")),
-                Event::WaybackDone { .. } | Event::Finished { .. } => {}
+                Event::Probing { what, total } => bar.set_message(probing_message(what, *total)),
+                Event::WaybackDone { .. }
+                | Event::Finished { .. }
+                | Event::Extracted { .. }
+                | Event::Decided { .. }
+                | Event::Undone { .. } => {}
             },
         }
     }
+}
+
+/// Progress-bar message for a probe phase. The full-article pass counts entries, not feeds.
+fn probing_message(what: &str, total: usize) -> String {
+    if what == FULL_ARTICLES {
+        format!("fetching {total} full articles…")
+    } else {
+        format!("probing {what} for {total} feeds…")
+    }
+}
+
+fn event_json(event: &Event) -> String {
+    serde_json::to_string(event).unwrap_or_default()
+}
+
+/// Writes a one-shot command's result: the event as one JSON line with `--json`, else `text`.
+pub fn write_result(
+    out: &mut impl Write,
+    json: bool,
+    event: &Event,
+    text: &str,
+) -> std::io::Result<()> {
+    if json {
+        writeln!(out, "{}", event_json(event))
+    } else {
+        writeln!(out, "{text}")
+    }
+}
+
+pub fn decided_text(feed_id: FeedId, decision: Decision) -> String {
+    let verb = match decision {
+        Decision::Keep => "Kept",
+        Decision::Repair => "Repaired",
+        Decision::Bury => "Buried",
+    };
+    format!("{verb} feed #{feed_id}.")
+}
+
+/// Also shown by the full-screen garden.
+pub fn undo_text(undone: Option<FeedId>) -> String {
+    undone.map_or("Nothing to undo.".into(), |id| {
+        format!("Undid the last decision (#{id}).")
+    })
+}
+
+/// Also shown by the full-screen garden.
+pub fn apply_safe_text(applied: usize, skipped: &[String]) -> String {
+    let mut msg = format!("Applied {applied} safe repairs.");
+    if !skipped.is_empty() {
+        msg.push_str(&format!(
+            " Skipped {}: {}",
+            skipped.len(),
+            skipped.join("; ")
+        ));
+    }
+    msg
+}
+
+/// `error` is the stored failure sentence; the wording matches the app's inline notice.
+pub fn extracted_text(entry_id: i64, error: Option<&str>) -> String {
+    match error {
+        None => format!("Saved the full article of entry #{entry_id}."),
+        Some(e) => format!("Full article unavailable: {e}"),
+    }
+}
+
+pub fn migrated_text(version: i64) -> String {
+    format!("Schema version {version}.")
 }
 
 /// Printed on stderr after a run stopped by Ctrl-C.
@@ -278,5 +346,61 @@ mod tests {
         );
         assert!(text.contains("run `ressac garden` to triage"), "{text}");
         assert!(!text.contains("Unchecked"), "zero Unchecked is hidden");
+    }
+
+    #[test]
+    fn probing_message_names_full_articles_by_count() {
+        assert_eq!(probing_message("https", 3), "probing https for 3 feeds…");
+        assert_eq!(
+            probing_message(ressac_core::service::FULL_ARTICLES, 20),
+            "fetching 20 full articles…"
+        );
+    }
+
+    #[test]
+    fn garden_texts_are_shared_with_the_tui() {
+        assert_eq!(decided_text(3, Decision::Keep), "Kept feed #3.");
+        assert_eq!(decided_text(3, Decision::Repair), "Repaired feed #3.");
+        assert_eq!(decided_text(3, Decision::Bury), "Buried feed #3.");
+        assert_eq!(undo_text(Some(4)), "Undid the last decision (#4).");
+        assert_eq!(undo_text(None), "Nothing to undo.");
+        assert_eq!(apply_safe_text(2, &[]), "Applied 2 safe repairs.");
+        assert_eq!(
+            apply_safe_text(
+                1,
+                &["#7: Feed #2 already uses x; merge into it instead.".into()]
+            ),
+            "Applied 1 safe repairs. Skipped 1: #7: Feed #2 already uses x; merge into it instead."
+        );
+    }
+
+    #[test]
+    fn extraction_and_migration_texts() {
+        assert_eq!(
+            extracted_text(5, None),
+            "Saved the full article of entry #5."
+        );
+        assert_eq!(
+            extracted_text(5, Some("HTTP 404.")),
+            "Full article unavailable: HTTP 404."
+        );
+        assert_eq!(migrated_text(2), "Schema version 2.");
+    }
+
+    #[test]
+    fn write_result_prints_the_event_or_the_text() {
+        let event = Event::Undone { feed_id: Some(4) };
+        let mut json = Vec::new();
+        write_result(&mut json, true, &event, "ignored").unwrap();
+        assert_eq!(
+            String::from_utf8(json).unwrap(),
+            "{\"event\":\"undone\",\"feed_id\":4}\n"
+        );
+        let mut text = Vec::new();
+        write_result(&mut text, false, &event, "Undid the last decision (#4).").unwrap();
+        assert_eq!(
+            String::from_utf8(text).unwrap(),
+            "Undid the last decision (#4).\n"
+        );
     }
 }

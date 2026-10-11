@@ -3,6 +3,10 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use serde_json::{Value, json};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/vienna-like.opml"
@@ -13,12 +17,100 @@ fn ressac(home: &Path, args: &[&str]) -> Output {
         .args(["--db", home.join("db.sqlite").to_str().unwrap()])
         .args(args)
         .env("HOME", home)
+        .env("RESSAC_ALLOW_PRIVATE_ARTICLES", "1")
         .output()
         .expect("binary runs")
 }
 
 fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+fn json_lines(o: &Output) -> Vec<Value> {
+    stdout(o)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+/// Runs the binary off the async runtime, so a wiremock server on it keeps answering.
+async fn ressac_async(home: &Path, args: &[&str]) -> Output {
+    let home = home.to_path_buf();
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    tokio::task::spawn_blocking(move || {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        ressac(&home, &args)
+    })
+    .await
+    .unwrap()
+}
+
+const PARA: &str = "The tide comes in twice a day, pulled by the moon and the sun, and the shore keeps a careful record of every visit in sand, shells and drifting weed.";
+
+fn article_page() -> String {
+    let body: String = (0..8)
+        .map(|i| format!("<p>Paragraph {i}. {PARA} {PARA}</p>"))
+        .collect();
+    format!(
+        "<!DOCTYPE html><html><head><title>Tides</title></head><body><article><h1>Tides</h1>{body}</article></body></html>"
+    )
+}
+
+fn channel(title: &str, items: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?><rss version="2.0"><channel><title>{title}</title><link>http://e.org/</link><description>d</description>{items}</channel></rss>"#
+    )
+}
+
+/// Serves four feeds and two pages, and imports them as News { A, B, Sub { C } } then D at
+/// the top level: feed ids 1–4 in that order, folder ids News = 1 and Sub = 2 (ids follow
+/// the OPML's depth-first order on a fresh database). Feed A holds, in order: an entry
+/// linking to /article, one linking to /missing (404), and one with no link and no title.
+async fn reading_home(server: &MockServer) -> tempfile::TempDir {
+    let base = server.uri();
+    let a_items = format!(
+        "<item><guid>linked</guid><title>Tides</title><link>{base}/article</link></item>\
+         <item><guid>broken</guid><title>Gone</title><link>{base}/missing</link></item>\
+         <item><guid>bare</guid><description>Only a summary.</description></item>"
+    );
+    for (at, body) in [
+        ("/a.xml", channel("A", &a_items)),
+        ("/b.xml", channel("B", "")),
+        ("/c.xml", channel("C", "")),
+        ("/d.xml", channel("D", "")),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(at))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/rss+xml"))
+            .mount(server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/article"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(article_page(), "text/html"))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/missing"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let opml = home.path().join("reading.opml");
+    std::fs::write(
+        &opml,
+        format!(
+            r#"<opml><body><outline text="News"><outline text="A" xmlUrl="{base}/a.xml"/><outline text="B" xmlUrl="{base}/b.xml"/><outline text="Sub"><outline text="C" xmlUrl="{base}/c.xml"/></outline></outline><outline text="D" xmlUrl="{base}/d.xml"/></body></opml>"#
+        ),
+    )
+    .unwrap();
+    let import = ressac_async(home.path(), &["import", opml.to_str().unwrap()]).await;
+    assert!(import.status.success(), "{import:?}");
+    home
 }
 
 #[test]
@@ -131,6 +223,11 @@ fn commands_on_an_empty_store_hint_at_import() {
         &["export"],
         &["export", "--cemetery"],
         &["--json", "fetch"],
+        &["fetch", "--feed", "1"],
+        &["extract", "1"],
+        &["garden", "decide", "1", "keep"],
+        &["garden", "undo"],
+        &["garden", "apply-safe"],
     ] {
         let out = ressac(home.path(), args);
         assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
@@ -146,13 +243,19 @@ fn commands_on_an_empty_store_hint_at_import() {
 #[test]
 fn usage_errors_exit_2() {
     let home = tempfile::tempdir().unwrap();
-    assert_eq!(ressac(home.path(), &["frobnicate"]).status.code(), Some(2));
+    for args in [
+        &["frobnicate"][..],
+        &["garden", "frobnicate"],
+        &["garden", "decide", "1", "frobnicate"],
+        &["extract", "x"],
+        &["fetch", "--feed", "1", "--folder", "1"],
+    ] {
+        assert_eq!(ressac(home.path(), args).status.code(), Some(2), "{args:?}");
+    }
 }
 
 #[tokio::test]
 async fn fetch_json_streams_events() {
-    use wiremock::matchers::method;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(
@@ -190,4 +293,183 @@ async fn fetch_json_streams_events() {
     assert_eq!(lines.first().unwrap()["event"], "started");
     assert_eq!(lines.last().unwrap()["event"], "finished");
     assert!(lines.iter().any(|l| l["event"] == "feed_done"));
+}
+
+#[tokio::test]
+async fn fetch_subsets_imply_force_and_include_subfolders() {
+    let server = MockServer::start().await;
+    let home = reading_home(&server).await;
+    let started = |o: &Output| json_lines(o)[0].clone();
+
+    let two = ressac_async(
+        home.path(),
+        &["--json", "fetch", "--feed", "1", "--feed", "4"],
+    )
+    .await;
+    assert!(two.status.success(), "{two:?}");
+    assert_eq!(started(&two), json!({"event": "started", "total": 2}));
+    let again = ressac_async(home.path(), &["--json", "fetch", "--feed", "1"]).await;
+    assert_eq!(
+        started(&again),
+        json!({"event": "started", "total": 1}),
+        "fetched seconds ago, fetched again: --feed implies --force"
+    );
+    let news = ressac_async(home.path(), &["--json", "fetch", "--folder", "1"]).await;
+    assert_eq!(
+        started(&news),
+        json!({"event": "started", "total": 3}),
+        "News holds A, B and Sub/C"
+    );
+    let sub = ressac_async(home.path(), &["--json", "fetch", "--folder", "2"]).await;
+    assert_eq!(started(&sub), json!({"event": "started", "total": 1}));
+    assert_eq!(json_lines(&sub).last().unwrap()["event"], "finished");
+}
+
+#[test]
+fn fetch_subsets_reject_unknown_ids_and_skip_buried_feeds() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let feed = ressac(home.path(), &["fetch", "--feed", "99"]);
+    assert_eq!(feed.status.code(), Some(2));
+    assert_eq!(stderr(&feed), "No feed #99.\n");
+    let folder = ressac(home.path(), &["fetch", "--folder", "99"]);
+    assert_eq!(folder.status.code(), Some(2));
+    assert_eq!(stderr(&folder), "No folder #99.\n");
+
+    // Nothing touches the network: the only named feed is buried.
+    assert!(
+        ressac(home.path(), &["garden", "decide", "1", "bury"])
+            .status
+            .success()
+    );
+    let buried = ressac(home.path(), &["--json", "fetch", "--feed", "1"]);
+    assert!(buried.status.success(), "{buried:?}");
+    let lines = json_lines(&buried);
+    assert_eq!(
+        lines[0],
+        json!({"event": "started", "total": 0}),
+        "a buried feed is skipped even when named"
+    );
+    assert_eq!(lines.last().unwrap()["event"], "finished");
+}
+
+#[tokio::test]
+async fn extract_stores_articles_and_refuses_unusable_entries() {
+    let server = MockServer::start().await;
+    let home = reading_home(&server).await;
+    let fetched = ressac_async(home.path(), &["fetch", "--feed", "1"]).await;
+    assert!(fetched.status.success(), "{fetched:?}");
+
+    let saved = ressac_async(home.path(), &["--json", "extract", "1"]).await;
+    assert!(saved.status.success(), "{saved:?}");
+    assert_eq!(
+        json_lines(&saved),
+        [json!({"event": "extracted", "entry_id": 1, "ok": true, "error": null})]
+    );
+    let failed = ressac_async(home.path(), &["--json", "extract", "2"]).await;
+    assert_eq!(
+        failed.status.code(),
+        Some(0),
+        "a failed extraction is data, not a fatal error"
+    );
+    assert_eq!(
+        json_lines(&failed),
+        [json!({"event": "extracted", "entry_id": 2, "ok": false, "error": "HTTP 404."})]
+    );
+    assert_eq!(
+        stdout(&ressac_async(home.path(), &["extract", "1"]).await),
+        "Saved the full article of entry #1.\n"
+    );
+    assert_eq!(
+        stdout(&ressac_async(home.path(), &["extract", "2"]).await),
+        "Full article unavailable: HTTP 404.\n"
+    );
+
+    // Review Focus 1: no link, no title, only a summary.
+    let no_link = ressac_async(home.path(), &["--json", "extract", "3"]).await;
+    assert_eq!(no_link.status.code(), Some(2));
+    assert_eq!(stderr(&no_link), "This entry has no link.\n");
+    assert!(no_link.stdout.is_empty());
+    let unknown = ressac_async(home.path(), &["extract", "999"]).await;
+    assert_eq!(unknown.status.code(), Some(2));
+    assert_eq!(stderr(&unknown), "No entry #999.\n");
+}
+
+#[test]
+fn garden_subcommands_decide_undo_and_apply_safe() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let run = |args: &[&str]| ressac(home.path(), args);
+
+    // Feed #2 is "Orange Drenka" (https://orange.example.org/feed/).
+    let buried = run(&["--json", "garden", "decide", "2", "bury"]);
+    assert!(buried.status.success(), "{buried:?}");
+    assert_eq!(
+        json_lines(&buried),
+        [json!({"event": "decided", "feed_id": 2, "decision": "bury"})]
+    );
+    assert!(!stdout(&run(&["export"])).contains("orange.example.org/feed/"));
+    for decision in ["bury", "repair"] {
+        let refused = run(&["garden", "decide", "2", decision]);
+        assert_eq!(refused.status.code(), Some(2), "{decision}");
+        assert_eq!(
+            stderr(&refused),
+            "Feed #2 is buried; only keep restores it.\n"
+        );
+        assert!(refused.stdout.is_empty());
+    }
+    let restored = run(&["--json", "garden", "decide", "2", "keep"]);
+    assert_eq!(
+        json_lines(&restored),
+        [json!({"event": "decided", "feed_id": 2, "decision": "keep"})]
+    );
+    assert!(stdout(&run(&["export"])).contains("orange.example.org/feed/"));
+
+    let nothing = run(&["garden", "decide", "1", "repair"]);
+    assert_eq!(nothing.status.code(), Some(2));
+    assert_eq!(stderr(&nothing), "Nothing to repair for feed #1.\n");
+    let unknown = run(&["garden", "decide", "99", "keep"]);
+    assert_eq!(unknown.status.code(), Some(2));
+    assert_eq!(stderr(&unknown), "No feed #99.\n");
+
+    // One shared stack: the keep, then the bury, then nothing left.
+    for expected in [json!(2), json!(2), Value::Null] {
+        let undo = run(&["--json", "garden", "undo"]);
+        assert!(undo.status.success(), "{undo:?}");
+        assert_eq!(
+            json_lines(&undo),
+            [json!({"event": "undone", "feed_id": expected})]
+        );
+    }
+    assert_eq!(stdout(&run(&["garden", "undo"])), "Nothing to undo.\n");
+    assert_eq!(
+        stdout(&run(&["garden", "decide", "5", "keep"])),
+        "Kept feed #5.\n"
+    );
+
+    let applied = run(&["--json", "garden", "apply-safe"]);
+    assert!(applied.status.success(), "{applied:?}");
+    let lines = json_lines(&applied);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["event"], "finished");
+    assert_eq!(lines[0]["summary"]["total"], 11);
+    assert_eq!(
+        stdout(&run(&["garden", "apply-safe"])),
+        "Applied 0 safe repairs.\n"
+    );
+}
+
+#[test]
+fn migrate_reports_the_schema_version() {
+    let home = tempfile::tempdir().unwrap();
+    let text = ressac(home.path(), &["migrate"]);
+    assert!(text.status.success(), "{text:?}");
+    assert_eq!(stdout(&text), "Schema version 2.\n");
+    assert!(home.path().join("db.sqlite").exists());
+    let json = ressac(home.path(), &["--json", "migrate"]);
+    assert!(json.status.success(), "{json:?}");
+    let lines = json_lines(&json);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["event"], "finished");
+    assert_eq!(lines[0]["summary"]["total"], 0);
 }

@@ -93,7 +93,7 @@ impl Store {
         dry_run: bool,
         now: DateTime<Utc>,
     ) -> Result<ImportReport> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let mut report = ImportReport::default();
         let known = known_keys(&tx)?;
         let mut seen: HashMap<String, String> = HashMap::new();
@@ -154,6 +154,19 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Active feeds of a folder and of its sub-folders, recursively, in id order. An
+    /// unknown folder has none.
+    pub fn feeds_in_folder(&self, folder_id: FolderId) -> Result<Vec<FeedId>> {
+        let mut stmt = self.conn().prepare(
+            "WITH RECURSIVE sub(id) AS (SELECT ?1 UNION SELECT f.id FROM folder f JOIN sub ON f.parent_id = sub.id) \
+             SELECT id FROM feed WHERE state = 'active' AND folder_id IN (SELECT id FROM sub) ORDER BY id",
+        )?;
+        let ids = stmt
+            .query_map([folder_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
     }
 
     /// Folder id → "Parent / Child" path, from the `v_folder_path` contract view.
@@ -456,5 +469,47 @@ mod tests {
         assert_eq!(flickr.state, "active");
         assert!(flickr.opml_attrs.contains("\"type\":\"rss\""));
         assert_eq!(store.feed(flickr.id).unwrap().title, flickr.title);
+    }
+
+    #[test]
+    fn feeds_in_folder_is_recursive_and_skips_buried_feeds() {
+        let store = Store::open_in_memory().unwrap();
+        let xml = r#"<opml><body>
+            <outline text="Top"><outline text="A" xmlUrl="https://a.example.org/feed"/>
+              <outline text="Sub"><outline text="B" xmlUrl="https://b.example.org/feed"/>
+                <outline text="C" xmlUrl="https://c.example.org/feed"/></outline></outline>
+            <outline text="Other"><outline text="D" xmlUrl="https://d.example.org/feed"/></outline>
+            </body></opml>"#;
+        store
+            .import_outlines(&opml::parse(xml).unwrap(), false, now())
+            .unwrap();
+        let folder = |name: &str| {
+            store
+                .folders()
+                .unwrap()
+                .into_iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .id
+        };
+        let feed = |title: &str| {
+            store
+                .feeds()
+                .unwrap()
+                .into_iter()
+                .find(|f| f.title == title)
+                .unwrap()
+                .id
+        };
+        store
+            .record_decision(feed("C"), Decision::Bury, Status::Dead, None, now())
+            .unwrap();
+        assert_eq!(
+            store.feeds_in_folder(folder("Top")).unwrap(),
+            [feed("A"), feed("B")]
+        );
+        assert_eq!(store.feeds_in_folder(folder("Sub")).unwrap(), [feed("B")]);
+        assert_eq!(store.feeds_in_folder(folder("Other")).unwrap(), [feed("D")]);
+        assert!(store.feeds_in_folder(999).unwrap().is_empty());
     }
 }

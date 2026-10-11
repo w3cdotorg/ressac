@@ -11,9 +11,12 @@ use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
 use tokio::sync::mpsc;
+use url::Url;
 
 use crate::discover::{alternate_feeds, same_feed};
 use crate::error::Result;
+use crate::extract::{Article, ExtractError, extract_article};
+use crate::garden;
 use crate::health::links::{LinkInput, apply_similar_titles, find_duplicates};
 use crate::health::{FeedEvidence, diagnose};
 use crate::model::{Action, Diagnosis, ErrorKind, FeedId, Status, parse_ts, ts};
@@ -34,10 +37,18 @@ const LINK_GUIDS: usize = 20;
 pub const DISCOVERY_RECHECK_DAYS: i64 = 30;
 const PROBE_CONCURRENCY: usize = 8;
 pub const PRODUCTION_WAYBACK: &str = "https://archive.org";
+/// New entries extracted per `prefer_full_text` feed and refresh (spec §6).
+pub const FULLTEXT_PER_FEED_PER_RUN: usize = 20;
+/// The `what` of the `Probing` event announcing the full-article pass of a refresh.
+pub const FULL_ARTICLES: &str = "full articles";
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RefreshOptions {
+    /// Ignore the 30-minute freshness rule.
     pub force: bool,
+    /// Restrict the fetch to these feeds (buried ones are still skipped). Diagnosis
+    /// always covers every feed, because duplicate detection is cross-feed.
+    pub only: Option<Vec<FeedId>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -65,6 +76,21 @@ pub enum Event {
     Finished {
         summary: Summary,
     },
+    /// One full-article extraction, stored either way. `error` is the stored sentence.
+    Extracted {
+        entry_id: i64,
+        ok: bool,
+        error: Option<String>,
+    },
+    /// A garden decision recorded by `ressac garden decide` (`keep`, `repair` or `bury`).
+    Decided {
+        feed_id: FeedId,
+        decision: String,
+    },
+    /// `ressac garden undo`: the feed whose decision was undone, `None` when nothing was left.
+    Undone {
+        feed_id: Option<FeedId>,
+    },
 }
 
 pub trait EventSink {
@@ -76,6 +102,22 @@ pub struct NullSink;
 impl EventSink for NullSink {
     fn emit(&self, _: &Event) {}
 }
+
+/// What `Ressac::extract_entry` did. `NoUrl` and `UnknownEntry` store nothing and emit nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtractOutcome {
+    /// The article was extracted and stored.
+    Saved,
+    /// The failure sentence that was stored (for example "HTTP 404.").
+    Failed(String),
+    /// The entry has no link to fetch.
+    NoUrl,
+    /// No entry has this id.
+    UnknownEntry,
+}
+
+/// What fetching and extracting one article page gave.
+type Extraction = std::result::Result<Article, ExtractError>;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Summary {
@@ -100,9 +142,13 @@ impl Summary {
 pub struct Ressac {
     store: Store,
     source: LocalSource,
+    /// Fetches article pages, whose URLs come from feeds: refuses local and private targets.
+    articles: LocalSource,
+    limits: FetchLimits,
     wayback: Wayback,
-    /// Pause between Wayback requests (1 request per second in production).
-    wayback_gap: Duration,
+    /// Pause between two requests to the same host: Wayback lookups and consecutive
+    /// article pages (1 request per second in production).
+    host_gap: Duration,
 }
 
 impl Ressac {
@@ -115,13 +161,22 @@ impl Ressac {
     }
 
     pub fn with_parts(store: Store, limits: FetchLimits, wayback_base: &str) -> Result<Self> {
-        let wayback_gap = limits.per_host_gap;
+        let host_gap = limits.per_host_gap;
         Ok(Self {
             store,
-            source: LocalSource::new(limits)?,
+            source: LocalSource::new(limits.clone())?,
+            articles: LocalSource::for_articles(limits.clone(), false)?,
+            limits,
             wayback: Wayback::new(wayback_base)?,
-            wayback_gap,
+            host_gap,
         })
+    }
+
+    /// Lets article pages be fetched from local and private addresses. For tests against a
+    /// local mock server and for the `RESSAC_ALLOW_PRIVATE_ARTICLES` test hook of the CLI.
+    pub fn allow_private_articles(mut self) -> Result<Self> {
+        self.articles = LocalSource::for_articles(self.limits.clone(), true)?;
+        Ok(self)
     }
 
     pub fn store(&self) -> &Store {
@@ -133,8 +188,9 @@ impl Ressac {
         self.store.import_outlines(&outlines, dry_run, Utc::now())
     }
 
-    /// Fetches due feeds (writing each attempt as it arrives), applies the network guard,
-    /// probes https variants and autodiscovery, then diagnoses every active feed.
+    /// Fetches due feeds, or the due feeds among `opts.only` (writing each attempt as it
+    /// arrives), applies the network guard, probes https variants and autodiscovery, then
+    /// diagnoses every active feed.
     pub async fn refresh(
         &self,
         opts: RefreshOptions,
@@ -143,7 +199,10 @@ impl Ressac {
     ) -> Result<Summary> {
         let started = Utc::now();
         let run_id = ts(started);
-        let due = self.store.feeds_to_fetch(started, opts.force)?;
+        let mut due = self.store.feeds_to_fetch(started, opts.force)?;
+        if let Some(only) = &opts.only {
+            due.retain(|f| only.contains(&f.id));
+        }
         let titles: HashMap<FeedId, String> = self
             .store
             .feeds()?
@@ -197,6 +256,12 @@ impl Ressac {
                 self.diagnose_all(Utc::now())?;
                 self.discover_replacements(sink, Utc::now(), &stop).await?;
             }
+        }
+        if !unreachable && !stop.load(Ordering::Relaxed) {
+            let mut fetched: Vec<FeedId> = fresh.keys().copied().collect();
+            fetched.sort_unstable();
+            self.fetch_full_texts(&fetched, started, sink, &stop)
+                .await?;
         }
         let mut summary = self.diagnose_all(Utc::now())?;
         summary.network_unreachable = unreachable;
@@ -303,7 +368,57 @@ impl Ressac {
         Ok(())
     }
 
-    /// Diagnoses every active feed and stores the results.
+    /// Extracts the entries this run stored for `prefer_full_text` feeds, at most
+    /// `FULLTEXT_PER_FEED_PER_RUN` per feed. Stops between entries on request, and waits
+    /// `host_gap` between two pages of the same host.
+    async fn fetch_full_texts(
+        &self,
+        fetched: &[FeedId],
+        since: DateTime<Utc>,
+        sink: &dyn EventSink,
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        let mut queue = Vec::new();
+        for &feed_id in fetched {
+            if self.store.prefer_full_text(feed_id)? {
+                queue.extend(self.store.entries_needing_fulltext(
+                    feed_id,
+                    since,
+                    FULLTEXT_PER_FEED_PER_RUN,
+                )?);
+            }
+        }
+        if queue.is_empty() {
+            return Ok(());
+        }
+        sink.emit(&Event::Probing {
+            what: FULL_ARTICLES.into(),
+            total: queue.len(),
+        });
+        tracing::info!(entries = queue.len(), "fetching full articles");
+        let mut previous_host: Option<String> = None;
+        for (entry_id, url) in queue {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let host = page_host(&url);
+            if host.is_some() && host == previous_host {
+                tokio::time::sleep(self.host_gap).await;
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            let outcome = fetch_article(&self.articles, &url).await;
+            if let Err(e) = self.save_extraction(entry_id, &outcome, sink) {
+                // One entry's store error must not end the pass or the refresh.
+                tracing::warn!(entry_id, error = %e, "storing a full article failed");
+            }
+            previous_host = host;
+        }
+        Ok(())
+    }
+
+    /// Diagnoses every active feed, stores the results and the garden's triage flags.
     pub fn diagnose_all(&self, now: DateTime<Utc>) -> Result<Summary> {
         let feeds: Vec<FeedRow> = self
             .store
@@ -355,6 +470,7 @@ impl Ressac {
             .collect();
         apply_similar_titles(&inputs, &mut diags);
         self.store.save_diagnoses(&diags, now)?;
+        garden::recompute_triage(&self.store)?;
         self.summary()
     }
 
@@ -394,7 +510,7 @@ impl Ressac {
                 break;
             }
             if i > 0 {
-                tokio::time::sleep(self.wayback_gap).await;
+                tokio::time::sleep(self.host_gap).await;
             }
             match self.wayback.closest(site, *around).await {
                 Ok(Some(url)) => {
@@ -407,6 +523,44 @@ impl Ressac {
         }
         sink.emit(&Event::WaybackDone { found });
         Ok(found)
+    }
+
+    /// Fetches the entry's page, extracts the article and stores the outcome (spec §6).
+    /// A failure is stored too, as one English sentence; a later call retries.
+    pub async fn extract_entry(
+        &self,
+        entry_id: i64,
+        sink: &dyn EventSink,
+    ) -> Result<ExtractOutcome> {
+        let Some((_, url)) = self.store.entry_for_extract(entry_id)? else {
+            return Ok(ExtractOutcome::UnknownEntry);
+        };
+        let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
+            return Ok(ExtractOutcome::NoUrl);
+        };
+        let outcome = fetch_article(&self.articles, &url).await;
+        Ok(match self.save_extraction(entry_id, &outcome, sink)? {
+            None => ExtractOutcome::Saved,
+            Some(sentence) => ExtractOutcome::Failed(sentence),
+        })
+    }
+
+    /// Stores one extraction outcome and emits `Extracted`. Returns the failure sentence.
+    fn save_extraction(
+        &self,
+        entry_id: i64,
+        outcome: &Extraction,
+        sink: &dyn EventSink,
+    ) -> Result<Option<String>> {
+        self.store.save_fulltext(entry_id, outcome, Utc::now())?;
+        let error = outcome.as_ref().err().map(ExtractError::sentence);
+        tracing::info!(entry_id, error = error.as_deref(), "full article");
+        sink.emit(&Event::Extracted {
+            entry_id,
+            ok: error.is_none(),
+            error: error.clone(),
+        });
+        Ok(error)
     }
 
     /// Status counts and safe repairs over active feeds (decisions are not considered).
@@ -461,6 +615,37 @@ fn is_challenged(raw: &RawResponse) -> bool {
         || (raw.error.is_none()
             && looks_like_html(raw.content_type.as_deref(), &raw.body)
             && is_challenge_page(&raw.body[..raw.body.len().min(CHALLENGE_SNIFF_BYTES)]))
+}
+
+/// Fetches an article page through the article source: the feed client's user agent, body
+/// cap and timeout (the whole exchange, redirects included), plus the public-address guard.
+async fn fetch_article(source: &LocalSource, url: &str) -> Extraction {
+    article_from(&source.fetch_raw(url, None, None).await)
+}
+
+/// The host of an article URL, for the per-host pause.
+fn page_host(url: &str) -> Option<String> {
+    Url::parse(url).ok()?.host_str().map(str::to_owned)
+}
+
+/// Maps a page fetch to an extraction outcome. A 401 asks for credentials, so it reads as a
+/// login wall; other fetch errors keep their kind ("HTTP 404.", "Timeout.").
+fn article_from(raw: &RawResponse) -> Extraction {
+    if raw.refused {
+        return Err(ExtractError::PrivateAddress);
+    }
+    if is_challenged(raw) {
+        return Err(ExtractError::Challenge);
+    }
+    match &raw.error {
+        Some(ErrorKind::Http(401)) => return Err(ExtractError::LoginWall),
+        Some(kind) => return Err(ExtractError::Fetch(kind.clone())),
+        None => {}
+    }
+    if !looks_like_html(raw.content_type.as_deref(), &raw.body) {
+        return Err(ExtractError::NoContent);
+    }
+    extract_article(&String::from_utf8_lossy(&raw.body), &raw.final_url)
 }
 
 /// `Some(found)` once the site was checked (`found` is `None` when it announces nothing new);
@@ -685,5 +870,411 @@ mod tests {
                 "{e:?}"
             );
         }
+    }
+
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<Event>>);
+
+    impl EventSink for Recorder {
+        fn emit(&self, event: &Event) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subset_refresh_fetches_only_the_named_active_feeds_and_diagnoses_all() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        serve(&server, "/gone.xml", 410, "", "text/plain").await;
+        serve(&server, "/other.xml", 200, RSS, "application/rss+xml").await;
+        serve(&server, "/buried.xml", 200, RSS, "application/rss+xml").await;
+        let limits = FetchLimits {
+            per_host_gap: Duration::ZERO,
+            timeout: Duration::from_secs(5),
+            ..FetchLimits::default()
+        };
+        let app = Ressac::with_parts(Store::open_in_memory().unwrap(), limits, &base).unwrap();
+        let opml = format!(
+            r#"<opml><body><outline text="Gone" xmlUrl="{base}/gone.xml"/>
+            <outline text="Other" xmlUrl="{base}/other.xml"/>
+            <outline text="Buried" xmlUrl="{base}/buried.xml"/></body></opml>"#
+        );
+        app.import_opml(&opml, false).unwrap();
+        garden::decide(app.store(), 3, crate::model::Decision::Bury, Utc::now()).unwrap();
+
+        let recorder = Recorder::default();
+        let opts = RefreshOptions {
+            force: false,
+            only: Some(vec![1, 3]),
+        };
+        app.refresh(opts, &recorder, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap();
+
+        let events = recorder.0.lock().unwrap().clone();
+        assert!(matches!(events.first(), Some(Event::Started { total: 1 })));
+        let done: Vec<FeedId> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::FeedDone { feed_id, .. } => Some(*feed_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(done, [1], "the buried feed is skipped even when named");
+        assert!(app.store().attempts(2, 1).unwrap().is_empty());
+        assert!(app.store().attempts(3, 1).unwrap().is_empty());
+        assert_eq!(
+            app.store().diagnosis(1).unwrap().map(|d| d.status),
+            Some(Status::Dead)
+        );
+        assert_eq!(
+            app.store().diagnosis(2).unwrap().map(|d| d.status),
+            Some(Status::Unchecked),
+            "diagnosis covers every active feed"
+        );
+        let flag: bool = app
+            .store()
+            .conn()
+            .query_row(
+                "SELECT needs_triage FROM v_garden_row WHERE feed_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(flag, "diagnose_all stores the triage flags");
+    }
+
+    #[test]
+    fn reading_and_garden_events_have_stable_json() {
+        let json = |e: Event| serde_json::to_value(e).unwrap();
+        assert_eq!(
+            json(Event::Extracted {
+                entry_id: 3,
+                ok: false,
+                error: Some("HTTP 404.".into()),
+            }),
+            serde_json::json!({"event": "extracted", "entry_id": 3, "ok": false, "error": "HTTP 404."})
+        );
+        assert_eq!(
+            json(Event::Extracted {
+                entry_id: 4,
+                ok: true,
+                error: None,
+            }),
+            serde_json::json!({"event": "extracted", "entry_id": 4, "ok": true, "error": null})
+        );
+        assert_eq!(
+            json(Event::Decided {
+                feed_id: 2,
+                decision: "bury".into(),
+            }),
+            serde_json::json!({"event": "decided", "feed_id": 2, "decision": "bury"})
+        );
+        assert_eq!(
+            json(Event::Undone { feed_id: None }),
+            serde_json::json!({"event": "undone", "feed_id": null})
+        );
+        assert_eq!(
+            json(Event::Probing {
+                what: FULL_ARTICLES.into(),
+                total: FULLTEXT_PER_FEED_PER_RUN,
+            }),
+            serde_json::json!({"event": "probing", "what": "full articles", "total": 20})
+        );
+    }
+
+    const PARA: &str = "The tide comes in twice a day, pulled by the moon and the sun, and the shore keeps a careful record of every visit in sand, shells and drifting weed.";
+
+    /// A page `dom_smoothie` extracts (checked against 0.18.2: about 2,500 characters of text).
+    fn article_page() -> String {
+        let body: String = (0..8)
+            .map(|i| format!("<p>Paragraph {i}. {PARA} {PARA}</p>"))
+            .collect();
+        format!(
+            "<!DOCTYPE html><html><head><title>Tides | Shore Notes</title><meta name=\"author\" content=\"Ada Lovelace\"></head><body><nav><a href=\"/\">Home</a></nav><article><h1>Tides</h1>{body}</article><footer>Footer</footer></body></html>"
+        )
+    }
+
+    fn parsed_entry(guid: &str, url: Option<String>, title: Option<&str>) -> ParsedEntry {
+        ParsedEntry {
+            guid: guid.into(),
+            url,
+            title: title.map(Into::into),
+            author: None,
+            published_at: Utc::now(),
+            published_at_is_fallback: false,
+            updated_at: None,
+            summary_html: Some("<p>Only a summary.</p>".into()),
+            content_html: None,
+        }
+    }
+
+    /// An app whose feed #1 holds `linked` (→ `{base}/article`) and `bare` (no link, no
+    /// title, only a summary). Returns the app and both entry ids.
+    fn app_with_entries(base: &str) -> (Ressac, i64, i64) {
+        let (app, linked, bare) = guarded_app_with_entries(base);
+        (app.allow_private_articles().unwrap(), linked, bare)
+    }
+
+    /// Like `app_with_entries`, with the production public-address guard still on.
+    fn guarded_app_with_entries(base: &str) -> (Ressac, i64, i64) {
+        let store = Store::open_in_memory().unwrap();
+        let xml =
+            r#"<opml><body><outline text="T" xmlUrl="https://t.example/feed"/></body></opml>"#;
+        store
+            .import_outlines(&opml::parse(xml).unwrap(), false, Utc::now())
+            .unwrap();
+        let parsed = ParsedFeed {
+            title: Some("T".into()),
+            description: None,
+            site_url: None,
+            entries: vec![
+                parsed_entry("linked", Some(format!("{base}/article")), Some("Tides")),
+                parsed_entry("bare", None, None),
+            ],
+        };
+        store
+            .record_attempt("r", &attempt(Some(parsed), None))
+            .unwrap();
+        let id = |guid: &str| -> i64 {
+            store
+                .conn()
+                .query_row("SELECT id FROM entry WHERE guid = ?1", [guid], |r| r.get(0))
+                .unwrap()
+        };
+        let (linked, bare) = (id("linked"), id("bare"));
+        let limits = FetchLimits {
+            per_host_gap: Duration::ZERO,
+            timeout: Duration::from_secs(5),
+            ..FetchLimits::default()
+        };
+        let app = Ressac::with_parts(store, limits, "http://127.0.0.1:9").unwrap();
+        (app, linked, bare)
+    }
+
+    fn raw(status: Option<u16>, error: Option<ErrorKind>, ct: &str, body: &str) -> RawResponse {
+        RawResponse {
+            status,
+            error,
+            final_url: "https://x.example/a".into(),
+            content_type: Some(ct.into()),
+            body: body.as_bytes().to_vec(),
+            ..RawResponse::default()
+        }
+    }
+
+    #[test]
+    fn article_from_maps_fetch_outcomes() {
+        let err = |r: RawResponse| article_from(&r).err();
+        assert_eq!(
+            err(raw(Some(403), Some(ErrorKind::Challenge), "text/html", "")),
+            Some(ExtractError::Challenge)
+        );
+        assert_eq!(
+            err(raw(Some(200), None, "text/html", CHALLENGE)),
+            Some(ExtractError::Challenge),
+            "a 200 interstitial is a challenge too"
+        );
+        assert_eq!(
+            err(raw(Some(401), Some(ErrorKind::Http(401)), "text/html", "")),
+            Some(ExtractError::LoginWall)
+        );
+        assert_eq!(
+            err(raw(Some(404), Some(ErrorKind::Http(404)), "text/html", "")),
+            Some(ExtractError::Fetch(ErrorKind::Http(404)))
+        );
+        assert_eq!(
+            err(raw(None, Some(ErrorKind::Timeout), "", "")),
+            Some(ExtractError::Fetch(ErrorKind::Timeout))
+        );
+        assert_eq!(
+            err(raw(Some(200), None, "application/pdf", "%PDF-1.7")),
+            Some(ExtractError::NoContent)
+        );
+        let article = article_from(&raw(Some(200), None, "text/html", &article_page())).unwrap();
+        assert!(article.html.contains("Paragraph 7."), "{}", article.html);
+    }
+
+    #[tokio::test]
+    async fn extract_entry_saves_the_article_and_reports_it() {
+        let server = MockServer::start().await;
+        serve(
+            &server,
+            "/article",
+            200,
+            &article_page(),
+            "text/html; charset=utf-8",
+        )
+        .await;
+        let (app, linked, _) = app_with_entries(&server.uri());
+        let recorder = Recorder::default();
+        assert_eq!(
+            app.extract_entry(linked, &recorder).await.unwrap(),
+            ExtractOutcome::Saved
+        );
+        let row = app
+            .store()
+            .fulltext(linked)
+            .unwrap()
+            .expect("a stored article");
+        assert!(row.html.as_deref().unwrap().contains("Paragraph 7."));
+        assert_eq!(row.error, None);
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![Event::Extracted {
+                entry_id: linked,
+                ok: true,
+                error: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_extraction_is_stored_and_a_retry_replaces_it() {
+        let server = MockServer::start().await;
+        serve(&server, "/article", 404, "gone", "text/plain").await;
+        let (app, linked, _) = app_with_entries(&server.uri());
+        let recorder = Recorder::default();
+        assert_eq!(
+            app.extract_entry(linked, &recorder).await.unwrap(),
+            ExtractOutcome::Failed("HTTP 404.".into())
+        );
+        let failed = app.store().fulltext(linked).unwrap().unwrap();
+        assert_eq!(failed.error.as_deref(), Some("HTTP 404."));
+        assert_eq!(failed.html, None);
+
+        server.reset().await;
+        serve(&server, "/article", 200, &article_page(), "text/html").await;
+        assert_eq!(
+            app.extract_entry(linked, &recorder).await.unwrap(),
+            ExtractOutcome::Saved
+        );
+        let saved = app.store().fulltext(linked).unwrap().unwrap();
+        assert!(saved.html.is_some());
+        assert_eq!(saved.error, None);
+        assert_eq!(
+            recorder.0.lock().unwrap()[0],
+            Event::Extracted {
+                entry_id: linked,
+                ok: false,
+                error: Some("HTTP 404.".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_challenge_page_is_stored_as_such() {
+        let server = MockServer::start().await;
+        serve(&server, "/article", 200, CHALLENGE, "text/html").await;
+        let (app, linked, _) = app_with_entries(&server.uri());
+        assert_eq!(
+            app.extract_entry(linked, &NullSink).await.unwrap(),
+            ExtractOutcome::Failed("Anti-bot challenge page.".into())
+        );
+    }
+
+    /// A store error on one entry is logged; the pass goes on with the next entries.
+    #[tokio::test]
+    async fn a_store_error_on_one_entry_does_not_end_the_full_text_pass() {
+        let server = MockServer::start().await;
+        serve(&server, "/article", 200, &article_page(), "text/html").await;
+        let (app, linked, _) = app_with_entries(&server.uri());
+        let more = ParsedFeed {
+            title: Some("T".into()),
+            description: None,
+            site_url: None,
+            entries: vec![parsed_entry(
+                "second",
+                Some(format!("{}/article", server.uri())),
+                Some("Second"),
+            )],
+        };
+        app.store()
+            .record_attempt("r2", &attempt(Some(more), None))
+            .unwrap();
+        let second: i64 = app
+            .store()
+            .conn()
+            .query_row("SELECT id FROM entry WHERE guid = 'second'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        app.store().set_prefer_full_text(1, true).unwrap();
+        app.store()
+            .conn()
+            .execute_batch(&format!(
+                "CREATE TRIGGER boom BEFORE INSERT ON entry_fulltext WHEN NEW.entry_id = {linked} \
+                 BEGIN SELECT RAISE(ABORT, 'disk on fire'); END;"
+            ))
+            .unwrap();
+        let stop = AtomicBool::new(false);
+        let since = "2000-01-01T00:00:00Z".parse().unwrap();
+        app.fetch_full_texts(&[1], since, &NullSink, &stop)
+            .await
+            .expect("the pass survives a store error");
+        assert!(app.store().fulltext(linked).unwrap().is_none());
+        assert!(app.store().fulltext(second).unwrap().is_some());
+    }
+
+    /// Review Focus 1: an entry with no link (and no title) cannot be extracted; nothing is
+    /// stored or emitted, and the CLI turns this into exit 2 (Phase 5).
+    #[tokio::test]
+    async fn extract_without_url_is_a_usage_error() {
+        let (app, _, bare) = app_with_entries("http://127.0.0.1:9");
+        let recorder = Recorder::default();
+        assert_eq!(
+            app.extract_entry(bare, &recorder).await.unwrap(),
+            ExtractOutcome::NoUrl
+        );
+        assert!(app.store().fulltext(bare).unwrap().is_none());
+        assert!(recorder.0.lock().unwrap().is_empty());
+    }
+
+    /// SSRF guard: a feed-controlled entry URL on a local address is never requested.
+    #[tokio::test]
+    async fn extract_refuses_local_addresses_without_sending_a_request() {
+        let server = MockServer::start().await;
+        serve(&server, "/article", 200, &article_page(), "text/html").await;
+        let (app, linked, _) = guarded_app_with_entries(&server.uri());
+        let recorder = Recorder::default();
+        assert_eq!(
+            app.extract_entry(linked, &recorder).await.unwrap(),
+            ExtractOutcome::Failed("The page is on a local or private network.".into())
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let row = app.store().fulltext(linked).unwrap().unwrap();
+        assert_eq!(
+            row.error.as_deref(),
+            Some("The page is on a local or private network.")
+        );
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![Event::Extracted {
+                entry_id: linked,
+                ok: false,
+                error: Some("The page is on a local or private network.".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn article_from_maps_a_refused_fetch() {
+        let refused = RawResponse {
+            refused: true,
+            ..RawResponse::default()
+        };
+        assert_eq!(
+            article_from(&refused).err(),
+            Some(ExtractError::PrivateAddress)
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_of_an_unknown_entry_is_reported() {
+        let (app, _, _) = app_with_entries("http://127.0.0.1:9");
+        assert_eq!(
+            app.extract_entry(9_999, &NullSink).await.unwrap(),
+            ExtractOutcome::UnknownEntry
+        );
     }
 }

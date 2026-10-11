@@ -86,6 +86,33 @@ Une revue du lot de calibrage a donné six points importants et dix mineurs, tou
 - **Indice de spam (M8)** : aucun changement de comportement, l'utilisateur voulait l'indice. Sur le run réel, 5 flux l'affichent : Bibliobsession (le cas visé), ReadWriteWeb (Alive, vocabulaire de paris dans un site tech) et trois flux Fossil avec une langue incohérente. On pourra le restreindre plus tard (statuts non Alive, ou termes du lexique seulement).
 - **Identifiants d'articles (R3)** : les entrées sans GUID dont le titre contenait une entité non déclarée changent d'identifiant une fois après la mise à jour (le titre est désormais haché avec le vrai caractère), donc quelques doublons d'articles apparaissent dans une base existante au premier relevé. C'est ponctuel, et la vraie base de Clément n'existe pas encore.
 
+## Appli Mac (sous-projet 2a)
+
+### Recette manuelle (10 et 11/10/2026)
+
+Base : construite depuis l'OPML Vienna (import puis check) dans un dossier temporaire, ouverte par `RESSAC_DB` (appli) et `--db` (terminal). La vraie base n'existe pas encore : rien n'a été créé dans `~/Library/Application Support/Ressac/`. Appli : build Release, `ressac` embarqué. Un petit script `recette.sh` (`app`, `garden`, `first-run`) a remplacé les variables du protocole, trop pénibles à recopier.
+
+- Point de départ : schéma 2, 186 flux actifs, 10 224 entrées dont 1 083 non lues (règle des 7 jours), 80 flux à trier.
+
+| # | Vérification (spec §9) | Résultat | Observations |
+|---|---|---|---|
+| 1 | Lancement sur la vraie base | OK | dossiers, compteurs, pastilles et jardin affichés d'emblée |
+| 2 | Lecture au clavier seul | KO puis OK | `j`/`k`/Espace gardés par la vue qui avait le focus (sélection par frappe de la barre latérale, liste, WebKit) ; corrigé par un routeur de touches au niveau de la fenêtre, flèches à la NetNewsWire, liste qui suit la sélection |
+| 3 | Article complet d'un flux tronqué | KO puis OK | le bouton existait mais s'affichait en petite icône sans titre ; désormais bouton titré, éteint après un échec avec la raison affichée |
+| 4 | Tri de trois flux, une annulation | OK | |
+| 5 | Mêmes décisions dans `ressac garden` | OK | et une décision prise dans le terminal remonte dans l'appli ouverte (veille sur `data_version`) |
+| 6 | Clair et sombre, polices, tailles | OK | |
+| 7 | Export OPML | OK | |
+| 8 | Premier lancement (dépôt d'OPML) | KO puis OK | « SQLite error 14 » : ouverture en lecture seule d'une base WAL sans fichier `-shm` ; les ouvertures de vérification passent en lecture-écriture |
+
+- **Icône** : vague dont la crête porte `<rss><item><title>` (piste B1 retenue par Clément) ; source `apps/macos/Ressac/Resources/AppIcon.svg`. Après une recompilation au même chemin, le Dock gardait l'ancienne icône : `touch` du paquet puis `lsregister -f`.
+- **Incident** : pendant le débogage du clavier, un sous-agent a envoyé 4 ou 5 frappes `j` par System Events à l'application au premier plan (vers 10 h 00, le 11/10). Règle désormais : aucune frappe simulée vers une appli que Clément utilise, seulement des tests en processus.
+- **À surveiller** : l'avertissement « reentrant operation in its NSTableView delegate » vient en partie du défilement de la liste vers la sélection (corrigé) ; une autre source possible n'est pas reproduite.
+
+### CI macOS
+
+- `macos-latest` (11/10/2026) : Xcode 26.6 et SDK macOS 26.5, donc la construction et les tests de l'appli sont sautés, échec autorisé, job vert avec un avertissement (exécution 38126512109). L'appli n'est vérifiée qu'en local tant que GitHub n'a pas Xcode 27.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
@@ -130,3 +157,21 @@ Une revue du lot de calibrage a donné six points importants et dix mineurs, tou
 - **`reqwest::Error::without_url()`** consomme l'erreur : `classify` prend désormais l'erreur par valeur. Le message de premier niveau contient l'URL complète (« error sending request for url (…) ») ; les sources de la chaîne, elles, ne la contiennent pas.
 - **Délai total** : `tokio::time::timeout` autour d'une boucle qui écrit dans un `&mut RawResponse` ; à l'échéance, le futur est abandonné, l'emprunt se termine et la chaîne de redirections déjà vue reste lisible.
 - **Ctrl-C en mode TUI** : en mode brut, crossterm désactive ISIG, Ctrl-C arrive comme touche et non comme signal ; le second Ctrl-C (sortie 130) ne concerne donc que `fetch` et `check`.
+
+### Recette de l'appli Mac (11/10/2026)
+- **Raccourcis sans modificateur dans les menus SwiftUI** : AppKit ne les essaie qu'après la vue qui a le clavier. La barre latérale et la liste (`SwiftUIOutlineListView`, sous-classe de `NSOutlineView`) prennent la barre d'espace et font de la sélection par frappe : `j` dans la barre latérale saute au dossier « Jon ». Le `WKWebView` du lecteur garde la barre d'espace pour son propre défilement, même tout en bas. Les touches de lecture passent donc par un moniteur local (`ReadingKeyRouter`), avant la vue, comme le fait NetNewsWire ; les menus gardent leurs raccourcis pour l'affichage et le clic.
+- **Drapeaux des événements clavier** : un événement posté par `CGEvent.postToPid` porte un bit privé (1 << 29) dans `modifierFlags`, en plus de `.numericPad` et `.function` sur les flèches. On ne regarde que Maj, Contrôle, Option et Commande.
+- **Barre d'outils (macOS 27)** : un `Label` y est affiché en icône seule, fondu dans la même capsule de verre que ses voisins. `.labelStyle(.titleAndIcon)` et un `ToolbarSpacer(.fixed)` de chaque côté donnent au bouton Full Article sa propre capsule, avec son titre.
+- **`callAsyncJavaScript`** fonctionne avec `allowsContentJavaScript = false` : seul le JavaScript de la page est coupé, pas celui de l'appli (défilement par la barre d'espace vérifié sur un long article).
+- **Liste et sélection au clavier** : une `List` SwiftUI ne fait pas défiler jusqu'à une sélection changée par le code ; `ScrollViewReader.scrollTo` sur `selectedEntryId`.
+
+## Extraction d'articles : essai de `dom_smoothie` 0.18.2 (phase 1 du sous-projet 2a)
+
+Essai du 10/10/2026 sur 10 pages réelles tirées des flux de l'utilisateur (base jetable du calibrage, liste d'URL gardée hors du dépôt), récupérées par `LocalSource::fetch_raw`. Commande : `RESSAC_SPIKE_URLS=… cargo test -p ressac-core extract::spike -- --ignored --nocapture`.
+
+- **Verdict** : retenu. 8 articles sur 8 extraits (titre, texte de 922 à 7 420 caractères qui commence bien par le chapeau de l'article), aucune panique, 10 à 60 ms par page en debug (Wired : page de 1,4 Mo, 60 ms).
+- **Pages refusées** : Le Monde sert une page « Client Challenge » en 200 ; `is_challenge_page` la reconnaît. Sans ce filtre, l'extracteur en tire 209 caractères avec le titre « Client Challenge » : d'où le contrôle des pages anti-robots *avant* l'extraction et le seuil `MIN_ARTICLE_CHARS` à 250. Libération répond 403 avec un corps vide ici : `fetch_raw` rend `Http(403)`, l'extraction stockera « HTTP 403. ».
+- **Auteur** : peut être faux. Morgane Tual donne « OpenAI » (métadonnées de la page). Affiché tel quel, jamais utilisé pour un calcul. BBC donne deux auteurs (« Mike Peter, Matt Warwick »).
+- **Titre** : parfois suivi du nom du site (« … - La République des livres »), et peut contenir des espaces insécables (Nautilus : `\u{a0}`). Gardé tel quel.
+- **Texte court** : le billet-citation de Simon Willison (922 caractères) est jugé `is_probably_readable() == false` mais bien extrait : on ne se sert pas de `is_probably_readable`.
+- **API** : `Readability::new(html, Some(url), Some(Config::default()))` refuse une URL relative (`BadDocumentURL`) ; avec une URL absolue, liens et images relatifs deviennent absolus. `parse()` échoue en `GrabFailed` sur une page vide. `content` et `text_content` sont des `StrTendril`.

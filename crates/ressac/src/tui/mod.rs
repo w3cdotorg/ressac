@@ -44,24 +44,10 @@ fn event_loop(
                     .map_err(Into::into)
             }
             Command::Undo => garden::undo(store)
-                .map(|undone| {
-                    Some(undone.map_or("Nothing to undo.".into(), |id| {
-                        format!("Undid the last decision (#{id}).")
-                    }))
-                })
+                .map(|undone| Some(crate::output::undo_text(undone)))
                 .map_err(Into::into),
             Command::ApplySafeRepairs => garden::apply_safe_repairs(store, Utc::now())
-                .map(|(applied, skipped)| {
-                    let mut msg = format!("Applied {applied} safe repairs.");
-                    if !skipped.is_empty() {
-                        msg.push_str(&format!(
-                            " Skipped {}: {}",
-                            skipped.len(),
-                            skipped.join("; ")
-                        ));
-                    }
-                    Some(msg)
-                })
+                .map(|(applied, skipped)| Some(crate::output::apply_safe_text(applied, &skipped)))
                 .map_err(Into::into),
             Command::Open(url) => open::that(&url).map(|()| None).map_err(Into::into),
         };

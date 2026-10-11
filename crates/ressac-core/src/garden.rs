@@ -116,6 +116,17 @@ pub fn load_rows(store: &Store) -> Result<Vec<GardenRow>> {
     Ok(rows)
 }
 
+/// Stores every feed's triage verdict (`feed_health.needs_triage`) so that other clients
+/// read the rule instead of reimplementing it. Called after every diagnosis, decision and undo.
+pub fn recompute_triage(store: &Store) -> Result<()> {
+    store.update_triage(|| {
+        Ok(load_rows(store)?
+            .iter()
+            .map(|r| (r.feed_id, r.needs_triage()))
+            .collect())
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Progress {
     pub decided: usize,
@@ -154,14 +165,26 @@ pub fn decide(
         Decision::Repair => diagnosis.and_then(|d| d.action),
         Decision::Keep | Decision::Bury => None,
     };
-    store.record_decision(feed_id, decision, status, action.as_ref(), now)
+    store.record_decision(feed_id, decision, status, action.as_ref(), now)?;
+    recompute_triage(store)
 }
 
 pub fn undo(store: &Store) -> Result<Option<FeedId>> {
-    store.undo_last_decision()
+    let undone = store.undo_last_decision()?;
+    recompute_triage(store)?;
+    Ok(undone)
 }
 
 pub fn apply_safe_repairs(store: &Store, now: DateTime<Utc>) -> Result<(usize, Vec<String>)> {
+    let result = apply_safe_repairs_inner(store, now);
+    // Repairs committed before an error keep their triage verdicts honest.
+    let recomputed = recompute_triage(store);
+    let outcome = result?;
+    recomputed?;
+    Ok(outcome)
+}
+
+fn apply_safe_repairs_inner(store: &Store, now: DateTime<Utc>) -> Result<(usize, Vec<String>)> {
     let rows = load_rows(store)?;
     let mut applied = 0;
     let mut skipped = Vec::new();
@@ -392,5 +415,99 @@ mod tests {
             decide(&s, 3, Decision::Repair, now()).is_err(),
             "Fossil has nothing to repair"
         );
+    }
+
+    /// `needs_triage` as other clients read it, by feed id.
+    fn stored_flags(s: &Store) -> Vec<(FeedId, bool)> {
+        s.conn()
+            .prepare("SELECT feed_id, needs_triage FROM v_garden_row ORDER BY feed_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    fn assert_flags_match_rows(s: &Store) {
+        let mut expected: Vec<(FeedId, bool)> = load_rows(s)
+            .unwrap()
+            .iter()
+            .map(|r| (r.feed_id, r.needs_triage()))
+            .collect();
+        expected.sort();
+        assert_eq!(stored_flags(s), expected);
+    }
+
+    #[test]
+    fn triage_flags_follow_decisions_undo_and_safe_repairs() {
+        let s = store();
+        recompute_triage(&s).unwrap();
+        assert_eq!(
+            stored_flags(&s),
+            [(1, true), (2, false), (3, true), (4, true)]
+        );
+        decide(&s, 3, Decision::Keep, now()).unwrap();
+        decide(&s, 1, Decision::Bury, now()).unwrap();
+        assert_eq!(
+            stored_flags(&s),
+            [(1, false), (2, false), (3, false), (4, true)]
+        );
+        assert_eq!(undo(&s).unwrap(), Some(1));
+        assert_eq!(stored_flags(&s)[0], (1, true), "undo brings the feed back");
+        apply_safe_repairs(&s, now()).unwrap();
+        assert_eq!(stored_flags(&s)[3], (4, false), "repaired");
+        assert_flags_match_rows(&s);
+    }
+
+    #[test]
+    fn apply_safe_repairs_recomputes_triage_even_when_it_fails() {
+        let s = store();
+        recompute_triage(&s).unwrap();
+        // A stale verdict: feed 3 (Fossil, undecided) needs triage but is stored as 0.
+        s.conn()
+            .execute(
+                "UPDATE feed_health SET needs_triage = 0 WHERE feed_id = 3",
+                [],
+            )
+            .unwrap();
+        s.conn()
+            .execute_batch(
+                "CREATE TRIGGER boom BEFORE INSERT ON garden_decision \
+                 BEGIN SELECT RAISE(ABORT, 'disk on fire'); END;",
+            )
+            .unwrap();
+        assert!(apply_safe_repairs(&s, now()).is_err());
+        assert_flags_match_rows(&s);
+        assert_eq!(stored_flags(&s)[2], (3, true));
+    }
+
+    #[test]
+    fn recompute_triage_holds_the_write_lock_while_it_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.sqlite");
+        let s = Store::open(&path).unwrap();
+        s.import_outlines(
+            &opml::parse(
+                r#"<opml><body><outline text="A" xmlUrl="https://a.example/f"/></body></opml>"#,
+            )
+            .unwrap(),
+            false,
+            now(),
+        )
+        .unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.busy_timeout(std::time::Duration::ZERO).unwrap();
+        s.update_triage(|| {
+            let err = other
+                .execute_batch("BEGIN IMMEDIATE")
+                .expect_err("another writer must be locked out between the read and the write");
+            assert_eq!(
+                err.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            Ok(HashMap::new())
+        })
+        .unwrap();
+        other.execute_batch("BEGIN IMMEDIATE; ROLLBACK").unwrap();
     }
 }
