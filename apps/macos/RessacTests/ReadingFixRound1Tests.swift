@@ -111,6 +111,62 @@ import WebKit
     }
 }
 
+/// A local HTTP server that accepts connections and never answers: an image that never loads.
+final class HangingServer {
+    let port: UInt16
+    private let fd: Int32
+
+    init() throws {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        self.fd = fd
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        address.sin_port = 0
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                bind(fd, generic, length) == 0 && listen(fd, 16) == 0 && getsockname(fd, generic, &length) == 0
+            }
+        }
+        guard bound else {
+            close(fd)
+            throw POSIXError(.EADDRINUSE)
+        }
+        port = UInt16(bigEndian: address.sin_port)  // the kernel completes connections; nobody accepts
+    }
+
+    deinit { close(fd) }
+}
+
+/// Round 2: Space must not wait for the article's images (the load event).
+@MainActor @Suite struct ReaderSlowImageTests {
+    @Test func spaceScrollsAndMovesOnBeforeAnImageLoads() async throws {
+        let server = try HangingServer()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let webView = WKWebView(frame: window.contentLayoutRect)
+        window.contentView = webView
+        let controller = ReaderController()
+        controller.webView = webView
+        let coordinator = ArticleWebView.Coordinator(controller: controller)
+        webView.navigationDelegate = coordinator
+        let pixel = #"<img src="http://127.0.0.1:\#(server.port)/pixel.gif" width="20" height="20">"#
+
+        let long = pixel + String(repeating: "<p>Line of a long article.</p>", count: 400)
+        controller.load(entryId: 1, html: long)
+        #expect(await eventually { controller.loadedEntryId == 1 })
+        #expect(webView.isLoading)  // the image still hangs: no load event yet
+        #expect(await controller.pageDown(entryId: 1))  // scrolls all the same
+
+        controller.load(entryId: 2, html: pixel + "<p>Short.</p>")
+        #expect(await eventually { controller.loadedEntryId == 2 })
+        #expect(webView.isLoading)
+        #expect(await !controller.pageDown(entryId: 2))  // at the bottom: Space moves on
+    }
+}
+
 /// Important 2 and Minor 4: the button is on only while the full article is shown.
 @MainActor @Suite struct FullArticleStateTests {
     @Test func aFailedExtractionLeavesTheButtonOffAndTheNoticeUp() async throws {

@@ -82,7 +82,7 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         }
         #expect(clean.contains("<p>Hello <b>world</b>"))
         #expect(clean.contains("<a>bad link</a>"))
-        #expect(clean.contains(#"<img src="https://img.example.org/a.png">"#))
+        #expect(clean.contains(#"<img src="https://img.example.org/a.png" loading="lazy">"#))
     }
 
     @Test func keepsTextEntitiesAndStructure() {
@@ -98,7 +98,7 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         let clean = ArticleTemplate.sanitize(html, baseURL: URL(string: articleURL))
         #expect(clean.contains(#"<a href="https://blog.example.org/post/2">rel</a>"#))
         #expect(clean.contains(#"<a href="https://blog.example.org/2026/10/post.html#notes">frag</a>"#))
-        #expect(clean.contains(#"<img src="https://blog.example.org/2026/10/img/a.png">"#))
+        #expect(clean.contains(#"<img src="https://blog.example.org/2026/10/img/a.png" loading="lazy">"#))
         #expect(clean.contains("<a>mail</a>"))
         let noBase = ArticleTemplate.sanitize(#"<a href="/post/2">rel</a><img src="/a.png">"#, baseURL: nil)
         #expect(noBase == "<a>rel</a>")
@@ -109,7 +109,7 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(clean.contains("kept text"))
         #expect(!clean.contains("<font"))
         #expect(!clean.contains("no source"))
-        #expect(clean.contains(#"<img src="data:image/png;base64,AAAA">"#))
+        #expect(clean.contains(#"<img src="data:image/png;base64,AAAA" loading="lazy">"#))
         #expect(!clean.contains("svg"))
     }
 

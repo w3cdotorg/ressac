@@ -131,7 +131,7 @@ struct ArticlePage: Equatable {
 /// Lets `AppState.advance()` scroll the reader with Space (through `readerPageDown`).
 @MainActor final class ReaderController {
     weak var webView: WKWebView?
-    /// The entry whose page has finished loading; nil while a page loads.
+    /// The entry whose page is on screen (its navigation committed); nil until then.
     private(set) var loadedEntryId: Int64?
     private var loadingEntryId: Int64?
     private var navigation: WKNavigation?
@@ -142,20 +142,24 @@ struct ArticlePage: Equatable {
         navigation = webView?.loadHTMLString(html, baseURL: nil)
     }
 
-    /// Called by the navigation delegate. A failed load counts too, or Space would stay spent.
-    func navigationEnded(_ ended: WKNavigation?) {
-        guard ended === navigation else { return }  // a load that a newer one replaced
+    /// Called by the navigation delegate once the new document replaced the old one, without
+    /// waiting for its images (the load event): a slow image or a hanging tracking pixel must not
+    /// keep Space dead. A failed load counts too, or Space would stay spent.
+    func navigationCommitted(_ committed: WKNavigation?) {
+        guard committed === navigation else { return }  // a load that a newer one replaced
         loadedEntryId = loadingEntryId
     }
 
     /// Scrolls one screen of `entryId`'s page down. Returns `false` when the article already shows
     /// its end, so `AppState` moves on to the next unread entry, and `true` without scrolling
-    /// while that entry's page is not loaded yet: Space must not read the previous page's
-    /// position (acceptance fix, review round 1).
+    /// until that entry's document is committed: Space must not read the previous page's
+    /// position (acceptance fix, review rounds 1 and 2).
     func pageDown(entryId: Int64) async -> Bool {
         guard let webView else { return false }
-        guard loadedEntryId == entryId, !webView.isLoading else { return true }
+        guard loadedEntryId == entryId else { return true }
+        // Committed but still parsing: the height is not known yet, so the key is spent.
         let script = """
+        if (document.readyState === "loading") { return true; }
         const page = document.scrollingElement;
         if (page.scrollTop + window.innerHeight >= page.scrollHeight - 2) { return false; }
         window.scrollBy({ top: Math.round(window.innerHeight * 0.9), behavior: "smooth" });
@@ -205,16 +209,16 @@ struct ArticleWebView: NSViewRepresentable {
             self.controller = controller
         }
 
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            controller.navigationEnded(navigation)
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            controller.navigationCommitted(navigation)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
-            controller.navigationEnded(navigation)
+            controller.navigationCommitted(navigation)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
-            controller.navigationEnded(navigation)
+            controller.navigationCommitted(navigation)
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,

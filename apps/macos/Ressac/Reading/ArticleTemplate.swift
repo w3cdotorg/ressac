@@ -291,6 +291,8 @@ enum ArticleTemplate {
             for attribute in attributes {
                 out += " \(attribute.name)=\"\(escapeAttribute(attribute.value))\""
             }
+            // Images below the fold wait until they are scrolled near.
+            if tag == "img" { out += #" loading="lazy""# }
             out += ">"
             guard !voidElements.contains(tag) else { return }
             for child in element.children ?? [] { render(child, baseURL: baseURL, depth: depth + 1, into: &out) }
