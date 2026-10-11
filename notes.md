@@ -109,6 +109,10 @@ Base : construite depuis l'OPML Vienna (import puis check) dans un dossier tempo
 - **Incident** : pendant le débogage du clavier, un sous-agent a envoyé 4 ou 5 frappes `j` par System Events à l'application au premier plan (vers 10 h 00, le 11/10). Règle désormais : aucune frappe simulée vers une appli que Clément utilise, seulement des tests en processus.
 - **À surveiller** : l'avertissement « reentrant operation in its NSTableView delegate » vient en partie du défilement de la liste vers la sélection (corrigé) ; une autre source possible n'est pas reproduite.
 
+### CI macOS
+
+- `macos-latest` (11/10/2026) : Xcode 26.6 et SDK macOS 26.5, donc la construction et les tests de l'appli sont sautés, échec autorisé, job vert avec un avertissement (exécution 38126512109). L'appli n'est vérifiée qu'en local tant que GitHub n'a pas Xcode 27.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
