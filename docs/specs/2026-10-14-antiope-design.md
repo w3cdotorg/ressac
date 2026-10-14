@@ -133,7 +133,7 @@ Not stored. An entry's sub-page is its position in the list currently shown (fee
 
 - A new **Appearance** picker (Native / Antiope) at the top.
 - In Antiope, the font picker is disabled with the note "Bedstead in Antiope".
-- Text size snaps to 15, 20, 25 or 30 points (20 by default), so that one font pixel always lands on whole Retina pixels. `⌘+` and `⌘−` move one step. The stored size is shared; Antiope rounds it to the nearest step when drawing.
+- Text size snaps to 15, 20, 25 or 30 points (20 by default), so that one font pixel always lands on whole Retina pixels. `⌘+` and `⌘−` move one step. Antiope keeps **its own stored size** (`reader.size.antiope`, default 20), separate from the Native size (`reader.size`), so switching looks never changes the other one; `⌘+`, `⌘−` and `⌘0` act on the size of the look shown (decision of 2026-10-14: a shared size would turn today's 17 into 15).
 - Line width gains a **40 columns** option (exactly 40 cells), available in both looks.
 - A **CRT screen** checkbox (`@AppStorage("antiope.crt")`, off by default) under the Appearance picker, enabled only when Appearance is Antiope (§9).
 
@@ -241,7 +241,7 @@ A mosaic progress row (`▐████░░ 12/80`) replaces the gauge.
 
 ### `GardenStatusStyle`
 
-One type gives each status its native colour (today's values) and its teletext colour. It replaces `SidebarRow.color(for:)` in `MainView.swift` and `statusColor(_:)` in `GardenInspector.swift`.
+One type gives each status its native colour and its teletext colour. The two copies disagree today (Hijacked, Duplicate); the sidebar's values win (Hijacked purple, Duplicate teal), so the inspector changes for those two (decision of 2026-10-14). It replaces `SidebarRow.color(for:)` in `MainView.swift` and `statusColor(_:)` in `GardenInspector.swift`.
 
 ### Banners
 
