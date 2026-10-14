@@ -13,3 +13,6 @@ apps/macos/build/
 DerivedData/
 xcuserdata/
 *.xcuserstate
+
+# Brainstorming mockups (local)
+.superpowers/
