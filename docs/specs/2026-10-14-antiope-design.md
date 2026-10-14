@@ -24,6 +24,7 @@ Success looks like: Clément switches Settings → Appearance to Antiope, the wi
 - **Articles are sub-pages** of their feed's page ("412 3/20").
 - **Font:** **Bedstead** (Ben Harris, CC0), modelled on the SAA5050 teletext character generator. Checked on 2026-10-14: every French letter (é è ê ë à â î ï ô ù û ü ÿ ç œ æ and their capitals), « » ’ “ ” … – — € °, the 60 sextant mosaics (U+1FB00–1FB3B) and the separated mosaics (U+1CE51 onwards) are present; one advance width (600/1000 em), so one font pixel is 1/10 of the font size. It is not the Antiope glyph set (no free one exists); swapping fonts later changes nothing else.
 - **Language:** the app spec's rule stands, every user-facing string is in English. **One exception:** the Minitel key labels stay in French, as they are the device's own key names.
+- **CRT screen (added the same day):** an optional checkbox, in the spirit of LeLion-web's `Shaders/Crt.gdshader` (curvature 0.045, scanlines 0.28, chromatic offset 1.2, vignette 0.35). No real barrel distortion: SwiftUI shaders cannot reach the `WKWebView`, and a curved image over straight hit areas would misplace clicks. Curvature is suggested by the tube's rounded corners instead (§9).
 - **Mockups:** `.superpowers/brainstorm/*/content/layout.html` (local, not committed).
 
 ## 3. Scope
@@ -46,6 +47,7 @@ Success looks like: Clément switches Settings → Appearance to Antiope, the wi
 - `AntiopeRootView`: page header, three cell-grid columns, Minitel bar, page-number entry, P100 SOMMAIRE and P899 GUIDE pages, search prompt.
 - The reader in Antiope (stylesheet, size steps, 40-column width, double-height titles) and image mosaics with a swap to the original.
 - The garden in Antiope (P800, P801, P802), banners and refresh progress.
+- The optional CRT screen (§9).
 - `GardenStatusStyle`, replacing the two copies of the status colours.
 
 ### Out of scope
@@ -133,6 +135,7 @@ Not stored. An entry's sub-page is its position in the list currently shown (fee
 - In Antiope, the font picker is disabled with the note "Bedstead in Antiope".
 - Text size snaps to 15, 20, 25 or 30 points (20 by default), so that one font pixel always lands on whole Retina pixels. `⌘+` and `⌘−` move one step. The stored size is shared; Antiope rounds it to the nearest step when drawing.
 - Line width gains a **40 columns** option (exactly 40 cells), available in both looks.
+- A **CRT screen** checkbox (`@AppStorage("antiope.crt")`, off by default) under the Appearance picker, enabled only when Appearance is Antiope (§9).
 
 ## 6. Teletext navigation
 
@@ -254,7 +257,30 @@ Launch screens (migration, too-new database, failure), the OPML import sheet, sy
 - The Minitel keys carry readable labels ("Sommaire, go to page 100").
 - The page counter respects Reduce motion.
 
-## 9. Error handling
+## 9. The CRT screen
+
+Active when Appearance is Antiope **and** the CRT screen box is checked. In Native the box is disabled and nothing is drawn.
+
+### Overlay
+
+- `CRTOverlay`: one view over the whole Antiope window (header, columns, reader, Minitel bar), with `allowsHitTesting(false)` so every click and scroll goes through. It sits above the `WKWebView`, so the reader gets the same treatment as the SwiftUI columns.
+- **Scanlines:** one dark band per font-pixel row (a font pixel is 1/10 of the text size, §5), covering the lower 40 % of that row in black at opacity 0.28, LeLion's value. The bands are aligned on the cell grid of the columns, so they stay crisp and regular. In the reader they stay fixed to the window while the article scrolls under them, as on a real tube.
+- **Vignette:** a radial darkening, black at opacity 0.35 at the corners, clear at the centre.
+- **Tube corners:** black rounded corners, with a radius of 3 % of the window's shorter side, suggesting the curved glass without moving any content.
+- **Cost:** drawn with `Canvas` once per size and text-size change; nothing animates.
+
+### Colour bleed
+
+The chromatic offset needs the underlying pixels, which an overlay cannot read, so each surface draws its own:
+
+- **SwiftUI cells:** a red copy of the text at +1 pt and a blue copy at −1 pt, both at opacity 0.45, plus a 2 pt glow of the text's own colour. Applied by one `crtBleed()` modifier on `CellText` views, a no-op when the CRT screen is off.
+- **Reader:** `ArticleTemplate` adds `data-crt` on `:root`, and `reader.css` gives text `text-shadow: 1px 0 rgba(255,0,0,.45), -1px 0 rgba(0,0,255,.45), 0 0 2px currentColor`. Mosaics and original images get no bleed; the scanlines and vignette already cover them.
+
+### What it does not do
+
+No barrel distortion (see §2), no flicker, no noise, no phosphor persistence. The effect is static, so Reduce motion has nothing to switch off. Increase contrast in the accessibility settings turns the bleed off and keeps the scanlines and vignette.
+
+## 10. Error handling
 
 | Case | Behaviour |
 |---|---|
@@ -265,7 +291,7 @@ Launch screens (migration, too-new database, failure), the OPML import sheet, sy
 | Image fetch or decode fails | `IMAGE` block, original still reachable. |
 | Bedstead missing | Log, stay in Native, Appearance picker disabled with a note. |
 
-## 10. Testing
+## 11. Testing
 
 ### Rust
 
@@ -284,6 +310,7 @@ Launch screens (migration, too-new database, failure), the OPML import sheet, sy
 - **`MosaicRenderer`:** flat colours, a two-colour cell, quantisation to the eight colours, maximum width.
 - **Scheme handler:** size cap, refused schemes, failure placeholder.
 - **Settings:** Antiope size steps; live Native ↔ Antiope switch keeping the selection.
+- **CRT screen:** active only for Antiope + checked; scanline bands land on font-pixel rows for each text size (15, 20, 25, 30); the overlay never takes a hit test; `data-crt` present in the article page exactly when active; bleed off with Increase contrast.
 
 ### Manual check before declaring done
 
@@ -297,12 +324,13 @@ Run on the real database and record it in `notes.md`. No simulated keystrokes in
 6. Check the separators stay straight on feeds with emoji or CJK titles.
 7. Try sizes 15 to 30 and the 40-column width.
 8. VoiceOver on the index column.
+9. CRT screen on: clicks and scrolling land where expected, lines stay crisp at every size, the box is disabled in Native.
 
 ### CI
 
 Unchanged: the Linux job runs the Rust checks; the macOS app job stays allowed-to-fail until GitHub has Xcode 27.
 
-## 11. Phases
+## 12. Phases
 
 Each phase touches at most five files; Clément approves each phase before the next starts.
 
@@ -312,11 +340,13 @@ Each phase touches at most five files; Clément approves each phase before the n
 4. **Antiope reader:** stylesheet, size steps, 40 columns, double height.
 5. **Mosaics:** renderer, scheme handler, swap to the original.
 6. **Garden in Antiope**, banners and progress, accessibility, README and `notes.md`.
+7. **CRT screen:** `CRTOverlay`, `crtBleed()`, the `data-crt` stylesheet rules, the Settings checkbox.
 
-## 12. Risks and open points
+## 13. Risks and open points
 
 - **Bedstead is SAA5050, not Antiope:** accepted. A future Antiope-shaped font drops in via `TeletextFont`.
 - **Pure blue on black** is barely legible: blue never carries text (§5).
 - **Long reading in a pixel font** may tire: the 15–30 sizes and the 40-column width are the levers; the Native look remains one switch away.
 - **Mosaic fetches** add a second download of each image when the original is shown. Accepted; the original is only loaded on demand.
+- **CRT bleed doubles text drawing** in the columns (two tinted copies per row): checked for scrolling smoothness in phase 7 on the largest folder; the fallback is the glow alone.
 - **`scaleY(2)` double height** in WebKit may blur at some sizes: checked in phase 4, with the fallback being a font size of 2 em in the same row grid.
