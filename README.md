@@ -20,13 +20,14 @@ ressac fetch --feed 12                 # repeatable; or --folder 3: refetch only
 ressac extract 4521                    # fetch and extract the full article of an entry
 ressac garden decide 12 keep           # keep | repair | bury, without the terminal UI
 ressac garden undo                     # revert the latest decision
-ressac garden apply-safe               # apply every undecided safe repair
+ressac garden apply-safe               # apply every undecided safe repair; --json also gives applied and skipped
 ressac migrate                         # bring the database to the current schema (v3)
 ressac page list                       # every page number, reserved ones first; --json for NDJSON
 ressac page set feed 12 412            # renumber a feed (or a folder) by hand, within 110-799
 ```
 
 Global flags: `--db <file>` (or `RESSAC_DB`), `--json`, `--ascii`, `-v`.
+Exit codes: `0` done, `1` error, `2` a refused request (an unknown id, nothing to repair, an address another active feed already uses), `130` stopped by Ctrl-C.
 The database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs in `~/Library/Logs/Ressac/`.
 
 **Schema v3.** The Mac app migrates the shared database to schema v3 on first launch, after a backup next to it (`ressac.sqlite.bak-v2`, or `ressac.sqlite.bak-v1` for an older database). v3 gives every folder and feed a three-digit page number, used by the Antiope look and listed by `ressac page list`; numbers never change on their own. A `ressac` built before v3 refuses the database ("database created by a newer Ressac"). Get a v3 CLI with `cargo install --path crates/ressac`, or use the app's own copy at `Ressac.app/Contents/Helpers/ressac`.
@@ -51,9 +52,9 @@ open build/Ressac.app
 Quit Ressac before replacing the build. To install it for every launch instead, copy `build/Ressac.app` to `/Applications/` (the commands below assume that location; with the local build, use `apps/macos/build/Ressac.app`).
 
 - **First run:** drop an OPML file on the window (or choose one, `⌘O`). A sheet shows what `ressac import --dry-run` found, then the app imports and fetches every feed.
-- **Reading:** three columns (sidebar with Unread, Today, Starred, your folders and the Garden; entry list; reader). `j`/`k` next/previous, `Space` scrolls then moves on, `m` read, `s` star, `⇧⌘A` mark all read, `⌘R` refresh the selection, `⇧⌘R` refresh everything, `⌘F` search, `⌘↩` open in the browser. Refresh is manual only.
+- **Reading:** three columns (sidebar with Unread, Today, Starred, your folders and the Garden; entry list; reader). `j`/`k` next/previous, `Space` scrolls then moves on, `m` read, `s` star, `⇧⌘A` mark all read, `⌘R` refresh the selection, `⇧⌘R` refresh everything, `⌘F` search, `⌘↩` open in the browser. Refresh is manual only. Long lists load 500 entries at a time; scrolling or `j` loads the next ones, and `Space` jumps to the next unread entry even beyond the loaded rows.
 - **Full article:** the toolbar's Full Article toggle fetches and extracts the page of a truncated entry; a feed's context menu offers "Always fetch full article". Articles render with JavaScript off, and every link opens in your browser.
-- **Garden:** the sidebar's Needs triage, All feeds and Cemetery lists, with the terminal's keys: `k` keep, `r` repair, `b` bury, `u` undo, `o` site, `w` Wayback, `⇧R` apply safe repairs.
+- **Garden:** the sidebar's Needs triage, All feeds and Cemetery lists, with the terminal's keys: `k` keep, `r` repair, `b` bury, `u` undo, `o` site, `w` Wayback, `⇧R` apply safe repairs. The Cemetery shows how many entries each buried feed left unread.
 - **Settings (`⌘,`):** appearance (Native or Antiope, see below), article font (SF Pro, New York, Charter, Newsreader, Atkinson Hyperlegible Next), text size (`⌘+` / `⌘−` / `⌘0` in the View menu), line width (three widths or exactly 40 columns), database location, logs.
 - **Unread only (`⌥⌘U`):** View ▸ Show Unread Only filters the entry list to unread entries, in both looks. In Antiope the `ENTRIES  ALL/UNREAD` column title is a clickable toggle for the same setting.
 - **Another database for one launch:** `open -n --env RESSAC_DB=/path/to/other.sqlite /Applications/Ressac.app` (`RESSAC_DB` also sets the terminal's database).
