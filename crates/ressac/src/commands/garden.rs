@@ -90,15 +90,18 @@ fn garden_command(
         }
         GardenCommand::ApplySafe => {
             let (applied, skipped) = garden::apply_safe_repairs(store, Utc::now())?;
-            let event = Event::Finished {
-                summary: app.summary()?,
-            };
-            output::write_result(
-                out,
-                json,
-                &event,
-                &output::apply_safe_text(applied, &skipped),
-            )?;
+            if json {
+                // The `finished` event, plus what this command did: the app reads the
+                // summary and ignores the extra keys.
+                let mut line = serde_json::to_value(Event::Finished {
+                    summary: app.summary()?,
+                })?;
+                line["applied"] = applied.into();
+                line["skipped"] = skipped.into();
+                writeln!(out, "{line}")?;
+            } else {
+                writeln!(out, "{}", output::apply_safe_text(applied, &skipped))?;
+            }
         }
     }
     Ok(())

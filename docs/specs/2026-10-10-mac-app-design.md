@@ -144,7 +144,7 @@ ressac/
 **Garden subcommands.**
 
 - `decide`, `undo` and `apply-safe` call `garden::decide`, `garden::undo` and `garden::apply_safe_repairs`, then re-diagnose the touched feeds and recompute `needs_triage`.
-- They emit `Decided { feed_id, decision }`, `Undone { feed_id }` and `Finished { summary }`.
+- They emit `Decided { feed_id, decision }`, `Undone { feed_id }` and `Finished { summary }`. The `finished` line of `apply-safe` also has `applied` (the number of repairs applied) and `skipped` (one `"#id: reason"` string per repair skipped).
 - A decision on a buried or unknown feed, a repair with nothing to repair, and a decision or an undo the store refuses (an address another active feed already uses, a merge target that is not active) exit `2` with a message.
 
 **Exit codes:** unchanged (`0`, `1`, `2`, `130`).

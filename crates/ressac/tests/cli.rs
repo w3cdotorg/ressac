@@ -539,6 +539,52 @@ fn decisions_on_a_taken_address_exit_2() {
     assert!(keep.stdout.is_empty());
 }
 
+/// `apply-safe --json` prints the `finished` event with what it did: the number of repairs
+/// applied and why the others were skipped. The text output says the same.
+#[test]
+fn apply_safe_json_counts_applied_and_skipped_repairs() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let run = |args: &[&str]| ressac(home.path(), args);
+    // #3's redirect target is #2's address, so it is skipped; #5's https upgrade applies.
+    seed_diagnoses(
+        home.path(),
+        &[
+            (
+                3,
+                Status::Moved,
+                Action::FollowRedirect {
+                    url: "https://orange.example.org/feed/".into(),
+                },
+            ),
+            (
+                5,
+                Status::Alive,
+                Action::UpgradeHttps {
+                    url: "https://girl.example.org/rss".into(),
+                },
+            ),
+        ],
+    );
+    let skipped =
+        "#3: Feed #2 already uses https://orange.example.org/feed/; merge into it instead.";
+
+    let applied = run(&["--json", "garden", "apply-safe"]);
+    assert!(applied.status.success(), "{applied:?}");
+    let lines = json_lines(&applied);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["event"], "finished");
+    assert_eq!(lines[0]["summary"]["total"], 11);
+    assert_eq!(lines[0]["applied"], 1);
+    assert_eq!(lines[0]["skipped"], json!([skipped]));
+    assert!(stdout(&run(&["export"])).contains("https://girl.example.org/rss"));
+
+    // #3 is still undecided, so a second run skips it again; #5 is decided now.
+    assert_eq!(
+        stdout(&run(&["garden", "apply-safe"])),
+        format!("Applied 0 safe repairs. Skipped 1: {skipped}\n")
+    );
+}
 
 #[test]
 fn migrate_reports_the_schema_version() {
