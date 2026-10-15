@@ -262,7 +262,8 @@ impl Ressac {
             self.probe_https(&fresh, &mut pacer, sink, stop.clone())
                 .await?;
             if !stop.load(Ordering::Relaxed) {
-                self.diagnose_all(Utc::now())?;
+                // Triage waits for the final diagnosis below.
+                self.save_fresh_diagnoses(Utc::now())?;
                 self.discover_replacements(sink, Utc::now(), &stop).await?;
             }
         }
@@ -432,6 +433,13 @@ impl Ressac {
 
     /// Diagnoses every active feed, stores the results and the garden's triage flags.
     pub fn diagnose_all(&self, now: DateTime<Utc>) -> Result<Summary> {
+        self.save_fresh_diagnoses(now)?;
+        garden::recompute_triage(&self.store)?;
+        self.summary()
+    }
+
+    /// Diagnoses every active feed and stores the results, leaving the triage flags alone.
+    fn save_fresh_diagnoses(&self, now: DateTime<Utc>) -> Result<()> {
         let feeds: Vec<FeedRow> = self
             .store
             .feeds()?
@@ -481,9 +489,7 @@ impl Ressac {
             })
             .collect();
         apply_similar_titles(&inputs, &mut diags);
-        self.store.save_diagnoses(&diags, now)?;
-        garden::recompute_triage(&self.store)?;
-        self.summary()
+        self.store.save_diagnoses(&diags, now)
     }
 
     /// Looks up a Wayback snapshot for Dead and Hijacked feeds that have none yet.
@@ -999,6 +1005,46 @@ mod tests {
             )
             .unwrap();
         assert!(flag, "diagnose_all stores the triage flags");
+    }
+
+    /// A refresh diagnoses twice; only its last diagnosis, `diagnose_all`, writes the triage
+    /// flags, so the first one leaves them alone.
+    #[test]
+    fn only_diagnose_all_writes_the_triage_flags() {
+        let app = Ressac::with_parts(
+            Store::open_in_memory().unwrap(),
+            FetchLimits::default(),
+            "http://127.0.0.1:9",
+        )
+        .unwrap();
+        app.import_opml(
+            r#"<opml><body><outline text="A" xmlUrl="https://a.example.org/feed"/></body></opml>"#,
+            false,
+        )
+        .unwrap();
+        let flag = |app: &Ressac| -> bool {
+            app.store()
+                .conn()
+                .query_row(
+                    "SELECT needs_triage FROM v_garden_row WHERE feed_id = 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        app.save_fresh_diagnoses(Utc::now()).unwrap();
+        // A stale flag on the Unchecked feed shows who writes it.
+        app.store()
+            .conn()
+            .execute(
+                "UPDATE feed_health SET needs_triage = 1 WHERE feed_id = 1",
+                [],
+            )
+            .unwrap();
+        app.save_fresh_diagnoses(Utc::now()).unwrap();
+        assert!(flag(&app), "the first diagnosis leaves the flag alone");
+        app.diagnose_all(Utc::now()).unwrap();
+        assert!(!flag(&app), "diagnose_all recomputes it");
     }
 
     #[test]
