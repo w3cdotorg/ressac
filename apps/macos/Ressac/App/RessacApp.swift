@@ -25,6 +25,7 @@ struct RessacApp: App {
 /// What the window shows for each launch phase (spec §8, Schema version).
 struct LaunchView: View {
     let launcher: Launcher
+    @AppStorage(Appearance.Keys.appearance) private var appearance = Appearance.native
 
     var body: some View {
         switch launcher.phase {
@@ -47,9 +48,17 @@ struct LaunchView: View {
             }
             .padding(40)
         case let .ready(state):
-            MainView(state: state)
-                .libraryChrome(state)
-                .environment(state)
+            // Both looks read the same `state`, so a switch keeps the selection, the selected
+            // entry, the search text and a running refresh (spec §5, Switch). The library chrome
+            // wraps the switch: an OPML import in progress survives it too.
+            Group {
+                switch Appearance.effective(stored: appearance, fontAvailable: TeletextFont.isAvailable) {
+                case .native: MainView(state: state)
+                case .antiope: AntiopeRootView(state: state)
+                }
+            }
+            .libraryChrome(state)
+            .environment(state)
         }
     }
 }
