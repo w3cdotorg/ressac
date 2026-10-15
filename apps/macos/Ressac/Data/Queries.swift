@@ -218,6 +218,21 @@ struct Queries {
         }
     }
 
+    /// The first unread row of a list after entry `entryId` (older, in the list's order; from its
+    /// newest row when nil), as the floor that loads it. Nil when none is left.
+    static func nextUnread(source: Source, unreadOnly: Bool, search: String?, after entryId: Int64?,
+                           now: Date = Date(), in db: Database) throws -> ListFloor? {
+        guard let list = condition(source: source, unreadOnly: unreadOnly, search: search, now: now) else { return nil }
+        var rest = Predicate(sql: list.sql + " AND NOT is_read", arguments: list.arguments)
+        if let entryId, let from = try Row.fetchOne(db, sql: "SELECT published_at, id FROM entry WHERE id = ?", arguments: [entryId]) {
+            rest = bounded(rest, by: ListFloor(publishedAt: from["published_at"], entryId: from["id"]), "<")
+        }
+        return try Row.fetchOne(db, sql: """
+            SELECT published_at, entry_id FROM v_entry WHERE \(rest.sql)
+            ORDER BY published_at DESC, entry_id DESC LIMIT 1
+            """, arguments: rest.arguments).map { ListFloor(publishedAt: $0["published_at"], entryId: $0["entry_id"]) }
+    }
+
     /// The `v_entry` rows of a list: a source's, unread only or not, or those matching `search`
     /// (which ignores the unread filter). Nil when the list is empty by definition: a garden
     /// source, a search without words.

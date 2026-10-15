@@ -290,22 +290,30 @@ enum PendingPanel: Equatable, Sendable {
         selectedEntryId = entries[previous].entryId
     }
 
-    /// The next unread entry after the selection (spec §7, Space at the bottom), loading pages
-    /// while the list has unread entries that are not loaded.
+    /// The next unread entry after the selection (spec §7, Space at the bottom). When none is
+    /// loaded, one query finds the next unread entry of the whole list and the floor goes down to
+    /// it once, instead of loading pages while looking.
     func selectNextUnread() {
         guard canNavigateEntries else { return }
-        while true {
+        func nextLoaded() -> EntryRow? {
             let start = selectedIndex.map { $0 + 1 } ?? 0
-            if let next = entries[start...].first(where: { !$0.isRead && $0.entryId != selectedEntryId }) {
-                markSelectedReadOnLeaving()
-                selectedEntryId = next.entryId
+            return entries[start...].first(where: { !$0.isRead && $0.entryId != selectedEntryId })
+        }
+        if nextLoaded() == nil, hasMoreEntries, let current = listFloor {
+            do {
+                // Everything loaded was scanned above: look past the last loaded row.
+                let target = try nextUnreadFloor(after: entries.last?.entryId)
+                guard let target else { return }
+                if target < current { listFloor = target }
+                observeList()
+            } catch {
+                report(error)
                 return
             }
-            let loaded = entries.count
-            guard hasMoreEntries, listUnread > entries.count(where: { !$0.isRead }) else { return }
-            loadMoreEntries()
-            guard entries.count > loaded else { return }
         }
+        guard let next = nextLoaded() else { return }
+        markSelectedReadOnLeaving()
+        selectedEntryId = next.entryId
     }
 
     /// A list view shows the row of `entryId`. Among the last `loadMoreMargin` loaded rows, the
@@ -585,6 +593,14 @@ enum PendingPanel: Equatable, Sendable {
         return try database.reader.read { db in
             try Queries.floor(source: source, unreadOnly: unreadOnly, search: search, below: current, rows: rows,
                               keeping: entryId, now: now, in: db)
+        }
+    }
+
+    /// The floor that loads the first unread entry of the list after entry `entryId`.
+    private func nextUnreadFloor(after entryId: Int64?) throws -> ListFloor? {
+        let (source, unreadOnly, search, now) = (selection, unreadOnly, activeSearch, now())
+        return try database.reader.read { db in
+            try Queries.nextUnread(source: source, unreadOnly: unreadOnly, search: search, after: entryId, now: now, in: db)
         }
     }
 

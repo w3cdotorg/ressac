@@ -454,4 +454,50 @@ func calls(_ stub: Stub) throws -> [String] {
         #expect(try test.one(Int.self, "SELECT COUNT(*) FROM entry WHERE read_at IS NULL") == 0)
         #expect(await eventually { !state.canMarkAllRead })
     }
+
+    /// Review Focus #1: an Unread-only list longer than a page while entries are read.
+    @Test func reading_through_a_long_unread_list_keeps_the_selection_and_the_counts() async throws {
+        let (state, test, _) = try makeState()
+        let ids = try days(test, 6)
+        state.listPageSize = 2
+        state.autoReadDelay = .seconds(60)
+        state.unreadOnly = true
+        state.selection = .feed(1)
+        func unreadInDatabase() throws -> Int { try test.one(Int.self, "SELECT COUNT(*) FROM entry WHERE read_at IS NULL") ?? -1 }
+        state.selectedEntryId = ids[1]  // the last loaded row
+        await state.toggleRead()?.value  // read: retained, so it stays listed
+        #expect(state.selectedEntryId == ids[1] && state.entries.map(\.entryId) == [ids[0], ids[1]])
+        #expect(await eventually { state.listUnread == 5 })
+        #expect((state.listUnread, state.entryTotal, state.hasMoreEntries) == (try unreadInDatabase(), 6, true))
+        // j on the last loaded row loads the next page and moves on; nothing loaded leaves.
+        state.selectNext()
+        #expect(state.selectedEntryId == ids[2])
+        #expect(Array(state.entries.map(\.entryId).prefix(2)) == [ids[0], ids[1]])
+        #expect(state.entries.count == 4 && state.hasMoreEntries)
+        // Space past the loaded rows: read ids[2], then ids[3], then reach ids[4] beyond the page.
+        await state.toggleRead()?.value
+        await state.advance()?.value
+        #expect(state.selectedEntryId == ids[3])
+        await state.toggleRead()?.value
+        await state.advance()?.value
+        #expect(state.selectedEntryId == ids[4])
+        #expect(Array(state.entries.map(\.entryId).prefix(4)) == Array(ids.prefix(4)))
+        #expect(await eventually { Optional(state.listUnread) == (try? unreadInDatabase()) })
+        #expect(state.entryTotal == (try unreadInDatabase()) + 3)  // plus the three read ones kept
+        #expect(state.hasMoreEntries == (state.entries.count < state.entryTotal))
+    }
+
+    /// Space reaches an unread entry several pages down with one floor change, not page by page.
+    @Test func space_reaches_a_deep_unread_entry_with_one_floor_change() throws {
+        let (state, test, _) = try makeState()
+        let ids = try days(test, 9) { day in day != 5 && day != 1 }  // unread: ids[4] and the oldest
+        state.listPageSize = 2
+        state.autoReadDelay = .seconds(60)
+        state.selection = .feed(1)
+        state.selectedEntryId = ids[0]
+        state.selectNextUnread()
+        #expect(state.selectedEntryId == ids[4])
+        // One load down to that row (5 rows); page by page would have stopped at 6.
+        #expect(state.entries.count == 5 && state.hasMoreEntries)
+    }
 }
