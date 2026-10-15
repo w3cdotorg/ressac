@@ -52,16 +52,22 @@ private struct SearchMenuItem: View {
     }
 }
 
-/// Reader text size in points (12...28, default 17). The key is phase 10's `ReaderStyle.Keys.size`.
+/// Reader text size (spec §5): 12...28 by 1 pt in Native, Bedstead's steps in Antiope. Each look
+/// has its own stored size (`ReaderStyle.sizeKey(for:)`); the commands act on the look shown.
+/// The standard defaults are the store `@AppStorage` reads everywhere outside the tests.
 private struct TextSizeMenuItems: View {
-    @AppStorage("reader.size") private var textSize = 17.0
+    @AppStorage(Appearance.Keys.appearance) private var storedAppearance = Appearance.native
+
+    private var appearance: Appearance {
+        Appearance.effective(stored: storedAppearance, fontAvailable: TeletextFont.isAvailable)
+    }
 
     var body: some View {
-        Button("Bigger Text") { textSize = min(28, textSize + 1) }
+        Button("Bigger Text") { ReaderStyle.resize(.bigger, appearance: appearance, in: .standard) }
             .keyboardShortcut("+")
-        Button("Smaller Text") { textSize = max(12, textSize - 1) }
+        Button("Smaller Text") { ReaderStyle.resize(.smaller, appearance: appearance, in: .standard) }
             .keyboardShortcut("-")
-        Button("Actual Size") { textSize = 17 }
+        Button("Actual Size") { ReaderStyle.resize(.actualSize, appearance: appearance, in: .standard) }
             .keyboardShortcut("0")
         Divider()
     }
