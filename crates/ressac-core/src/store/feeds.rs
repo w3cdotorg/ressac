@@ -86,7 +86,8 @@ impl Store {
     /// Imports folders and feeds. Folders are matched by (parent, name). A feed already
     /// exists when any feed, buried or not, has its URL key as current or original address,
     /// so triage (burials, merges, repairs) survives a re-import. New items go after the
-    /// existing ones of their folder. A dry run executes the same statements and rolls them back.
+    /// existing ones of their folder and get their page numbers in the same transaction.
+    /// A dry run executes the same statements and rolls them back.
     pub fn import_outlines(
         &self,
         outlines: &[Outline],
@@ -105,6 +106,7 @@ impl Store {
             report: &mut report,
         };
         import_level(&mut ctx, outlines, None)?;
+        super::pages::assign_missing(&tx)?;
         if dry_run {
             tx.rollback()?;
         } else {
@@ -511,5 +513,65 @@ mod tests {
         assert_eq!(store.feeds_in_folder(folder("Sub")).unwrap(), [feed("B")]);
         assert_eq!(store.feeds_in_folder(folder("Other")).unwrap(), [feed("D")]);
         assert!(store.feeds_in_folder(999).unwrap().is_empty());
+    }
+
+    fn pages(store: &Store) -> Vec<(String, Option<u16>)> {
+        let mut stmt = store
+            .conn()
+            .prepare(
+                "SELECT name, page FROM folder UNION ALL SELECT title, page FROM feed ORDER BY 2, 1",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn import_numbers_new_folders_and_feeds_and_keeps_earlier_numbers() {
+        let store = Store::open_in_memory().unwrap();
+        let first = r#"<opml><body><outline text="Blogs">
+            <outline text="X" xmlUrl="https://x.example.org/feed"/>
+            <outline text="Y" xmlUrl="https://y.example.org/feed"/>
+            </outline><outline text="Solo" xmlUrl="https://solo.example.org/feed"/></body></opml>"#;
+        store
+            .import_outlines(&opml::parse(first).unwrap(), false, now())
+            .unwrap();
+        let x = store.feeds().unwrap()[0].id;
+        store
+            .record_decision(x, Decision::Bury, Status::Dead, None, now())
+            .unwrap();
+        let second = r#"<opml><body><outline text="Blogs">
+            <outline text="Z" xmlUrl="https://z.example.org/feed"/>
+            <outline text="Sub"><outline text="W" xmlUrl="https://w.example.org/feed"/></outline>
+            </outline></body></opml>"#;
+        store
+            .import_outlines(&opml::parse(second).unwrap(), false, now())
+            .unwrap();
+        let expected: Vec<(String, Option<u16>)> = [
+            ("Solo", 110),
+            ("Blogs", 200),
+            ("X", 201),
+            ("Y", 202),
+            ("Z", 203),
+            ("Sub", 204),
+            ("W", 205),
+        ]
+        .iter()
+        .map(|(t, p)| (t.to_string(), Some(*p)))
+        .collect();
+        assert_eq!(pages(&store), expected, "the buried X keeps 201");
+    }
+
+    #[test]
+    fn a_dry_run_numbers_nothing() {
+        let (store, _) = imported();
+        let extra = r#"<opml><body><outline text="New" xmlUrl="https://new.example.org/feed"/></body></opml>"#;
+        let before = pages(&store);
+        store
+            .import_outlines(&opml::parse(extra).unwrap(), true, now())
+            .unwrap();
+        assert_eq!(pages(&store), before);
     }
 }
