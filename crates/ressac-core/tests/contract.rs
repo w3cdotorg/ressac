@@ -162,6 +162,42 @@ fn reading_columns_and_views_are_stable() {
     assert_eq!(version, ressac_core::store::SCHEMA_VERSION);
 }
 
+/// `v_entry` and `v_unread_count` cover active feeds only, so a buried feed's entries leave
+/// the reading lists. The Cemetery counts them on `entry` itself (`Queries.garden` in the
+/// app), which needs its `feed_id` and `read_at` columns.
+#[test]
+fn buried_feeds_leave_the_reading_views_but_keep_their_unread_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("buried.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .import_outlines(
+            &ressac_core::opml::parse(
+                r#"<opml><body><outline text="A" xmlUrl="https://a.example.org/feed"/></body></opml>"#,
+            )
+            .unwrap(),
+            false,
+            now(),
+        )
+        .unwrap();
+    let entries = vec![
+        parsed("a1", 1, "<p>One.</p>"),
+        parsed("a2", 2, "<p>Two.</p>"),
+    ];
+    store
+        .record_attempt("contract", &fetched(&store, 1, entries))
+        .unwrap();
+    garden::decide(&store, 1, Decision::Bury, now()).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let int = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(int("SELECT count(*) FROM v_entry"), 0);
+    assert_eq!(int("SELECT count(*) FROM v_unread_count"), 0);
+    assert_eq!(
+        int("SELECT count(*) FROM entry WHERE feed_id = 1 AND read_at IS NULL"),
+        2
+    );
+}
+
 #[test]
 fn page_columns_and_view_are_stable() {
     let (_dir, conn) = live_store();

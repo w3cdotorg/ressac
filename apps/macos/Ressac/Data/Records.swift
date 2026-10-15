@@ -252,6 +252,9 @@ struct GardenRow: RessacRecord, Identifiable {
     var waybackUrl: String?
     var htmlUrl: String?
     var xmlUrl: String
+    /// Unread entries of a buried feed, counted by `Queries.garden(scope: .cemetery)` only (0 in
+    /// the other scopes): the reading views hide buried feeds, so the sidebar has no count for them.
+    var unread = 0
 
     var id: Int64 { feedId }
 }

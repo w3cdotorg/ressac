@@ -115,11 +115,16 @@ struct Queries {
         case .all: "state = 'active'"
         case .cemetery: "state = 'buried'"
         }
+        // `v_unread_count` covers active feeds only, so the Cemetery counts on `entry` itself. The
+        // other scopes leave `entry` out: reading or fetching entries does not refetch them.
+        let unread = scope == .cemetery
+            ? "(SELECT COUNT(*) FROM entry e WHERE e.feed_id = v_garden_row.feed_id AND e.read_at IS NULL)"
+            : "0"
         return ValueObservation.tracking { db in
             try GardenRow.fetchAll(db, sql: """
                 SELECT feed_id, title, folder_path, state, status, reason, clue, evidence,
                        COALESCE(remarks, '[]') AS remarks, proposed_action, needs_triage, last_decision,
-                       wayback_url, html_url, xml_url
+                       wayback_url, html_url, xml_url, \(unread) AS unread
                 FROM v_garden_row WHERE \(filter)
                 ORDER BY \(urgencyOrder), title COLLATE NOCASE, feed_id
                 """)
