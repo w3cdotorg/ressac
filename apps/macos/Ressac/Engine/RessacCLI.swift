@@ -59,6 +59,14 @@ struct RunRequest: Sendable, Equatable {
 
     /// Extraction failures are shown inline in the reader, never as a banner (spec §8).
     var showsFailureBanner: Bool { arguments.first != "extract" }
+
+    /// True when `failure` is the store refusing a garden decision or an undo (exit 2, e.g. an
+    /// address another active feed already uses), which the app cannot foresee. From any other
+    /// call, exit 2 means the app built a wrong command line (spec §8).
+    func isRefusal(_ failure: RunFailure) -> Bool {
+        failure.exitCode == 2
+            && (arguments.starts(with: ["garden", "decide"]) || arguments == ["garden", "undo"])
+    }
 }
 
 /// A run that did not exit 0. A signal death has `exitCode = -signal`; a binary that

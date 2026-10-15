@@ -110,11 +110,15 @@ enum RunOutcome: Equatable, Sendable {
                 banner = nil
             }
         case let .failed(failure):
-            if failure.exitCode == 2 {
+            let refused = request.isRefusal(failure)
+            if refused {
+                Self.log.error("ressac refused \(request.arguments.joined(separator: " "), privacy: .public): \(failure.message, privacy: .public)")
+            } else if failure.exitCode == 2 {
                 Self.log.fault("usage error from ressac \(request.arguments.joined(separator: " "), privacy: .public)")
             }
             if request.showsFailureBanner {
-                banner = Banner(message: failure.message, showLog: true)
+                // A refusal's sentence says it all: the log holds nothing more.
+                banner = Banner(message: failure.message, showLog: !refused)
             }
         }
         return outcome

@@ -85,6 +85,39 @@ func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async 
         #expect(runs.banner == nil)
     }
 
+    /// An address clash refuses a garden decision or an undo with exit 2: the banner shows
+    /// the CLI's sentence, without Show log. Exit 2 from a call the app builds alone is still
+    /// a bug, with the log button.
+    @Test func a_refused_garden_decision_shows_its_sentence_without_the_log_button() async throws {
+        let stub = try Stub("""
+            case "$4 $5" in
+              "garden decide") echo 'Feed #2 already uses https://e.org/feed; merge into it instead.' >&2 ;;
+              "garden undo") echo 'Feed #10 already uses https://e.org/feed; cannot undo.' >&2 ;;
+              *) echo 'No feed #9.' >&2 ;;
+            esac
+            exit 2
+            """)
+        let runs = RunCoordinator(cli: stub.cli)
+        let clash = "Feed #2 already uses https://e.org/feed; merge into it instead."
+        #expect(await runs.perform(.decide(feedId: 3, .repair)) == .failed(RunFailure(exitCode: 2, lastStderrLine: clash)))
+        #expect(runs.banner == Banner(message: clash, showLog: false))
+        let undo = "Feed #10 already uses https://e.org/feed; cannot undo."
+        #expect(await runs.perform(.undo()) == .failed(RunFailure(exitCode: 2, lastStderrLine: undo)))
+        #expect(runs.banner == Banner(message: undo, showLog: false))
+        #expect(await runs.perform(.fetch(feeds: [9])) == .failed(RunFailure(exitCode: 2, lastStderrLine: "No feed #9.")))
+        #expect(runs.banner == Banner(message: "No feed #9.", showLog: true))
+    }
+
+    @Test func only_garden_decisions_and_undo_can_be_refused() {
+        let exitTwo = RunFailure(exitCode: 2, lastStderrLine: "Feed #10 already uses https://e.org/feed; cannot restore.")
+        #expect(RunRequest.decide(feedId: 9, .keep).isRefusal(exitTwo))
+        #expect(RunRequest.undo().isRefusal(exitTwo))
+        #expect(!RunRequest.applySafe().isRefusal(exitTwo))
+        #expect(!RunRequest.fetch(feeds: [9]).isRefusal(exitTwo))
+        #expect(!RunRequest.migrate().isRefusal(exitTwo))
+        #expect(!RunRequest.decide(feedId: 9, .keep).isRefusal(RunFailure(exitCode: 1, lastStderrLine: "error: disk I/O error")))
+    }
+
     @Test func extraction_failure_stays_out_of_the_banner() async throws {
         let stub = try Stub(script)
         let runs = RunCoordinator(cli: stub.cli)
