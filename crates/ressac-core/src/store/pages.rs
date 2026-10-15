@@ -4,10 +4,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::ops::RangeInclusive;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Pages fixed in code and never stored: Index, Unread, Today, Starred, the three garden
 /// pages and the Guide.
@@ -290,6 +290,59 @@ pub fn list(conn: &Connection) -> Result<Vec<PageRow>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rows.extend(stored);
     Ok(rows)
+}
+
+/// Renumbers one folder or feed; `kind` must be Folder or Feed. Refuses a reserved page,
+/// a page outside `ASSIGNABLE`, an unknown id and a page held by any other folder or feed;
+/// nothing is written then. Giving an item the page it already holds changes nothing.
+/// Opens its own write transaction, so it must not run inside another one.
+pub fn set(conn: &Connection, kind: PageKind, id: i64, page: u16) -> Result<()> {
+    let table = match kind {
+        PageKind::Folder => "folder",
+        PageKind::Feed => "feed",
+        PageKind::Reserved => {
+            return Err(Error::Invalid(
+                "Only a folder or a feed can be renumbered.".into(),
+            ));
+        }
+    };
+    if RESERVED_PAGES.contains(&page) {
+        return Err(Error::PageReserved(page));
+    }
+    if !ASSIGNABLE.contains(&page) {
+        return Err(Error::PageOutOfRange(page));
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let current: Option<Option<u16>> = tx
+        .query_row(
+            &format!("SELECT page FROM {table} WHERE id = ?1"),
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(current) = current else {
+        return Err(Error::UnknownPageTarget {
+            kind: kind.as_str(),
+            id,
+        });
+    };
+    if current == Some(page) {
+        return Ok(());
+    }
+    let taken: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM folder WHERE page = ?1) OR EXISTS (SELECT 1 FROM feed WHERE page = ?1)",
+        [page],
+        |r| r.get(0),
+    )?;
+    if taken {
+        return Err(Error::PageTaken { page });
+    }
+    tx.execute(
+        &format!("UPDATE {table} SET page = ?2 WHERE id = ?1"),
+        params![id, page],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -627,5 +680,109 @@ mod tests {
             serde_json::to_value(&rows[0]).unwrap(),
             json!({"page": 100, "kind": "reserved", "id": null, "title": "Index", "parent_page": null})
         );
+    }
+
+    /// Root folder 1 (200) holding feeds 10 (201) and 11 (202), subfolder 2 (203).
+    fn numbered() -> Store {
+        let s = Store::open_in_memory().unwrap();
+        folder(&s, 1, None, 0);
+        feed(&s, 10, Some(1), 0);
+        feed(&s, 11, Some(1), 1);
+        folder(&s, 2, Some(1), 2);
+        assign(&s);
+        s
+    }
+
+    #[test]
+    fn set_renumbers_a_feed_or_a_folder() {
+        let s = numbered();
+        set(s.conn(), PageKind::Feed, 10, 412).unwrap();
+        set(s.conn(), PageKind::Folder, 2, 150).unwrap();
+        assert_eq!(feed_page(&s, 10), Some(412));
+        assert_eq!(folder_page(&s, 2), Some(150));
+        set(s.conn(), PageKind::Feed, 10, 412).unwrap(); // its own page: nothing to do
+        set(s.conn(), PageKind::Feed, 11, 201).unwrap(); // 201 was freed above
+        assert_eq!(feed_page(&s, 11), Some(201));
+        assert_eq!(assign(&s), 0, "a renumbered item is never renumbered again");
+    }
+
+    #[test]
+    fn set_refuses_reserved_pages() {
+        let s = numbered();
+        for page in RESERVED_PAGES {
+            let err = set(s.conn(), PageKind::Feed, 10, page).unwrap_err();
+            assert!(
+                matches!(err, Error::PageReserved(p) if p == page),
+                "{err:?}"
+            );
+        }
+        assert_eq!(
+            set(s.conn(), PageKind::Feed, 10, 800)
+                .unwrap_err()
+                .to_string(),
+            "Page 800 is reserved."
+        );
+        assert_eq!(feed_page(&s, 10), Some(201));
+    }
+
+    #[test]
+    fn set_refuses_pages_outside_110_to_799() {
+        let s = numbered();
+        for page in [0, 99, 104, 109, 900, u16::MAX] {
+            let err = set(s.conn(), PageKind::Feed, 10, page).unwrap_err();
+            assert!(
+                matches!(err, Error::PageOutOfRange(p) if p == page),
+                "{err:?}"
+            );
+        }
+        assert_eq!(
+            set(s.conn(), PageKind::Feed, 10, 900)
+                .unwrap_err()
+                .to_string(),
+            "Page 900 is not between 110 and 799."
+        );
+        assert_eq!(feed_page(&s, 10), Some(201));
+    }
+
+    #[test]
+    fn set_refuses_a_page_taken_by_a_feed_or_a_folder() {
+        let s = numbered();
+        let taken = |kind, id, page| {
+            let err = set(s.conn(), kind, id, page).unwrap_err();
+            assert!(
+                matches!(err, Error::PageTaken { page: p } if p == page),
+                "{err:?}"
+            );
+            err.to_string()
+        };
+        assert_eq!(taken(PageKind::Feed, 10, 202), "Page 202 is already taken.");
+        taken(PageKind::Feed, 10, 203); // a folder's page
+        taken(PageKind::Folder, 2, 201); // a feed's page
+        taken(PageKind::Folder, 2, 200); // another folder's page
+        assert_eq!(feed_page(&s, 10), Some(201));
+        assert_eq!(folder_page(&s, 2), Some(203));
+    }
+
+    #[test]
+    fn set_refuses_an_unknown_id_and_the_reserved_kind() {
+        let s = numbered();
+        let err = set(s.conn(), PageKind::Feed, 99, 300).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::UnknownPageTarget {
+                    kind: "feed",
+                    id: 99
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(err.to_string(), "No feed #99.");
+        let err = set(s.conn(), PageKind::Folder, 10, 300).unwrap_err();
+        assert_eq!(err.to_string(), "No folder #10.", "ids are per table");
+        assert!(matches!(
+            set(s.conn(), PageKind::Reserved, 1, 300),
+            Err(Error::Invalid(_))
+        ));
     }
 }
