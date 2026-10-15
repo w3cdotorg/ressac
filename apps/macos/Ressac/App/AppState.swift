@@ -726,6 +726,10 @@ enum PendingPanel: Equatable, Sendable {
     }
 
     private(set) var phase = Phase.starting
+    /// True while a launch runs. Each window's `.task` launches (a window reopened from the Dock,
+    /// a new tab), and Use Default Database can be clicked twice: a second launch would run
+    /// `migrate` again and replace the `AppState` already on screen.
+    @ObservationIgnored private var isLaunching = false
     /// Shows the fatal alert of spec §8 (the helper is missing). Tests replace it.
     @ObservationIgnored var presentFatalAlert: @MainActor (String) -> Void = { Launcher.runFatalAlert($0) }
 
@@ -751,12 +755,18 @@ enum PendingPanel: Equatable, Sendable {
     func useDefaultDatabase(defaults: UserDefaults = .standard,
                             environment: [String: String] = ProcessInfo.processInfo.environment,
                             executable: URL? = RessacCLI.bundledExecutable()) async {
+        guard !isLaunching else { return }
         DatabaseLocation.resetToDefault(defaults: defaults)
         phase = .starting
         await launch(database: DatabaseLocation.current(environment: environment, defaults: defaults), executable: executable)
     }
 
+    /// Launches from `.starting` only, one launch at a time: a later call (another window's
+    /// `.task`) leaves the running or finished launch alone.
     func launch(database url: URL, executable: URL?) async {
+        guard !isLaunching, case .starting = phase else { return }
+        isLaunching = true
+        defer { isLaunching = false }
         guard let executable else {
             let message = "The ressac helper is missing from the app bundle. Rebuild the app."
             phase = .failed(message)

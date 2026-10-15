@@ -325,6 +325,29 @@ func calls(_ stub: Stub) throws -> [String] {
         #expect(message.hasPrefix("The ressac helper is missing"))
         #expect(alerts == [message])
     }
+
+    /// Two windows launch at once (each `.task` calls `launch`): one `migrate`, one `AppState`.
+    /// A launch after that, from a window opened later, keeps the `AppState` already shown.
+    @Test func a_second_launch_is_ignored() async throws {
+        let test = try TestDatabase()
+        let fresh = test.dir.appending(path: "new/ressac.sqlite")
+        let stub = try Stub("""
+            [ "$4" = migrate ] || exit 2
+            echo migrate >> "$(dirname "$0")/calls"
+            sleep 0.3
+            mkdir -p "$(dirname "$2")" && cp "\(TestDatabase.fixture.path)" "$2"
+            echo '{"event":"finished"}'
+            """)
+        let launcher = Launcher()
+        async let first: Void = launcher.launch(database: fresh, executable: stub.executable)
+        async let second: Void = launcher.launch(database: fresh, executable: stub.executable)
+        _ = await (first, second)
+        #expect(try calls(stub) == ["migrate"])
+        let state = try #require(launcher.state)
+        await launcher.launch(database: fresh, executable: stub.executable)
+        #expect(launcher.state === state)
+        #expect(try calls(stub) == ["migrate"])
+    }
 }
 
 /// Long lists load one page at a time: a folder of thousands of entries in "All" is never read
