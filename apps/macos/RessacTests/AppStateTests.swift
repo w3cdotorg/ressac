@@ -255,6 +255,19 @@ func calls(_ stub: Stub) throws -> [String] {
     }
 }
 
+/// `AppState.init` wires `runs.onDatabaseChange` to `notifyExternalChanges()`. Rows written by
+/// another connection (the `ressac` process, here `TestDatabase.raw`) reach the lists after a run
+/// with no other nudge: nothing else notifies in a unit test (`startSystemObservers` is not called).
+@MainActor @Suite struct DatabaseChangeWiringTests {
+    @Test func a_finished_run_reloads_the_lists() async throws {
+        let (state, test, _) = try makeState()
+        let id = try test.entry(feed: 1, title: "Written by ressac")
+        #expect(state.entries.isEmpty)
+        #expect(await state.refreshAll().value == .succeeded)
+        #expect(await eventually { state.entries.map(\.entryId) == [id] })
+    }
+}
+
 @MainActor @Suite struct LauncherTests {
     /// Review Focus #4 (app side): a v1 database goes through `ressac migrate`, then opens.
     @Test func v1_database_is_migrated_before_opening() async throws {
