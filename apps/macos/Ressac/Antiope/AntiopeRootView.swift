@@ -28,7 +28,7 @@ struct AntiopeRootView: View {
         GeometryReader { proxy in
             let width = max(0, Int(proxy.size.width / cell.width))
             VStack(alignment: .leading, spacing: 0) {
-                PageHeader(width: width)
+                PageHeader(width: width, windowSize: proxy.size)
                 if let banner = state.runs.banner {
                     AntiopeBannerRow(banner: banner) { state.runs.banner = nil }
                 }
@@ -113,7 +113,12 @@ enum HeaderLabel: Equatable, Sendable {
 /// The top row: `P412 RESSAC` … `WED 14 OCT 09:47:12`, ticking every second.
 struct PageHeader: View {
     let width: Int
+    /// The window's size, for the tube's corner (`rightMarginCells`).
+    let windowSize: CGSize
 
+    @AppStorage(Appearance.Keys.appearance) private var appearance = Appearance.native
+    @AppStorage(Appearance.Keys.crt) private var crt = false
+    @AppStorage(ReaderStyle.Keys.antiopeSize) private var storedSize = TeletextFont.defaultSize
     @Environment(AppState.self) private var app
     @Environment(AntiopeState.self) private var antiope
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -121,11 +126,15 @@ struct PageHeader: View {
     var body: some View {
         // The counter is decorative and stays off with Reduce Motion (spec §8, Accessibility).
         let rolling = app.runs.isLongRunActive && !reduceMotion
+        let margin = Self.rightMarginCells(
+            windowSize: windowSize, cell: TeletextFont.cell(forSize: TeletextFont.snapped(storedSize)),
+            crt: CRTGeometry.isActive(
+                appearance: Appearance.effective(stored: appearance, fontAvailable: TeletextFont.isAvailable), crt: crt))
         TimelineView(.periodic(from: .now, by: rolling ? 0.1 : 1)) { context in
             CellLineView(line: Self.line(
                 label: Self.label(entry: antiope.entry, notFound: antiope.notFound, current: antiope.currentPage,
                                   rolling: rolling ? Self.rollingPage(at: context.date) : nil),
-                date: context.date, width: width))
+                date: context.date, width: width, rightMargin: margin))
         }
     }
 
@@ -143,10 +152,23 @@ struct PageHeader: View {
         return 100 + ((tenths % 800) + 800) % 800
     }
 
+    /// Blank cells kept at the right of the header. The CRT screen paints the tube's corner over
+    /// the top-right of the window (a radius of 3 % of the shorter side, `CRTGeometry.cornerRadius`),
+    /// and the bleed draws up to `bleedOffset + glowRadius` beyond a glyph: the last cells of the
+    /// time sat under that mask. With the screen on the margin covers both, rounded up to whole
+    /// cells; with it off nothing covers the corner, so the time stays flush with the edge.
+    static func rightMarginCells(windowSize: CGSize, cell: CGSize, crt: Bool) -> Int {
+        guard crt, cell.width > 0 else { return 0 }
+        let reach = CRTGeometry.cornerRadius(for: windowSize) + CRTGeometry.bleedOffset + CRTGeometry.glowRadius
+        return Int((reach / cell.width).rounded(.up))
+    }
+
     /// The page in yellow (red when not found) and `RESSAC` in white on the left; the date in cyan
     /// and the time in yellow at the right edge. Exactly `width` cells: when the window is narrow,
-    /// the time keeps its cells first, then the date, then the page.
-    static func line(label: HeaderLabel, date: Date, width: Int, timeZone: TimeZone = .current) -> CellLine {
+    /// the time keeps its cells first, then the date, then the page. `rightMargin` blank cells
+    /// close the row, inside `width` (never more than a quarter of it, and never at the time's expense).
+    static func line(label: HeaderLabel, date: Date, width: Int, rightMargin: Int = 0,
+                     timeZone: TimeZone = .current) -> CellLine {
         let day = format(date, "EEE dd MMM", timeZone: timeZone).uppercased() + " "
         let time = format(date, "HH:mm:ss", timeZone: timeZone)
         let (page, colour, showsName): (String, TeletextColor, Bool) = switch label {
@@ -155,7 +177,8 @@ struct PageHeader: View {
         case let .searching(number): ("P\(number)", .yellow, true)
         case let .notFound(number): ("P\(number) NOT FOUND", .red, false)
         }
-        var remaining = max(0, width)
+        let margin = max(0, min(rightMargin, width / 4, width - time.count))
+        var remaining = max(0, width) - margin
         func take(_ wanted: Int) -> Int {
             let cells = min(wanted, remaining)
             remaining -= cells
@@ -165,12 +188,14 @@ struct PageHeader: View {
         let dayCells = take(day.count)
         let pageCells = take(page.count + 1)
         let nameCells = take(remaining)
-        return CellLine([
+        var spans = [
             CellSpan(page, cells: pageCells, foreground: colour),
             CellSpan(showsName ? "RESSAC" : "", cells: nameCells, foreground: .white),
             CellSpan(day, cells: dayCells, foreground: .cyan),
             CellSpan(time, cells: timeCells, foreground: .yellow),
-        ])
+        ]
+        if margin > 0 { spans.append(CellSpan("", cells: margin, foreground: .white)) }
+        return CellLine(spans)
     }
 
     private static func format(_ date: Date, _ pattern: String, timeZone: TimeZone) -> String {

@@ -311,6 +311,36 @@ func listEntry(title: String?, isRead: Bool = false, isStarred: Bool = false) ->
         #expect(text(of: PageHeader.line(label: .page(412), date: date, width: 8, timeZone: paris).spans[3]) == "09:47:12")
     }
 
+    /// The clock was cut at the right with the CRT screen on: the tube's corner mask (3 % of the
+    /// shorter side) and the bleed cover the top-right of the window. The time must end before both.
+    @Test func theTimeStaysClearOfTheTubeCornerAtEverySize() {
+        let label = HeaderLabel.page(412)
+        for size in [15.0, 20, 25, 30] {
+            let cell = TeletextFont.cell(forSize: size)
+            for windowSize in [CGSize(width: 700, height: 500), CGSize(width: 1000, height: 700), CGSize(width: 1600, height: 1000)] {
+                for crt in [false, true] {
+                    let width = Int(windowSize.width / cell.width)
+                    let margin = PageHeader.rightMarginCells(windowSize: windowSize, cell: cell, crt: crt)
+                    let line = PageHeader.line(label: label, date: date, width: width, rightMargin: margin, timeZone: paris)
+                    #expect(line.width == width, "size \(size)")
+                    let time = line.spans[3]
+                    #expect(text(of: time) == "09:47:12", "size \(size)")
+                    let endsAt = Double(line.spans[0..<4].reduce(0) { $0 + $1.cellCount }) * cell.width
+                    if crt {
+                        let reach = CRTGeometry.cornerRadius(for: windowSize) + CRTGeometry.bleedOffset + CRTGeometry.glowRadius
+                        #expect(endsAt <= windowSize.width - reach, "size \(size), window \(windowSize)")
+                        #expect(margin > 0 && line.spans.count == 5 && text(of: line.spans[4]).allSatisfy { $0 == " " })
+                    } else {
+                        #expect(margin == 0 && line.spans.count == 4 && endsAt == Double(width) * cell.width)
+                    }
+                }
+            }
+        }
+        // A tiny window never loses the time to the margin.
+        let narrow = PageHeader.line(label: label, date: date, width: 8, rightMargin: 9, timeZone: paris)
+        #expect(text(of: narrow.spans[3]) == "09:47:12" && narrow.width == 8)
+    }
+
     @Test func typingNotFoundAndNoPage() {
         let typing = PageHeader.line(label: .typing("41_"), date: date, width: 40, timeZone: paris)
         #expect(text(of: typing.spans[0]) == "P41_ " && typing.spans[0].foreground == .yellow)
