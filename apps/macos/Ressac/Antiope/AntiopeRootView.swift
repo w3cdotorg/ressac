@@ -13,7 +13,7 @@ struct AntiopeRootView: View {
     let state: AppState
     @State private var antiope: AntiopeState
     /// Shared by the garden pages and the Minitel bar (phase 12).
-    @State private var garden = AntiopeGardenStore()
+    @State private var garden = GardenStore()
     /// Antiope's own text size (decision of 2026-10-14), separate from the Native `reader.size`.
     @AppStorage(ReaderStyle.Keys.antiopeSize) private var storedSize = TeletextFont.defaultSize
 

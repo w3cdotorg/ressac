@@ -1,103 +1,4 @@
-import GRDB
 import SwiftUI
-
-/// The garden pages' shared state (spec §8): the rows both columns draw, the queue's memory, the
-/// fetch log of the selected feed and the last refusal. `AntiopeRootView` owns one;
-/// `GardenEntryPage` drives the observations, `GardenInspectorPage` and `MinitelBar` read it.
-/// The selection logic and the command dispatch are `GardenTable`'s, over `GardenModel`.
-@MainActor @Observable final class AntiopeGardenStore {
-    /// `Queries.garden(scope: .all)` (active feeds) and `.cemetery` (buried ones).
-    private(set) var active: [GardenRow] = []
-    private(set) var buried: [GardenRow] = []
-    /// Feeds seen needing triage during this visit: once decided (here, by ⇧R or in the
-    /// terminal) they stay listed until the page is left.
-    private(set) var seenInQueue: Set<Int64> = []
-    private(set) var log: [FetchLogRow] = []
-    /// The last refusal ("Nothing to repair for this feed."), shown in the Minitel bar.
-    var message: String?
-    var confirmingSafeRepairs = false
-
-    var rows: [GardenRow] { active + buried }
-
-    func retained(_ app: AppState) -> Set<Int64> {
-        seenInQueue.union(app.decidedThisVisit)
-    }
-
-    func selectedRow(_ app: AppState) -> GardenRow? {
-        rows.first { $0.feedId == app.selectedFeedId }
-    }
-
-    /// Starts a visit of the page `scope` and observes the lists it needs until the task is
-    /// cancelled (the page changes or disappears).
-    func observe(page scope: GardenScope, app: AppState) async {
-        active = []
-        buried = []
-        seenInQueue = []
-        message = nil
-        await withDiscardingTaskGroup { group in
-            if scope != .cemetery {
-                group.addTask { await self.follow(.all, page: scope, app: app) }
-            }
-            group.addTask { await self.follow(.cemetery, page: scope, app: app) }
-        }
-    }
-
-    func observeLog(feedId: Int64?, app: AppState) async {
-        log = []
-        guard let feedId else { return }
-        do {
-            for try await fresh in Queries.fetchLog(feedId: feedId).values(in: app.database.reader) {
-                log = fresh
-            }
-        } catch {
-            log = []
-        }
-    }
-
-    /// Carries out a key's command exactly as `GardenTable.handle` does.
-    func perform(_ command: GardenCommand, app: AppState) {
-        message = nil
-        switch command {
-        case .decide(let decision): app.gardenDecide(decision)
-        case .undo: app.gardenUndo()
-        case .open(let url): app.openURL(url)
-        case .confirmSafeRepairs: confirmingSafeRepairs = true
-        case .message(let text): message = text
-        }
-    }
-
-    private func follow(_ query: GardenScope, page scope: GardenScope, app: AppState) async {
-        do {
-            for try await fresh in Queries.garden(scope: query).values(in: app.database.reader) {
-                let previous = rows
-                if query == .cemetery {
-                    buried = fresh
-                } else {
-                    active = fresh
-                }
-                rowsDidChange(previous: previous, scope: scope, app: app)
-            }
-        } catch {
-            if !Task.isCancelled {
-                message = "The garden could not be read."
-            }
-        }
-    }
-
-    /// Keeps the queue's memory and moves the selection on when the selected feed was decided
-    /// (`GardenTable.rowsDidChange`).
-    private func rowsDidChange(previous: [GardenRow], scope: GardenScope, app: AppState) {
-        seenInQueue.formUnion(rows.filter(\.needsTriage).map(\.feedId))
-        let ordered = GardenPage.orderedRows(rows, scope: scope, retained: retained(app))
-        if scope == .needsTriage {
-            app.selectedFeedId = GardenModel.selectionAfterUpdate(
-                selected: app.selectedFeedId, previous: previous, current: rows, ordered: ordered)
-        }
-        if !ordered.contains(where: { $0.feedId == app.selectedFeedId }) {
-            app.selectedFeedId = ordered.first(where: \.needsTriage)?.feedId ?? ordered.first?.feedId
-        }
-    }
-}
 
 /// The entry column of P800, P801 and P802 (spec §8): the feeds by status under coloured headings,
 /// the mosaic progress row, and the terminal garden's keys.
@@ -106,12 +7,11 @@ struct GardenEntryPage: View {
 
     @Environment(AppState.self) private var state
     @Environment(AntiopeState.self) private var antiope
-    @Environment(AntiopeGardenStore.self) private var store
+    @Environment(GardenStore.self) private var store
     @Environment(\.teletextSize) private var size
     @FocusState private var focused: Bool
 
     var body: some View {
-        @Bindable var store = store
         let cell = TeletextFont.cell(forSize: size)
         let lines = GardenPage.entryLines(store.rows, scope: scope, retained: store.retained(state),
                                           selected: state.selectedFeedId, cells: EntryPageColumn.cells)
@@ -143,7 +43,7 @@ struct GardenEntryPage: View {
             handle(press, safeRepairCount: safeRepairs.count)
         }
         .background { undoShortcut }
-        .confirmationDialog(GardenModel.applyQuestion(safeRepairs.count), isPresented: $store.confirmingSafeRepairs,
+        .confirmationDialog(GardenModel.applyQuestion(safeRepairs.count), isPresented: Binding(get: { store.confirmingSafeRepairs }, set: { store.setConfirmingSafeRepairs($0) }),
                             titleVisibility: .visible) {
             Button(safeRepairs.count == 1 ? "Apply" : "Apply All") { state.gardenApplySafe() }
             Button("Cancel", role: .cancel) {}
@@ -158,7 +58,7 @@ struct GardenEntryPage: View {
             focused = !open
         }
         .onDisappear {
-            store.message = nil
+            store.clearMessage()
         }
     }
 
@@ -198,7 +98,7 @@ struct GardenEntryPage: View {
 /// The reader column of the garden pages: the selected feed's inspector as a teletext page.
 struct GardenInspectorPage: View {
     @Environment(AppState.self) private var state
-    @Environment(AntiopeGardenStore.self) private var store
+    @Environment(GardenStore.self) private var store
     @Environment(\.teletextSize) private var size
 
     var body: some View {
@@ -227,6 +127,7 @@ struct AntiopeBannerRow: View {
     let banner: Banner
     let dismiss: () -> Void
 
+    @Environment(AppState.self) private var state
     @Environment(\.teletextSize) private var size
 
     var body: some View {
@@ -237,7 +138,7 @@ struct AntiopeBannerRow: View {
                 CellLineView(line: row.message)
                 if let log = row.log {
                     Button {
-                        NSWorkspace.shared.open(DatabaseLocation.logsURL)
+                        state.openURL(DatabaseLocation.logsURL)
                     } label: {
                         CellLineView(line: log)
                     }

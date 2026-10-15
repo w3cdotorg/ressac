@@ -330,7 +330,7 @@ private func trailingTrimmed(_ text: String) -> String {
     }
 }
 
-@MainActor @Suite struct AntiopeGardenStoreTests {
+@MainActor @Suite struct GardenStoreTests {
     /// Two feeds needing triage in the contract database: Moved (feed 3) comes before Dead (feed 2).
     private func diagnose(_ test: TestDatabase) async throws {
         try await test.raw.write { db in
@@ -348,7 +348,7 @@ private func trailingTrimmed(_ text: String) -> String {
         let (state, test, _) = try makeState()
         try await diagnose(test)
         state.selection = .garden(.needsTriage)
-        let store = AntiopeGardenStore()
+        let store = GardenStore()
         let observation = Task { await store.observe(page: .needsTriage, app: state) }
         defer { observation.cancel() }
         #expect(await eventually { store.rows.contains { $0.feedId == 3 } })
@@ -364,7 +364,7 @@ private func trailingTrimmed(_ text: String) -> String {
         state.openURL = { opened.append($0) }
         state.selection = .garden(.needsTriage)
         state.selectedFeedId = 3
-        let store = AntiopeGardenStore()
+        let store = GardenStore()
 
         store.perform(.message("Nothing to repair for this feed."), app: state)
         #expect(store.message == "Nothing to repair for this feed.")

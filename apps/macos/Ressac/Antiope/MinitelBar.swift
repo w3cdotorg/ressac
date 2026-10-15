@@ -58,7 +58,7 @@ struct MinitelBar: View {
 
     @Environment(AppState.self) private var app
     @Environment(AntiopeState.self) private var antiope
-    @Environment(AntiopeGardenStore.self) private var garden
+    @Environment(GardenStore.self) private var garden
 
     var body: some View {
         HStack(spacing: 0) {

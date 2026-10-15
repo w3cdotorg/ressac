@@ -1,4 +1,3 @@
-import GRDB
 import SwiftUI
 
 /// The Garden's list column (spec §7, mockup option A): one section per status, a header
@@ -7,19 +6,11 @@ struct GardenTable: View {
     @Bindable var state: AppState
     let scope: GardenScope
 
-    /// `Queries.garden(scope: .all)` (active feeds) and `.cemetery` (buried ones, kept in All Feeds
-    /// and Needs Triage only when buried during this visit).
-    @State private var active: [GardenRow] = []
-    @State private var buried: [GardenRow] = []
-    /// Feeds seen needing triage during this visit: once decided (here, by ⇧R or in the
-    /// terminal) they stay, dimmed, until the list is left.
-    @State private var seenInQueue: Set<Int64> = []
-    @State private var message: String?
-    @State private var confirmingSafeRepairs = false
+    @State private var store = GardenStore()
     @FocusState private var listFocused: Bool
 
-    private var rows: [GardenRow] { active + buried }
-    private var retained: Set<Int64> { seenInQueue.union(state.decidedThisVisit) }
+    private var rows: [GardenRow] { store.rows }
+    private var retained: Set<Int64> { store.retained(state) }
 
     var body: some View {
         let visible = GardenModel.visibleRows(rows, scope: scope, seenInQueue: retained)
@@ -48,23 +39,15 @@ struct GardenTable: View {
                 }
             }
         }
-        .confirmationDialog(GardenModel.applyQuestion(safeRepairs.count), isPresented: $confirmingSafeRepairs, titleVisibility: .visible) {
+        .confirmationDialog(GardenModel.applyQuestion(safeRepairs.count), isPresented: Binding(get: { store.confirmingSafeRepairs }, set: { store.setConfirmingSafeRepairs($0) }), titleVisibility: .visible) {
             Button(safeRepairs.count == 1 ? "Apply" : "Apply All") { state.gardenApplySafe() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(GardenModel.safeRepairPreview(safeRepairs))
         }
         .task(id: scope) {
-            seenInQueue = []
-            message = nil
-            active = []
             listFocused = true
-            guard scope != .cemetery else { return }
-            await observe(.all) { active = $0 }
-        }
-        .task(id: scope) {
-            buried = []
-            await observe(.cemetery) { buried = $0 }
+            await store.observe(page: scope, app: state)
         }
     }
 
@@ -80,7 +63,7 @@ struct GardenTable: View {
                 .padding(.vertical, 2)
                 .background(.quaternary, in: Capsule())
             Spacer(minLength: 8)
-            if let message {
+            if let message = store.message {
                 Text(message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -89,7 +72,7 @@ struct GardenTable: View {
                     .transition(.opacity)
             }
             if scope != .cemetery {
-                Button(GardenModel.applyButtonTitle(safeRepairCount)) { confirmingSafeRepairs = true }
+                Button(GardenModel.applyButtonTitle(safeRepairCount)) { store.confirmSafeRepairs() }
                     .buttonStyle(.borderedProminent)
                     .disabled(safeRepairCount == 0)
                     .help("Apply every safe repair: https upgrades and permanent redirects (⇧R)")
@@ -101,7 +84,7 @@ struct GardenTable: View {
         .controlSize(.small)
         .padding(.horizontal, 12)
         .frame(height: 44)
-        .animation(.easeOut(duration: 0.15), value: message)
+        .animation(.easeOut(duration: 0.15), value: store.message)
     }
 
     private func countLabel(visibleCount: Int) -> String {
@@ -119,41 +102,8 @@ struct GardenTable: View {
         guard let command = GardenModel.command(for: key, modifiers: modifiers, row: row, safeRepairCount: safeRepairCount) else {
             return .ignored
         }
-        message = nil
-        switch command {
-        case .decide(let decision): state.gardenDecide(decision)
-        case .undo: state.gardenUndo()
-        case .open(let url): NSWorkspace.shared.open(url)
-        case .confirmSafeRepairs: confirmingSafeRepairs = true
-        case .message(let text): message = text
-        }
+        store.perform(command, app: state)
         return .handled
-    }
-
-    private func observe(_ query: GardenScope, into store: ([GardenRow]) -> Void) async {
-        do {
-            for try await fresh in Queries.garden(scope: query).values(in: state.database.reader) {
-                let previous = rows
-                store(fresh)
-                rowsDidChange(previous: previous)
-            }
-        } catch {
-            message = "The garden could not be read."
-        }
-    }
-
-    /// Keeps the queue's memory and moves the selection on when the selected feed was decided.
-    private func rowsDidChange(previous: [GardenRow]) {
-        seenInQueue.formUnion(rows.filter(\.needsTriage).map(\.feedId))
-        let ordered = GardenModel.sections(GardenModel.visibleRows(rows, scope: scope, seenInQueue: retained), scope: scope)
-            .flatMap(\.rows)
-        if scope == .needsTriage {
-            state.selectedFeedId = GardenModel.selectionAfterUpdate(
-                selected: state.selectedFeedId, previous: previous, current: rows, ordered: ordered)
-        }
-        if !ordered.contains(where: { $0.feedId == state.selectedFeedId }) {
-            state.selectedFeedId = ordered.first(where: \.needsTriage)?.feedId ?? ordered.first?.feedId
-        }
     }
 }
 
