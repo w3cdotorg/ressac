@@ -107,6 +107,22 @@ extension ReaderView {
     }
 }
 
+/// An entry's place in the list shown, under its own feed's page (spec §4, Sub-pages): "412 3/20".
+struct SubpageLabel: Equatable, Sendable {
+    var page: Int?
+    var index: Int
+    var count: Int
+
+    /// "412 3/20", or "3/20" for a feed without a page number yet.
+    var text: String { (page.map { "\($0) " } ?? "") + "\(index)/\(count)" }
+
+    /// Numbered from 1 in `entries`; nil when the entry is not in the list (filtered out).
+    static func of(entryId: Int64, in entries: [EntryRow], page: (Int64) -> Int?) -> SubpageLabel? {
+        guard let position = entries.firstIndex(where: { $0.entryId == entryId }) else { return nil }
+        return SubpageLabel(page: page(entries[position].feedId), index: position + 1, count: entries.count)
+    }
+}
+
 /// Everything the page depends on. Read and starred flags are left out on purpose: marking the
 /// entry read must not reload the page and lose the scroll position.
 struct ArticlePage: Equatable {

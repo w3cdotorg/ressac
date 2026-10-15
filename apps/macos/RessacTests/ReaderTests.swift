@@ -391,3 +391,13 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         }
     }
 }
+
+@Suite struct SubpageLabelTests {
+    @Test func theLabelReadsPageIndexAndCount() {
+        #expect(SubpageLabel(page: 412, index: 3, count: 20).text == "412 3/20")
+        #expect(SubpageLabel(page: nil, index: 1, count: 1).text == "1/1")
+        let list = [entry(id: 5), entry(id: 6), entry(id: 7)]
+        #expect(SubpageLabel.of(entryId: 6, in: list) { $0 == 7 ? 412 : nil } == SubpageLabel(page: 412, index: 2, count: 3))
+        #expect(SubpageLabel.of(entryId: 9, in: list) { _ in 412 } == nil)
+    }
+}
