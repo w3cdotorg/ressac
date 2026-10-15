@@ -476,6 +476,49 @@ small, sub, sup {
   border-radius: 0;
 }
 
+/*
+ * Mosaics (spec §7). A box per image: the mosaic PNG has one pixel per font pixel and is zoomed
+ * by --font-pixel (CSS pixels per font pixel), pixelated, on rows of exactly 1 em. A box marked
+ * data-failed shows the magenta IMAGE line instead; .original shows the original image.
+ */
+:root[data-theme="antiope"] .mosaic {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 var(--row);
+  line-height: 1em;
+}
+
+:root[data-theme="antiope"] .mosaic img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+  zoom: var(--font-pixel);
+  image-rendering: pixelated;
+}
+
+:root[data-theme="antiope"] .mosaic.original img {
+  zoom: 1;
+  image-rendering: auto;
+}
+
+:root[data-theme="antiope"] .mosaic-alt {
+  display: none;
+}
+
+:root[data-theme="antiope"] .mosaic[data-failed]:not(.original) img {
+  display: none;
+}
+
+:root[data-theme="antiope"] .mosaic[data-failed]:not(.original) .mosaic-alt {
+  display: block;
+  padding: 0 var(--cell);
+  background: var(--tt-magenta);
+  color: var(--tt-black);
+  line-height: var(--row);
+}
+
 /* Antiope end. */
 
 /*

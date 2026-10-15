@@ -460,3 +460,63 @@ private func mosaicEntry(_ html: String) -> EntryRow {
         #expect(large.contains("--font-pixel: 2.5;"))
     }
 }
+
+/// End to end in a real web view: mosaics load through the handler, a failure shows its box,
+/// a click on a mosaic and `i` swap the images (spec §7, manual check 4 in process).
+@MainActor @Suite(.serialized) struct MosaicWebViewTests {
+    @Test func mosaicsLoadFailAndSwap() async throws {
+        StubProtocol.serve("/photo.png", .init(chunks: [encoded([flat(255, 0, 0, width: 120, height: 120)], as: .png)]))
+        StubProtocol.serve("/broken.png", .init(chunks: [Data("<html>gone</html>".utf8)]))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        let handler = MosaicSchemeHandler(fetcher: MosaicFetcher(configuration: StubProtocol.configuration()), cache: NSCache())
+        let webView = WKWebView(frame: window.contentLayoutRect, configuration: ArticleWebView.configuration(mosaics: handler))
+        window.contentView = webView
+        let controller = ReaderController()
+        controller.webView = webView
+        let coordinator = ArticleWebView.Coordinator(controller: controller)
+        webView.navigationDelegate = coordinator
+        let html = #"<p><img src="https://stub.ressac.test/photo.png" alt="Photo"></p><p><img src="https://stub.ressac.test/broken.png" alt="Gone"></p>"#
+        let page = ArticleTemplate.page(for: mosaicEntry(html), fulltext: nil, showFull: false, style: ReaderStyle(),
+                                        colorScheme: .dark, theme: ReaderTheme(appearance: .antiope, crt: false))
+        controller.load(entryId: 1, html: page)
+        #expect(await eventually { controller.loadedEntryId == 1 })
+
+        func js(_ script: String) async -> Any? { try? await webView.callAsyncJavaScript(script, contentWorld: .page) }
+        #expect(await eventually(timeout: .seconds(5)) { handler.runningCount == 0 })
+        var loaded: Int?
+        for _ in 0..<100 where loaded != 60 {
+            loaded = await js(#"return document.getElementById("m0").querySelector("img").naturalWidth"#) as? Int
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(loaded == 60)  // 10 columns of 6 font pixels
+        var failed = false
+        for _ in 0..<100 where !failed {
+            failed = await js(#"return document.getElementById("m1").hasAttribute("data-failed")"#) as? Bool ?? false
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(failed)
+        #expect(await js(#"return document.getElementById("m0").hasAttribute("data-failed")"#) as? Bool == false)
+        // reader.css hides the placeholder image and shows the magenta IMAGE line instead.
+        #expect(await js(#"return getComputedStyle(document.getElementById("m1").querySelector(".mosaic-alt")).display"#) as? String == "block")
+        #expect(await js(#"return getComputedStyle(document.getElementById("m1").querySelector("img")).display"#) as? String == "none")
+        #expect(await js(#"return getComputedStyle(document.getElementById("m0").querySelector(".mosaic-alt")).display"#) as? String == "none")
+
+        // A click on the first mosaic goes through the navigation delegate (.linkActivated).
+        _ = await js(#"document.getElementById("m0").click()"#)
+        var source: String?
+        for _ in 0..<100 where source != "https://stub.ressac.test/photo.png" {
+            source = await js(#"return document.getElementById("m0").querySelector("img").getAttribute("src")"#) as? String
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(source == "https://stub.ressac.test/photo.png")
+        #expect(await js(#"return document.getElementById("m0").classList.contains("original")"#) as? Bool == true)
+
+        // `i`: one mosaic still shows, so every image goes to its original; then all back.
+        #expect(await controller.toggleAllImages() == 2)
+        #expect(await js(#"return document.querySelectorAll(".mosaic.original").length"#) as? Int == 2)
+        #expect(await controller.toggleAllImages() == 2)
+        #expect(await js(#"return document.querySelectorAll(".mosaic.original").length"#) as? Int == 0)
+        #expect(await js(#"return document.getElementById("m1").querySelector("img").getAttribute("src")"#) as? String
+            == MosaicRequest.url(for: URL(string: "https://stub.ressac.test/broken.png")!, columns: 40))
+    }
+}

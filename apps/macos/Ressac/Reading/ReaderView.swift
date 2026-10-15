@@ -13,6 +13,7 @@ struct ReaderView: View {
     @AppStorage(ReaderStyle.Keys.antiopeSize) private var antiopeSize = TeletextFont.defaultSize
     @AppStorage(Appearance.Keys.appearance) private var storedAppearance = Appearance.native
     @AppStorage(Appearance.Keys.crt) private var crt = false
+    @Environment(AntiopeState.self) private var antiope: AntiopeState?
     @State private var controller = ReaderController()
 
     var body: some View {
@@ -26,8 +27,14 @@ struct ReaderView: View {
             }
         }
         .toolbar { toolbarContent }
-        .onAppear { state.readerPageDown = { [controller] id in await controller.pageDown(entryId: id) } }
-        .onDisappear { state.readerPageDown = nil }
+        .onAppear {
+            state.readerPageDown = { [controller] id in await controller.pageDown(entryId: id) }
+            antiope?.imageToggle = { [controller] in Task { await controller.toggleAllImages() } }
+        }
+        .onDisappear {
+            state.readerPageDown = nil
+            antiope?.imageToggle = nil
+        }
     }
 
     private func page(for entry: EntryRow) -> ArticlePage {
@@ -208,6 +215,41 @@ struct ArticlePage: Equatable {
         return (result as? Bool) ?? false
     }
 
+    /// Swaps mosaic `index` and its original (a click on the mosaic, spec §7). Returns whether the
+    /// original is now shown. App JavaScript; the page's own stays off.
+    @discardableResult
+    func toggleImage(_ index: Int) async -> Bool {
+        guard let webView else { return false }
+        let script = """
+        const box = document.getElementById("m" + index);
+        if (!box) { return false; }
+        const original = !box.classList.contains("original");
+        box.classList.toggle("original", original);
+        box.querySelector("img").src = original ? box.dataset.original : box.dataset.mosaic;
+        return original;
+        """
+        let result = try? await webView.callAsyncJavaScript(script, arguments: ["index": index], contentWorld: .page)
+        return (result as? Bool) ?? false
+    }
+
+    /// `i`: every image of the article both ways, originals while any mosaic shows, else mosaics.
+    /// Returns how many images it swapped.
+    @discardableResult
+    func toggleAllImages() async -> Int {
+        guard let webView else { return 0 }
+        let script = """
+        const boxes = Array.from(document.querySelectorAll(".mosaic"));
+        const original = boxes.some((box) => !box.classList.contains("original"));
+        for (const box of boxes) {
+          box.classList.toggle("original", original);
+          box.querySelector("img").src = original ? box.dataset.original : box.dataset.mosaic;
+        }
+        return boxes.length;
+        """
+        let result = try? await webView.callAsyncJavaScript(script, contentWorld: .page)
+        return (result as? Int) ?? 0
+    }
+
     /// Rewrites the Antiope sub-page line of the page on screen, keeping its scroll position.
     func showSubpage(_ label: SubpageLabel?) async {
         guard let webView else { return }
@@ -224,11 +266,7 @@ struct ArticleWebView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(controller: controller) }
 
     func makeNSView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.mediaTypesRequiringUserActionForPlayback = .all
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = WKWebView(frame: .zero, configuration: Self.configuration())
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsMagnification = false
@@ -251,6 +289,16 @@ struct ArticleWebView: NSViewRepresentable {
         }
         context.coordinator.page = page
         controller.load(entryId: page.entry.entryId, html: page.html())
+    }
+
+    /// JavaScript off, no persistent website data, and the mosaic handler (spec §7).
+    static func configuration(mosaics: MosaicSchemeHandler = MosaicSchemeHandler()) -> WKWebViewConfiguration {
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.mediaTypesRequiringUserActionForPlayback = .all
+        configuration.setURLSchemeHandler(mosaics, forURLScheme: MosaicSchemeHandler.scheme)
+        return configuration
     }
 
     /// The colour past the page's edges in Native; Antiope's is black (spec §7).
@@ -290,8 +338,9 @@ struct ArticleWebView: NSViewRepresentable {
             case .openExternally(let url):
                 decisionHandler(.cancel)
                 NSWorkspace.shared.open(url)
-            case .toggleImage:
-                decisionHandler(.cancel)  // wired in the next commit
+            case .toggleImage(let index):
+                decisionHandler(.cancel)
+                Task { await controller.toggleImage(index) }
             }
         }
     }
