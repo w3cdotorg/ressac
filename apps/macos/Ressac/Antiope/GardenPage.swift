@@ -119,20 +119,28 @@ enum GardenPage {
         ], accessibilityText: section.rows.count == 1 ? "\(section.id), 1 feed" : "\(section.id), \(section.rows.count) feeds"))
     }
 
-    /// "● Title … bury": a yellow dot while the feed needs triage, the title, then the chip (the
-    /// proposed action in cyan, or the decision once made in green), as `EntryPageColumn` lays out
-    /// an entry. Black on white when selected; a `?` replacement stays magenta (`CellSpan`).
+    /// "● Title … bury": a yellow dot while the feed needs triage, the title, a buried feed's unread
+    /// count in yellow (as the index shows counts), then the chip (the proposed action in cyan, or
+    /// the decision once made in green), as `EntryPageColumn` lays out an entry. Black on white when
+    /// selected; a `?` replacement stays magenta (`CellSpan`).
     static func feedLine(_ row: GardenRow, selected: Bool, cells: Int) -> Line {
         let decided = row.lastDecision != nil && !row.needsTriage
         let chip = GardenModel.chip(for: row).map { " " + $0 } ?? ""
+        let unreadLabel = GardenModel.unreadLabel(for: row)
+        let count = unreadLabel == nil ? "" : " \(min(row.unread, 99_999))"
         let markerCells = min(2, max(0, cells))
         let chipCells = min(chip.count, max(0, cells - markerCells))
-        let spoken = [row.title, GardenModel.status(of: row), GardenModel.chip(for: row)].compactMap { $0 }
-        let line = CellLine([
+        let countCells = min(count.count, max(0, cells - markerCells - chipCells))
+        let spoken = [row.title, GardenModel.status(of: row), unreadLabel, GardenModel.chip(for: row)].compactMap { $0 }
+        var spans = [
             CellSpan(row.needsTriage ? "●" : "", cells: markerCells, foreground: .yellow),
-            CellSpan(row.title, cells: cells - markerCells - chipCells, foreground: .white),
-            CellSpan(chip, cells: chipCells, foreground: decided ? .green : .cyan),
-        ], accessibilityText: spoken.joined(separator: ", "))
+            CellSpan(row.title, cells: cells - markerCells - countCells - chipCells, foreground: .white),
+        ]
+        if !count.isEmpty {
+            spans.append(CellSpan(count, cells: countCells, foreground: .yellow))
+        }
+        spans.append(CellSpan(chip, cells: chipCells, foreground: decided ? .green : .cyan))
+        let line = CellLine(spans, accessibilityText: spoken.joined(separator: ", "))
         return Line(id: "feed-\(row.feedId)", role: .feed(row.feedId),
                     cells: selected ? line.reversed(.black, on: .white) : line, isSelected: selected)
     }

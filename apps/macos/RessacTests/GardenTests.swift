@@ -6,13 +6,20 @@ import Testing
 
 private func row(_ id: Int64, _ title: String, status: String?, folder: String? = "Blogs", state: String = "active",
                  action: ProposedAction? = nil, needsTriage: Bool = false, decision: String? = nil,
-                 site: String? = nil, wayback: String? = nil) -> GardenRow {
+                 site: String? = nil, wayback: String? = nil, unread: Int = 0) -> GardenRow {
     GardenRow(feedId: id, title: title, folderPath: folder, state: state, status: status, reason: nil, clue: nil,
               evidence: nil, remarks: [], proposedAction: action, needsTriage: needsTriage, lastDecision: decision,
-              waybackUrl: wayback, htmlUrl: site, xmlUrl: "https://feeds.example.org/\(id)")
+              waybackUrl: wayback, htmlUrl: site, xmlUrl: "https://feeds.example.org/\(id)", unread: unread)
 }
 
 @Suite struct GardenModelTests {
+    /// Only a buried feed says how many entries it left unread: active feeds have the sidebar.
+    @Test func onlyBuriedFeedsShowTheirUnreadCount() {
+        #expect(GardenModel.unreadLabel(for: row(4, "Gone", status: "Dead", state: "buried", unread: 12)) == "12 unread")
+        #expect(GardenModel.unreadLabel(for: row(4, "Gone", status: "Dead", state: "buried")) == nil)
+        #expect(GardenModel.unreadLabel(for: row(1, "Live", status: "Alive", unread: 3)) == nil)
+    }
+
     @Test func sectionsFollowUrgencyThenFolderThenTitle() {
         let rows = [
             row(1, "Zed", status: "Dead"),

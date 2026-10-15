@@ -8,11 +8,11 @@ import Testing
 private func gardenRow(_ id: Int64, _ title: String, status: String?, folder: String? = "Blogs", state: String = "active",
                        reason: String? = nil, evidence: [String]? = nil, remarks: [Remark] = [],
                        action: ProposedAction? = nil, needsTriage: Bool = false, decision: String? = nil,
-                       site: String? = nil, wayback: String? = nil) -> GardenRow {
+                       site: String? = nil, wayback: String? = nil, unread: Int = 0) -> GardenRow {
     GardenRow(feedId: id, title: title, folderPath: folder, state: state, status: status, reason: reason, clue: nil,
               evidence: evidence.map { GardenEvidence(bullets: $0, clue: "", language: nil) }, remarks: remarks,
               proposedAction: action, needsTriage: needsTriage, lastDecision: decision,
-              waybackUrl: wayback, htmlUrl: site, xmlUrl: "https://feeds.example.org/\(id)")
+              waybackUrl: wayback, htmlUrl: site, xmlUrl: "https://feeds.example.org/\(id)", unread: unread)
 }
 
 private func spaces(_ count: Int) -> String { String(repeating: " ", count: count) }
@@ -152,6 +152,24 @@ private func trailingTrimmed(_ text: String) -> String {
         #expect(selected.isSelected)
         #expect(selected.cells.spans.allSatisfy { $0.foreground == .black && $0.background == .white })
         #expect(selected.text == waiting.text)
+    }
+
+    /// A buried feed's unread count sits before its chip, in yellow like the index's counts, and
+    /// VoiceOver reads it; without unread entries the row is unchanged.
+    @Test func buriedFeedRowsShowTheirUnreadCount() {
+        let counted = GardenPage.feedLine(gardenRow(4, "Gone", status: "Dead", state: "buried", decision: "bury", unread: 12),
+                                          selected: false, cells: cells)
+        #expect(counted.text == "  Gone" + spaces(12) + " 12 buried")
+        #expect(counted.cells.width == 28)
+        #expect(counted.cells.spans[2] == CellSpan(" 12", cells: 3, foreground: .yellow))
+        #expect(counted.cells.spans.last == CellSpan(" buried", cells: 7, foreground: .green))
+        #expect(counted.cells.accessibilityText == "Gone, Dead, 12 unread, buried")
+
+        let none = GardenPage.feedLine(gardenRow(4, "Gone", status: "Dead", state: "buried", decision: "bury"),
+                                       selected: false, cells: cells)
+        #expect(none.text == "  Gone" + spaces(15) + " buried")
+        #expect(none.cells.spans.count == 3)
+        #expect(none.cells.accessibilityText == "Gone, Dead, buried")
     }
 
     /// VoiceOver reads the original title; the cells show a `?` for what Bedstead lacks, which

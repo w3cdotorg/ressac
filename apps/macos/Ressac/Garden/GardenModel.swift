@@ -222,6 +222,12 @@ enum GardenModel {
         }
     }
 
+    /// "12 unread" on a buried feed: the reading lists hide its entries, so the garden is the only
+    /// place that tells what burying left unread. Nil for active feeds and when nothing is left.
+    static func unreadLabel(for row: GardenRow) -> String? {
+        isBuried(row) && row.unread > 0 ? "\(row.unread) unread" : nil
+    }
+
     static func remarkSentence(_ remark: Remark) -> String {
         switch remark {
         case .httpsAvailable: "The https:// address serves the same feed."
