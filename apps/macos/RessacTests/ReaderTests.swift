@@ -260,15 +260,18 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
     }
 
     /// Space reads the page's height: an image holds its place before it loads when its feed
-    /// gives its size, in an attribute pair, a style or WordPress's or Blogger's data attributes.
+    /// gives its size for this very src, in an attribute pair or a style. The data attributes of WordPress and
+    /// Blogger describe the original upload, not the served thumbnail, so they give none.
     @Test func imagesGetTheSizeTheirFeedGives() {
         let html = #"<img src="https://e.org/a.png" style="width: 600px; height:400px"><img src="https://e.org/b.png" data-orig-size="1200,800">"#
             + #"<img src="https://e.org/c.png" data-original-width="640" data-original-height="480"><img src="https://e.org/d.png" width="50%" style="height: 10px">"#
             + #"<img src="https://e.org/e.png" width="320"><img src="https://e.org/f.png">"#
         let clean = ArticleTemplate.sanitize(html)
         #expect(clean.contains(#"<img src="https://e.org/a.png" width="600" height="400" loading="lazy">"#))
-        #expect(clean.contains(#"<img src="https://e.org/b.png" width="1200" height="800" loading="lazy">"#))
-        #expect(clean.contains(#"<img src="https://e.org/c.png" width="640" height="480" loading="lazy">"#))
+        #expect(clean.contains(#"<img src="https://e.org/b.png" loading="lazy">"#))
+        #expect(clean.contains(#"<img src="https://e.org/c.png" loading="lazy">"#))
+        #expect(ArticleTemplate.declaredSize(["data-orig-size": "1200,800"]) == nil)
+        #expect(ArticleTemplate.declaredSize(["data-original-width": "640", "data-original-height": "480"]) == nil)
         #expect(clean.contains(#"<img src="https://e.org/d.png" width="50%" loading="lazy">"#))  // its own attribute wins
         #expect(clean.contains(#"<img src="https://e.org/e.png" width="320" loading="lazy">"#))
         #expect(clean.contains(#"<img src="https://e.org/f.png" loading="lazy">"#))

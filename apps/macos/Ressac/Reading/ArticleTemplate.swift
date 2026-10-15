@@ -456,9 +456,9 @@ enum ArticleTemplate {
     }
 
     /// The size an image's attributes give: `width` and `height`, else `width` and `height` in
-    /// pixels in `style`, else WordPress's `data-orig-size` ("1200,800"), else Blogger's
-    /// `data-original-width` and `data-original-height`. Nil when none gives both as whole
-    /// pixels from 1 to 20,000 (a percentage gives none).
+    /// pixels in `style`. Nil when none gives both as whole pixels from 1 to 20,000 (a percentage
+    /// gives none). Only sizes of this very `src` count: the `data-*` sizes of WordPress and
+    /// Blogger describe the original upload and are ignored.
     static func declaredSize(_ attributes: [String: String]) -> ImageSize? {
         func pixels(_ text: Substring?) -> Int? {
             guard var text = text?.trimmingCharacters(in: .whitespaces).lowercased() else { return nil }
@@ -479,9 +479,9 @@ enum ArticleTemplate {
             }
             if let found = size(declarations["width"], declarations["height"]) { return found }
         }
-        if let pair = attributes["data-orig-size"]?.split(separator: ","), pair.count == 2,
-           let found = size(pair[0], pair[1]) { return found }
-        return size(attributes["data-original-width"]?[...], attributes["data-original-height"]?[...])
+        // No `data-orig-size` nor `data-original-*`: they describe the original upload, not the
+        // (often smaller) image served at this `src`, and would stretch a thumbnail.
+        return nil
     }
 
     /// Every attribute of `element`, names lowercased, unfiltered: only for reading sizes.
