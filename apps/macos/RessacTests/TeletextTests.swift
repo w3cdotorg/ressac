@@ -108,3 +108,60 @@ import Testing
         }
     }
 }
+
+@Suite struct CellTextTests {
+    func cellCount(_ fitted: FittedCells) -> Int {
+        fitted.runs.reduce(0) { $0 + $1.text.count }
+    }
+
+    /// Review Focus #1: emoji, CJK and a combining accent each take exactly one cell.
+    @Test func emojiCJKAndCombiningAccentsTakeOneCellEach() {
+        let fitted = CellText.fit("Café 🎉 東京", cells: 12)
+        #expect(fitted.runs == [
+            CellRun(text: "Café ", isReplacement: false),
+            CellRun(text: "?", isReplacement: true),
+            CellRun(text: " ", isReplacement: false),
+            CellRun(text: "??", isReplacement: true),
+            CellRun(text: "   ", isReplacement: false),
+        ])
+        #expect(cellCount(fitted) == 12)
+        #expect(fitted.runs.reduce(0) { $0 + $1.text.unicodeScalars.count } == 12)  // one scalar per cell
+        #expect(fitted.accessibilityText == "Café 🎉 東京")
+
+        let decomposed = CellText.fit("Cafe\u{301} noir", cells: 6)
+        #expect(decomposed.runs == [CellRun(text: "Café n", isReplacement: false)])
+        #expect(decomposed.runs[0].text.unicodeScalars.map(\.value) == [0x43, 0x61, 0x66, 0xE9, 0x20, 0x6E])
+        #expect(decomposed.accessibilityText == "Cafe\u{301} noir")
+    }
+
+    @Test func longTextIsCutWithoutEllipsisAndShortTextIsPadded() {
+        #expect(CellText.fit("Courrier international", cells: 8).runs == [CellRun(text: "Courrier", isReplacement: false)])
+        #expect(CellText.fit("Unread", cells: 9).runs == [CellRun(text: "Unread   ", isReplacement: false)])
+        #expect(CellText.fit("", cells: 3).runs == [CellRun(text: "   ", isReplacement: false)])
+        #expect(CellText.fit("xkcd", cells: 0).runs.isEmpty)
+        #expect(CellText.fit("xkcd", cells: -2).runs.isEmpty)
+        #expect(CellText.fit("xkcd", cells: 0).accessibilityText == "xkcd")
+    }
+
+    @Test func clustersWhitespaceAndInvisiblesNeverMoveTheGrid() {
+        let family = CellText.fit("👩‍👩‍👧🇫🇷x", cells: 4)  // a ZWJ sequence and a flag: one cell each
+        #expect(family.runs == [CellRun(text: "??", isReplacement: true), CellRun(text: "x ", isReplacement: false)])
+        let lines = CellText.fit("Line\nbreak\ttab\r\nend", cells: 20)
+        #expect(lines.runs == [CellRun(text: "Line break tab end  ", isReplacement: false)])
+        let invisible = CellText.fit("a\u{200B}b\u{FEFF}c\u{00AD}d", cells: 5)
+        #expect(invisible.runs == [CellRun(text: "abcd ", isReplacement: false)])
+        for fitted in [family, lines, invisible] {
+            #expect(fitted.runs.reduce(0) { $0 + $1.text.unicodeScalars.count } == cellCount(fitted))
+        }
+    }
+
+    @Test func theCoverageTestIsInjectable() {
+        let fitted = CellText.fit("abcb", cells: 4, supports: { $0 != "b" })
+        #expect(fitted.runs == [
+            CellRun(text: "a", isReplacement: false),
+            CellRun(text: "?", isReplacement: true),
+            CellRun(text: "c", isReplacement: false),
+            CellRun(text: "?", isReplacement: true),
+        ])
+    }
+}
