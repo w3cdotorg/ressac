@@ -293,11 +293,7 @@ enum GardenPage {
 
     /// "10 OCT 26 07:00": fetch log dates, English month in capitals, in `timeZone`.
     static func logDate(_ date: Date, timeZone: TimeZone) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = timeZone
-        formatter.dateFormat = "dd MMM yy HH:mm"
-        return formatter.string(from: date).uppercased()
+        TeletextDateFormat.string(from: date, pattern: "dd MMM yy HH:mm", timeZone: timeZone).uppercased()
     }
 
     // MARK: Banner
