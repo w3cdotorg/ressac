@@ -317,3 +317,229 @@ func arrowEvent(_ key: Int, modifiers: NSEvent.ModifierFlags = [], window: NSWin
                             timestamp: 0, windowNumber: window?.windowNumber ?? 0, context: nil, characters: characters,
                             charactersIgnoringModifiers: characters, isARepeat: false, keyCode: 0)!
 }
+
+/// A clock that moves only when the test advances it (the 2-second `NOT FOUND`).
+final class ManualClock: Clock, @unchecked Sendable {
+    struct Instant: InstantProtocol {
+        var offset: Swift.Duration
+
+        func advanced(by duration: Swift.Duration) -> Instant { Instant(offset: offset + duration) }
+        func duration(to other: Instant) -> Swift.Duration { other.offset - offset }
+        static func < (a: Instant, b: Instant) -> Bool { a.offset < b.offset }
+    }
+
+    private let lock = NSLock()
+    private var current = Instant(offset: .zero)
+    private var sleepers: [(deadline: Instant, continuation: CheckedContinuation<Void, any Error>)] = []
+
+    var now: Instant { lock.withLock { current } }
+    var minimumResolution: Swift.Duration { .zero }
+    /// Tasks waiting on this clock: a test advances it only once the sleeper is in place.
+    var sleeperCount: Int { lock.withLock { sleepers.count } }
+
+    func sleep(until deadline: Instant, tolerance: Swift.Duration? = nil) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            let isDue = lock.withLock {
+                guard deadline > current else { return true }
+                sleepers.append((deadline, continuation))
+                return false
+            }
+            if isDue { continuation.resume() }
+        }
+    }
+
+    func advance(by duration: Swift.Duration) {
+        let due = lock.withLock {
+            current = current.advanced(by: duration)
+            let due = sleepers.filter { $0.deadline <= current }
+            sleepers.removeAll { $0.deadline <= current }
+            return due
+        }
+        for sleeper in due { sleeper.continuation.resume() }
+    }
+}
+
+@MainActor @Suite struct AntiopeStateTests {
+    func make(clock: any Clock<Duration> = ContinuousClock()) throws -> (AntiopeState, AppState, TestDatabase, Stub) {
+        let (state, test, stub) = try makeState()
+        return (AntiopeState(app: state, clock: clock), state, test, stub)
+    }
+
+    /// Types a page number digit by digit, as the keys would.
+    func dial(_ number: String, into antiope: AntiopeState) {
+        for digit in number.compactMap(\.wholeNumberValue) {
+            #expect(antiope.handle(.pageDigit(digit)))
+        }
+    }
+
+    func feedPage(_ id: Int64, in state: AppState) throws -> Int {
+        try #require(state.sidebar.feeds.first { $0.feedId == id }?.page)
+    }
+
+    @Test func aTypedPageSelectsItsSourceAndFocusesTheIndex() throws {
+        let (antiope, state, test, _) = try make()
+        let entry = try test.entry(feed: 8)
+        let page = try String(feedPage(8, in: state))
+        antiope.column = .reader
+        dial(String(page.prefix(2)), into: antiope)
+        #expect(antiope.entry.display == String(page.prefix(2)) + "_")
+        #expect(state.selection == .unread)  // nothing happens before the third digit
+        dial(String(page.suffix(1)), into: antiope)
+        #expect(state.selection == .feed(8))
+        #expect(state.entries.map(\.entryId) == [entry])  // the entry list follows
+        #expect(antiope.column == .index && antiope.readerPage == .article)
+        #expect(antiope.currentPage.map { String($0) } == page)
+        #expect(!antiope.entry.isActive && antiope.notFound == nil)
+    }
+
+    @Test func correctionAndCancelEditTheEntry() throws {
+        let (antiope, _, _, _) = try make()
+        #expect(!antiope.handle(.pageCorrect))  // nothing typed: the key goes on
+        #expect(!antiope.handle(.pageCancel))
+        dial("41", into: antiope)
+        #expect(antiope.handle(.pageCorrect))
+        #expect(antiope.entry.display == "4__")
+        #expect(antiope.handle(.pageCancel))
+        #expect(!antiope.entry.isActive && antiope.entry.display == "")
+    }
+
+    @Test func anUnknownPageShowsNotFoundForTwoSeconds() async throws {
+        let clock = ManualClock()
+        let (antiope, state, _, _) = try make(clock: clock)
+        #expect(antiope.directory.destination(for: 437) == nil)
+        dial("437", into: antiope)
+        #expect(antiope.notFound == 437)
+        #expect(state.selection == .unread && antiope.currentPage == 101)  // selection unchanged
+        #expect(!antiope.entry.isActive)
+        #expect(await eventually { clock.sleeperCount == 1 })
+        clock.advance(by: .milliseconds(1999))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(antiope.notFound == 437)
+        clock.advance(by: .milliseconds(1))
+        #expect(await eventually { antiope.notFound == nil })
+    }
+
+    @Test func aNewDigitClearsNotFoundAtOnce() async throws {
+        let clock = ManualClock()
+        let (antiope, _, _, _) = try make(clock: clock)
+        dial("437", into: antiope)
+        #expect(await eventually { clock.sleeperCount == 1 })
+        dial("1", into: antiope)
+        #expect(antiope.notFound == nil && antiope.entry.display == "1__")
+        clock.advance(by: .seconds(2))  // the cancelled reset must not touch a later NOT FOUND
+        #expect(antiope.directory.destination(for: 199) == nil)
+        dial("99", into: antiope)
+        #expect(antiope.notFound == 199)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(antiope.notFound == 199)
+        #expect(await eventually { clock.sleeperCount == 1 })
+        clock.advance(by: .seconds(2))  // lets the last reset run, so no continuation leaks
+        #expect(await eventually { antiope.notFound == nil })
+    }
+
+    @Test func reservedPagesOpenTheirDestination() throws {
+        let (antiope, state, _, _) = try make()
+        antiope.jump(to: 102)
+        #expect(state.selection == .today)
+        antiope.jump(to: 800)
+        #expect(state.selection == .garden(.needsTriage) && antiope.currentPage == 800)
+        antiope.jump(to: 100)
+        #expect(antiope.readerPage == .index && antiope.currentPage == 100)
+        #expect(state.selection == .garden(.needsTriage))  // P100 keeps the selection
+        #expect(antiope.handle(.guide))
+        #expect(antiope.readerPage == .guide && antiope.currentPage == 899)
+        #expect(antiope.handle(.sommaire))
+        #expect(antiope.readerPage == .index)
+        antiope.jump(to: 103)
+        #expect(state.selection == .starred && antiope.readerPage == .article)
+    }
+
+    @Test func suiteAndRetourStayWithAppStateAndBringTheArticleBack() async throws {
+        let (antiope, state, test, _) = try make()
+        let newer = try test.entry(feed: 1, published: "2026-10-02T08:00:00.000Z")
+        let older = try test.entry(feed: 1, published: "2026-10-01T08:00:00.000Z")
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { state.entries.count == 2 })
+        state.autoReadDelay = .seconds(60)
+        #expect(antiope.handle(.guide))
+        #expect(!antiope.handle(.nextEntry))  // not Antiope's: the router hands it to AppState
+        #expect(antiope.readerPage == .article)
+        #expect(state.perform(.nextEntry))
+        #expect(state.selectedEntryId == newer)
+        #expect(!antiope.handle(.advance) && !antiope.handle(.previousEntry))
+        #expect(state.perform(.nextEntry))
+        #expect(state.selectedEntryId == older)
+    }
+
+    @Test func repetitionRefreshesTheSelection() async throws {
+        let (antiope, state, _, stub) = try make()
+        state.selection = .feed(3)
+        #expect(antiope.handle(.repetition))
+        #expect(await eventually { (try? calls(stub))?.isEmpty == false })
+        #expect(try calls(stub).map { $0.split(separator: " ").dropFirst(3).joined(separator: " ") } == ["fetch --feed 3"])
+    }
+
+    @Test func imagesToggleOnlyOnAnArticleWithAReader() async throws {
+        let (antiope, state, test, _) = try make()
+        var toggles = 0
+        #expect(!antiope.handle(.toggleImages))  // no Antiope reader yet
+        antiope.imageToggle = { toggles += 1 }
+        #expect(!antiope.handle(.toggleImages))  // no entry selected
+        let id = try test.entry(feed: 1)
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { !state.entries.isEmpty })
+        state.autoReadDelay = .seconds(60)
+        state.selectedEntryId = id
+        #expect(await eventually { state.selectedEntry != nil })
+        #expect(antiope.handle(.toggleImages))
+        #expect(toggles == 1)
+        #expect(antiope.handle(.guide))
+        #expect(!antiope.handle(.toggleImages))  // P899 has no images
+        #expect(toggles == 1)
+    }
+
+    @Test func theIndexArrowsWalkThePages() throws {
+        let (antiope, state, _, _) = try make()
+        #expect(antiope.handle(.previousIndexRow))  // 101 → 100
+        #expect(antiope.readerPage == .index && antiope.currentPage == 100)
+        #expect(antiope.handle(.previousIndexRow))  // the first page: spent, no move
+        #expect(antiope.currentPage == 100)
+        #expect(antiope.handle(.nextIndexRow))
+        #expect(state.selection == .unread && antiope.readerPage == .article)
+        #expect(antiope.handle(.nextIndexRow))
+        #expect(state.selection == .today && antiope.column == .index)
+    }
+
+    @Test func columnsMoveLeftAndRight() async throws {
+        let (antiope, state, test, _) = try make()
+        let id = try test.entry(feed: 1)
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { !state.entries.isEmpty })
+        state.autoReadDelay = .seconds(60)
+        #expect(!antiope.handle(.previousColumn))  // the index is the first column
+        #expect(antiope.handle(.nextColumn))
+        #expect(antiope.column == .entries && state.selectedEntryId == id)  // as → from the native sidebar
+        #expect(antiope.handle(.nextColumn))
+        #expect(antiope.column == .reader)
+        #expect(!antiope.handle(.nextColumn))  // the reader is the last
+        #expect(antiope.handle(.previousColumn))
+        #expect(antiope.column == .entries)
+    }
+
+    @Test func theFocusFollowsTheColumnAndThePrompt() throws {
+        let (antiope, state, _, _) = try make()
+        #expect(antiope.keyFocus(in: nil) == .sidebar)
+        antiope.column = .entries
+        #expect(antiope.keyFocus(in: nil) == .entryList)
+        antiope.column = .reader
+        #expect(antiope.keyFocus(in: nil) == .reader)
+        state.isSearchFocused = true  // ⌘F, through the Search menu item
+        #expect(antiope.isSearchPromptOpen && antiope.keyFocus(in: nil) == .textInput)
+        state.searchText = "tidal"
+        antiope.closeSearchPrompt(clearing: false)  // Return
+        #expect(!antiope.isSearchPromptOpen && state.searchText == "tidal" && state.letterShortcutsEnabled)
+        antiope.isSearchPromptOpen = true
+        antiope.closeSearchPrompt(clearing: true)  // Esc
+        #expect(!state.isSearchFocused && state.searchText.isEmpty)
+    }
+}
