@@ -238,6 +238,16 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(probe.runs.withLock { $0 } <= 2)
     }
 
+    /// Up to 512 KB the article is parsed; the largest stored one was 358 KB on 15/10/2026.
+    @Test func articlesUpTo512KBAreParsed() {
+        let paragraph = "<p>" + String(repeating: "Words of an ordinary long article. ", count: 12) + "<b>bold</b></p>\n"
+        let big = String(repeating: paragraph, count: 400_000 / paragraph.utf8.count)
+        #expect(big.utf8.count > 390_000)
+        #expect(ArticleTemplate.sanitize(big + "<!-- \(UUID()) -->", budget: 10).contains("<b>bold</b>"))
+        let huge = String(repeating: paragraph, count: 540_000 / paragraph.utf8.count)
+        #expect(!ArticleTemplate.sanitize(huge, budget: 10).contains("<b>"))
+    }
+
     @Test func optionalEndTagsStayOnTheParsedPath() {
         let rows = String(repeating: "<tr><td>a<td>b", count: 150)
         let defs = String(repeating: "<dt>t<dd>d", count: 150)

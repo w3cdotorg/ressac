@@ -162,7 +162,10 @@ enum ArticleTemplate {
     }
 
     static let parseBudget: TimeInterval = 1.0
-    private static let maxParsedBytes = 256 * 1024
+    /// Past this, the plain-text fallback. Once the guards below keep libxml linear, its worst
+    /// measured cost is about 0.85 ms per KB of dense markup (real articles: 0.1), so 512 KB
+    /// stays within half the budget; the largest stored article was 358 KB on 15/10/2026.
+    private static let maxParsedBytes = 512 * 1024
     static let maxNestingDepth = 256
     /// libxml checks a tag's attributes pairwise for duplicates: 60,000 on one tag took 5 s.
     static let maxAttributesPerTag = 256
