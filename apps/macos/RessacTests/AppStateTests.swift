@@ -322,3 +322,136 @@ func calls(_ stub: Stub) throws -> [String] {
         #expect(message.hasPrefix("The ressac helper is missing"))
     }
 }
+
+/// Long lists load one page at a time: a folder of thousands of entries in "All" is never read
+/// whole, and the counts stay those of the whole list.
+@MainActor @Suite struct ListPageTests {
+    /// `count` entries of `feed`, one a day from 1 October; their ids, newest first.
+    private func days(_ test: TestDatabase, _ count: Int, feed: Int64 = 1, read: (Int) -> Bool = { _ in false }) throws -> [Int64] {
+        try (1...count).map { day in
+            try test.entry(feed: feed, published: String(format: "2026-10-%02dT08:00:00.000Z", day), read: read(day))
+        }.reversed()
+    }
+
+    @Test func a_long_list_loads_one_page_and_counts_the_whole_list() throws {
+        let (state, test, _) = try makeState()
+        let ids = try days(test, 5)
+        state.listPageSize = 2
+        state.selection = .feed(1)
+        #expect(state.entries.map(\.entryId) == Array(ids.prefix(2)))
+        #expect((state.entryTotal, state.listUnread, state.hasMoreEntries) == (5, 5, true))
+        state.loadMoreEntries()
+        #expect(state.entries.map(\.entryId) == Array(ids.prefix(4)))
+        state.loadMoreEntries()
+        #expect(state.entries.map(\.entryId) == ids)
+        #expect(!state.hasMoreEntries)
+    }
+
+    /// What the list views report as rows appear: one page per turn, only near the end.
+    @Test func rows_appearing_near_the_end_load_one_more_page() async throws {
+        let (state, test, _) = try makeState()
+        let ids = try days(test, 26)
+        let short = try days(test, 6, feed: 2)
+        state.listPageSize = 24
+        state.selection = .feed(1)
+        state.entryRowAppeared(ids[3])  // 21 rows from the end of the 24 loaded: not near it
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(state.entries.count == 24)
+        state.entryRowAppeared(ids[4])  // 20 rows from the end
+        #expect(await eventually { state.entries.count == 26 })
+        #expect(!state.hasMoreEntries)
+        // Rows appearing together load one page, not one each.
+        state.listPageSize = 2
+        state.selection = .feed(2)
+        state.entryRowAppeared(short[0])
+        state.entryRowAppeared(short[1])
+        #expect(await eventually { state.entries.count == 4 })
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(state.entries.count == 4)
+    }
+
+    @Test func next_entry_past_the_loaded_rows_loads_the_next_page() throws {
+        let (state, test, _) = try makeState()
+        let ids = try days(test, 3)
+        state.listPageSize = 2
+        state.selection = .feed(1)
+        state.autoReadDelay = .seconds(60)
+        state.selectNext()
+        state.selectNext()
+        #expect(state.selectedEntryId == ids[1] && state.entries.count == 2)
+        state.selectNext()
+        #expect(state.selectedEntryId == ids[2])
+        #expect(state.entries.count == 3 && !state.hasMoreEntries)
+    }
+
+    @Test func space_looks_for_unread_entries_in_the_rows_not_loaded() throws {
+        let (state, test, _) = try makeState()
+        let ids = try days(test, 5) { $0 != 1 }  // only the oldest is unread
+        let allRead = try days(test, 3, feed: 2) { _ in true }
+        state.listPageSize = 2
+        state.autoReadDelay = .seconds(60)
+        state.selection = .feed(1)
+        state.selectedEntryId = ids[0]
+        #expect((state.listUnread, state.entries.count) == (1, 2))
+        state.selectNextUnread()
+        #expect(state.selectedEntryId == ids[4])
+        #expect(state.entries.count == 5)
+        // Nothing unread beyond the loaded rows: no page is loaded for nothing.
+        state.selection = .feed(2)
+        state.selectedEntryId = allRead[0]
+        state.selectNextUnread()
+        #expect(state.selectedEntryId == allRead[0])
+        #expect(state.entries.count == 2)
+    }
+
+    @Test func new_entries_never_push_the_loaded_rows_out() async throws {
+        let (state, test, _) = try makeState()
+        let ids = try days(test, 3)
+        state.listPageSize = 2
+        state.selection = .feed(1)
+        state.autoReadDelay = .seconds(60)
+        state.selectedEntryId = ids[1]  // the last loaded row
+        let newer = try (20...23).map { try test.entry(feed: 1, published: "2026-10-\($0)T08:00:00.000Z") }
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { state.entryTotal == 7 })
+        #expect(state.entries.map(\.entryId) == Array(newer.reversed()) + Array(ids.prefix(2)))
+        #expect(state.selectedEntryId == ids[1] && state.hasMoreEntries)
+    }
+
+    /// The first run: the list was empty, so whole, when the first refresh filled it.
+    @Test func a_short_list_made_long_by_a_refresh_is_paged_again() async throws {
+        let (state, test, _) = try makeState()
+        state.listPageSize = 2
+        state.selection = .feed(1)
+        #expect(state.entries.isEmpty && !state.hasMoreEntries)
+        let ids = try days(test, 5)
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { state.entries.count == 2 })
+        #expect(state.entries.map(\.entryId) == Array(ids.prefix(2)))
+        #expect((state.entryTotal, state.hasMoreEntries) == (5, true))
+    }
+
+    @Test func the_selection_stays_loaded_when_the_list_restarts() throws {
+        let (state, test, _) = try makeState()
+        let ids = try days(test, 4)
+        state.listPageSize = 2
+        state.selection = .feed(1)
+        state.autoReadDelay = .seconds(60)
+        state.loadMoreEntries()
+        state.selectedEntryId = ids[3]  // the oldest, on the second page
+        state.unreadOnly = true
+        #expect(state.entries.map(\.entryId) == ids)
+        #expect(!state.hasMoreEntries)
+    }
+
+    @Test func mark_all_read_counts_the_rows_not_loaded() async throws {
+        let (state, test, _) = try makeState()
+        _ = try days(test, 3) { $0 != 1 }  // the oldest, not loaded, is the only unread one
+        state.listPageSize = 2
+        state.selection = .feed(1)
+        #expect(state.entries.allSatisfy(\.isRead) && state.canMarkAllRead)
+        await state.markAllRead()?.value
+        #expect(try test.one(Int.self, "SELECT COUNT(*) FROM entry WHERE read_at IS NULL") == 0)
+        #expect(await eventually { !state.canMarkAllRead })
+    }
+}

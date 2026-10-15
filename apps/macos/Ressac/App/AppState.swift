@@ -93,8 +93,16 @@ enum PendingPanel: Equatable, Sendable {
     // MARK: Data
 
     private(set) var sidebar = SidebarSnapshot()
-    /// The entry list, or the search results while `searchText` is not empty.
+    /// The entry list, or the search results while `searchText` is not empty: its loaded rows,
+    /// newest first. A long list loads `listPageSize` rows at a time (`loadMoreEntries`).
     private(set) var entries: [EntryRow] = []
+    /// The whole list's size, loaded or not, with the entries read during this visit that it
+    /// keeps: the "/20" of the sub-page line.
+    private(set) var entryTotal = 0
+    /// Unread entries of the whole list, loaded or not.
+    private(set) var listUnread = 0
+    /// Rows of the list are not loaded yet.
+    private(set) var hasMoreEntries = false
     /// The selected entry with its full content, for the reader.
     private(set) var selectedEntry: EntryRow?
     private(set) var selectedFulltext: FulltextRow?
@@ -110,6 +118,10 @@ enum PendingPanel: Equatable, Sendable {
     let runs: RunCoordinator
 
     @ObservationIgnored var autoReadDelay: Duration = .seconds(1)
+    /// Rows a list loads at a time. A list starts with one page and grows by one per `loadMoreEntries`.
+    @ObservationIgnored var listPageSize = 500
+    /// Rows from the end of the loaded ones whose appearance loads the next page (`entryRowAppeared`).
+    static let loadMoreMargin = 20
     @ObservationIgnored var now: @MainActor () -> Date = { Date() }
     @ObservationIgnored var openURL: @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
     /// Set by the reader (phase 10): scrolls one page of the given entry and returns false at
@@ -134,6 +146,11 @@ enum PendingPanel: Equatable, Sendable {
     /// Entries read during this visit of the source: they stay listed in unread-only
     /// lists until the source changes, so the selection never vanishes.
     @ObservationIgnored private var retained: Set<Int64> = []
+    /// The list's oldest loaded row. It only moves down while the list is shown, so new entries
+    /// never push a loaded row (the selection) out. Nil: the list was short enough to load whole
+    /// when it started; `.oldest`: its last page was loaded.
+    @ObservationIgnored private var listFloor: ListFloor?
+    @ObservationIgnored private var isLoadMoreScheduled = false
 
     init(database: AppDatabase, runs: RunCoordinator) {
         self.database = database
@@ -232,7 +249,9 @@ enum PendingPanel: Equatable, Sendable {
     var letterShortcutsEnabled: Bool { !isSearchFocused && readingWindowIsKey }
     var canNavigateEntries: Bool { letterShortcutsEnabled && !selection.isGarden && !entries.isEmpty }
     var canToggleEntry: Bool { letterShortcutsEnabled && !selection.isGarden && selectedEntry != nil }
-    var canMarkAllRead: Bool { !selection.isGarden && searchText.isEmpty && entries.contains { !$0.isRead } }
+    var canMarkAllRead: Bool {
+        !selection.isGarden && searchText.isEmpty && (entries.contains { !$0.isRead } || (hasMoreEntries && listUnread > 0))
+    }
     var canRefresh: Bool { !runs.isLongRunActive }
     var canOpenInBrowser: Bool { selectedEntry?.link != nil }
     var canRequestFullText: Bool { selectedEntry?.link != nil && !isExtracting }
@@ -254,10 +273,11 @@ enum PendingPanel: Equatable, Sendable {
 
     // MARK: Reading commands
 
+    /// The next entry; past the last loaded row, the next page first.
     func selectNext() {
         guard canNavigateEntries else { return }
-        let index = selectedEntryId.flatMap { id in entries.firstIndex { $0.entryId == id } }
-        let next = index.map { $0 + 1 } ?? 0
+        if let index = selectedIndex, index + 1 == entries.count { loadMoreEntries() }
+        let next = selectedIndex.map { $0 + 1 } ?? 0
         guard next < entries.count else { return }
         markSelectedReadOnLeaving()
         selectedEntryId = entries[next].entryId
@@ -265,19 +285,54 @@ enum PendingPanel: Equatable, Sendable {
 
     func selectPrevious() {
         guard canNavigateEntries else { return }
-        let index = selectedEntryId.flatMap { id in entries.firstIndex { $0.entryId == id } }
-        let previous = index.map { $0 - 1 } ?? 0
+        let previous = selectedIndex.map { $0 - 1 } ?? 0
         guard previous >= 0, previous < entries.count else { return }
         selectedEntryId = entries[previous].entryId
     }
 
-    /// The next unread entry after the selection (spec §7, Space at the bottom).
+    /// The next unread entry after the selection (spec §7, Space at the bottom), loading pages
+    /// while the list has unread entries that are not loaded.
     func selectNextUnread() {
         guard canNavigateEntries else { return }
-        let start = selectedEntryId.flatMap { id in entries.firstIndex { $0.entryId == id } }.map { $0 + 1 } ?? 0
-        guard let next = entries[start...].first(where: { !$0.isRead && $0.entryId != selectedEntryId }) else { return }
-        markSelectedReadOnLeaving()
-        selectedEntryId = next.entryId
+        while true {
+            let start = selectedIndex.map { $0 + 1 } ?? 0
+            if let next = entries[start...].first(where: { !$0.isRead && $0.entryId != selectedEntryId }) {
+                markSelectedReadOnLeaving()
+                selectedEntryId = next.entryId
+                return
+            }
+            let loaded = entries.count
+            guard hasMoreEntries, listUnread > entries.count(where: { !$0.isRead }) else { return }
+            loadMoreEntries()
+            guard entries.count > loaded else { return }
+        }
+    }
+
+    /// A list view shows the row of `entryId`. Among the last `loadMoreMargin` loaded rows, the
+    /// next page loads, on the next turn: a row appears while its table lays out, where changing
+    /// the rows is a reentrant operation. One page per turn, however many rows appear.
+    func entryRowAppeared(_ entryId: Int64) {
+        guard !isLoadMoreScheduled, hasMoreEntries,
+              entries.suffix(Self.loadMoreMargin).contains(where: { $0.entryId == entryId })
+        else { return }
+        isLoadMoreScheduled = true
+        Task { [weak self] in
+            guard let self else { return }
+            isLoadMoreScheduled = false
+            loadMoreEntries()
+        }
+    }
+
+    /// Loads the next `listPageSize` rows of the list. `entries` has them on return.
+    func loadMoreEntries() {
+        guard hasMoreEntries, let current = listFloor else { return }
+        do {
+            listFloor = try floor(below: current, keeping: nil) ?? .oldest
+        } catch {
+            report(error)
+            return
+        }
+        observeList()
     }
 
     /// Space: scroll the reader; at the bottom, next unread. One at a time: nil (nothing done)
@@ -503,17 +558,61 @@ enum PendingPanel: Equatable, Sendable {
         listDidChange()
     }
 
+    /// The list restarts with one page, keeping the selection loaded.
     private func listDidChange() {
-        let observation = searchText.trimmingCharacters(in: .whitespaces).isEmpty
-            ? Queries.entries(source: selection, unreadOnly: unreadOnly, now: now())
-            : Queries.search(searchText, in: selection, now: now())
+        do {
+            listFloor = try floor(below: nil, keeping: selectedEntryId)
+        } catch {
+            listFloor = nil
+            report(error)
+        }
+        observeList()
+    }
+
+    /// The search words, or nil for the plain list.
+    private var activeSearch: String? {
+        searchText.trimmingCharacters(in: .whitespaces).isEmpty ? nil : searchText
+    }
+
+    private var selectedIndex: Int? {
+        selectedEntryId.flatMap { id in entries.firstIndex { $0.entryId == id } }
+    }
+
+    /// The floor one page below `current` (below the newest row when nil), lowered to keep entry
+    /// `keeping` loaded; nil when the rest of the list fits in the page.
+    private func floor(below current: ListFloor?, keeping entryId: Int64?) throws -> ListFloor? {
+        let (source, unreadOnly, search, rows, now) = (selection, unreadOnly, activeSearch, listPageSize, now())
+        return try database.reader.read { db in
+            try Queries.floor(source: source, unreadOnly: unreadOnly, search: search, below: current, rows: rows,
+                              keeping: entryId, now: now, in: db)
+        }
+    }
+
+    /// (Re)starts the list's observation at `listFloor`. `.immediate`: `entries` is up to date on return.
+    private func observeList() {
+        let observation = activeSearch.map { Queries.search($0, in: selection, floor: listFloor, now: now()) }
+            ?? Queries.entries(source: selection, unreadOnly: unreadOnly, floor: listFloor, now: now())
         listObservation = observation.start(
             in: database.reader, scheduling: .immediate,
             onError: { [weak self] in self?.report($0) },
-            onChange: { [weak self] fresh in
-                guard let self else { return }
-                entries = Self.merge(fresh: fresh.rows, previous: entries, retained: retained)
-            })
+            onChange: { [weak self] page in self?.listDidLoad(page) })
+    }
+
+    private func listDidLoad(_ page: EntryPage) {
+        let merged = Self.merge(fresh: page.rows, previous: entries, retained: retained, floor: listFloor)
+        // Equal after an optimistic change already made: the views are not updated twice.
+        if merged != entries { entries = merged }
+        entryTotal = page.total + merged.count - page.rows.count
+        listUnread = page.unread
+        hasMoreEntries = page.rows.count < page.total
+        // A list that was whole when it started (a short one) and that a refresh made long, as on
+        // the first run: one page again. On the next turn, not inside the observation's callback.
+        if listFloor == nil, page.rows.count > listPageSize {
+            Task { [weak self] in
+                guard let self, listFloor == nil, entries.count > listPageSize else { return }
+                listDidChange()
+            }
+        }
     }
 
     private func entryDidChange() {
@@ -582,10 +681,13 @@ enum PendingPanel: Equatable, Sendable {
     }
 
     /// Fresh rows, plus the entries read during this visit that an unread-only query
-    /// dropped, newest first.
-    static func merge(fresh: [EntryRow], previous: [EntryRow], retained: Set<Int64>) -> [EntryRow] {
+    /// dropped, newest first. Only rows at or after `floor` are kept: below it, a row of the
+    /// list is merely not loaded.
+    static func merge(fresh: [EntryRow], previous: [EntryRow], retained: Set<Int64>, floor: ListFloor?) -> [EntryRow] {
         let freshIds = Set(fresh.map(\.entryId))
-        let kept = previous.filter { retained.contains($0.entryId) && !freshIds.contains($0.entryId) }
+        let kept = previous.filter {
+            retained.contains($0.entryId) && !freshIds.contains($0.entryId) && floor?.admits($0) != false
+        }
         guard !kept.isEmpty else { return fresh }
         return (fresh + kept.map { row in
             var row = row
