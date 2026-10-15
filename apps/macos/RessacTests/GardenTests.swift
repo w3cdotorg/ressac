@@ -276,3 +276,38 @@ private func row(_ id: Int64, _ title: String, status: String?, folder: String? 
         #expect(latest.redirectChain.map(\.url) == ["https://www.unphotographable.com/index.rdf"])
     }
 }
+
+@Suite struct GardenStatusStyleTests {
+    @Test func everyStatusHasOneNativeAndOneTeletextColour() {
+        let expected: [(String?, Color, TeletextColor)] = [
+            ("Dead", .red, .red),
+            ("Hijacked", .purple, .magenta),
+            ("Moved", .blue, .cyan),
+            ("Ailing", .orange, .yellow),
+            ("Duplicate", .teal, .white),
+            ("Fossil", .brown, .blue),
+            ("Dormant", .indigo, .green),
+            ("Alive", .green, .green),
+            ("Unchecked", .secondary, .white),
+            ("Haunted", .secondary, .white),  // a status newer than this app
+            (nil, .secondary, .white),
+        ]
+        for (status, native, teletext) in expected {
+            #expect(GardenStatusStyle.nativeColor(for: status) == native, "\(status ?? "nil")")
+            #expect(GardenStatusStyle.teletextColor(for: status) == teletext, "\(status ?? "nil")")
+        }
+    }
+
+    /// The sidebar dot tells the sick statuses apart, Dead and Hijacked included.
+    @Test func sickStatusesNeverShareANativeColour() {
+        let sick = ["Ailing", "Dead", "Moved", "Hijacked", "Duplicate"]
+        #expect(Set(sick.map { GardenStatusStyle.nativeColor(for: $0) }).count == sick.count)
+    }
+
+    /// Blue never colours text (spec §5): only Fossil is blue, and its heading is drawn reversed.
+    @Test func onlyFossilIsBlueAndNoStatusIsBlack() {
+        let statuses = GardenModel.urgencyOrder
+        #expect(statuses.filter { GardenStatusStyle.teletextColor(for: $0) == .blue } == ["Fossil"])
+        #expect(!statuses.contains { GardenStatusStyle.teletextColor(for: $0) == .black })
+    }
+}

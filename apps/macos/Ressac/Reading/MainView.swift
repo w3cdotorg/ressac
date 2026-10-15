@@ -119,7 +119,7 @@ struct SidebarRow: View {
             HStack(spacing: 6) {
                 Text(feed.title).lineLimit(1)
                 if feed.isSick, let status = feed.status {
-                    Circle().fill(Self.color(for: status)).frame(width: 7, height: 7).help(status)
+                    Circle().fill(GardenStatusStyle.nativeColor(for: status)).frame(width: 7, height: 7).help(status)
                 }
             }
             .badge(feed.unread)
@@ -132,16 +132,6 @@ struct SidebarRow: View {
                 Button("Open Site") { state.openSite(feedId: feed.feedId) }.disabled(feed.htmlUrl == nil)
                 Button("Show in Garden") { state.showInGarden(feedId: feed.feedId) }
             }
-        }
-    }
-
-    static func color(for status: String) -> Color {
-        switch status {
-        case "Dead": .red
-        case "Hijacked": .purple
-        case "Moved": .blue
-        case "Duplicate": .teal
-        default: .orange
         }
     }
 }

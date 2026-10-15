@@ -47,7 +47,7 @@ struct GardenInspector: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("\(GardenModel.glyph(status)) \(status)")
                     .font(.headline)
-                    .foregroundStyle(statusColor(status))
+                    .foregroundStyle(GardenStatusStyle.nativeColor(for: status))
                 if buried {
                     Text("Buried. Press k to restore it.").font(.callout.weight(.medium))
                 }
@@ -157,19 +157,6 @@ struct GardenInspector: View {
         GridRow {
             Text(label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
             value
-        }
-    }
-
-    private func statusColor(_ status: String) -> Color {
-        switch status {
-        case "Dead", "Hijacked": .red
-        case "Ailing": .orange
-        case "Moved": .blue
-        case "Duplicate": .purple
-        case "Fossil": .brown
-        case "Dormant": .indigo
-        case "Alive": .green
-        default: .secondary
         }
     }
 
