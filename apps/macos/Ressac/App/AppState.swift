@@ -153,6 +153,9 @@ enum PendingPanel: Equatable, Sendable {
     @ObservationIgnored private var isLoadMoreScheduled = false
     /// Counts the list restarts (`listDidChange`): a deferred page only loads into the list it was scheduled for.
     @ObservationIgnored private var listGeneration = 0
+    /// The last restart could not read its floor, so the list loaded whole. Until the next restart
+    /// succeeds, it is not paged again (that would fail again, and report again, every turn).
+    @ObservationIgnored private var listFloorFailed = false
 
     init(database: AppDatabase, runs: RunCoordinator) {
         self.database = database
@@ -575,8 +578,10 @@ enum PendingPanel: Equatable, Sendable {
         listGeneration += 1
         do {
             listFloor = try floor(below: nil, keeping: selectedEntryId)
+            listFloorFailed = false
         } catch {
             listFloor = nil
+            listFloorFailed = true
             report(error)
         }
         observeList()
@@ -628,9 +633,9 @@ enum PendingPanel: Equatable, Sendable {
         hasMoreEntries = page.rows.count < page.total
         // A list that was whole when it started (a short one) and that a refresh made long, as on
         // the first run: one page again. On the next turn, not inside the observation's callback.
-        if listFloor == nil, page.rows.count > listPageSize {
+        if listFloor == nil, !listFloorFailed, page.rows.count > listPageSize {
             Task { [weak self] in
-                guard let self, listFloor == nil, entries.count > listPageSize else { return }
+                guard let self, listFloor == nil, !listFloorFailed, entries.count > listPageSize else { return }
                 listDidChange()
             }
         }
