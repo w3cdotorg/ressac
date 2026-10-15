@@ -42,17 +42,19 @@ enum ArticleTemplate {
 
     /// Returns inert HTML. Relative `href`/`src` are resolved against `baseURL` (the entry's
     /// address), since `<base>` is removed; links and images keep only http(s) addresses
-    /// (images may also be `data:image/…`, except SVG).
-    static func sanitize(_ html: String, baseURL: URL? = nil, budget: TimeInterval = parseBudget) -> String {
-        let key = CacheKey(html: html, baseURL: baseURL)
+    /// (images may also be `data:image/…`, except SVG). With `mosaics` (Antiope, spec §7), each
+    /// http(s) image becomes a numbered mosaic box: a `ressac-mosaic:` image that a click on its
+    /// `ressac-toggle:<n>` link, or `i`, swaps for the original.
+    static func sanitize(_ html: String, baseURL: URL? = nil, budget: TimeInterval = parseBudget, mosaics: Bool = false) -> String {
+        let key = CacheKey(html: html, baseURL: baseURL, mosaics: mosaics)
         if let cached = cache.withLock({ $0.lookup(key) }) { return cached }
-        let (result, timedOut) = sanitizeUncached(html, baseURL: baseURL, budget: budget)
+        let (result, timedOut) = sanitizeUncached(html, baseURL: baseURL, budget: budget, mosaics: mosaics)
         // A timed-out parse is a busy moment, not a property of the article: do not remember it.
         if html.utf8.count <= maxParsedBytes, !timedOut { cache.withLock { $0.store(key, result) } }
         return result
     }
 
-    private static func sanitizeUncached(_ html: String, baseURL: URL?, budget: TimeInterval) -> (html: String, timedOut: Bool) {
+    private static func sanitizeUncached(_ html: String, baseURL: URL?, budget: TimeInterval, mosaics: Bool) -> (html: String, timedOut: Bool) {
         // Tidy and the recursive renderer overflow the stack on pathological nesting, and libxml's
         // repair of misnested end tags is quadratic, so such input (or anything big) skips the
         // parser and is shown as escaped plain text.
@@ -61,7 +63,7 @@ enum ArticleTemplate {
             let text = size > maxInputBytes ? String(decoding: html.utf8.prefix(maxInputBytes), as: UTF8.self) : html
             return (plainTextFallback(text), false)
         }
-        if let rendered = onLargeStack(timeout: budget, { parseAndRender(html, baseURL: baseURL) }) {
+        if let rendered = onLargeStack(timeout: budget, { parseAndRender(html, baseURL: baseURL, mosaics: mosaics) }) {
             return (rendered, false)
         }
         return (plainTextFallback(html), true)
@@ -72,6 +74,7 @@ enum ArticleTemplate {
     private struct CacheKey: Hashable, Sendable {
         let html: String
         let baseURL: URL?
+        let mosaics: Bool
     }
 
     private struct Memo: Sendable {
@@ -105,18 +108,18 @@ enum ArticleTemplate {
         cache.withLock { ($0.hits, $0.misses) }
     }
 
-    private static func parseAndRender(_ html: String, baseURL: URL?) -> String {
+    private static func parseAndRender(_ html: String, baseURL: URL?, mosaics: Bool) -> String {
         let wrapped = "<html><body>\(html)</body></html>"
         guard let document = try? XMLDocument(xmlString: wrapped, options: [.documentTidyHTML, .nodeLoadExternalEntitiesNever]),
               let body = document.rootElement()?.children?.first(where: { name(of: $0) == "body" })
         else {
             return "<p>\(escapeText(html))</p>"
         }
-        var out = ""
+        var renderer = Renderer(baseURL: baseURL, mosaics: mosaics)
         for child in body.children ?? [] {
-            render(child, baseURL: baseURL, depth: 1, into: &out)
+            renderer.render(child, depth: 1, inLink: false)
         }
-        return out
+        return renderer.out
     }
 
     private final class ResultBox: @unchecked Sendable { var value = "" }
@@ -272,34 +275,69 @@ enum ArticleTemplate {
         (node.localName ?? node.name ?? "").lowercased()
     }
 
-    private static func render(_ node: XMLNode, baseURL: URL?, depth: Int, into out: inout String) {
-        if depth > maxNestingDepth { return }
-        switch node.kind {
-        case .text:
-            out += escapeText(node.stringValue ?? "")
-        case .element:
-            guard let element = node as? XMLElement else { return }
-            let tag = name(of: element)
-            if droppedElements.contains(tag) { return }
-            guard allowedElements.contains(tag) else {
-                for child in element.children ?? [] { render(child, baseURL: baseURL, depth: depth + 1, into: &out) }
+    /// Writes the allowed tree back out with our own serialiser, numbering images as it goes.
+    private struct Renderer {
+        let baseURL: URL?
+        let mosaics: Bool
+        var out = ""
+        private var images = 0
+
+        init(baseURL: URL?, mosaics: Bool) {
+            self.baseURL = baseURL
+            self.mosaics = mosaics
+        }
+
+        /// `inLink`: inside an `a`, where a mosaic cannot carry its own toggle link (anchors do not nest).
+        mutating func render(_ node: XMLNode, depth: Int, inLink: Bool) {
+            if depth > maxNestingDepth { return }
+            switch node.kind {
+            case .text:
+                out += escapeText(node.stringValue ?? "")
+            case .element:
+                guard let element = node as? XMLElement else { return }
+                let tag = name(of: element)
+                if droppedElements.contains(tag) { return }
+                guard allowedElements.contains(tag) else {
+                    for child in element.children ?? [] { render(child, depth: depth + 1, inLink: inLink) }
+                    return
+                }
+                let attributes = safeAttributes(of: element, tag: tag, baseURL: baseURL)
+                if tag == "img" {
+                    guard let source = attributes.first(where: { $0.name == "src" })?.value else { return }
+                    if mosaics, let original = LinkPolicy.webURL(source) {
+                        let alt = attributes.first(where: { $0.name == "alt" })?.value ?? ""
+                        return mosaic(original: original, alt: alt, inLink: inLink)
+                    }
+                }
+                out += "<\(tag)"
+                for attribute in attributes {
+                    out += " \(attribute.name)=\"\(escapeAttribute(attribute.value))\""
+                }
+                // Images below the fold wait until they are scrolled near.
+                if tag == "img" { out += #" loading="lazy""# }
+                out += ">"
+                guard !voidTags.contains(tag) else { return }
+                for child in element.children ?? [] { render(child, depth: depth + 1, inLink: inLink || tag == "a") }
+                out += "</\(tag)>"
+            default:
+                // Comments, processing instructions, DTD nodes: dropped.
                 return
             }
-            let attributes = safeAttributes(of: element, tag: tag, baseURL: baseURL)
-            if tag == "img" && !attributes.contains(where: { $0.name == "src" }) { return }
-            out += "<\(tag)"
-            for attribute in attributes {
-                out += " \(attribute.name)=\"\(escapeAttribute(attribute.value))\""
-            }
-            // Images below the fold wait until they are scrolled near.
-            if tag == "img" { out += #" loading="lazy""# }
-            out += ">"
-            guard !voidTags.contains(tag) else { return }
-            for child in element.children ?? [] { render(child, baseURL: baseURL, depth: depth + 1, into: &out) }
-            out += "</\(tag)>"
-        default:
-            // Comments, processing instructions, DTD nodes: dropped.
-            return
+        }
+
+        /// Image `n` as a mosaic box. The box keeps both addresses for the swap and an IMAGE line
+        /// with the alt text, shown by the stylesheet when the mosaic fails (`data-failed`).
+        private mutating func mosaic(original: URL, alt: String, inLink: Bool) {
+            let index = images
+            images += 1
+            let source = escapeAttribute(MosaicRequest.url(for: original, columns: MosaicRenderer.maxColumns))
+            let box = #"id="m\#(index)" data-original="\#(escapeAttribute(original.absoluteString))" data-mosaic="\#(source)""#
+            let label = escapeText(alt.isEmpty ? "IMAGE" : "IMAGE \(alt)")
+            let content = #"<img src="\#(source)" alt="\#(escapeAttribute(alt))" loading="lazy">"#
+                + #"<span class="mosaic-alt">\#(label)</span>"#
+            out += inLink
+                ? #"<span class="mosaic" \#(box)>\#(content)</span>"#
+                : #"<a class="mosaic" href="\#(LinkPolicy.toggleScheme):\#(index)" \#(box)>\#(content)</a>"#
         }
     }
 
@@ -340,9 +378,10 @@ enum ArticleTemplate {
 
     // MARK: Page
 
-    /// No scripts, frames, objects, forms or base URL; images from the web; fonts and styles inline.
+    /// No scripts, frames, objects, forms or base URL; images from the web and the mosaic handler;
+    /// fonts and styles inline.
     private static let contentSecurityPolicy =
-        "default-src 'none'; img-src http: https: data:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'"
+        "default-src 'none'; img-src http: https: data: \(MosaicSchemeHandler.scheme):; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'"
 
     static func page(for entry: EntryRow, fulltext: FulltextRow?, showFull: Bool, style: ReaderStyle, colorScheme: ColorScheme,
                      theme: ReaderTheme = .native, subpage: SubpageLabel? = nil) -> String {
@@ -353,7 +392,7 @@ enum ArticleTemplate {
         let source = fullHTML ?? [entry.contentHtml, entry.summaryHtml]
             .compactMap { $0 }
             .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
-        let body = sanitize(source, baseURL: base)
+        let body = sanitize(source, baseURL: base, mosaics: antiope)
 
         var meta = [escapeText(entry.feedTitle), escapeText(entry.publishedAt.formatted(date: .long, time: .shortened))]
         if fullHTML != nil { meta.append(#"<span class="badge">full article</span>"#) }
@@ -375,7 +414,7 @@ enum ArticleTemplate {
         <style>
         \(antiope ? teletextFace : fontFaces(for: style.font))
         \(readerCSS)
-        :root { --reader-font: \(style.font.cssFamily); --reader-size: \(Int(size))px; --reader-measure: \(style.width.maxCh)ch;\(antiope ? teletextVariables : "") }
+        :root { --reader-font: \(style.font.cssFamily); --reader-size: \(Int(size))px; --reader-measure: \(style.width.maxCh)ch;\(antiope ? teletextVariables(size: size) : "") }
         </style>
         </head>
         <body>
@@ -408,8 +447,11 @@ enum ArticleTemplate {
         #"<span class="dh-space" aria-hidden="true">\#(text)</span><span class="dh-ink">\#(heading)</span>"#
     }
 
-    /// Antiope's extra custom properties: the teletext font for every role of `reader.css`.
-    private static let teletextVariables = #" --teletext-font: "\#(TeletextFont.familyName)", monospace;"#
+    /// Antiope's extra custom properties: the teletext font for every role of `reader.css`, and
+    /// the font pixel in CSS pixels, by which mosaics (one PNG pixel per font pixel) are zoomed.
+    private static func teletextVariables(size: Double) -> String {
+        #" --teletext-font: "\#(TeletextFont.familyName)", monospace; --font-pixel: \#(String(format: "%g", size / 10));"#
+    }
 
     // MARK: Resources
 
@@ -459,23 +501,36 @@ enum ArticleTemplate {
 
 /// Which navigations the reader allows. Only the page we load ourselves (about:blank, since
 /// it is loaded without a base URL) is shown; a clicked http(s) link opens in the default
-/// browser; everything else (redirects, form posts, other schemes) is cancelled.
+/// browser; a clicked mosaic (`ressac-toggle:<n>`) swaps image `n`; everything else (redirects,
+/// form posts, other schemes) is cancelled.
 enum LinkPolicy {
     enum Decision: Equatable {
         case allow
         case cancel
         case openExternally(URL)
+        case toggleImage(Int)
     }
+
+    static let toggleScheme = "ressac-toggle"
 
     static func decide(type: WKNavigationType, url: URL?) -> Decision {
         switch type {
         case .other where url?.absoluteString == "about:blank":
             return .allow
         case .linkActivated:
+            if let index = toggleIndex(url) { return .toggleImage(index) }
             return webURL(url?.absoluteString).map(Decision.openExternally) ?? .cancel
         default:
             return .cancel
         }
+    }
+
+    /// `n` of `ressac-toggle:<n>`, or nil for any other address.
+    static func toggleIndex(_ url: URL?) -> Int? {
+        guard let url, url.scheme?.lowercased() == toggleScheme,
+              let index = Int(url.absoluteString.dropFirst(toggleScheme.count + 1)), index >= 0
+        else { return nil }
+        return index
     }
 
     /// Feed content is untrusted: only http(s) addresses may reach the system opener.

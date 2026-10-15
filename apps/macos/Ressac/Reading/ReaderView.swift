@@ -290,6 +290,8 @@ struct ArticleWebView: NSViewRepresentable {
             case .openExternally(let url):
                 decisionHandler(.cancel)
                 NSWorkspace.shared.open(url)
+            case .toggleImage:
+                decisionHandler(.cancel)  // wired in the next commit
             }
         }
     }

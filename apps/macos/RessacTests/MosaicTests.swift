@@ -416,3 +416,47 @@ final class FakeSchemeTask: NSObject, WKURLSchemeTask {
         #expect(task.events.isEmpty)
     }
 }
+
+// MARK: Reader wiring (phase 11b)
+
+private func mosaicEntry(_ html: String) -> EntryRow {
+    EntryRow(entryId: 1, feedId: 7, feedTitle: "Example Blog", folderId: nil, title: "Pictures", author: nil,
+             url: "https://blog.example.org/post.html", publishedAt: Date(timeIntervalSince1970: 1_791_619_200),
+             isRead: false, isStarred: false, hasFulltext: false, summaryHtml: nil, contentHtml: html)
+}
+
+@Suite struct MosaicMarkupTests {
+    @Test func imagesBecomeNumberedMosaicBoxes() {
+        let html = #"<p><img src="https://img.example.org/a.png" alt="A &quot;cat&quot;" width="800"></p><img src="/b.jpg"><img src="data:image/png;base64,AAAA">"#
+        let clean = ArticleTemplate.sanitize(html, baseURL: URL(string: "https://blog.example.org/post.html"), mosaics: true)
+        let a = MosaicRequest.url(for: URL(string: "https://img.example.org/a.png")!, columns: 40).replacingOccurrences(of: "&", with: "&amp;")
+        let b = MosaicRequest.url(for: URL(string: "https://blog.example.org/b.jpg")!, columns: 40).replacingOccurrences(of: "&", with: "&amp;")
+        #expect(clean.contains(#"<a class="mosaic" href="ressac-toggle:0" id="m0" data-original="https://img.example.org/a.png" data-mosaic="\#(a)"><img src="\#(a)" alt="A &quot;cat&quot;" loading="lazy"><span class="mosaic-alt">IMAGE A "cat"</span></a>"#))
+        #expect(clean.contains(#"<a class="mosaic" href="ressac-toggle:1" id="m1" data-original="https://blog.example.org/b.jpg" data-mosaic="\#(b)"><img src="\#(b)" alt="" loading="lazy"><span class="mosaic-alt">IMAGE</span></a>"#))
+        #expect(clean.contains(#"<img src="data:image/png;base64,AAAA" loading="lazy">"#))  // inline data stays as it is
+        #expect(!clean.contains("width="))
+        // Without mosaics (Native) the same input keeps its plain images.
+        #expect(ArticleTemplate.sanitize(html, baseURL: URL(string: "https://blog.example.org/post.html"))
+            .contains(#"<img src="https://img.example.org/a.png" alt="A &quot;cat&quot;" width="800" loading="lazy">"#))
+    }
+
+    @Test func anImageInsideALinkKeepsTheLink() {
+        let clean = ArticleTemplate.sanitize(#"<a href="https://example.org/big.jpg"><img src="https://example.org/small.jpg"></a>"#, mosaics: true)
+        #expect(clean.hasPrefix(#"<a href="https://example.org/big.jpg"><span class="mosaic" id="m0" data-original="https://example.org/small.jpg""#))
+        #expect(!clean.contains("ressac-toggle"))
+    }
+
+    @Test func theToggleLinkAndThePolicy() {
+        #expect(LinkPolicy.decide(type: .linkActivated, url: URL(string: "ressac-toggle:3")) == .toggleImage(3))
+        #expect(LinkPolicy.decide(type: .linkActivated, url: URL(string: "ressac-toggle:x")) == .cancel)
+        #expect(LinkPolicy.decide(type: .linkActivated, url: URL(string: "ressac-toggle:-1")) == .cancel)
+        #expect(LinkPolicy.decide(type: .other, url: URL(string: "ressac-toggle:3")) == .cancel)
+        let page = ArticleTemplate.page(for: mosaicEntry("<p>x</p>"), fulltext: nil, showFull: false, style: ReaderStyle(),
+                                        colorScheme: .dark, theme: ReaderTheme(appearance: .antiope, crt: false))
+        #expect(page.contains("img-src http: https: data: ressac-mosaic:;"))
+        #expect(page.contains("--font-pixel: 1.5;"))  // 17 pt is drawn at 15
+        let large = ArticleTemplate.page(for: mosaicEntry("<p>x</p>"), fulltext: nil, showFull: false, style: ReaderStyle(size: 25),
+                                         colorScheme: .dark, theme: ReaderTheme(appearance: .antiope, crt: false))
+        #expect(large.contains("--font-pixel: 2.5;"))
+    }
+}
