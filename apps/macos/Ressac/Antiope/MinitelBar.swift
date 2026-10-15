@@ -58,6 +58,7 @@ struct MinitelBar: View {
 
     @Environment(AppState.self) private var app
     @Environment(AntiopeState.self) private var antiope
+    @Environment(AntiopeGardenStore.self) private var garden
 
     var body: some View {
         HStack(spacing: 0) {
@@ -71,7 +72,8 @@ struct MinitelBar: View {
                 SearchPrompt(width: max(0, width - Self.keysCells))
             } else {
                 CellLineView(line: Self.hintLine(
-                    Self.hint(column: antiope.column, isGarden: app.selection.isGarden, searchText: app.searchText),
+                    Self.status(progress: app.runs.progress, message: app.selection.isGarden ? garden.message : nil)
+                        ?? Self.hint(column: antiope.column, isGarden: app.selection.isGarden, searchText: app.searchText),
                     width: max(0, width - Self.keysCells)))
             }
         }

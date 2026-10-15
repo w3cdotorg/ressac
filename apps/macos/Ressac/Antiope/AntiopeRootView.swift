@@ -12,6 +12,8 @@ struct AntiopeRootView: View {
 
     let state: AppState
     @State private var antiope: AntiopeState
+    /// Shared by the garden pages and the Minitel bar (phase 12).
+    @State private var garden = AntiopeGardenStore()
     /// Antiope's own text size (decision of 2026-10-14), separate from the Native `reader.size`.
     @AppStorage(ReaderStyle.Keys.antiopeSize) private var storedSize = TeletextFont.defaultSize
 
@@ -27,7 +29,9 @@ struct AntiopeRootView: View {
             let width = max(0, Int(proxy.size.width / cell.width))
             VStack(alignment: .leading, spacing: 0) {
                 PageHeader(width: width)
-                // Phase 12 puts the banner row here (spec §8, Banners).
+                if let banner = state.runs.banner {
+                    AntiopeBannerRow(banner: banner) { state.runs.banner = nil }
+                }
                 HStack(alignment: .top, spacing: 0) {
                     PageIndexColumn()
                         .frame(width: CGFloat(PageIndexColumn.cells) * cell.width)
@@ -51,29 +55,29 @@ struct AntiopeRootView: View {
         .background(AntiopeWindowChrome())
         .environment(state)
         .environment(antiope)
+        .environment(garden)
         .environment(\.teletextSize, size)
         // Neither look inherits an open search prompt; the search text stays (Review Focus #5).
         .onAppear { antiope.closeSearchPrompt(clearing: false) }
         .onDisappear { antiope.closeSearchPrompt(clearing: false) }
     }
 
-    /// The entry list. In a Garden scope the native Garden table stays here until phase 12 draws
-    /// P800–P802.
+    /// The entry list, or P800–P802 in a Garden scope.
     @ViewBuilder private var entriesColumn: some View {
         if case let .garden(scope) = state.selection {
-            GardenTable(state: state, scope: scope)
+            GardenEntryPage(scope: scope)
         } else {
             EntryPageColumn()
         }
     }
 
-    /// P100 SOMMAIRE, P899 GUIDE, or else the selected entry (`ReaderView`, themed by phase 10) or
-    /// the Garden's inspector (redrawn by phase 12).
+    /// P100 SOMMAIRE, P899 GUIDE, or else the selected entry (`ReaderView`, themed by phase 10) or,
+    /// in a Garden scope, the selected feed's inspector page.
     @ViewBuilder private var readerColumn: some View {
         switch antiope.readerPage {
         case .article:
-            if case let .garden(scope) = state.selection {
-                GardenInspector(state: state, scope: scope)
+            if state.selection.isGarden {
+                GardenInspectorPage()
             } else {
                 ReaderView(state: state)
             }
