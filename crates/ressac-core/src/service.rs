@@ -25,6 +25,7 @@ use crate::parse::{
     CHALLENGE_SNIFF_BYTES, ParsedFeed, is_challenge_page, looks_like_html, parse_feed,
 };
 use crate::source::{FeedRef, FetchAttempt, FetchLimits, LocalSource, RawResponse, Source};
+use crate::store::pages::{self, PageKind, PageRow};
 use crate::store::{FeedRow, ImportReport, Store};
 use crate::url_key::{https_variant, url_key};
 use crate::wayback::Wayback;
@@ -91,6 +92,8 @@ pub enum Event {
     Undone {
         feed_id: Option<FeedId>,
     },
+    /// One line of `ressac page list`, or the row `ressac page set` renumbered.
+    Page(PageRow),
 }
 
 pub trait EventSink {
@@ -563,6 +566,16 @@ impl Ressac {
         Ok(error)
     }
 
+    /// Every teletext page: the reserved ones, then each numbered folder and feed.
+    pub fn pages(&self) -> Result<Vec<PageRow>> {
+        pages::list(self.store.conn())
+    }
+
+    /// Gives a folder or a feed another page; see `store::pages::set` for the refusals.
+    pub fn set_page(&self, kind: PageKind, id: i64, page: u16) -> Result<()> {
+        pages::set(self.store.conn(), kind, id, page)
+    }
+
     /// Status counts and safe repairs over active feeds (decisions are not considered).
     pub fn summary(&self) -> Result<Summary> {
         let diags = self.store.diagnoses()?;
@@ -981,6 +994,68 @@ mod tests {
             }),
             serde_json::json!({"event": "probing", "what": "full articles", "total": 20})
         );
+    }
+
+    #[test]
+    fn page_events_have_stable_json() {
+        let row = PageRow {
+            page: 412,
+            kind: PageKind::Feed,
+            id: Some(12),
+            title: "Courrier international".into(),
+            parent_page: Some(400),
+        };
+        assert_eq!(
+            serde_json::to_string(&Event::Page(row)).unwrap(),
+            r#"{"event":"page","page":412,"kind":"feed","id":12,"title":"Courrier international","parent_page":400}"#
+        );
+        let reserved = PageRow {
+            page: 899,
+            kind: PageKind::Reserved,
+            id: None,
+            title: "Guide".into(),
+            parent_page: None,
+        };
+        assert_eq!(
+            serde_json::to_value(Event::Page(reserved)).unwrap(),
+            serde_json::json!({"event": "page", "page": 899, "kind": "reserved", "id": null, "title": "Guide", "parent_page": null})
+        );
+    }
+
+    #[test]
+    fn pages_and_set_page_go_through_the_store() {
+        let app = Ressac::with_parts(
+            Store::open_in_memory().unwrap(),
+            FetchLimits::default(),
+            "http://127.0.0.1:9",
+        )
+        .unwrap();
+        app.import_opml(
+            r#"<opml><body><outline text="Infos"><outline text="A" xmlUrl="https://a.example.org/feed"/></outline></body></opml>"#,
+            false,
+        )
+        .unwrap();
+        let numbered = |app: &Ressac| -> Vec<(u16, PageKind, Option<i64>)> {
+            app.pages()
+                .unwrap()
+                .into_iter()
+                .skip(8)
+                .map(|r| (r.page, r.kind, r.id))
+                .collect()
+        };
+        assert_eq!(
+            numbered(&app),
+            [
+                (200, PageKind::Folder, Some(1)),
+                (201, PageKind::Feed, Some(1))
+            ]
+        );
+        app.set_page(PageKind::Feed, 1, 412).unwrap();
+        assert_eq!(numbered(&app)[1], (412, PageKind::Feed, Some(1)));
+        assert!(matches!(
+            app.set_page(PageKind::Feed, 1, 200),
+            Err(crate::Error::PageTaken { page: 200 })
+        ));
     }
 
     const PARA: &str = "The tide comes in twice a day, pulled by the moon and the sun, and the shore keeps a careful record of every visit in sand, shells and drifting weed.";

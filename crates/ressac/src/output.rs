@@ -128,7 +128,8 @@ impl EventSink for Sink {
                 | Event::Finished { .. }
                 | Event::Extracted { .. }
                 | Event::Decided { .. }
-                | Event::Undone { .. } => {}
+                | Event::Undone { .. }
+                | Event::Page(_) => {}
             },
         }
     }
