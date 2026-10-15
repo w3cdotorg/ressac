@@ -55,3 +55,56 @@ import Testing
         }
     }
 }
+
+@Suite struct TeletextFontTests {
+    @Test func bedsteadIsAvailableInTheApp() {
+        #expect(TeletextFont.isAvailable)
+        #expect(TeletextFont.familyName == "Bedstead")
+        #expect(Bundle.main.url(forResource: TeletextFont.fileName, withExtension: "otf", subdirectory: "Fonts") != nil)
+        #expect(TeletextFont.font(size: 20) == Font.custom("Bedstead", fixedSize: 20))
+    }
+
+    @Test func cellsAndPixelsFollowTheSize() {
+        #expect(TeletextFont.sizeSteps.map(TeletextFont.cell(forSize:)) == [
+            CGSize(width: 9, height: 15), CGSize(width: 12, height: 20),
+            CGSize(width: 15, height: 25), CGSize(width: 18, height: 30),
+        ])
+        #expect(TeletextFont.sizeSteps.map(TeletextFont.pixel(forSize:)) == [1.5, 2, 2.5, 3])
+    }
+
+    @Test func sizesSnapToTheNearestStepAndTiesGoUp() {
+        let cases: [(Double, Double)] = [
+            (12, 15), (15, 15), (17, 15), (17.5, 20), (18, 20), (20, 20), (22, 20), (22.5, 25),
+            (23, 25), (27, 25), (27.5, 30), (28, 30), (40, 30), (-3, 15), (.nan, 20), (.infinity, 20),
+        ]
+        for (size, expected) in cases {
+            #expect(TeletextFont.snapped(size) == expected, "\(size)")
+        }
+        #expect(TeletextFont.defaultSize == 20)
+        #expect(EnvironmentValues().teletextSize == TeletextFont.defaultSize)
+        // Antiope keeps its own size, never the Native `reader.size` (decision of 2026-10-14).
+        #expect(ReaderStyle.Keys.antiopeSize == "reader.size.antiope" && ReaderStyle.Keys.size == "reader.size")
+    }
+
+    @Test func stepsMoveFromTheSnappedSizeAndStopAtTheEnds() {
+        #expect(TeletextFont.step(17, by: 1) == 20)  // a stored 17 draws at 15, so ⌘+ gives 20
+        #expect(TeletextFont.step(18, by: 1) == 25)  // 18 draws at 20
+        #expect(TeletextFont.step(20, by: -1) == 15)
+        #expect(TeletextFont.step(30, by: 1) == 30)
+        #expect(TeletextFont.step(15, by: -1) == 15)
+        #expect(TeletextFont.step(15, by: 7) == 30)
+        #expect(TeletextFont.step(25, by: 0) == 25)
+    }
+
+    /// The French repertoire and the glyphs Antiope draws (spec §2, Font), and what Bedstead lacks.
+    @Test func supportsReadsBedsteadsCharacterSet() {
+        for character in "éèêëàâîïôùûüÿçœæÉÈÊËÀÂÎÏÔÙÛÜŸÇŒÆ«»’“”…–—€°▐█░●*?" {
+            #expect(TeletextFont.supports(character), "\(character)")
+        }
+        #expect(TeletextFont.supports("\u{1FB00}") && TeletextFont.supports("\u{1FB3B}"))  // sextant mosaics
+        #expect(TeletextFont.supports("e\u{301}"))  // composed to é first
+        for character: Character in ["🎉", "東", "❤️", "🇫🇷", "q\u{301}", "\u{301}"] {
+            #expect(!TeletextFont.supports(character), "\(character)")
+        }
+    }
+}

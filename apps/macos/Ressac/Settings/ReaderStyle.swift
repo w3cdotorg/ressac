@@ -101,6 +101,10 @@ struct ReaderStyle: Equatable, Sendable {
     enum Keys {
         static let font = "reader.font"
         static let size = "reader.size"
+        /// Antiope's own text size (decision of 2026-10-14), one of `TeletextFont.sizeSteps`,
+        /// `TeletextFont.defaultSize` until changed. `size` stays the Native size: switching looks
+        /// never changes the other one.
+        static let antiopeSize = "reader.size.antiope"
         static let width = "reader.width"
     }
 
