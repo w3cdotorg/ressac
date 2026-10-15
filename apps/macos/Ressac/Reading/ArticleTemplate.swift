@@ -10,14 +10,14 @@ enum ArticleTemplate {
     // MARK: Sanitiser
 
     /// Removed together with everything inside them.
-    static let droppedElements: Set<String> = [
+    private static let droppedElements: Set<String> = [
         "applet", "audio", "base", "button", "canvas", "dialog", "embed", "form", "frame", "frameset",
         "head", "iframe", "input", "link", "math", "meta", "noscript", "object", "option", "script",
         "select", "source", "style", "svg", "template", "textarea", "title", "track", "video",
     ]
 
     /// Kept, with their allowed attributes. Any other element is unwrapped: its children stay.
-    static let allowedElements: Set<String> = [
+    private static let allowedElements: Set<String> = [
         "a", "abbr", "article", "aside", "b", "bdi", "bdo", "blockquote", "br", "caption", "cite", "code",
         "col", "colgroup", "dd", "del", "details", "dfn", "div", "dl", "dt", "em", "figcaption", "figure",
         "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "i", "img", "ins", "kbd", "li", "main",
@@ -26,7 +26,6 @@ enum ArticleTemplate {
         "u", "ul", "var", "wbr",
     ]
 
-    private static let voidElements: Set<String> = ["br", "col", "hr", "img", "wbr"]
     private static let globalAttributes: Set<String> = ["dir", "lang", "title"]
     private static let elementAttributes: [String: Set<String>] = [
         "a": ["href"],
@@ -98,7 +97,7 @@ enum ArticleTemplate {
         }
     }
 
-    static let cacheCapacity = 32
+    private static let cacheCapacity = 32
     private static let cache = Mutex(Memo())
 
     /// Cache hit and miss counts, for tests.
@@ -141,9 +140,10 @@ enum ArticleTemplate {
     }
 
     static let parseBudget: TimeInterval = 1.0
-    static let maxParsedBytes = 256 * 1024
+    private static let maxParsedBytes = 256 * 1024
     static let maxNestingDepth = 256
-    static let maxInputBytes = 2_000_000
+    private static let maxInputBytes = 2_000_000
+    /// HTML's void elements: never closed, never nested (the renderer and the depth estimate).
     private static let voidTags: Set<String> = [
         "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
     ]
@@ -294,7 +294,7 @@ enum ArticleTemplate {
             // Images below the fold wait until they are scrolled near.
             if tag == "img" { out += #" loading="lazy""# }
             out += ">"
-            guard !voidElements.contains(tag) else { return }
+            guard !voidTags.contains(tag) else { return }
             for child in element.children ?? [] { render(child, baseURL: baseURL, depth: depth + 1, into: &out) }
             out += "</\(tag)>"
         default:
@@ -316,7 +316,7 @@ enum ArticleTemplate {
         }
     }
 
-    static func safeURL(_ raw: String, baseURL: URL?, allowImageData: Bool) -> String? {
+    private static func safeURL(_ raw: String, baseURL: URL?, allowImageData: Bool) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
         let lowered = trimmed.lowercased()
         if allowImageData && lowered.hasPrefix("data:image/") && !lowered.hasPrefix("data:image/svg") {
@@ -328,20 +328,20 @@ enum ArticleTemplate {
         return url.absoluteString
     }
 
-    static func escapeText(_ text: String) -> String {
+    private static func escapeText(_ text: String) -> String {
         text.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
     }
 
-    static func escapeAttribute(_ text: String) -> String {
+    private static func escapeAttribute(_ text: String) -> String {
         escapeText(text).replacingOccurrences(of: "\"", with: "&quot;")
     }
 
     // MARK: Page
 
     /// No scripts, frames, objects, forms or base URL; images from the web; fonts and styles inline.
-    static let contentSecurityPolicy =
+    private static let contentSecurityPolicy =
         "default-src 'none'; img-src http: https: data:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'"
 
     static func page(for entry: EntryRow, fulltext: FulltextRow?, showFull: Bool, style: ReaderStyle, colorScheme: ColorScheme) -> String {
