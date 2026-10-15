@@ -457,7 +457,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let app = open(&db)?;
             // A v1 → v2 migration leaves every `needs_triage` at 0 until the next
             // diagnosis or decision: compute the flags now, so the app's Garden is right.
-            ressac_core::garden::recompute_triage(app.store())?;
+            garden::recompute_triage(app.store())?;
             let event = Event::Finished {
                 summary: app.summary()?,
             };
