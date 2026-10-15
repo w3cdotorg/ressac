@@ -61,11 +61,11 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 
 - [ ] CI : épingler les actions GitHub par SHA plutôt que par étiquette.
 
-### À vérifier à la main (Clément)
+### Vérifié à la main par Clément (15/10/2026)
 
-- [ ] Alerte « binaire `ressac` absent » au lancement.
-- [ ] Une fenêtre rouverte (⌘W puis clic sur l'icône du Dock) garde la sélection.
-- [ ] « Show Log » et « Open Site » dans le jardin.
-- [ ] Clavier complet : P100 et la bannière.
-- [ ] Comptes du Cimetière dans les deux apparences.
-- [ ] Premier passage de la CI sur l'image de préversion `xcode-27`.
+- [x] Alerte « binaire `ressac` absent » au lancement.
+- [x] Une fenêtre rouverte (⌘W puis clic sur l'icône du Dock) garde la sélection.
+- [x] « Show Log » et « Open Site » dans le jardin.
+- [x] Clavier complet : P100 et la bannière.
+- [x] Comptes du Cimetière dans les deux apparences.
+- [x] Premier passage de la CI sur l'image de préversion `xcode-27` : Xcode 27.0, SDK macOS 27.0, 350 tests déclarés et exécutés (PR #6).
