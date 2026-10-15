@@ -92,3 +92,44 @@ import Testing
         #expect(lines.allSatisfy { $0.spans.allSatisfy { $0.cells.runs.allSatisfy { !$0.isReplacement } } })
     }
 }
+
+@MainActor @Suite struct SearchPromptTests {
+    @Test func thePromptAsksAsATerminalWould() {
+        #expect(SearchPrompt.label == "SEARCH? ")
+    }
+
+    /// Review Focus #5: switching Appearance with the prompt open closes it and keeps the search.
+    @Test func switchingLooksClosesThePromptAndKeepsTheSearch() async throws {
+        let (state, test, _) = try makeState()
+        let match = try test.entry(feed: 1, title: "Tidal bore", body: "ressac")
+        try test.entry(feed: 1, title: "Other", body: "calm")
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { state.entries.count == 2 })
+        let antiope = AntiopeState(app: state)
+        state.isSearchFocused = true  // ⌘F
+        #expect(antiope.isSearchPromptOpen && antiope.keyFocus(in: nil) == .textInput)
+        state.searchText = "tidal"
+        #expect(state.entries.map(\.entryId) == [match])
+        antiope.closeSearchPrompt(clearing: false)  // AntiopeRootView.onDisappear
+        #expect(!state.isSearchFocused && state.letterShortcutsEnabled)  // Native's letters work at once
+        #expect(state.searchText == "tidal" && state.entries.map(\.entryId) == [match])
+        let back = AntiopeState(app: state)  // the look comes back: a fresh state, the prompt shut
+        #expect(!back.isSearchPromptOpen && back.keyFocus(in: nil) == .sidebar)
+        #expect(MinitelBar.hint(column: back.column, isGarden: false, searchText: state.searchText).text == "SEARCH: tidal")
+    }
+
+    @Test func escapeClearsTheSearchAndTheListComesBack() async throws {
+        let (state, test, _) = try makeState()
+        try test.entry(feed: 1, title: "Tidal bore", body: "ressac")
+        try test.entry(feed: 1, title: "Other", body: "calm")
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { state.entries.count == 2 })
+        let antiope = AntiopeState(app: state)
+        antiope.isSearchPromptOpen = true
+        state.searchText = "zzz"
+        #expect(state.entries.isEmpty)
+        antiope.closeSearchPrompt(clearing: true)
+        #expect(state.searchText.isEmpty && !antiope.isSearchPromptOpen)
+        #expect(state.entries.count == 2)
+    }
+}

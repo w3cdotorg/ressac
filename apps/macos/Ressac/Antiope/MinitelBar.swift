@@ -67,9 +67,13 @@ struct MinitelBar: View {
                     .accessibilityLabel(key.accessibilityLabel)
                 CellLineView(line: .blank(1))
             }
-            CellLineView(line: Self.hintLine(
-                Self.hint(column: antiope.column, isGarden: app.selection.isGarden, searchText: app.searchText),
-                width: max(0, width - Self.keysCells)))
+            if antiope.isSearchPromptOpen {
+                SearchPrompt(width: max(0, width - Self.keysCells))
+            } else {
+                CellLineView(line: Self.hintLine(
+                    Self.hint(column: antiope.column, isGarden: app.selection.isGarden, searchText: app.searchText),
+                    width: max(0, width - Self.keysCells)))
+            }
         }
     }
 
@@ -91,5 +95,44 @@ struct MinitelBar: View {
     /// The hint after one blank cell, exactly `width` cells.
     static func hintLine(_ hint: MinitelHint, width: Int) -> CellLine {
         CellLine([CellSpan(" " + hint.text, cells: width, foreground: hint.colour)], accessibilityText: hint.text)
+    }
+}
+
+/// `SEARCH? ____` in the Minitel bar (spec §5, Search), opened by ⌘F: a field bound to
+/// `AppState.searchText`, the same text as the native search field. Return keeps the search, Esc
+/// clears it; both close the prompt, and so does a click elsewhere (the search stays).
+struct SearchPrompt: View {
+    static let label = "SEARCH? "
+
+    let width: Int
+
+    @Environment(AppState.self) private var app
+    @Environment(AntiopeState.self) private var antiope
+    @Environment(\.teletextSize) private var size
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        @Bindable var app = app
+        let cell = TeletextFont.cell(forSize: size)
+        let labelCells = min(Self.label.count + 1, width)
+        HStack(spacing: 0) {
+            CellLineView(line: CellLine([CellSpan(" " + Self.label, cells: labelCells, foreground: .cyan)],
+                                        accessibilityText: ""))
+            TextField("Search", text: $app.searchText, prompt: Text("____").foregroundStyle(TeletextColor.yellow.color))
+                .textFieldStyle(.plain)
+                .font(TeletextFont.font(size: size))
+                .foregroundStyle(TeletextColor.yellow.color)
+                .tint(TeletextColor.white.color)
+                .focused($focused)
+                .onSubmit { antiope.closeSearchPrompt(clearing: false) }
+                .onExitCommand { antiope.closeSearchPrompt(clearing: true) }
+                .frame(width: CGFloat(max(0, width - labelCells)) * cell.width, height: cell.height, alignment: .leading)
+                .background(TeletextColor.black.color)
+        }
+        // After the first layout, so that the field exists when it takes the focus.
+        .task { focused = true }
+        .onChange(of: focused) { _, isFocused in
+            if !isFocused { antiope.closeSearchPrompt(clearing: false) }
+        }
     }
 }
