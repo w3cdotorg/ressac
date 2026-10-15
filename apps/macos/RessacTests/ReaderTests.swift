@@ -197,6 +197,21 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         }
     }
 
+    /// libxml checks a tag's attributes pairwise: past `maxAttributesPerTag`, plain text.
+    @Test func aTagWithThousandsOfAttributesIsShownAsText() {
+        let many = "<p " + (0..<20_000).map { "a\($0)=x" }.joined(separator: " ") + ">kept</p>"  // 164 KB: 0.7 s in libxml
+        #expect(ArticleTemplate.mostAttributesOnATag(many) == 20_000)
+        #expect(ArticleTemplate.mostAttributesOnATag(many, stoppingAbove: 256) == 257)
+        let start = Date()
+        #expect(ArticleTemplate.sanitize(many) == "<p>kept</p>")
+        #expect(Date().timeIntervalSince(start) < 0.2)
+        // Quoted values are skipped whole, spaces and `>` included; unquoted ones up to a space.
+        #expect(ArticleTemplate.mostAttributesOnATag(#"<p>x</p><img src="a b>c" alt='d e' width=600 data-x = "1">"#) == 4)
+        #expect(ArticleTemplate.mostAttributesOnATag("<p>no attributes</p><br/>") == 0)
+        let fine = "<p " + (0..<200).map { "a\($0)=x" }.joined(separator: " ") + ">kept</p>"
+        #expect(ArticleTemplate.sanitize(fine).hasPrefix("<p>kept"))
+    }
+
     @Test func optionalEndTagsStayOnTheParsedPath() {
         let rows = String(repeating: "<tr><td>a<td>b", count: 150)
         let defs = String(repeating: "<dt>t<dd>d", count: 150)

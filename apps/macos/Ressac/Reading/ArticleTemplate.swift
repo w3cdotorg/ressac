@@ -56,10 +56,11 @@ enum ArticleTemplate {
 
     private static func sanitizeUncached(_ html: String, baseURL: URL?, budget: TimeInterval, mosaics: Bool) -> (html: String, timedOut: Bool) {
         // Tidy and the recursive renderer overflow the stack on pathological nesting, and libxml's
-        // work grows with the square of the depth, so such input (or anything big) skips the
-        // parser and is shown as escaped plain text.
+        // work grows with the square of the depth and of a tag's attributes, so such input (or
+        // anything big) skips the parser and is shown as escaped plain text.
         let size = html.utf8.count
-        if size > maxParsedBytes || estimatedNestingDepth(html, stoppingAbove: maxNestingDepth) > maxNestingDepth {
+        if size > maxParsedBytes || estimatedNestingDepth(html, stoppingAbove: maxNestingDepth) > maxNestingDepth
+            || mostAttributesOnATag(html, stoppingAbove: maxAttributesPerTag) > maxAttributesPerTag {
             let text = size > maxInputBytes ? String(decoding: html.utf8.prefix(maxInputBytes), as: UTF8.self) : html
             return (plainTextFallback(text), false)
         }
@@ -145,6 +146,8 @@ enum ArticleTemplate {
     static let parseBudget: TimeInterval = 1.0
     private static let maxParsedBytes = 256 * 1024
     static let maxNestingDepth = 256
+    /// libxml checks a tag's attributes pairwise for duplicates: 60,000 on one tag took 5 s.
+    static let maxAttributesPerTag = 256
     private static let maxInputBytes = 2_000_000
     /// HTML's void elements: never closed, never nested (the renderer and the depth estimate).
     private static let voidTags: Set<String> = [
@@ -223,6 +226,47 @@ enum ArticleTemplate {
         case "html": 220
         default: 100
         }
+    }
+
+    /// The most attributes on one start tag. A value is skipped whole (quoted, it may hold
+    /// spaces and `>`), so only names count; an unquoted value is read up to a space or `>`.
+    /// Linear; stops as soon as a tag has more than `limit` (and returns `limit + 1`).
+    static func mostAttributesOnATag(_ html: String, stoppingAbove limit: Int = .max) -> Int {
+        let bytes = Array(html.utf8)
+        func isSpace(_ b: UInt8) -> Bool { b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0C || b == 0x0D }
+        var most = 0, i = 0
+        while i < bytes.count {
+            guard bytes[i] == 0x3C, i + 1 < bytes.count, isASCIILetter(bytes[i + 1]) else { i += 1; continue }  // <a
+            var j = i + 1
+            while j < bytes.count, !isSpace(bytes[j]), bytes[j] != 0x3E, bytes[j] != 0x2F { j += 1 }  // the tag name
+            var count = 0
+            scan: while j < bytes.count {
+                switch bytes[j] {
+                case 0x3E:  // >
+                    break scan
+                case 0x3D:  // =: skip the value
+                    j += 1
+                    while j < bytes.count, isSpace(bytes[j]) { j += 1 }
+                    if j < bytes.count, bytes[j] == 0x22 || bytes[j] == 0x27 {
+                        let quote = bytes[j]
+                        j += 1
+                        while j < bytes.count, bytes[j] != quote { j += 1 }
+                        j += 1
+                    } else {
+                        while j < bytes.count, !isSpace(bytes[j]), bytes[j] != 0x3E { j += 1 }
+                    }
+                case let b where isSpace(b) || b == 0x2F:  // spaces and /
+                    j += 1
+                default:  // a name
+                    count += 1
+                    if count > limit { return count }
+                    while j < bytes.count, !isSpace(bytes[j]), bytes[j] != 0x3E, bytes[j] != 0x3D, bytes[j] != 0x2F { j += 1 }
+                }
+            }
+            most = max(most, count)
+            i = j + 1
+        }
+        return most
     }
 
     /// HTML's optional end tags: what an opening tag closes when it sits on top of the stack.
