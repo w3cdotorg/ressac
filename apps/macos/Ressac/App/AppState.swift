@@ -151,6 +151,8 @@ enum PendingPanel: Equatable, Sendable {
     /// when it started; `.oldest`: its last page was loaded.
     @ObservationIgnored private var listFloor: ListFloor?
     @ObservationIgnored private var isLoadMoreScheduled = false
+    /// Counts the list restarts (`listDidChange`): a deferred page only loads into the list it was scheduled for.
+    @ObservationIgnored private var listGeneration = 0
 
     init(database: AppDatabase, runs: RunCoordinator) {
         self.database = database
@@ -324,9 +326,11 @@ enum PendingPanel: Equatable, Sendable {
               entries.suffix(Self.loadMoreMargin).contains(where: { $0.entryId == entryId })
         else { return }
         isLoadMoreScheduled = true
+        let generation = listGeneration
         Task { [weak self] in
             guard let self else { return }
             isLoadMoreScheduled = false
+            guard generation == listGeneration else { return }  // the source, search or filter changed since
             loadMoreEntries()
         }
     }
@@ -568,6 +572,7 @@ enum PendingPanel: Equatable, Sendable {
 
     /// The list restarts with one page, keeping the selection loaded.
     private func listDidChange() {
+        listGeneration += 1
         do {
             listFloor = try floor(below: nil, keeping: selectedEntryId)
         } catch {

@@ -410,6 +410,19 @@ func calls(_ stub: Stub) throws -> [String] {
         #expect(state.entries.count == 4)
     }
 
+    /// A page scheduled for one list never lands on another: the source changes before the turn.
+    @Test func a_scheduled_page_is_dropped_when_the_list_changed() async throws {
+        let (state, test, _) = try makeState()
+        let first = try days(test, 30)
+        _ = try days(test, 30, feed: 2)
+        state.listPageSize = 24
+        state.selection = .feed(1)
+        state.entryRowAppeared(first[4])  // schedules the next page of feed 1 for the next turn
+        state.selection = .feed(2)  // before that turn
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(state.entries.count == 24 && state.hasMoreEntries)
+    }
+
     @Test func next_entry_past_the_loaded_rows_loads_the_next_page() throws {
         let (state, test, _) = try makeState()
         let ids = try days(test, 3)
