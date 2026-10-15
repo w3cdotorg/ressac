@@ -183,7 +183,7 @@ import WebKit
         #expect(await eventually { state.entries.count == 2 })
         state.autoReadDelay = .seconds(60)
         let harness = Harness()
-        let router = ReadingKeyRouter(state: state)
+        let router = ReadingKeyRouter(state: state, focus: ResponderFocusProvider(), antiope: nil)
         router.window = harness.window
         return (router, harness, state, test, [newer, older])
     }
@@ -541,5 +541,115 @@ final class ManualClock: Clock, @unchecked Sendable {
         antiope.isSearchPromptOpen = true
         antiope.closeSearchPrompt(clearing: true)  // Esc
         #expect(!state.isSearchFocused && state.searchText.isEmpty)
+    }
+}
+
+/// The Antiope window: no split view, the focus is `AntiopeState.column`.
+@MainActor @Suite struct AntiopeKeyRouterTests {
+    func makeRouter() throws -> (ReadingKeyRouter, NSWindow, NSTextField, AntiopeState, AppState, TestDatabase) {
+        let (state, test, _) = try makeState()
+        let antiope = AntiopeState(app: state)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 500),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let field = NSTextField()
+        window.contentView = NSView()
+        window.contentView?.addSubview(field)
+        let router = ReadingKeyRouter(state: state, focus: antiope, antiope: antiope)
+        router.window = window
+        return (router, window, field, antiope, state, test)
+    }
+
+    func press(_ digits: String, _ router: ReadingKeyRouter, _ window: NSWindow) -> [Bool] {
+        digits.map { router.handle(keyEvent(String($0), window: window)) }
+    }
+
+    @Test func typedDigitsJumpToTheFeedsPage() throws {
+        let (router, window, _, antiope, state, _) = try makeRouter()
+        let page = try #require(state.sidebar.feeds.first { $0.feedId == 8 }?.page)
+        antiope.column = .reader
+        #expect(press(String(page), router, window) == [true, true, true])
+        #expect(state.selection == .feed(8))
+        #expect(antiope.column == .index)
+    }
+
+    /// Review Focus #2 at the router: a focused text field, or the open prompt, keeps the digits.
+    @Test func digitsGoToAFocusedTextFieldOrTheOpenPrompt() throws {
+        let (router, window, field, antiope, state, _) = try makeRouter()
+        #expect(window.makeFirstResponder(field))
+        #expect(press("401", router, window) == [false, false, false])
+        #expect(!antiope.entry.isActive && state.selection == .unread)
+        #expect(window.makeFirstResponder(nil))
+        antiope.isSearchPromptOpen = true
+        #expect(press("401", router, window) == [false, false, false])
+        #expect(!antiope.entry.isActive && state.selection == .unread)
+        #expect(!router.handle(keyEvent("s", modifiers: .option, window: window)))
+        #expect(antiope.readerPage == .article)
+    }
+
+    @Test func aHeldDigitTypesOnce() throws {
+        let (router, window, _, antiope, _, _) = try makeRouter()
+        #expect(router.handle(keyEvent("4", window: window)))
+        #expect(router.handle(keyEvent("4", window: window, isARepeat: true)))  // spent
+        #expect(antiope.entry.display == "4__")
+        #expect(router.handle(keyEvent("\u{7F}", window: window)))
+        #expect(!antiope.entry.isActive)
+        #expect(!router.handle(keyEvent("\u{1B}", window: window)))  // nothing to cancel: the key goes on
+    }
+
+    @Test func arrowsMoveBetweenTheColumnsAndThroughTheIndex() async throws {
+        let (router, window, _, antiope, state, test) = try makeRouter()
+        let id = try test.entry(feed: 1)
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { !state.entries.isEmpty })
+        state.autoReadDelay = .seconds(60)
+        #expect(router.handle(arrowEvent(NSDownArrowFunctionKey, window: window)))  // 101 → 102
+        #expect(state.selection == .today)
+        #expect(router.handle(arrowEvent(NSUpArrowFunctionKey, window: window)))
+        #expect(state.selection == .unread)
+        #expect(router.handle(arrowEvent(NSRightArrowFunctionKey, window: window)))
+        #expect(antiope.column == .entries && state.selectedEntryId == id)
+        #expect(router.handle(arrowEvent(NSRightArrowFunctionKey, window: window)))
+        #expect(antiope.column == .reader)
+        #expect(!router.handle(arrowEvent(NSRightArrowFunctionKey, window: window)))  // nothing further right
+        #expect(router.handle(arrowEvent(NSLeftArrowFunctionKey, window: window)))
+        #expect(antiope.column == .entries)
+    }
+
+    @Test func optionKeysOpenTheSpecialPages() throws {
+        let (router, window, _, antiope, _, _) = try makeRouter()
+        #expect(router.handle(keyEvent("g", modifiers: .option, window: window)))
+        #expect(antiope.readerPage == .guide)
+        #expect(router.handle(keyEvent("s", modifiers: .option, window: window)))
+        #expect(antiope.readerPage == .index && antiope.currentPage == 100)
+        #expect(router.handle(keyEvent("?", modifiers: .shift, window: window)))
+        #expect(antiope.readerPage == .guide)
+    }
+}
+
+@MainActor @Suite struct ReadingWindowTests {
+    /// A live Appearance switch may add the new look's reader before the old one leaves: the
+    /// window must stay a reading window until the last reader is gone.
+    @Test func aWindowStaysReadingUntilTheLastReaderLeaves() throws {
+        let (state, _, _) = try makeState()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let other = NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = NSView()
+        func reader() -> ReadingWindowReader.WindowView {
+            ReadingWindowReader.WindowView(router: ReadingKeyRouter(state: state, focus: ResponderFocusProvider(), antiope: nil))
+        }
+        let old = reader()
+        let new = reader()
+        window.contentView?.addSubview(old)
+        window.contentView?.addSubview(new)  // the new look arrives first
+        old.removeFromSuperview()
+        ReadingWindowReader.dismantleNSView(old, coordinator: ())  // SwiftUI dismantles it too: no second unregistration
+        state.windowDidChangeKey(other, isKey: true)
+        #expect(!state.letterShortcutsEnabled)  // another window has the keyboard
+        state.windowDidChangeKey(window, isKey: true)
+        #expect(state.letterShortcutsEnabled)  // still a reading window
+        new.removeFromSuperview()
+        state.windowDidChangeKey(window, isKey: true)
+        #expect(!state.letterShortcutsEnabled)  // no reading window left: the letters are off
     }
 }

@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import WebKit
 
 /// What a reading key asks the window to do (spec §7, Keyboard; Antiope spec §6).
@@ -173,14 +174,19 @@ enum ReadingKeys {
 /// enough: AppKit tries them only once the first responder has declined the key, and the
 /// sidebar and the list (type-select, Space) and the reader (WebKit scrolls with Space, even
 /// at the bottom) each keep some of `j`, `k` and Space for themselves (acceptance fix 1).
+/// In Antiope, `AntiopeState` is offered each command before `AppState`.
 @MainActor final class ReadingKeyRouter {
     weak var window: NSWindow?
     let state: AppState
-    let focus: any KeyFocusProvider = ResponderFocusProvider()
+    let focus: any KeyFocusProvider
+    /// The Antiope window's state; nil in the native window.
+    let antiope: AntiopeState?
     private var monitor: Any?
 
-    init(state: AppState) {
+    init(state: AppState, focus: any KeyFocusProvider, antiope: AntiopeState?) {
         self.state = state
+        self.focus = focus
+        self.antiope = antiope
     }
 
     isolated deinit {
@@ -206,9 +212,13 @@ enum ReadingKeys {
     func handle(_ event: NSEvent) -> Bool {
         guard let window, event.type == .keyDown, event.windowNumber == window.windowNumber,
               let key = ReadingKeys.key(for: event),
-              let command = ReadingKeys.command(for: key, in: focus.keyFocus(in: window), appearance: .native),
-              state.perform(command, isRepeat: event.isARepeat)
+              let command = ReadingKeys.command(for: key, in: focus.keyFocus(in: window),
+                                                appearance: antiope == nil ? .native : .antiope)
         else { return false }
+        // A held digit must not type `444`, nor a held ⌥R queue refreshes: spent, nothing done.
+        if event.isARepeat, command.actsOncePerPress { return true }
+        if let antiope, antiope.handle(command) { return true }
+        guard state.perform(command, isRepeat: event.isARepeat) else { return false }
         switch command {
         case .focusEntryList: focusTable(inColumn: MainColumns.list, of: window)
         case .focusSidebar: focusTable(inColumn: MainColumns.sidebar, of: window)
@@ -222,6 +232,18 @@ enum ReadingKeys {
               let table = MainColumns.firstTable(in: columns[index])
         else { return }
         window.makeFirstResponder(table)
+    }
+}
+
+private extension ReadingCommand {
+    /// Antiope keys that act once per press; `⌫` and the index arrows repeat when held.
+    var actsOncePerPress: Bool {
+        switch self {
+        case .pageDigit, .pageCancel, .sommaire, .guide, .repetition, .toggleImages, .nextColumn, .previousColumn:
+            true
+        default:
+            false
+        }
     }
 }
 
@@ -258,5 +280,57 @@ enum ReadingKeys {
             pending += view.subviews
         }
         return nil
+    }
+}
+
+/// Tells `AppState` which window is a reading window, to gate single-letter shortcuts, and routes
+/// that window's keys. Each look puts one behind its root view with its own router (`MainView`,
+/// `AntiopeRootView`).
+struct ReadingWindowReader: NSViewRepresentable {
+    let makeRouter: @MainActor () -> ReadingKeyRouter
+
+    func makeNSView(context: Context) -> WindowView { WindowView(router: makeRouter()) }
+
+    func updateNSView(_ view: WindowView, context: Context) {}
+
+    static func dismantleNSView(_ view: WindowView, coordinator: ()) {
+        view.leave()
+    }
+
+    final class WindowView: NSView {
+        let router: ReadingKeyRouter
+        /// The window this view registered, so that it unregisters it exactly once.
+        private weak var registered: NSWindow?
+
+        init(router: ReadingKeyRouter) {
+            self.router = router
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            super.viewWillMove(toWindow: newWindow)
+            if newWindow !== window { leave() }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            router.window = window
+            guard let window else { return }
+            if registered !== window {
+                router.state.registerReadingWindow(window)
+                registered = window
+            }
+            router.start()
+        }
+
+        /// Stops routing and gives the window back, once.
+        func leave() {
+            router.stop()
+            if let registered { router.state.unregisterReadingWindow(registered) }
+            registered = nil
+        }
     }
 }

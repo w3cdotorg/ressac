@@ -118,8 +118,12 @@ enum PendingPanel: Equatable, Sendable {
 
     @ObservationIgnored private var externalChanges: ExternalChangeMonitor?
     @ObservationIgnored private var systemObservers: [any NSObjectProtocol] = []
-    /// The windows showing `MainView`, each registered by its own view.
+    /// The windows showing a reading root view (`MainView` or `AntiopeRootView`), each
+    /// registered by its `ReadingWindowReader`.
     @ObservationIgnored private let readingWindows = NSHashTable<NSWindow>.weakObjects()
+    /// How many readers hold each of them: on a live Appearance switch the new look's reader can
+    /// arrive before the old one leaves.
+    @ObservationIgnored private var readingWindowHolds: [ObjectIdentifier: Int] = [:]
     /// One Space at a time: a second press while the first runs is spent without effect.
     @ObservationIgnored private var isAdvancing = false
     @ObservationIgnored private var sidebarObservation: AnyDatabaseCancellable?
@@ -189,16 +193,24 @@ enum PendingPanel: Equatable, Sendable {
         else if isKey { readingWindowIsKey = false }
     }
 
-    /// Called by the main view (`ReadingWindowReader`) when it enters a window.
+    /// Called by a root view's `ReadingWindowReader` when it enters a window.
     func registerReadingWindow(_ window: NSWindow) {
         readingWindows.add(window)
+        readingWindowHolds[ObjectIdentifier(window), default: 0] += 1
         readingWindowIsKey = window.isKeyWindow
     }
 
-    /// Called by the main view when it leaves `window`. Another window's registration stays,
-    /// and with no reading window left the letters are off.
+    /// Called by a root view's reader when it leaves `window`. The window stays a reading
+    /// window while another reader holds it; another window's registration stays too, and with
+    /// no reading window left the letters are off.
     func unregisterReadingWindow(_ window: NSWindow) {
-        guard readingWindows.contains(window) else { return }
+        let id = ObjectIdentifier(window)
+        guard readingWindows.contains(window), let holds = readingWindowHolds[id] else { return }
+        guard holds == 1 else {
+            readingWindowHolds[id] = holds - 1
+            return
+        }
+        readingWindowHolds[id] = nil
         readingWindows.remove(window)
         readingWindowIsKey = readingWindows.allObjects.contains { $0.isKeyWindow }
     }
