@@ -169,7 +169,7 @@ Correctifs faits pendant l'exécution, après l'écriture du plan :
 
 Comptes à la fin : `ressac` 35 tests unitaires et 19 tests de CLI, cœur 260 (et 1 ignoré), puis 1 (`article_proxy`), 9 (contrat) et 4 (`end_to_end`) dans ses tests d'intégration ; appli 349 tests dans 84 suites, sans avertissement.
 
-À vérifier à la main par Clément : l'alerte quand `ressac` manque, un relancement qui garde la sélection, « Show Log » et « Open Site », le clavier complet sur P100 et la bannière, les comptes du Cimetière dans les deux apparences, et le premier passage de la CI sur l'image `xcode-27`.
+À vérifier à la main par Clément : l'alerte quand `ressac` manque, une fenêtre rouverte (⌘W puis Dock) qui garde la sélection, « Show Log » et « Open Site », le clavier complet sur P100 et la bannière, les comptes du Cimetière dans les deux apparences, et le premier passage de la CI sur l'image `xcode-27`.
 
 Durcissement proposé, non fait : épingler les actions GitHub par SHA.
 

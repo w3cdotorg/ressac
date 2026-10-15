@@ -33,7 +33,7 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [x] Listes d'articles : 500 lignes à la fois, la suite au défilement ou au clavier ; `Espace` trouve le prochain non lu au-delà des lignes chargées par une requête et un changement de page ; une marque « lu » ne relit plus que la page chargée et deux comptes (todo-fixes, phases 5 et 6).
 - [x] Plafond du HTML analysé porté à 512 Ko (todo-fixes, phase 6).
 - [x] Nettoyage : l'estimation de profondeur suit libxml, plus de 2048 attributs sur une balise donnent du texte simple, deux fils de nettoyage au plus (un abandonné, un vivant) pour qu'un nouvel article ne soit jamais bloqué (todo-fixes, phase 6).
-- [x] Images : largeur et hauteur reprises du style ou des attributs `data-` du flux ; en Antiope, la boîte `.mosaic` réserve sa hauteur avant l'arrivée de l'image (todo-fixes, phase 6).
+- [x] Images : largeur et hauteur reprises des attributs `width` et `height` ou du style en pixels (jamais des attributs `data-`, qui décrivent l'image d'origine et non celle servie) ; en Antiope, la boîte `.mosaic` réserve sa hauteur avant l'arrivée de l'image (todo-fixes, phase 6).
 - [ ] Avertissement « reentrant operation in its NSTableView delegate » : une source corrigée, une autre possible non reproduite. N'agir qu'avec une trace.
 
 ### Cœur et CLI
@@ -64,7 +64,7 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 ### À vérifier à la main (Clément)
 
 - [ ] Alerte « binaire `ressac` absent » au lancement.
-- [ ] Un relancement garde la sélection.
+- [ ] Une fenêtre rouverte (⌘W puis clic sur l'icône du Dock) garde la sélection.
 - [ ] « Show Log » et « Open Site » dans le jardin.
 - [ ] Clavier complet : P100 et la bannière.
 - [ ] Comptes du Cimetière dans les deux apparences.
