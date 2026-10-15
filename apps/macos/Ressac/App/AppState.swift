@@ -306,6 +306,11 @@ enum PendingPanel: Equatable, Sendable {
             if !selection.isGarden, selectedEntryId == nil { selectedEntryId = entries.first?.entryId }
         case .focusSidebar:
             break
+        case .pageDigit, .pageCorrect, .pageCancel, .sommaire, .guide, .repetition, .toggleImages,
+             .nextColumn, .previousColumn, .nextIndexRow, .previousIndexRow:
+            // Antiope's own keys: `AntiopeState.handle(_:)` had them first and declined them,
+            // so the key goes on to the focused view.
+            return false
         }
         return true
     }

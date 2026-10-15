@@ -8,33 +8,39 @@ import WebKit
 /// focused view (acceptance fix 1 and 3): the sidebar's and the list's type-select and the
 /// reader's own Space scrolling used to take `j`, `k` and Space before the Go menu saw them.
 @MainActor @Suite struct ReadingKeysTests {
+    static let readingFocuses: [KeyFocus] = [.sidebar, .entryList, .reader, .window]
+    static let antiopeOnlyKeys: [ReadingKeys.Key] = (0...9).map(ReadingKeys.Key.digit)
+        + [.delete, .escape, .option("s"), .option("g"), .option("r"), .question, .letter("i")]
+
     @Test func lettersAndSpaceActEverywhereButInTextFields() {
-        for focus in [KeyFocus.sidebar, .entryList, .reader, .window] {
-            #expect(ReadingKeys.command(for: .letter("j"), in: focus) == .nextEntry)
-            #expect(ReadingKeys.command(for: .letter("k"), in: focus) == .previousEntry)
-            #expect(ReadingKeys.command(for: .letter("m"), in: focus) == .toggleRead)
-            #expect(ReadingKeys.command(for: .letter("s"), in: focus) == .toggleStar)
-            #expect(ReadingKeys.command(for: .space, in: focus) == .advance)
+        for appearance in Appearance.allCases {
+            for focus in Self.readingFocuses {
+                #expect(ReadingKeys.command(for: .letter("j"), in: focus, appearance: appearance) == .nextEntry)
+                #expect(ReadingKeys.command(for: .letter("k"), in: focus, appearance: appearance) == .previousEntry)
+                #expect(ReadingKeys.command(for: .letter("m"), in: focus, appearance: appearance) == .toggleRead)
+                #expect(ReadingKeys.command(for: .letter("s"), in: focus, appearance: appearance) == .toggleStar)
+                #expect(ReadingKeys.command(for: .space, in: focus, appearance: appearance) == .advance)
+            }
+            for key in [ReadingKeys.Key.letter("j"), .letter("k"), .space, .up, .down, .left, .right] {
+                #expect(ReadingKeys.command(for: key, in: .textInput, appearance: appearance) == nil)
+            }
+            #expect(ReadingKeys.command(for: .letter("x"), in: .entryList, appearance: appearance) == nil)
+            #expect(ReadingKeys.command(for: .space, in: .control, appearance: appearance) == nil)  // a focused button keeps Space
         }
-        for key in [ReadingKeys.Key.letter("j"), .letter("k"), .space, .up, .down, .left, .right] {
-            #expect(ReadingKeys.command(for: key, in: .textInput) == nil)
-        }
-        #expect(ReadingKeys.command(for: .letter("x"), in: .entryList) == nil)
-        #expect(ReadingKeys.command(for: .space, in: .control) == nil)  // a focused button keeps Space
     }
 
     @Test func arrowsFollowTheFocus() {
         for focus in [KeyFocus.entryList, .reader] {
-            #expect(ReadingKeys.command(for: .down, in: focus) == .nextEntry)
-            #expect(ReadingKeys.command(for: .up, in: focus) == .previousEntry)
+            #expect(ReadingKeys.command(for: .down, in: focus, appearance: .native) == .nextEntry)
+            #expect(ReadingKeys.command(for: .up, in: focus, appearance: .native) == .previousEntry)
         }
-        #expect(ReadingKeys.command(for: .down, in: .sidebar) == nil)  // the sidebar's own arrows
-        #expect(ReadingKeys.command(for: .up, in: .sidebar) == nil)
-        #expect(ReadingKeys.command(for: .right, in: .sidebar) == .focusEntryList)
-        #expect(ReadingKeys.command(for: .left, in: .entryList) == .focusSidebar)
-        #expect(ReadingKeys.command(for: .left, in: .sidebar) == nil)
-        #expect(ReadingKeys.command(for: .right, in: .entryList) == nil)
-        #expect(ReadingKeys.command(for: .left, in: .reader) == nil)
+        #expect(ReadingKeys.command(for: .down, in: .sidebar, appearance: .native) == nil)  // the sidebar's own arrows
+        #expect(ReadingKeys.command(for: .up, in: .sidebar, appearance: .native) == nil)
+        #expect(ReadingKeys.command(for: .right, in: .sidebar, appearance: .native) == .focusEntryList)
+        #expect(ReadingKeys.command(for: .left, in: .entryList, appearance: .native) == .focusSidebar)
+        #expect(ReadingKeys.command(for: .left, in: .sidebar, appearance: .native) == nil)
+        #expect(ReadingKeys.command(for: .right, in: .entryList, appearance: .native) == nil)
+        #expect(ReadingKeys.command(for: .left, in: .reader, appearance: .native) == nil)
     }
 
     @Test func modifiedKeysAreLeftAlone() {
@@ -47,8 +53,95 @@ import WebKit
         #expect(ReadingKeys.key(for: keyEvent("J", modifiers: .capsLock)) == .letter("j"))
         // A posted event carries a private flag (bit 29): it must not hide the key.
         #expect(ReadingKeys.key(for: keyEvent("j", modifiers: NSEvent.ModifierFlags(rawValue: 1 << 29))) == .letter("j"))
-        #expect(ReadingKeys.key(for: keyEvent("j", modifiers: .option)) == nil)
         #expect(ReadingKeys.key(for: keyEvent("j", modifiers: .control)) == nil)
+        // ⌥ and a letter is a key Antiope may use; ⌥J is none of them, in either look.
+        #expect(ReadingKeys.key(for: keyEvent("j", modifiers: .option)) == .option("j"))
+        for appearance in Appearance.allCases {
+            #expect(ReadingKeys.command(for: .option("j"), in: .entryList, appearance: appearance) == nil)
+        }
+    }
+
+    @Test func antiopeKeysAreRecognised() {
+        #expect(ReadingKeys.key(for: keyEvent("4")) == .digit(4))
+        #expect(ReadingKeys.key(for: keyEvent("4", modifiers: .shift)) == .digit(4))  // AZERTY top row
+        #expect(ReadingKeys.key(for: keyEvent("0", modifiers: .numericPad)) == .digit(0))  // keypad
+        #expect(ReadingKeys.key(for: keyEvent("4", modifiers: .command)) == nil)
+        #expect(ReadingKeys.key(for: keyEvent("4", modifiers: .option)) == nil)
+        #expect(ReadingKeys.key(for: keyEvent("\u{7F}")) == .delete)
+        #expect(ReadingKeys.key(for: keyEvent("\u{7F}", modifiers: .option)) == nil)
+        #expect(ReadingKeys.key(for: keyEvent("\u{1B}")) == .escape)
+        #expect(ReadingKeys.key(for: keyEvent("s", modifiers: .option)) == .option("s"))
+        #expect(ReadingKeys.key(for: keyEvent("S", modifiers: [.option, .shift])) == nil)
+        #expect(ReadingKeys.key(for: keyEvent("g", modifiers: [.option, .command])) == nil)
+        #expect(ReadingKeys.key(for: keyEvent("?", modifiers: .shift)) == .question)
+        #expect(ReadingKeys.key(for: keyEvent("?")) == .question)
+        #expect(ReadingKeys.key(for: keyEvent("?", modifiers: .command)) == nil)
+    }
+
+    @Test func antiopeKeysMapToTheirCommands() {
+        for focus in Self.readingFocuses + [.control] {
+            for digit in 0...9 {
+                #expect(ReadingKeys.command(for: .digit(digit), in: focus, appearance: .antiope) == .pageDigit(digit))
+            }
+            #expect(ReadingKeys.command(for: .delete, in: focus, appearance: .antiope) == .pageCorrect)
+            #expect(ReadingKeys.command(for: .escape, in: focus, appearance: .antiope) == .pageCancel)
+            #expect(ReadingKeys.command(for: .option("s"), in: focus, appearance: .antiope) == .sommaire)
+            #expect(ReadingKeys.command(for: .option("g"), in: focus, appearance: .antiope) == .guide)
+            #expect(ReadingKeys.command(for: .question, in: focus, appearance: .antiope) == .guide)
+            #expect(ReadingKeys.command(for: .option("r"), in: focus, appearance: .antiope) == .repetition)
+            #expect(ReadingKeys.command(for: .letter("i"), in: focus, appearance: .antiope) == .toggleImages)
+        }
+        for focus in Self.readingFocuses {
+            #expect(ReadingKeys.command(for: .right, in: focus, appearance: .antiope) == .nextColumn)
+            #expect(ReadingKeys.command(for: .left, in: focus, appearance: .antiope) == .previousColumn)
+        }
+        #expect(ReadingKeys.command(for: .right, in: .control, appearance: .antiope) == nil)
+        #expect(ReadingKeys.command(for: .down, in: .sidebar, appearance: .antiope) == .nextIndexRow)
+        #expect(ReadingKeys.command(for: .up, in: .sidebar, appearance: .antiope) == .previousIndexRow)
+        #expect(ReadingKeys.command(for: .down, in: .entryList, appearance: .antiope) == .nextEntry)
+        #expect(ReadingKeys.command(for: .up, in: .reader, appearance: .antiope) == .previousEntry)
+        #expect(ReadingKeys.command(for: .option("x"), in: .reader, appearance: .antiope) == nil)
+    }
+
+    /// Review Focus #2: digits typed in the search prompt or any other text field are text.
+    @Test func digitsInATextFieldNeverBecomePageNumbers() {
+        for appearance in Appearance.allCases {
+            for key in Self.antiopeOnlyKeys + [.left, .right, .up, .down] {
+                #expect(ReadingKeys.command(for: key, in: .textInput, appearance: appearance) == nil)
+            }
+        }
+    }
+
+    @Test func nativeNeverProducesAnAntiopeCommand() {
+        let nativeCommands: [ReadingCommand] = [
+            .nextEntry, .previousEntry, .advance, .toggleRead, .toggleStar, .focusEntryList, .focusSidebar,
+        ]
+        let alphabet = "abcdefghijklmnopqrstuvwxyz"
+        let keys: [ReadingKeys.Key] = alphabet.map(ReadingKeys.Key.letter) + alphabet.map(ReadingKeys.Key.option)
+            + Self.antiopeOnlyKeys + [.space, .up, .down, .left, .right]
+        for key in keys {
+            for focus in Self.readingFocuses + [.textInput, .control] {
+                if let command = ReadingKeys.command(for: key, in: focus, appearance: .native) {
+                    #expect(nativeCommands.contains(command), "\(key) in \(focus) gave \(command)")
+                }
+            }
+        }
+        for key in Self.antiopeOnlyKeys {
+            #expect(ReadingKeys.command(for: key, in: .entryList, appearance: .native) == nil)
+        }
+    }
+
+    /// No clash with `j`, `k`, `m`, `s` or the Garden's keys (Global Constraints, Keys).
+    @Test func readingAndGardenLettersKeepTheirMeaningInAntiope() {
+        for focus in [KeyFocus.entryList, .reader] {
+            for letter: Character in ["j", "k", "m", "s"] {
+                #expect(ReadingKeys.command(for: .letter(letter), in: focus, appearance: .antiope)
+                    == ReadingKeys.command(for: .letter(letter), in: focus, appearance: .native))
+            }
+            for letter: Character in ["r", "b", "u", "o", "w"] {
+                #expect(ReadingKeys.command(for: .letter(letter), in: focus, appearance: .antiope) == nil)
+            }
+        }
     }
 }
 
@@ -96,14 +189,15 @@ import WebKit
     }
 
     @Test func theFocusedViewIsClassifiedByColumn() async throws {
-        let (router, h, _, _, _) = try await makeRouter()
-        #expect(router.focus(of: h.sidebar) == .sidebar)
-        #expect(router.focus(of: h.list) == .entryList)
-        #expect(router.focus(of: h.reader) == .reader)
-        #expect(router.focus(of: h.window) == .window)
-        #expect(router.focus(of: nil) == .window)
+        let (_, h, _, _, _) = try await makeRouter()
+        let provider = ResponderFocusProvider()
+        #expect(provider.focus(of: h.sidebar, in: h.window) == .sidebar)
+        #expect(provider.focus(of: h.list, in: h.window) == .entryList)
+        #expect(provider.focus(of: h.reader, in: h.window) == .reader)
+        #expect(provider.focus(of: h.window, in: h.window) == .window)
+        #expect(provider.focus(of: nil, in: h.window) == .window)
         #expect(h.window.makeFirstResponder(h.search))
-        #expect(router.focus(of: h.window.firstResponder) == .textInput)  // the field editor
+        #expect(provider.keyFocus(in: h.window) == .textInput)  // the field editor
     }
 
     @Test func spaceInTheReaderMovesOnInsteadOfReachingTheWebView() async throws {
@@ -193,6 +287,18 @@ import WebKit
         #expect(state.selectedEntryId == nil)  // no entry to pick in a Garden scope
         #expect(router.handle(arrowEvent(NSLeftArrowFunctionKey, window: h.window)))
         #expect(h.window.firstResponder === h.sidebar)
+    }
+
+    /// The native window binds no Antiope key: the list's type-select and the menus keep them.
+    @Test func digitsAndAntiopeKeysPassThroughTheNativeWindow() async throws {
+        let (router, h, state, _, _) = try await makeRouter()
+        #expect(h.window.makeFirstResponder(h.list))
+        for event in [keyEvent("4", window: h.window), keyEvent("4", modifiers: .shift, window: h.window),
+                      keyEvent("s", modifiers: .option, window: h.window), keyEvent("?", modifiers: .shift, window: h.window),
+                      keyEvent("i", window: h.window), keyEvent("\u{1B}", window: h.window)] {
+            #expect(!router.handle(event))
+        }
+        #expect(state.selection == .unread && state.selectedEntryId == nil)
     }
 }
 
