@@ -8,11 +8,11 @@ Prochaines étapes de Ressac, au 15/10/2026. Le détail des décisions passées 
 
 ## Mise en service
 
-- [ ] Compiler l'appli en Release et la copier dans `/Applications` (commandes dans le README, section « The Mac app »).
-- [ ] Premier lancement : déposer `~/Documents/vienna_20260415.opml` sur la fenêtre, laisser l'import et le premier rafraîchissement se faire.
-- [ ] Faire le tri dans le jardin, dont la fusion de « Google Blog: Research » dans « Google Blog: Innovation & AI ».
-- [ ] Exporter un OPML propre une fois le tri fini.
-- [ ] Optionnel : lien `ressac` dans le `PATH` vers `/Applications/Ressac.app/Contents/Helpers/ressac`.
+- [x] Compiler l'appli en Release ; elle tourne depuis `apps/macos/build/Ressac.app` (commandes dans le README, section « The Mac app »).
+- [x] Premier lancement : déposer `~/Documents/vienna_20260415.opml` sur la fenêtre, laisser l'import et le premier rafraîchissement se faire.
+- [x] Faire le tri dans le jardin, dont la fusion de « Google Blog: Research » dans « Google Blog: Innovation & AI ».
+- [x] Exporter un OPML propre une fois le tri fini.
+- [ ] Optionnel : lien `ressac` dans le `PATH` vers `~/Sites/ressac/apps/macos/build/Ressac.app/Contents/Helpers/ressac`.
 
 ## Sous-projets suivants
 
@@ -60,4 +60,4 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 ### Antiope (sous-projet 4)
 
 - [ ] Défilement des gros dossiers : accrocs même sans écran CRT (38 ms/s sur la page 400), optimisation possible (voir `notes.md`).
-- [ ] Mineurs des relectures restés ouverts : caches de `PageDirectory` et de `DateFormatter`, boutons focalisables au clavier complet, `NSWorkspace` appelé en direct par la bannière du journal et `GardenInspector`, `main.rs` à découper avant le sous-projet 2b.
+- [ ] Mineurs des relectures restés ouverts : `DateFormatter` recréé à chaque seconde par l'en-tête, lignes de P100 et boutons de la bannière encore focalisables au clavier complet, `NSWorkspace` appelé en direct par la bannière native et `GardenInspector`, `main.rs` à découper avant le sous-projet 2b.

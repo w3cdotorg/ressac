@@ -37,14 +37,18 @@ The database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs
 
 The app icon source is `apps/macos/Ressac/Resources/AppIcon.svg` (a 1024 squircle-template drawing; the PNGs in `Assets.xcassets/AppIcon.appiconset` are exported from it).
 
-Build it with Xcode 27 and XcodeGen:
+Build it with Xcode 27 and XcodeGen. The Release app goes to `apps/macos/build/` (ignored by git) and runs from there:
 
 ```sh
 cd apps/macos
 xcodegen generate
 xcodebuild -project Ressac.xcodeproj -scheme Ressac -configuration Release -derivedDataPath "$TMPDIR/ressac-build" build
-cp -R "$TMPDIR/ressac-build/Build/Products/Release/Ressac.app" /Applications/
+rm -rf build/Ressac.app && mkdir -p build
+cp -R "$TMPDIR/ressac-build/Build/Products/Release/Ressac.app" build/
+open build/Ressac.app
 ```
+
+Quit Ressac before replacing the build. To install it for every launch instead, copy `build/Ressac.app` to `/Applications/` (the commands below assume that location; with the local build, use `apps/macos/build/Ressac.app`).
 
 - **First run:** drop an OPML file on the window (or choose one, `⌘O`). A sheet shows what `ressac import --dry-run` found, then the app imports and fetches every feed.
 - **Reading:** three columns (sidebar with Unread, Today, Starred, your folders and the Garden; entry list; reader). `j`/`k` next/previous, `Space` scrolls then moves on, `m` read, `s` star, `⇧⌘A` mark all read, `⌘R` refresh the selection, `⇧⌘R` refresh everything, `⌘F` search, `⌘↩` open in the browser. Refresh is manual only.
