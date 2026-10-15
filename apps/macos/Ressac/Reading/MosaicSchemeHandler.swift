@@ -14,6 +14,15 @@ enum MosaicFailure: Error, Equatable, Sendable {
     case unreadable
     /// Timeout, DNS, connection, TLS.
     case network
+
+    /// A failure that may not repeat (a network error, a server error, throttling): never remembered.
+    var isTransient: Bool {
+        switch self {
+        case .network: true
+        case .status(let code): code == 429 || (500...599).contains(code)
+        case .refused, .tooLarge, .unreadable: false
+        }
+    }
 }
 
 /// A `ressac-mosaic:` address: `ressac-mosaic:image?cols=40&src=<original, percent-encoded>`.
@@ -54,6 +63,8 @@ final class MosaicFetcher: Sendable {
 
     init(configuration: URLSessionConfiguration = .ephemeral, maxBytes: Int = MosaicSchemeHandler.maxBytes,
          timeout: TimeInterval = MosaicSchemeHandler.timeout) {
+        // A copy: the limits below are the fetcher's, not the caller's configuration's.
+        let configuration = configuration.copy() as! URLSessionConfiguration
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout
         configuration.httpCookieAcceptPolicy = .never
@@ -231,7 +242,9 @@ enum MosaicDecoder {
     nonisolated static let failurePNG = MosaicRenderer.png(
         MosaicImage(columns: 1, rows: 1, cells: [MosaicCell(foreground: .black, background: .black, mask: 0)]))
 
-    /// An `NSObject`, so that a test can hand the handler an `NSCache` subclass that never evicts.
+    /// `NSCache` itself only needs a class. It is an `NSObject` so that the `NSCache` subclass the
+    /// tests use (`KeepingCache`) can override `object(forKey:)` and `setObject`: an `@objc`
+    /// override needs Objective-C representable types.
     final class CachedMosaic: NSObject {
         let result: Result<Data, MosaicFailure>
         init(_ result: Result<Data, MosaicFailure>) { self.result = result }
@@ -270,12 +283,15 @@ enum MosaicDecoder {
         nextToken += 1
         let token = nextToken
         let fetcher = fetcher
-        let work = Task {
+        let work = Task { [weak webView] in
             let result = await Self.mosaic(for: request, fetcher: fetcher)
             // Stopped (or replaced): WebKit throws if a stopped task is called back.
             guard running[key]?.token == token else { return }
             running[key] = nil
-            if result != .failure(.network) {
+            // A transient failure is not remembered: the next request tries again.
+            var remembered = true
+            if case .failure(let failure) = result { remembered = !failure.isTransient }
+            if remembered {
                 cache.setObject(CachedMosaic(result), forKey: request.cacheKey, cost: (try? result.get().count) ?? 64)
             }
             respond(result, url: url, to: urlSchemeTask, in: webView)
@@ -300,7 +316,7 @@ enum MosaicDecoder {
         }
     }
 
-    private func respond(_ result: Result<Data, MosaicFailure>, url: URL, to task: any WKURLSchemeTask, in webView: WKWebView) {
+    private func respond(_ result: Result<Data, MosaicFailure>, url: URL, to task: any WKURLSchemeTask, in webView: WKWebView?) {
         let body: Data
         switch result {
         case .success(let png):
@@ -317,22 +333,13 @@ enum MosaicDecoder {
     }
 
     /// Flags every box showing `url`, through app JavaScript (the page's own stays off).
-    private func markFailed(_ url: URL, in webView: WKWebView) {
+    private func markFailed(_ url: URL, in webView: WKWebView?) {
         let script = """
         for (const box of document.querySelectorAll(".mosaic")) {
           const image = box.querySelector("img");
           if (box.dataset.mosaic === source || (image && image.src === source)) { box.dataset.failed = ""; }
         }
         """
-        Task { _ = try? await webView.callAsyncJavaScript(script, arguments: ["source": url.absoluteString], contentWorld: .page) }
+        Task { [weak webView] in _ = try? await webView?.callAsyncJavaScript(script, arguments: ["source": url.absoluteString], contentWorld: .page) }
     }
-}
-
-/// An `NSCache` that never evicts, for the one test that needs an entry to stay.
-final class KeepingCache: NSCache<NSString, MosaicSchemeHandler.CachedMosaic>, @unchecked Sendable {
-    private var kept: [NSString: MosaicSchemeHandler.CachedMosaic] = [:]
-
-    override func object(forKey key: NSString) -> MosaicSchemeHandler.CachedMosaic? { kept[key] }
-    override func setObject(_ obj: MosaicSchemeHandler.CachedMosaic, forKey key: NSString) { kept[key] = obj }
-    override func setObject(_ obj: MosaicSchemeHandler.CachedMosaic, forKey key: NSString, cost g: Int) { kept[key] = obj }
 }

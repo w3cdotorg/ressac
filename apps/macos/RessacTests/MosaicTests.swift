@@ -317,6 +317,18 @@ private func stub(_ path: String) -> MosaicRequest {
         #expect(try #require(decodePNG(png)).rgb(0, 0) == (255, 0, 0))
     }
 
+    /// The caller's configuration is the caller's: the fetcher applies its limits to a copy.
+    @Test func theGivenConfigurationIsNotMutated() {
+        let configuration = StubProtocol.configuration()
+        let before = (configuration.timeoutIntervalForRequest, configuration.timeoutIntervalForResource,
+                      configuration.httpShouldSetCookies, configuration.httpCookieAcceptPolicy)
+        _ = MosaicFetcher(configuration: configuration, timeout: 0.5)
+        #expect(configuration.timeoutIntervalForRequest == before.0)
+        #expect(configuration.timeoutIntervalForResource == before.1)
+        #expect(configuration.httpShouldSetCookies == before.2)
+        #expect(configuration.httpCookieAcceptPolicy == before.3)
+    }
+
     @Test func aServerThatNeverAnswersTimesOut() async throws {
         let server = try HangingServer()
         let quick = MosaicFetcher(timeout: 0.5)
@@ -329,6 +341,15 @@ private func stub(_ path: String) -> MosaicRequest {
 }
 
 // MARK: Handler
+
+/// An `NSCache` that never evicts, for the tests that need an entry to stay (or to be seen gone).
+final class KeepingCache: NSCache<NSString, MosaicSchemeHandler.CachedMosaic>, @unchecked Sendable {
+    private var kept: [NSString: MosaicSchemeHandler.CachedMosaic] = [:]
+
+    override func object(forKey key: NSString) -> MosaicSchemeHandler.CachedMosaic? { kept[key] }
+    override func setObject(_ obj: MosaicSchemeHandler.CachedMosaic, forKey key: NSString) { kept[key] = obj }
+    override func setObject(_ obj: MosaicSchemeHandler.CachedMosaic, forKey key: NSString, cost g: Int) { kept[key] = obj }
+}
 
 /// Records what the handler sends to one WebKit task.
 final class FakeSchemeTask: NSObject, WKURLSchemeTask {
@@ -388,6 +409,25 @@ final class FakeSchemeTask: NSObject, WKURLSchemeTask {
         #expect(task.events == ["response", "data", "finish"])
         #expect(task.body == Data("cached".utf8))
         #expect(handler.runningCount == 0)
+    }
+
+    /// A 5xx or 429 passes: it is not remembered, so the next request downloads again. A 404 stays.
+    @Test(arguments: [(503, false), (500, false), (429, false), (404, true)])
+    func onlyLastingFailuresAreCached(status: Int, cached: Bool) async throws {
+        let path = "/flaky-\(status).png"
+        StubProtocol.serve(path, .init(status: status, chunks: [Data("no".utf8)]))
+        let cache = KeepingCache()
+        let handler = MosaicSchemeHandler(fetcher: MosaicFetcher(configuration: StubProtocol.configuration()), cache: cache)
+        let address = MosaicRequest.url(for: URL(string: "https://stub.ressac.test\(path)")!, columns: 40)
+        let first = FakeSchemeTask(address)
+        handler.webView(webView, start: first)
+        #expect(await eventually { first.events == ["response", "data", "finish"] })
+        #expect(first.body == MosaicSchemeHandler.failurePNG)
+        StubProtocol.serve(path, .init(chunks: [encoded([flat(0, 0, 255, width: 60, height: 60)], as: .png)]))
+        let second = FakeSchemeTask(address)
+        handler.webView(webView, start: second)
+        #expect(await eventually { second.events == ["response", "data", "finish"] })
+        #expect((second.body == MosaicSchemeHandler.failurePNG) == cached)
     }
 
     @Test func aFailureAnswersTheBlackPlaceholder() async {

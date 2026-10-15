@@ -103,7 +103,7 @@ enum MosaicRenderer {
         case 0: return MosaicCell(foreground: a, background: a, mask: 0)
         case 6: return MosaicCell(foreground: b, background: b, mask: 0)
         case 4, 5: return MosaicCell(foreground: a, background: b, mask: ~maskOfB & 0b11_1111)
-        default: return MosaicCell(foreground: b, background: a, mask: maskOfB)  // a comes first on a tie
+        default: return MosaicCell(foreground: b, background: a, mask: maskOfB)  // b is the minority, or a 3–3 tie: a, listed first, is the background
         }
     }
 
