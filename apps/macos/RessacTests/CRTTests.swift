@@ -66,3 +66,27 @@ import Testing
         #expect(CRTGeometry.glowRadius == 2)
     }
 }
+
+@MainActor @Suite struct CRTOverlayTests {
+    /// Spec §11: the overlay never takes a hit test, so every click and scroll reaches the views
+    /// under it. `CRTOverlay.body` applies `.allowsHitTesting(CRTOverlay.allowsHits)`.
+    @Test func theOverlayNeverTakesAHitTest() {
+        #expect(!CRTOverlay.allowsHits)
+    }
+
+    /// The overlay is redrawn only for a new text size (and, through its `Canvas`, a new window
+    /// size or display scale): equal sizes compare equal, so `.equatable()` skips the body.
+    @Test func theOverlayRedrawsOnlyForANewTextSize() {
+        #expect(CRTOverlay(teletextSize: 20) == CRTOverlay(teletextSize: 20))
+        #expect(CRTOverlay(teletextSize: 20) != CRTOverlay(teletextSize: 25))
+    }
+
+    /// The bleed draws around the glyphs, so the text's drawing area grows by the offset and the
+    /// glow when it is on, and not at all when it is off.
+    @Test func theBleedDrawsBeyondTheGlyphsOnlyWhenActive() {
+        #expect(CRTBleedRenderer(isActive: false).displayPadding == EdgeInsets())
+        let reach = CRTGeometry.bleedOffset + CRTGeometry.glowRadius
+        #expect(CRTBleedRenderer(isActive: true).displayPadding
+            == EdgeInsets(top: reach, leading: reach, bottom: reach, trailing: reach))
+    }
+}
