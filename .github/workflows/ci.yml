@@ -6,7 +6,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -16,9 +16,9 @@ jobs:
       - run: cargo test --workspace
   macos:
     name: macOS app
-    runs-on: macos-latest
+    runs-on: xcode-27
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check for Xcode 27 and the macOS 27 SDK
         id: xcode
         shell: bash
@@ -32,8 +32,8 @@ jobs:
               sudo xcode-select -s "$candidate/Contents/Developer"
             fi
           fi
-          xcode=$(xcodebuild -version | head -n 1)
-          sdk=$(xcrun --sdk macosx --show-sdk-version)
+          xcode=$(xcodebuild -version | head -n 1) || true
+          sdk=$(xcrun --sdk macosx --show-sdk-version) || true
           if [ "$(major)" -ge "$required" ] && [ "${sdk%%.*}" -ge "$required" ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
             echo "Using $xcode with the macOS $sdk SDK."
@@ -55,7 +55,24 @@ jobs:
       - name: Build and test the app
         if: steps.xcode.outputs.available == 'true'
         working-directory: apps/macos
-        run: xcodebuild -project Ressac.xcodeproj -scheme Ressac -destination 'platform=macOS' test
+        run: xcodebuild -project Ressac.xcodeproj -scheme Ressac -destination 'platform=macOS' -resultBundlePath "$RUNNER_TEMP/TestResults.xcresult" test
+      - name: Check that every test ran
+        if: steps.xcode.outputs.available == 'true'
+        working-directory: apps/macos
+        shell: bash
+        run: |
+          set -euo pipefail
+          # One test case per @Test function, a parameterized one included (Xcode 27's count).
+          declared=$(grep -rhE '^\s*(@[A-Za-z]+(\([^)]*\))?\s+)*@Test\b' RessacTests | wc -l | tr -d ' ')
+          summary=$(xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/TestResults.xcresult" --compact)
+          total=$(jq -r '.totalTestCount' <<<"$summary")
+          failed=$(jq -r '.failedTests' <<<"$summary")
+          skipped=$(jq -r '.skippedTests' <<<"$summary")
+          echo "RessacTests declares $declared tests; $total ran ($failed failed, $skipped skipped)."
+          if [ "$total" -lt "$declared" ] || [ "$failed" -ne 0 ]; then
+            echo "::error title=Tests missing::$total of the $declared tests declared in RessacTests ran, $failed failed."
+            exit 1
+          fi
       - name: Allowed failure, no Xcode 27 on this runner
         if: steps.xcode.outputs.available != 'true'
         continue-on-error: true
