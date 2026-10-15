@@ -329,3 +329,72 @@ private func trailingTrimmed(_ text: String) -> String {
         #expect(MinitelBar.hintLine(MinitelBar.status(progress: run, message: nil)!, width: 30).width == 30)
     }
 }
+
+@MainActor @Suite struct AntiopeGardenStoreTests {
+    /// Two feeds needing triage in the contract database: Moved (feed 3) comes before Dead (feed 2).
+    private func diagnose(_ test: TestDatabase) async throws {
+        try await test.raw.write { db in
+            try db.execute(sql: """
+                INSERT OR REPLACE INTO feed_health (feed_id, status, reason, evidence, remarks, proposed_action, computed_at, needs_triage)
+                VALUES (2, 'Dead', 'Gone.', '{"bullets":[],"clue":"","language":null}', '[]', '{"type":"bury"}',
+                        '2026-10-10T08:00:00.000Z', 1),
+                       (3, 'Moved', 'Moved.', '{"bullets":[],"clue":"301","language":null}', '[]',
+                        '{"type":"follow_redirect","url":"https://moved.example.org/feed"}', '2026-10-10T08:00:00.000Z', 1);
+                """)
+        }
+    }
+
+    @Test func enteringTheQueueSelectsTheFirstFeedToTriage() async throws {
+        let (state, test, _) = try makeState()
+        try await diagnose(test)
+        state.selection = .garden(.needsTriage)
+        let store = AntiopeGardenStore()
+        let observation = Task { await store.observe(page: .needsTriage, app: state) }
+        defer { observation.cancel() }
+        #expect(await eventually { store.rows.contains { $0.feedId == 3 } })
+        #expect(await eventually { state.selectedFeedId == 3 })
+        #expect(store.selectedRow(state)?.status == "Moved")
+        #expect(store.message == nil)
+    }
+
+    @Test func gardenCommandsActAsInTheNativeTable() async throws {
+        let (state, test, stub) = try makeState()
+        try await diagnose(test)
+        var opened: [URL] = []
+        state.openURL = { opened.append($0) }
+        state.selection = .garden(.needsTriage)
+        state.selectedFeedId = 3
+        let store = AntiopeGardenStore()
+
+        store.perform(.message("Nothing to repair for this feed."), app: state)
+        #expect(store.message == "Nothing to repair for this feed.")
+        store.perform(.confirmSafeRepairs, app: state)
+        #expect(store.confirmingSafeRepairs)
+        #expect(store.message == nil, "a new key clears the last refusal")
+        store.perform(.open(URL(string: "https://example.org/")!), app: state)
+        #expect(opened == [URL(string: "https://example.org/")!])
+        store.perform(.decide(.keep), app: state)
+        #expect(await eventually { (try? calls(stub))?.contains { $0.hasSuffix("garden decide 3 keep") } == true })
+        store.perform(.undo, app: state)
+        #expect(await eventually { (try? calls(stub))?.contains { $0.hasSuffix("garden undo") } == true })
+    }
+
+    /// The garden keys reach `GardenEntryPage` only if neither Antiope nor `AppState` takes them
+    /// first: `k` is Keep here, not RETOUR (phase 7's `AntiopeState.handle` must leave it).
+    @Test func readingCommandsFallThroughInTheGarden() throws {
+        let (state, _, _) = try makeState()
+        let antiope = AntiopeState(app: state)
+        state.selection = .garden(.needsTriage)
+        for command in [ReadingCommand.previousEntry, .nextEntry, .advance, .toggleRead, .toggleStar] {
+            #expect(!antiope.handle(command), "\(command)")
+            #expect(!state.perform(command), "\(command)")
+        }
+    }
+
+    /// The glyphs the garden pages draw outside `CellText` must exist in Bedstead.
+    @Test(.enabled(if: TeletextFont.isAvailable)) func bedsteadDrawsTheGardenGlyphs() {
+        for glyph: Character in ["▐", "█", "░", "●"] {
+            #expect(TeletextFont.supports(glyph), "\(glyph)")
+        }
+    }
+}
