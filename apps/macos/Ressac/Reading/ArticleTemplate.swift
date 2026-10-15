@@ -133,21 +133,24 @@ enum ArticleTemplate {
         func abandon() { state.withLock { $0.abandoned = true } }
     }
 
-    /// One worker at a time: abandoned parses never pile up.
-    private static let workerGate = DispatchSemaphore(value: 1)
+    /// At most `maxWorkers` at a time: abandoned parses never pile up.
+    private static let workerGate = DispatchSemaphore(value: maxWorkers)
+    /// A running abandoned worker plus the live one: a new article always gets a worker.
+    static let maxWorkers = 2
 
     /// Runs `work` on a thread with a 256 MB stack (a virtual reservation) and waits for it, so
     /// libxml's recursive parser cannot exhaust the stack on input the depth guard let through.
-    /// Returns `nil` when `timeout` passes first. Workers run one at a time: a worker waits for
-    /// the previous one, and skips its work when its caller stopped waiting meanwhile. A worker
+    /// Returns `nil` when `timeout` passes first. Workers pass through `gate` (two at a time by default): a worker waits for
+    /// a free slot, and skips its work when its caller stopped waiting meanwhile. A worker
     /// already running cannot be cancelled: it finishes and its late result is discarded.
-    static func onLargeStack(timeout: TimeInterval = .infinity, _ work: @escaping @Sendable () -> String) -> String? {
+    static func onLargeStack(timeout: TimeInterval = .infinity, gate: DispatchSemaphore = workerGate,
+                             _ work: @escaping @Sendable () -> String) -> String? {
         let job = Job()
         let done = DispatchSemaphore(value: 0)
         let thread = Thread {
-            workerGate.wait()
+            gate.wait()
             if !job.isAbandoned { job.finish(work()) }
-            workerGate.signal()
+            gate.signal()
             done.signal()
         }
         thread.stackSize = 256 << 20
@@ -167,8 +170,8 @@ enum ArticleTemplate {
     /// stays within half the budget; the largest stored article was 358 KB on 15/10/2026.
     private static let maxParsedBytes = 512 * 1024
     static let maxNestingDepth = 256
-    /// libxml checks a tag's attributes pairwise for duplicates: 60,000 on one tag took 5 s.
-    static let maxAttributesPerTag = 256
+    /// libxml checks a tag's attributes pairwise for duplicates: 60,000 on one tag took 5 s, 2,000 about 6 ms.
+    static let maxAttributesPerTag = 2048
     private static let maxInputBytes = 2_000_000
     /// HTML's void elements: never closed, never nested (the renderer and the depth estimate).
     private static let voidTags: Set<String> = [
@@ -229,7 +232,7 @@ enum ArticleTemplate {
     /// libxml's rule for a misplaced end tag (`htmlAutoCloseOnClose`): it closes the elements
     /// opened after its match only when none of them has a higher end priority than its own;
     /// otherwise it is ignored. So `</b>` never closes an open `div`, and `<b><div>x</b>`,
-    /// repeated, nests one level deeper each time (60 KB of it took 0.8 s, 250 KB 23 s).
+    /// repeated, nests two levels deeper each time (60 KB of it took 0.8 s, 250 KB 23 s).
     private static func closes(_ tag: String, above opened: ArraySlice<String>) -> Bool {
         let priority = endPriority(tag)
         return opened.allSatisfy { endPriority($0) <= priority }
@@ -424,20 +427,21 @@ enum ArticleTemplate {
 
         /// Image `n` as a mosaic box. The box keeps both addresses for the swap and an IMAGE line
         /// with the alt text, shown by the stylesheet when the mosaic fails (`data-failed`). With
-        /// the original's `size`, the mosaic keeps its height before it arrives: the rows its
-        /// renderer will draw, in PNG pixels (one per font pixel), which the stylesheet zooms.
+        /// the original's `size`, the box keeps the mosaic's height before it arrives: the rows its
+        /// renderer will draw, in PNG pixels (one per font pixel) times `--font-pixel`. The box
+        /// holds it, not the `img`, which is always drawn at its real grid, never stretched.
         private mutating func mosaic(original: URL, alt: String, size: ImageSize?, inLink: Bool) {
             let index = images
             images += 1
             let source = escapeAttribute(MosaicRequest.url(for: original, columns: MosaicRenderer.maxColumns))
-            let box = #"id="m\#(index)" data-original="\#(escapeAttribute(original.absoluteString))" data-mosaic="\#(source)""#
+            var box = #"id="m\#(index)" data-original="\#(escapeAttribute(original.absoluteString))" data-mosaic="\#(source)""#
             let label = escapeText(alt.isEmpty ? "IMAGE" : "IMAGE \(alt)")
-            let height = size.map { size in
+            if let size {  // integers only: the values come from untrusted attributes
                 let grid = MosaicRenderer.grid(width: size.width, height: size.height,
                                                columns: MosaicRenderer.columns(forPixelWidth: size.width))
-                return #" style="min-height: \#(grid.rows * MosaicRenderer.cellHeight)px""#
-            } ?? ""
-            let content = #"<img src="\#(source)" alt="\#(escapeAttribute(alt))" loading="lazy"\#(height)>"#
+                box += #" style="min-height: calc(\#(grid.rows * MosaicRenderer.cellHeight)px * var(--font-pixel))""#
+            }
+            let content = #"<img src="\#(source)" alt="\#(escapeAttribute(alt))" loading="lazy">"#
                 + #"<span class="mosaic-alt">\#(label)</span>"#
             out += inLink
                 ? #"<span class="mosaic" \#(box)>\#(content)</span>"#

@@ -162,7 +162,7 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(Date().timeIntervalSince(mediumStart) < 0.2)
     }
 
-    /// libxml ignores `</b>` while a `div` is open, so this nests one level deeper each time and
+    /// libxml ignores `</b>` while a `div` is open, so this nests two levels deeper each time and
     /// libxml's time grows with the square of the depth: the estimate follows it, the text is plain.
     @Test func inlineEndTagsThatCannotCloseABlockCountAsDepth() {
         let html = String(repeating: "<b><div>x</b>", count: 5_000)  // 63 KB: 0.8 s in libxml
@@ -198,29 +198,35 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         }
     }
 
-    /// libxml checks a tag's attributes pairwise: past `maxAttributesPerTag`, plain text.
+    /// libxml checks a tag's attributes pairwise: past `maxAttributesPerTag`, plain text. The
+    /// fallback strips tags, so the markup carries a `<b>` that only the parsed path keeps.
     @Test func aTagWithThousandsOfAttributesIsShownAsText() {
-        let many = "<p " + (0..<20_000).map { "a\($0)=x" }.joined(separator: " ") + ">kept</p>"  // 164 KB: 0.7 s in libxml
+        func tag(_ count: Int) -> String { "<p " + (0..<count).map { "a\($0)=x" }.joined(separator: " ") + "><b>kept</b></p>" }
+        let many = tag(20_000)  // 170 KB: 0.7 s in libxml
         #expect(ArticleTemplate.mostAttributesOnATag(many) == 20_000)
-        #expect(ArticleTemplate.mostAttributesOnATag(many, stoppingAbove: 256) == 257)
+        #expect(ArticleTemplate.mostAttributesOnATag(many, stoppingAbove: 2_048) == 2_049)
         let start = Date()
-        #expect(ArticleTemplate.sanitize(many) == "<p>kept</p>")
+        let clean = ArticleTemplate.sanitize(many)
         #expect(Date().timeIntervalSince(start) < 0.2)
+        #expect(!clean.contains("<b>") && clean.contains("kept"))
+        #expect(!ArticleTemplate.sanitize(tag(2_049)).contains("<b>"))  // just over the bound: text
+        #expect(ArticleTemplate.sanitize(tag(2_000)).contains("<b>kept</b>"))  // about the bound: parsed
         // Quoted values are skipped whole, spaces and `>` included; unquoted ones up to a space.
         #expect(ArticleTemplate.mostAttributesOnATag(#"<p>x</p><img src="a b>c" alt='d e' width=600 data-x = "1">"#) == 4)
         #expect(ArticleTemplate.mostAttributesOnATag("<p>no attributes</p><br/>") == 0)
-        let fine = "<p " + (0..<200).map { "a\($0)=x" }.joined(separator: " ") + ">kept</p>"
-        #expect(ArticleTemplate.sanitize(fine).hasPrefix("<p>kept"))
     }
 
-    /// One worker at a time: abandoned parses wait their turn, then skip it.
-    @Test func abandonedWorkersNeverOverlap() {
+    /// At most two workers at once (an abandoned one still running plus a live one), through a gate
+    /// of the test's own so that the shared one stays free for other suites. A new article is
+    /// never blocked by one abandoned worker; a third waits its turn, then skips it.
+    @Test func abandonedWorkersAreBoundedAndNeverBlockTheNextArticle() {
         final class Probe: Sendable {
             let running = Mutex(0)
             let peak = Mutex(0)
             let runs = Mutex(0)
         }
         let probe = Probe()
+        let gate = DispatchSemaphore(value: ArticleTemplate.maxWorkers)
         let work: @Sendable () -> String = {
             let now = probe.running.withLock { $0 += 1; return $0 }
             probe.peak.withLock { $0 = max($0, now) }
@@ -229,13 +235,18 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
             probe.running.withLock { $0 -= 1 }
             return "done"
         }
-        #expect(ArticleTemplate.onLargeStack(timeout: 0.3, work) == nil)  // abandoned while it runs
+        #expect(ArticleTemplate.onLargeStack(timeout: 0.3, gate: gate, work) == nil)  // abandoned while it runs
+        // One abandoned worker is running: the next article still gets its worker, within its budget.
+        #expect(ArticleTemplate.onLargeStack(timeout: 5, gate: gate, work) == "done")
+        #expect(probe.peak.withLock { $0 } <= 2)
+        // Two running (one abandoned), then more callers that give up: they wait, then skip.
+        #expect(ArticleTemplate.onLargeStack(timeout: 0.3, gate: gate, work) == nil)
         for _ in 0..<3 {
-            #expect(ArticleTemplate.onLargeStack(timeout: 0.05, work) == nil)  // abandoned before their turn
+            #expect(ArticleTemplate.onLargeStack(timeout: 0.05, gate: gate, work) == nil)
         }
-        #expect(ArticleTemplate.onLargeStack(timeout: 5, work) == "done")
-        #expect(probe.peak.withLock { $0 } == 1)
-        #expect(probe.runs.withLock { $0 } <= 2)
+        #expect(ArticleTemplate.onLargeStack(timeout: 5, gate: gate, work) == "done")
+        #expect(probe.peak.withLock { $0 } <= 2)
+        #expect(probe.runs.withLock { $0 } <= 5)
     }
 
     /// Up to 512 KB the article is parsed; the largest stored one was 358 KB on 15/10/2026.
@@ -271,7 +282,9 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
     @Test func mosaicsHoldTheirHeightWhenTheFeedGivesASize() {
         let clean = ArticleTemplate.sanitize(#"<img src="https://e.org/a.png" width="600" height="400"><img src="https://e.org/b.png">"#, mosaics: true)
         // 600 pixels: 40 columns (the most); 0.6 × 40 × 400 / 600 = 16 rows of 10 font pixels.
-        #expect(clean.contains(#"alt="" loading="lazy" style="min-height: 160px"><span class="mosaic-alt">"#))
+        // The box holds the height, in font pixels; the image itself is drawn at its real grid.
+        #expect(clean.contains(#"style="min-height: calc(160px * var(--font-pixel))"><img src="#))
+        #expect(clean.contains(#"alt="" loading="lazy"><span class="mosaic-alt">"#))
         #expect(clean.components(separatedBy: "min-height").count == 2)  // the image without a size has none
     }
 
@@ -680,6 +693,7 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
 @MainActor @Suite struct ImageBoxTests {
     @Test func anImageOfKnownSizeHoldsItsPlace() async throws {
         let content = #"<p>Text.</p><img src="http://127.0.0.1:9/a.png" style="width:600px;height:400px">"#
+        // The box that holds the place: the mosaic's in Antiope (its image is not stretched), the image's in Native.
         for theme in [ReaderTheme.native, ReaderTheme(appearance: .antiope, crt: false)] {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
             let webView = WKWebView(frame: window.contentLayoutRect)
@@ -693,7 +707,7 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
             controller.load(entryId: 1, html: html)
             #expect(await eventually { controller.loadedEntryId == 1 })
             let height = try await webView.callAsyncJavaScript(
-                #"return document.querySelector(".content img").getBoundingClientRect().height"#, contentWorld: .page)
+                #"return document.querySelector(".content .mosaic, .content img").getBoundingClientRect().height"#, contentWorld: .page)
             #expect((height as? Double ?? 0) > 100, "\(theme.appearance)")
         }
     }

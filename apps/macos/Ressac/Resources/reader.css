@@ -507,6 +507,12 @@ small, sub, sup {
   display: none;
 }
 
+/* The inline min-height reserves the mosaic's rows before it loads; the original and the IMAGE line size themselves. */
+:root[data-theme="antiope"] .mosaic.original,
+:root[data-theme="antiope"] .mosaic[data-failed] {
+  min-height: 0 !important;
+}
+
 :root[data-theme="antiope"] .mosaic[data-failed]:not(.original) img {
   display: none;
 }
