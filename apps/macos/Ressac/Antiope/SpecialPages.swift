@@ -106,3 +106,100 @@ struct SommairePage: View {
         }
     }
 }
+
+/// One line of P899: the keys, spelled out, and what they do.
+struct GuideKey: Equatable, Sendable {
+    var keys: String
+    var action: String
+}
+
+struct GuideSection: Equatable, Sendable {
+    var title: String
+    var keys: [GuideKey]
+}
+
+/// P899 GUIDE (spec §6), drawn in the reader column: every key of the window, grouped as the
+/// GUIDE page of a Minitel service. Keys are spelled in capitals: Bedstead has no ⌘, ⌥, ⇧ or ⌫.
+struct GuidePage: View {
+    /// The key column, wide enough for ` SHIFT CMD R`.
+    static let keyCells = 12
+
+    static let sections: [GuideSection] = [
+        GuideSection(title: "PAGES", keys: [
+            GuideKey(keys: "0-9", action: "type a page number"),
+            GuideKey(keys: "DEL", action: "erase the last digit"),
+            GuideKey(keys: "ESC", action: "cancel the number"),
+            GuideKey(keys: "OPT S", action: "SOMMAIRE: every page"),
+            GuideKey(keys: "OPT G  ?", action: "GUIDE: this page"),
+        ]),
+        GuideSection(title: "READING", keys: [
+            GuideKey(keys: "SPACE  J", action: "SUITE: next page"),
+            GuideKey(keys: "K", action: "RETOUR: previous page"),
+            GuideKey(keys: "UP DOWN", action: "previous or next entry"),
+            GuideKey(keys: "M", action: "mark read or unread"),
+            GuideKey(keys: "S", action: "star or unstar"),
+            GuideKey(keys: "I", action: "mosaics or original images"),
+            GuideKey(keys: "OPT R", action: "RÉPÉTITION: refresh"),
+            GuideKey(keys: "CMD RETURN", action: "open in the browser"),
+        ]),
+        GuideSection(title: "COLUMNS", keys: [
+            GuideKey(keys: "LEFT RIGHT", action: "change column"),
+            GuideKey(keys: "UP DOWN", action: "in the index: previous or next page"),
+        ]),
+        GuideSection(title: "GARDEN", keys: [
+            GuideKey(keys: "K", action: "keep"),
+            GuideKey(keys: "R", action: "repair"),
+            GuideKey(keys: "B", action: "bury"),
+            GuideKey(keys: "U", action: "undo"),
+            GuideKey(keys: "O", action: "open the site"),
+            GuideKey(keys: "W", action: "open the Wayback snapshot"),
+            GuideKey(keys: "SHIFT R", action: "apply the safe repairs"),
+        ]),
+        GuideSection(title: "MENUS", keys: [
+            GuideKey(keys: "CMD F", action: "search: RETURN keeps it, ESC clears it"),
+            GuideKey(keys: "CMD R", action: "refresh the selection"),
+            GuideKey(keys: "SHIFT CMD R", action: "refresh every feed"),
+            GuideKey(keys: "SHIFT CMD A", action: "mark all as read"),
+            GuideKey(keys: "CMD + -", action: "bigger or smaller text"),
+            GuideKey(keys: "CMD O", action: "import OPML"),
+            GuideKey(keys: "SHIFT CMD E", action: "export OPML"),
+        ]),
+    ]
+
+    @Environment(\.teletextSize) private var size
+
+    var body: some View {
+        let cell = TeletextFont.cell(forSize: size)
+        GeometryReader { proxy in
+            let width = max(0, Int(proxy.size.width / cell.width))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    DoubleHeight(line: .centred("GUIDE", width: width, foreground: .yellow))
+                    ForEach(Array(Self.lines(width: width).enumerated()), id: \.offset) { _, line in
+                        CellLineView(line: line)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
+    }
+
+    /// For each section: a blank row, the heading black on green, then one row per key, the keys
+    /// in cyan and the action in white. Every row is exactly `width` cells.
+    static func lines(width: Int) -> [CellLine] {
+        let keyCells = min(Self.keyCells, max(0, width))
+        var lines: [CellLine] = []
+        for section in sections {
+            lines.append(.blank(width))
+            lines.append(CellLine([CellSpan(" " + section.title, cells: width, foreground: .black, background: .green)],
+                                  accessibilityText: section.title))
+            for key in section.keys {
+                lines.append(CellLine([
+                    CellSpan(" " + key.keys, cells: keyCells, foreground: .cyan),
+                    CellSpan(key.action, cells: width - keyCells, foreground: .white),
+                ], accessibilityText: "\(key.keys): \(key.action)"))
+            }
+        }
+        return lines
+    }
+}

@@ -67,8 +67,8 @@ struct AntiopeRootView: View {
         }
     }
 
-    /// The selected entry (`ReaderView`, themed by phase 10) or the Garden's inspector (redrawn by
-    /// phase 12). Phase 9 draws P100 and P899 for `.index` and `.guide`; until then the article stays.
+    /// P100 SOMMAIRE, P899 GUIDE, or else the selected entry (`ReaderView`, themed by phase 10) or
+    /// the Garden's inspector (redrawn by phase 12).
     @ViewBuilder private var readerColumn: some View {
         switch antiope.readerPage {
         case .article:
@@ -77,8 +77,10 @@ struct AntiopeRootView: View {
             } else {
                 ReaderView(state: state)
             }
-        case .index, .guide:
-            ReaderView(state: state)
+        case .index:
+            SommairePage()
+        case .guide:
+            GuidePage()
         }
     }
 }

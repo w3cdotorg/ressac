@@ -54,3 +54,41 @@ import Testing
         #expect(logo.allSatisfy { $0.spans.allSatisfy { $0.foreground == .cyan } && $0.accessibilityText.isEmpty })
     }
 }
+
+@MainActor @Suite struct GuidePageTests {
+    @Test func everyLineFillsTheWidth() {
+        for width in [0, 5, 12, 30, 60] {
+            let lines = GuidePage.lines(width: width)
+            #expect(lines.count == GuidePage.sections.reduce(0) { $0 + 2 + $1.keys.count })
+            #expect(lines.allSatisfy { $0.width == width })
+        }
+    }
+
+    @Test func everyKeyOfTheWindowIsListed() {
+        let keys = Set(GuidePage.sections.flatMap { $0.keys.map(\.keys) })
+        for key in ["0-9", "DEL", "ESC", "OPT S", "OPT G  ?", "OPT R", "I", "SPACE  J", "K", "M", "S",
+                    "LEFT RIGHT", "UP DOWN", "R", "B", "U", "O", "W", "SHIFT R", "CMD F", "CMD R"] {
+            #expect(keys.contains(key), "\(key)")
+        }
+        #expect(GuidePage.sections.map(\.title) == ["PAGES", "READING", "COLUMNS", "GARDEN", "MENUS"])
+        #expect(GuidePage.sections.flatMap(\.keys).allSatisfy { $0.keys.count + 1 <= GuidePage.keyCells })
+    }
+
+    @Test func headingsKeysAndActionsAreColoured() {
+        let lines = GuidePage.lines(width: 40)
+        #expect(lines[0] == .blank(40))
+        #expect(text(of: lines[1].spans[0]).hasPrefix(" PAGES"))
+        #expect(lines[1].spans[0].foreground == .black && lines[1].spans[0].background == .green)
+        #expect(text(of: lines[2].spans[0]) == " 0-9        " && lines[2].spans[0].foreground == .cyan)
+        #expect(lines[2].spans[1].foreground == .white)
+        #expect(lines[2].accessibilityText == "0-9: type a page number")
+        #expect(lines.allSatisfy { $0.spans.allSatisfy { $0.foreground != .blue } })
+    }
+
+    /// Bedstead draws every character of P100 and P899: no magenta `?` on a help page.
+    @Test func thePagesDrawWithoutAMissingGlyph() throws {
+        try #require(TeletextFont.isAvailable)
+        let lines = GuidePage.lines(width: 60) + SommairePage.logo(width: 16) + [SommairePage.titleLine(width: 20)]
+        #expect(lines.allSatisfy { $0.spans.allSatisfy { $0.cells.runs.allSatisfy { !$0.isReplacement } } })
+    }
+}
