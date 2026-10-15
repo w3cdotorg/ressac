@@ -228,6 +228,8 @@ fn commands_on_an_empty_store_hint_at_import() {
         &["garden", "decide", "1", "keep"],
         &["garden", "undo"],
         &["garden", "apply-safe"],
+        &["page", "list"],
+        &["page", "set", "feed", "1", "300"],
     ] {
         let out = ressac(home.path(), args);
         assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
@@ -249,6 +251,9 @@ fn usage_errors_exit_2() {
         &["garden", "decide", "1", "frobnicate"],
         &["extract", "x"],
         &["fetch", "--feed", "1", "--folder", "1"],
+        &["page"],
+        &["page", "set", "entry", "1", "300"],
+        &["page", "set", "feed", "1", "70000"],
     ] {
         assert_eq!(ressac(home.path(), args).status.code(), Some(2), "{args:?}");
     }
@@ -472,4 +477,153 @@ fn migrate_reports_the_schema_version() {
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["event"], "finished");
     assert_eq!(lines[0]["summary"]["total"], 0);
+}
+
+#[test]
+fn page_list_prints_reserved_pages_then_every_folder_and_feed() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let text = ressac(home.path(), &["page", "list"]);
+    assert!(text.status.success(), "{text:?}");
+    assert_eq!(
+        stdout(&text),
+        "100 reserved - Index\n\
+         101 reserved - Unread\n\
+         102 reserved - Today\n\
+         103 reserved - Starred\n\
+         800 reserved - Needs triage\n\
+         801 reserved - All feeds\n\
+         802 reserved - Cemetery\n\
+         899 reserved - Guide\n\
+         200 folder 1 Blogs\n\
+         201 feed 1 xkcd.com\n\
+         202 folder 2 potes\n\
+         203 feed 2 Orange Drenka\n\
+         204 feed 3 Orange-Drenka\n\
+         205 feed 4 Photos from bouquiniste\n\
+         206 feed 5 Girl on the Couch\n\
+         300 folder 3 Biblis\n\
+         301 feed 6 Bibliobsession 2.0\n\
+         302 feed 7 Unphotographable\n\
+         400 folder 4 Infos\n\
+         401 feed 8 Daring Fireball\n\
+         402 feed 9 Six Colors\n\
+         403 folder 5 Science\n\
+         404 feed 10 Center for Humane Technology\n\
+         500 folder 6 Jon\n\
+         501 folder 7 YouTube\n\
+         502 feed 11 Center for Humane Technology (1)\n"
+    );
+
+    let json = ressac(home.path(), &["--json", "page", "list"]);
+    assert!(json.status.success(), "{json:?}");
+    let lines = json_lines(&json);
+    assert_eq!(lines.len(), 26);
+    assert_eq!(
+        lines[0],
+        json!({"event": "page", "page": 100, "kind": "reserved", "id": null, "title": "Index", "parent_page": null})
+    );
+    assert_eq!(
+        lines[11],
+        json!({"event": "page", "page": 203, "kind": "feed", "id": 2, "title": "Orange Drenka", "parent_page": 202})
+    );
+    assert!(lines.iter().all(|l| l["event"] == "page"));
+}
+
+#[test]
+fn page_set_renumbers_and_prints_the_row() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let run = |args: &[&str]| ressac(home.path(), args);
+
+    let feed = run(&["page", "set", "feed", "2", "412"]);
+    assert!(feed.status.success(), "{feed:?}");
+    assert_eq!(stdout(&feed), "412 feed 2 Orange Drenka\n");
+    let folder = run(&["--json", "page", "set", "folder", "4", "450"]);
+    assert!(folder.status.success(), "{folder:?}");
+    assert_eq!(
+        json_lines(&folder),
+        [
+            json!({"event": "page", "page": 450, "kind": "folder", "id": 4, "title": "Infos", "parent_page": null})
+        ]
+    );
+    let list = stdout(&run(&["page", "list"]));
+    assert!(list.contains("412 feed 2 Orange Drenka\n"), "{list}");
+    assert!(!list.contains("203 feed 2"), "{list}");
+    let infos = json_lines(&run(&["--json", "page", "list"]));
+    let df = infos
+        .iter()
+        .find(|l| l["title"] == "Daring Fireball")
+        .unwrap();
+    assert_eq!(
+        df["parent_page"], 450,
+        "children follow their folder's new page"
+    );
+}
+
+#[test]
+fn page_set_refusals_exit_2_and_write_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let run = |args: &[&str]| ressac(home.path(), args);
+    for (args, message) in [
+        (
+            &["page", "set", "feed", "2", "800"][..],
+            "Page 800 is reserved.\n",
+        ),
+        (
+            &["page", "set", "feed", "2", "100"],
+            "Page 100 is reserved.\n",
+        ),
+        (
+            &["page", "set", "feed", "2", "900"],
+            "Page 900 is not between 110 and 799.\n",
+        ),
+        (
+            &["page", "set", "feed", "2", "109"],
+            "Page 109 is not between 110 and 799.\n",
+        ),
+        (
+            &["page", "set", "feed", "2", "201"],
+            "Page 201 is already taken.\n",
+        ),
+        (
+            &["page", "set", "feed", "2", "200"],
+            "Page 200 is already taken.\n",
+        ),
+        (
+            &["page", "set", "folder", "1", "201"],
+            "Page 201 is already taken.\n",
+        ),
+        (&["page", "set", "feed", "99", "300"], "No feed #99.\n"),
+        (&["page", "set", "folder", "99", "300"], "No folder #99.\n"),
+        (
+            &["--json", "page", "set", "feed", "99", "300"],
+            "No feed #99.\n",
+        ),
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert_eq!(stderr(&out), message, "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    let list = stdout(&run(&["page", "list"]));
+    assert!(
+        list.contains("203 feed 2 Orange Drenka\n"),
+        "unchanged: {list}"
+    );
+}
+
+#[test]
+fn page_commands_exit_1_on_a_database_error() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("db.sqlite"), b"this is not a database").unwrap();
+    for args in [&["page", "list"][..], &["page", "set", "feed", "1", "300"]] {
+        let out = ressac(home.path(), args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+        assert!(
+            stderr(&out).starts_with("error: cannot open database"),
+            "{out:?}"
+        );
+    }
 }
