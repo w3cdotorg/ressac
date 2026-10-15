@@ -79,18 +79,45 @@ struct SettingsView: View {
 }
 
 private struct ReadingSettings: View {
+    @AppStorage(Appearance.Keys.appearance) private var appearance = Appearance.native
     @AppStorage(ReaderStyle.Keys.font) private var font = ReaderFont.sfPro
     @AppStorage(ReaderStyle.Keys.size) private var size = ReaderStyle.defaultSize
+    /// Antiope's own text size (decision of 2026-10-14), for the preview in Antiope.
+    @AppStorage(ReaderStyle.Keys.antiopeSize) private var antiopeSize = TeletextFont.defaultSize
     @AppStorage(ReaderStyle.Keys.width) private var width = LineWidth.medium
+
+    /// What the window shows: Native whenever Bedstead failed to load.
+    private var shown: Appearance {
+        Appearance.effective(stored: appearance, fontAvailable: TeletextFont.isAvailable)
+    }
 
     var body: some View {
         Form {
+            Picker("Appearance:", selection: Binding(get: { shown }, set: { appearance = $0 })) {
+                ForEach(Appearance.allCases) { option in
+                    Text(option.displayName).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(!TeletextFont.isAvailable)
+            if !TeletextFont.isAvailable {
+                Text("Antiope needs the Bedstead font, which did not load.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
             Picker("Font:", selection: $font) {
                 ForEach(ReaderFont.allCases) { option in
                     Text(option.displayName)
                         .font(option.swiftUIFont(size: NSFont.systemFontSize))
                         .tag(option)
                 }
+            }
+            .disabled(shown == .antiope)
+            if shown == .antiope {
+                Text("Bedstead in Antiope")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
 
             LabeledContent("Text size:") {
@@ -119,7 +146,9 @@ private struct ReadingSettings: View {
 
             LabeledContent("Preview:") {
                 Text("The quick brown fox jumps over 1 234 lazy dogs. Il1 O0, « l'écart » se creuse.")
-                    .font(font.swiftUIFont(size: ReaderStyle.clampedSize(size)))
+                    .font(shown == .antiope
+                          ? TeletextFont.font(size: TeletextFont.snapped(antiopeSize))
+                          : font.swiftUIFont(size: ReaderStyle.clampedSize(size)))
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)

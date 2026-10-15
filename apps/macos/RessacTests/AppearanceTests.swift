@@ -90,3 +90,45 @@ import Testing
         #expect(state.selectedEntryId == id && state.searchText == "albatross")
     }
 }
+
+/// Settings → Reading: the Appearance picker comes first and writes the shared setting.
+@MainActor @Suite struct AppearanceSettingsTests {
+    /// SwiftUI draws a segmented `Picker` with an `NSSegmentedControl` subclass.
+    static func segmentedControl(_ labels: [String], in host: NSView) -> NSSegmentedControl? {
+        host.layoutSubtreeIfNeeded()
+        return AppearanceSwitchTests.descendants(of: host).compactMap { $0 as? NSSegmentedControl }.first { control in
+            (0..<control.segmentCount).map { control.label(forSegment: $0) } == labels
+        }
+    }
+
+    @Test func thePickerLeadsTheReadingTabAndWritesTheSetting() async throws {
+        try #require(TeletextFont.isAvailable, "Bedstead must be registered in the test host (phase 3)")
+        let suite = "ressac.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let host = NSHostingView(rootView: SettingsView().defaultAppStorage(defaults))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        defer { window.contentView = nil }
+
+        let names = Appearance.allCases.map(\.displayName)
+        #expect(await eventually { Self.segmentedControl(names, in: host) != nil })
+        let picker = try #require(Self.segmentedControl(names, in: host))
+        let width = try #require(Self.segmentedControl(LineWidth.allCases.map(\.displayName), in: host))
+        #expect(picker.isEnabled)
+        #expect(picker.selectedSegment == 0)
+        // Above the line-width control: window coordinates grow upwards.
+        #expect(picker.convert(picker.bounds, to: nil).minY > width.convert(width.bounds, to: nil).maxY)
+
+        // The setting drives the picker...
+        defaults.set(Appearance.antiope.rawValue, forKey: Appearance.Keys.appearance)
+        #expect(await eventually { Self.segmentedControl(names, in: host)?.selectedSegment == 1 })
+
+        // ...and the picker writes the setting (an in-process action, no keystroke).
+        let current = try #require(Self.segmentedControl(names, in: host))
+        current.selectedSegment = 0
+        current.sendAction(current.action, to: current.target)
+        #expect(await eventually { defaults.string(forKey: Appearance.Keys.appearance) == Appearance.native.rawValue })
+    }
+}
