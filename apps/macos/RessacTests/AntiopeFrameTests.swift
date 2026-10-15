@@ -189,6 +189,41 @@ func listEntry(title: String?, isRead: Bool = false, isStarred: Bool = false) ->
     }
 }
 
+@MainActor @Suite struct ColumnTitleTests {
+    static let columns: [AntiopeColumn] = [.index, .entries, .reader]
+
+    @Test func everyTitleIsExactlyAsWideAsItsColumn() {
+        for column in Self.columns {
+            for active in [false, true] {
+                for width in [0, 1, 5, 22, 28, 31, 120] {
+                    #expect(ColumnTitle.line(for: column, isActive: active, width: width).width == width)
+                }
+            }
+        }
+        #expect(Self.columns.map(ColumnTitle.label(for:)) == ["INDEX", "ENTRIES", "READER"])
+    }
+
+    @Test func onlyTheActiveColumnIsInReverseVideo() {
+        for column in Self.columns {
+            let active = ColumnTitle.line(for: column, isActive: true, width: 22)
+            #expect(active.spans.allSatisfy { $0.foreground == .black && $0.background == .cyan })
+            let inactive = ColumnTitle.line(for: column, isActive: false, width: 22)
+            #expect(inactive.spans.allSatisfy { $0.foreground == .cyan && $0.background == .black })
+            #expect(text(of: inactive.spans[0]).hasPrefix(" " + ColumnTitle.label(for: column)))
+            #expect(active.accessibilityText == ColumnTitle.label(for: column))
+        }
+    }
+
+    @Test func blueNeverColoursATitle() {
+        for column in Self.columns {
+            for active in [false, true] {
+                let line = ColumnTitle.line(for: column, isActive: active, width: 22)
+                #expect(line.spans.allSatisfy { $0.foreground != .blue })
+            }
+        }
+    }
+}
+
 @MainActor @Suite struct MinitelBarTests {
     @Test func theKeysAreTheMinitelsInReverseVideo() {
         #expect(MinitelKey.allCases.map(\.label) == ["SOMMAIRE", "SUITE", "RETOUR", "GUIDE", "RÉPÉTITION"])

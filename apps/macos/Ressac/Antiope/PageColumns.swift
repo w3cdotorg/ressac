@@ -165,3 +165,34 @@ struct EntryPageColumn: View {
         return line
     }
 }
+
+/// The one-row title at the top of each column, as on a Minitel page: the focused column's in
+/// reverse video (black on cyan), the others cyan on black. Exactly as wide as the column.
+enum ColumnTitle {
+    static func label(for column: AntiopeColumn) -> String {
+        switch column {
+        case .index: "INDEX"
+        case .entries: "ENTRIES"
+        case .reader: "READER"
+        }
+    }
+
+    static func line(for column: AntiopeColumn, isActive: Bool, width: Int) -> CellLine {
+        let label = label(for: column)
+        let line = CellLine([CellSpan(" " + label, cells: width, foreground: .cyan)], accessibilityText: label)
+        return isActive ? line.reversed(.black, on: .cyan) : line
+    }
+}
+
+/// A column's title row, following `AntiopeState.column` live (keys and clicks alike).
+struct ColumnTitleView: View {
+    let column: AntiopeColumn
+    let width: Int
+
+    @Environment(AntiopeState.self) private var antiope
+
+    var body: some View {
+        CellLineView(line: ColumnTitle.line(for: column, isActive: antiope.column == column, width: width))
+            .accessibilityAddTraits(antiope.column == column ? .isSelected : [])
+    }
+}

@@ -33,13 +33,13 @@ struct AntiopeRootView: View {
                     AntiopeBannerRow(banner: banner) { state.runs.banner = nil }
                 }
                 HStack(alignment: .top, spacing: 0) {
-                    PageIndexColumn()
+                    titled(.index, width: PageIndexColumn.cells) { PageIndexColumn() }
                         .frame(width: CGFloat(PageIndexColumn.cells) * cell.width)
                     ColumnSeparator()
-                    entriesColumn
+                    titled(.entries, width: EntryPageColumn.cells) { entriesColumn }
                         .frame(width: CGFloat(EntryPageColumn.cells) * cell.width)
                     ColumnSeparator()
-                    readerColumn
+                    titled(.reader, width: max(0, width - Self.minimumCells + Self.minimumReaderCells)) { readerColumn }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
@@ -61,6 +61,14 @@ struct AntiopeRootView: View {
         .onAppear { antiope.closeSearchPrompt(clearing: false) }
         .onDisappear { antiope.closeSearchPrompt(clearing: false) }
         .crtScreen()
+    }
+
+    /// A column under its one-row title.
+    private func titled(_ column: AntiopeColumn, width: Int, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ColumnTitleView(column: column, width: width)
+            content()
+        }
     }
 
     /// The entry list, or P800–P802 in a Garden scope.
