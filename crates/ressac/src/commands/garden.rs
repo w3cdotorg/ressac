@@ -96,8 +96,10 @@ fn garden_command(
                 let mut line = serde_json::to_value(Event::Finished {
                     summary: app.summary()?,
                 })?;
-                line["applied"] = applied.into();
-                line["skipped"] = skipped.into();
+                if let Some(object) = line.as_object_mut() {
+                    object.insert("applied".into(), applied.into());
+                    object.insert("skipped".into(), skipped.into());
+                }
                 writeln!(out, "{line}")?;
             } else {
                 writeln!(out, "{}", output::apply_safe_text(applied, &skipped))?;
