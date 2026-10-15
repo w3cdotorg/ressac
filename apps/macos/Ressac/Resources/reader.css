@@ -519,6 +519,11 @@ small, sub, sup {
   line-height: var(--row);
 }
 
+/* A legacy (always-visible) scroller would take width off the reader: Antiope scrolls without one. */
+:root[data-theme="antiope"] ::-webkit-scrollbar {
+  display: none;
+}
+
 /* Antiope end. */
 
 /*

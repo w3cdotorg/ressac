@@ -25,7 +25,7 @@ struct PageIndexColumn: View {
                     }
                 }
             }
-            .scrollIndicators(.hidden)
+            .scrollIndicators(.never)
             .onChange(of: current) { _, page in
                 if let page { proxy.scrollTo(page) }
             }
@@ -94,7 +94,7 @@ struct EntryPageColumn: View {
                     }
                 }
             }
-            .scrollIndicators(.hidden)
+            .scrollIndicators(.never)
             .overlay {
                 if app.entries.isEmpty {
                     CellLineView(line: Self.emptyLine(app.emptyListMessage, width: Self.cells))

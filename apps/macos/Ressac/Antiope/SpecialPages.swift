@@ -63,7 +63,7 @@ struct SommairePage: View {
                     }
                 }
             }
-            .scrollIndicators(.hidden)
+            .scrollIndicators(.never)
         }
     }
 
@@ -180,7 +180,7 @@ struct GuidePage: View {
                     }
                 }
             }
-            .scrollIndicators(.hidden)
+            .scrollIndicators(.never)
         }
     }
 

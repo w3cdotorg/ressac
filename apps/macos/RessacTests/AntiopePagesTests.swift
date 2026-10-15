@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 
 @testable import Ressac
@@ -159,5 +160,34 @@ import Testing
         state.searchText = ""
         state.selection = .starred
         #expect(state.entries.isEmpty && shown().contains("NO ENTRIES"))
+    }
+}
+
+/// Acceptance fix F: with System Settings > Scroll bars on "Always", a SwiftUI ScrollView with
+/// `.scrollIndicators(.hidden)` still reserves a legacy scroller track, which cut the right end
+/// off the 22-cell index column. `.never` takes no width at all.
+@MainActor @Suite struct LegacyScrollerTests {
+    private func scrollViews(in view: NSView) -> [NSScrollView] {
+        (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrollViews(in:))
+    }
+
+    @Test func theIndexColumnKeepsAllItsCellsUnderLegacyScrollers() async throws {
+        let (state, _, _) = try makeState()
+        let antiope = AntiopeState(app: state)
+        let width = CGFloat(PageIndexColumn.cells) * TeletextFont.cell(forSize: TeletextFont.defaultSize).width
+        let host = NSHostingView(rootView: PageIndexColumn().environment(antiope))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        defer { window.contentView = nil }
+        host.layoutSubtreeIfNeeded()
+        let found = scrollViews(in: host)
+        let scroll = try #require(found.first)
+        scroll.scrollerStyle = .legacy
+        host.layoutSubtreeIfNeeded()
+        scroll.tile()
+        #expect(!scroll.hasVerticalScroller)
+        #expect(scroll.contentSize.width == scroll.frame.width)
+        #expect(abs(scroll.contentSize.width - width) < 0.5, "\(scroll.contentSize.width) vs \(width)")
     }
 }
