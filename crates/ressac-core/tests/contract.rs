@@ -158,8 +158,19 @@ fn reading_columns_and_views_are_stable() {
     let version: i64 = conn
         .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     assert_eq!(version, ressac_core::store::SCHEMA_VERSION);
+}
+
+#[test]
+fn page_columns_and_view_are_stable() {
+    let (_dir, conn) = live_store();
+    assert_eq!(
+        columns(&conn, "v_page"),
+        ["page", "kind", "ref_id", "title", "parent_page"]
+    );
+    assert!(columns(&conn, "folder").contains(&"page".to_string()));
+    assert!(columns(&conn, "feed").contains(&"page".to_string()));
 }
 
 /// What the Swift tests rely on in the committed fixture (rows found by guid or title).
@@ -168,7 +179,7 @@ fn contract_fixture_covers_the_reading_cases() {
     let db = fixture();
     let int = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
     let text = |sql: &str| -> String { db.query_row(sql, [], |r| r.get(0)).unwrap() };
-    assert_eq!(int("SELECT version FROM schema_meta"), 2);
+    assert_eq!(int("SELECT version FROM schema_meta"), 3);
 
     // One FTS row per entry; the backlog rule on xkcd's first fill.
     assert_eq!(int("SELECT count(*) FROM entry"), 6);
