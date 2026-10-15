@@ -17,6 +17,7 @@ mod reading;
 pub use decisions::{DecisionRecord, FeedSnapshot};
 pub use feeds::{FeedRow, FolderRow, ImportReport};
 pub use fetch::{AttemptRecord, BACKLOG_DAYS, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
+pub use health::TriageFacts;
 pub use reading::{FulltextRow, plain_text};
 
 /// Highest schema version this binary knows.
