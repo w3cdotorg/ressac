@@ -726,6 +726,8 @@ enum PendingPanel: Equatable, Sendable {
     }
 
     private(set) var phase = Phase.starting
+    /// Shows the fatal alert of spec §8 (the helper is missing). Tests replace it.
+    @ObservationIgnored var presentFatalAlert: @MainActor (String) -> Void = { Launcher.runFatalAlert($0) }
 
     var state: AppState? {
         if case let .ready(state) = phase { state } else { nil }
@@ -756,7 +758,9 @@ enum PendingPanel: Equatable, Sendable {
 
     func launch(database url: URL, executable: URL?) async {
         guard let executable else {
-            phase = .failed("The ressac helper is missing from the app bundle. Rebuild the app.")
+            let message = "The ressac helper is missing from the app bundle. Rebuild the app."
+            phase = .failed(message)
+            presentFatalAlert(message)
             return
         }
         let runs = RunCoordinator(cli: RessacCLI(executable: executable, database: url))
@@ -782,5 +786,18 @@ enum PendingPanel: Equatable, Sendable {
         } catch {
             phase = .failed("Cannot open \(url.path): \(error.localizedDescription)")
         }
+    }
+
+    /// The app cannot run a single command without its helper: a critical alert whose only way
+    /// out is Quit (spec §8). Never shown in the unit-test host, where it would block the run.
+    static func runFatalAlert(_ message: String) {
+        guard !isRunningTests else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Ressac cannot start"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Quit Ressac")
+        _ = alert.runModal()
+        NSApplication.shared.terminate(nil)
     }
 }

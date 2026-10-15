@@ -311,15 +311,19 @@ func calls(_ stub: Stub) throws -> [String] {
         #expect(launcher.state != nil)
     }
 
+    /// Spec §8: a missing helper is a fatal alert at launch, not only a message in the window.
     @Test func missing_helper_is_fatal() async throws {
         let test = try TestDatabase()
         let launcher = Launcher()
+        var alerts: [String] = []
+        launcher.presentFatalAlert = { alerts.append($0) }
         await launcher.launch(database: test.url, executable: nil)
         guard case let .failed(message) = launcher.phase else {
             Issue.record("expected a failure, got \(launcher.phase)")
             return
         }
         #expect(message.hasPrefix("The ressac helper is missing"))
+        #expect(alerts == [message])
     }
 }
 
