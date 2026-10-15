@@ -175,6 +175,8 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         var chunks: [Data] = []
         /// Seconds before the response, to keep a load in flight.
         var delay: TimeInterval = 0
+        /// A 302 to this address instead of a body.
+        var redirect: String?
     }
 
     static let answers = Mutex<[String: Answer]>([:])
@@ -197,6 +199,19 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         let url = request.url!
         guard let answer = Self.answers.withLock({ $0[url.path()] }) else {
             client?.urlProtocol(self, didFailWithError: URLError(.cannotFindHost))
+            return
+        }
+        if let target = answer.redirect, let targetURL = URL(string: target) {
+            let response = HTTPURLResponse(url: url, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": target])!
+            client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: targetURL), redirectResponse: response)
+            // A redirect the session declines to follow leaves the protocol running (a followed one
+            // stops it): then the 3xx itself is the answer, as a server would end it.
+            Thread.detachNewThread { [self] in
+                Thread.sleep(forTimeInterval: 0.2)
+                if stopped.withLock({ $0 }) { return }
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocolDidFinishLoading(self)
+            }
             return
         }
         Thread.detachNewThread { [self] in
@@ -280,6 +295,26 @@ private func stub(_ path: String) -> MosaicRequest {
             return
         }
         #expect(thumbnail.columns == 9)
+    }
+
+    /// "http/https only" holds across redirects: a `data:` or `ftp:` target is not followed.
+    @Test func aRedirectToANonWebSchemeIsNotFollowed() async {
+        let png = encoded([flat(255, 0, 0, width: 24, height: 40)], as: .png)
+        let dataURL = "data:image/png;base64," + png.base64EncodedString()
+        StubProtocol.serve("/to-data.png", .init(redirect: dataURL))
+        StubProtocol.serve("/to-ftp.png", .init(redirect: "ftp://stub.ressac.test/a.png"))
+        for path in ["/to-data.png", "/to-ftp.png"] {
+            let start = ContinuousClock.now
+            #expect(await MosaicSchemeHandler.mosaic(for: stub(path), fetcher: fetcher) == .failure(.status(302)), "\(path)")
+            #expect(ContinuousClock.now - start < .seconds(3), "\(path)")
+        }
+    }
+
+    @Test func aRedirectToAnotherWebAddressIsFollowed() async throws {
+        StubProtocol.serve("/moved.png", .init(redirect: "https://stub.ressac.test/final.png"))
+        StubProtocol.serve("/final.png", .init(chunks: [encoded([flat(255, 0, 0, width: 24, height: 40)], as: .png)]))
+        let png = try await MosaicSchemeHandler.mosaic(for: stub("/moved.png"), fetcher: fetcher).get()
+        #expect(try #require(decodePNG(png)).rgb(0, 0) == (255, 0, 0))
     }
 
     @Test func aServerThatNeverAnswersTimesOut() async throws {

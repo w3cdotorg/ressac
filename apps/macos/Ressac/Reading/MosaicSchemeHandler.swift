@@ -148,12 +148,19 @@ final class MosaicFetcher: Sendable {
             }
         }
 
+        /// "http/https only" holds across redirects: any other target is not followed, and the 3xx
+        /// answer itself ends the transfer as `status(3xx)`.
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+            completionHandler(LinkPolicy.webURL(request.url?.absoluteString) == nil ? nil : request)
+        }
+
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
             let overflow = loads.withLock { loads -> Bool in
-                guard var load = loads[dataTask.taskIdentifier], load.result == nil else { return false }
+                guard let load = loads[dataTask.taskIdentifier], load.result == nil else { return false }
                 guard load.data.count + data.count <= maxBytes else { return true }
-                load.data.append(data)
-                loads[dataTask.taskIdentifier] = load
+                // In place: copying the struct out would copy the whole buffer on every chunk.
+                loads[dataTask.taskIdentifier]?.data.append(data)
                 return false
             }
             if overflow {
