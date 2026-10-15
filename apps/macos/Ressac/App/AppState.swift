@@ -512,7 +512,7 @@ enum PendingPanel: Equatable, Sendable {
             onError: { [weak self] in self?.report($0) },
             onChange: { [weak self] fresh in
                 guard let self else { return }
-                entries = Self.merge(fresh: fresh, previous: entries, retained: retained)
+                entries = Self.merge(fresh: fresh.rows, previous: entries, retained: retained)
             })
     }
 
