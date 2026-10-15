@@ -6,8 +6,8 @@ import GRDB
 /// The schema belongs to the Rust core: the app never migrates it itself, it runs
 /// `ressac migrate` when `check(at:)` says so.
 final class AppDatabase: Sendable {
-    /// Schema version this build understands (`schema_meta.version`).
-    static let knownSchemaVersion = 2
+    /// Schema version this build understands (`schema_meta.version`): v3 adds page numbers.
+    static let knownSchemaVersion = 3
 
     enum SchemaCheck: Equatable, Sendable {
         case missing
@@ -66,9 +66,15 @@ final class AppDatabase: Sendable {
     }
 
     static func check(at url: URL) throws -> SchemaCheck {
+        try check(at: url, known: knownSchemaVersion)
+    }
+
+    /// `check(at:)` against any known version, so that a test can play an older app
+    /// opening a newer database (Review Focus #3).
+    static func check(at url: URL, known: Int) throws -> SchemaCheck {
         guard let version = try schemaVersion(at: url) else { return .missing }
-        if version < knownSchemaVersion { return .needsMigration(version) }
-        if version > knownSchemaVersion { return .tooNew(version) }
+        if version < known { return .needsMigration(version) }
+        if version > known { return .tooNew(version) }
         return .ok
     }
 

@@ -6,9 +6,10 @@ import Testing
 
 // MARK: - Test database
 
-/// A private copy of `tests/fixtures/contract.sqlite` reduced to its schema (v2) and the
-/// 7 folders and 11 feeds of `vienna-like.opml`, all active: entries, full texts,
-/// diagnoses, fetch logs and decisions are cleared, so each test seeds what it asserts on.
+/// A private copy of `tests/fixtures/contract.sqlite` reduced to its schema (v3) and the
+/// 7 folders and 11 feeds of `vienna-like.opml`, all active, with the page numbers the core
+/// gave them: entries, full texts, diagnoses, fetch logs and decisions are cleared, so each
+/// test seeds what it asserts on.
 final class TestDatabase: Sendable {
     static let repoRoot = URL(filePath: #filePath)
         .deletingLastPathComponent()  // RessacTests
@@ -116,8 +117,27 @@ final class TestDatabase: Sendable {
 
     @Test func newer_database_is_refused() throws {
         let test = try TestDatabase()
-        try test.execute("UPDATE schema_meta SET version = 3")
-        #expect(try AppDatabase.check(at: test.url) == .tooNew(3))
+        try test.execute("UPDATE schema_meta SET version = 4")
+        #expect(try AppDatabase.check(at: test.url) == .tooNew(4))
+    }
+
+    /// Review Focus #3: a database the v3 core migrated, opened by an app that knows v2,
+    /// gets "This database was created by a newer Ressac" (`SchemaCheck.tooNew`).
+    @Test func an_older_app_refuses_a_v3_database() throws {
+        let test = try TestDatabase()
+        #expect(AppDatabase.knownSchemaVersion == 3)
+        #expect(try AppDatabase.schemaVersion(at: test.url) == 3)
+        #expect(try AppDatabase.check(at: test.url, known: 2) == .tooNew(3))
+        #expect(try AppDatabase.check(at: test.url, known: 3) == .ok)
+        #expect(try AppDatabase.check(at: test.url, known: 4) == .needsMigration(3))
+        #expect(try AppDatabase.check(at: test.dir.appending(path: "nope.sqlite"), known: 2) == .missing)
+    }
+
+    /// Every database made before this sub-project is at v2: the app runs `ressac migrate` first.
+    @Test func a_v2_database_requests_migration() throws {
+        let test = try TestDatabase()
+        try test.execute("UPDATE schema_meta SET version = 2")
+        #expect(try AppDatabase.check(at: test.url) == .needsMigration(2))
     }
 
     @Test func default_url_follows_ressac_db_like_the_cli() {
