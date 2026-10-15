@@ -113,6 +113,41 @@ Base : construite depuis l'OPML Vienna (import puis check) dans un dossier tempo
 
 - `macos-latest` (11/10/2026) : Xcode 26.6 et SDK macOS 26.5, donc la construction et les tests de l'appli sont sautés, échec autorisé, job vert avec un avertissement (exécution 38126512109). L'appli n'est vérifiée qu'en local tant que GitHub n'a pas Xcode 27.
 
+## Thème Antiope (sous-projet 4)
+
+### Recette manuelle (15/10/2026)
+
+Base : la vraie base (`~/Library/Application Support/Ressac/ressac.sqlite`), migrée de la v2 à la v3 par l'appli à son premier lancement, sauvegarde `ressac.sqlite.bak-v2` à côté (version 2, 61,6 Mo). Appli : build Release 8a5bf4a (puis les correctifs D à F, voir plus bas) à la place de l'ancien `/Applications/Ressac.app`. Recette faite par Clément ; Claude n'a envoyé aucune frappe ni aucun clic, il a seulement lu des copies de la base avec un petit `recette.sh` jetable et tenu le journal. Aucun test n'a écrit dans la vraie base. Migration essayée d'abord sur une copie (0,19 s, mêmes numéros de page que sur la vraie base).
+
+- Point de départ : schéma 2 puis 3, 16 dossiers, 155 flux actifs et 31 enterrés, 202 pages attribuées (de 200 à 548), dossiers racine en 200 (Blogs), 300 (Biblis), 400 (Infos) et 500 (Jon), 1079 entrées non lues, 0 flux à trier. Aucune page sous 200 : pas de flux hors dossier. Tous les contrôles d'intégrité à 1.
+
+| # | Vérification (spec §11) | Résultat | Observations |
+|---|---|---|---|
+| 1 | Passage en Antiope et retour sans relancer | OK | |
+| 2 | Page 415 (Courrier international) puis une page inconnue (399) | OK | NOT FOUND, CORRECTION et ANNULATION vérifiés |
+| 3 | Lecture avec SUITE / RETOUR seulement | OK | SUITE depuis P100 ou P899 ramène l'article |
+| 4 | Mosaïque vers l'original et retour avec `i` | KO puis OK | l'article proposé (page 462, Slashdot) n'avait que des icônes de partage dans des liens : refait sur la page 206 (Dinosaur Comics), OK |
+| 5 | Tri d'un flux en P800 puis annulation | OK | |
+| 6 | Séparateurs droits avec émojis ou CJK | OK | pages 209 (CJK) et 527 (émoji) ; aucun accent combiné dans la base |
+| 7 | Tailles 15 à 30 et largeur 40 colonnes | OK | |
+| 8 | VoiceOver sur la colonne d'index | OK | |
+| 9 | Écran CRT : clics, défilement, lignes nettes, case grisée en Natif | OK | contraste augmenté vérifié |
+
+Le seul KO (4) venait du choix de l'article de test, pas du code. Trois remarques de Clément en cours de recette ont été traitées sur place, puis revérifiées par lui :
+
+- **D** (8f8d926, 8e6f585, 45094e2) : pas de repère de la colonne active, donc titres de colonne en vidéo inverse ; une bascule tous / non lus, donc « Show Unread Only » (`⌥⌘U`, menu View, pour les deux habillages) et un titre `ENTRIES  ALL/UNREAD` cliquable ; l'horloge en haut à droite était coupée par le coin du CRT, donc une marge droite.
+- **E** (bfd0cc2) : plus de titre READER en double sur P100 et P899, et un clic sur le titre ENTRIES rend la colonne active. Le doublon du jardin est gardé, à la demande de Clément.
+- **F** (730bad9) : avec « Afficher les barres de défilement : toujours » (souris), les colonnes Antiope réservaient la piste d'un défileur classique et coupaient la fin des lignes (1028 devenait 102). Correctif : `.scrollIndicators(.never)`, et la barre du lecteur est masquée en Antiope.
+
+### Trouvailles
+
+- **Fluidité de l'écran CRT (phase 13)** : enregistrement Animation Hitches de 20 s à la souris sur la page 400 (Infos, 6002 entrées) : 59 accrocs sur 525 images, soit 53,3 ms/s avec l'écran CRT ; 32 sur 508, soit 38,3 ms/s sans (seuil retenu : 5 ms/s). Les deux dépassent le seuil : la bavure n'est pas la cause, et la bavure complète est gardée comme le plan le prévoit. Clément ne voit pas de différence à l'œil. Les premières mesures, où la case avait été basculée pendant l'enregistrement, sont écartées.
+- **Défilement des gros dossiers** : il accroche aussi sans CRT (38 ms/s). Optimisation possible plus tard, pas bloquante.
+- **Contraste augmenté** : vérifié en recette (point 9).
+- **`sqlite3 -readonly` et les copies `.backup`** : une copie faite par `.backup` d'une base WAL garde l'indicateur WAL sans fichiers `-wal` ni `-shm`, et l'ouverture en lecture seule échoue. Le `recette.sh` utilise `file:…?immutable=1`. Sur la vraie base, `.backup` n'a changé que la date du fichier `-shm`.
+- **Numéros de page** : 202 pages de 200 à 548, racines en 200, 300, 400 et 500, aucune collision ; l'attribution est déterministe, l'essai sur copie a donné les mêmes numéros.
+- **Mineurs reportés** : les remarques mineures des relectures restent ouvertes (caches de `PageDirectory` et de `DateFormatter`, focus des boutons au clavier complet, `GardenInspector` et la bannière du journal qui appellent `NSWorkspace` en direct, quelques tests à renforcer, `main.rs` à découper avant le sous-projet 2b). Le détail est dans le registre local `.superpowers/`, hors dépôt.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
