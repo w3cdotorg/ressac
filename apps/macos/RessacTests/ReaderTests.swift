@@ -485,6 +485,26 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(a == b)
         #expect(a != c)
     }
+
+    @Test func theEmptyReaderIsOneCyanEnglishLineAsWideAsTheColumn() {
+        for width in [0, 10, 17, 40, 41] {
+            let line = AntiopeReaderLines.noEntry(width: width)
+            #expect(line.width == width)
+            #expect(line.accessibilityText == "No entry selected")
+            #expect(line.spans.allSatisfy { $0.foreground == .cyan && $0.background == .black })
+        }
+        let line = AntiopeReaderLines.noEntry(width: 40)
+        #expect(line.spans.map(\.cells.accessibilityText).joined().trimmingCharacters(in: .whitespaces) == "NO ENTRY SELECTED")
+    }
+
+    @Test func theRunFailureNoticeIsRedReverseVideoAsWideAsTheColumn() {
+        for width in [0, 10, 40, 80] {
+            let line = AntiopeReaderLines.failureNotice("Could not fetch the page.", width: width)
+            #expect(line.width == width)
+            #expect(line.accessibilityText == "Could not fetch the page.")
+            #expect(line.spans.allSatisfy { $0.foreground == .black && $0.background == .red })
+        }
+    }
 }
 
 @MainActor @Suite struct SubpageLineTests {

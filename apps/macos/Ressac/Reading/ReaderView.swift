@@ -22,6 +22,8 @@ struct ReaderView: View {
             if let entry = state.selectedEntry {
                 ArticleWebView(page: page(for: entry), controller: controller)
                     .safeAreaInset(edge: .top, spacing: 0) { runFailureNotice }
+            } else if antiope != nil {
+                AntiopeReaderLine { AntiopeReaderLines.noEntry(width: $0) }
             } else {
                 ContentUnavailableView("No Entry Selected", systemImage: "doc.richtext",
                                        description: Text("Choose an entry in the list to read it here."))
@@ -67,13 +69,17 @@ struct ReaderView: View {
     @ViewBuilder
     private var runFailureNotice: some View {
         if state.readerShowsFullText, let notice = state.fullTextNotice, state.selectedFulltext?.error == nil {
-            Text(notice)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(.bar)
+            if antiope != nil {
+                AntiopeReaderLine(fillsHeight: false) { AntiopeReaderLines.failureNotice(notice, width: $0) }
+            } else {
+                Text(notice)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                    .background(.bar)
+            }
         }
     }
 
@@ -261,7 +267,46 @@ struct ArticlePage: Equatable {
     }
 }
 
-/// `WKWebView` with JavaScript off, no persistent website data, and every link sent to the browser.
+/// What the Antiope reader column draws besides the article, as cell rows (spec §2, §5): no
+/// system font, symbol or grey, whatever the page shows.
+enum AntiopeReaderLines {
+    /// Nothing selected, for instance after typing a page number: one centred cyan row.
+    static func noEntry(width: Int) -> CellLine {
+        var line = CellLine.centred("NO ENTRY SELECTED", width: width, foreground: .cyan)
+        line.accessibilityText = "No entry selected"
+        return line
+    }
+
+    /// The run-failure notice: reverse video, black on red, one row of exactly `width` cells.
+    static func failureNotice(_ text: String, width: Int) -> CellLine {
+        CellLine([CellSpan(" " + text, cells: width, foreground: .black, background: .red)], accessibilityText: text)
+    }
+}
+
+/// One `AntiopeReaderLines` row sized to the reader column: centred in it, or one row tall.
+private struct AntiopeReaderLine: View {
+    let fillsHeight: Bool
+    let line: (Int) -> CellLine
+    @Environment(\.teletextSize) private var size
+
+    init(fillsHeight: Bool = true, _ line: @escaping (Int) -> CellLine) {
+        self.fillsHeight = fillsHeight
+        self.line = line
+    }
+
+    var body: some View {
+        let cell = TeletextFont.cell(forSize: size)
+        GeometryReader { proxy in
+            CellLineView(line: line(max(0, Int(proxy.size.width / cell.width))))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: fillsHeight ? .center : .topLeading)
+        }
+        .frame(height: fillsHeight ? nil : cell.height)
+        .background(TeletextColor.black.color)
+    }
+}
+
+/// `WKWebView` with JavaScript off and no persistent website data. Links go to the browser, except
+/// the mosaic toggle links, which the page handles in-app.
 struct ArticleWebView: NSViewRepresentable {
     let page: ArticlePage
     let controller: ReaderController
