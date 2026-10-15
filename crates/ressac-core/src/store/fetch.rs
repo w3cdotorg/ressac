@@ -97,10 +97,10 @@ impl Store {
             )?;
             // Only a real change rewrites the row, and only then is the search row redone.
             let mut update = tx.prepare(
-                "UPDATE entry SET url = ?3, title = ?4, updated_at = ?5, summary_html = ?6, content_html = ?7 \
-                 WHERE feed_id = ?1 AND guid = ?2 AND (url IS NOT ?3 OR title IS NOT ?4 \
-                 OR updated_at IS NOT ?5 OR summary_html IS NOT ?6 OR content_html IS NOT ?7) \
-                 RETURNING id, author",
+                "UPDATE entry SET url = ?3, title = ?4, author = ?5, updated_at = ?6, summary_html = ?7, \
+                 content_html = ?8 WHERE feed_id = ?1 AND guid = ?2 AND (url IS NOT ?3 OR title IS NOT ?4 \
+                 OR author IS NOT ?5 OR updated_at IS NOT ?6 OR summary_html IS NOT ?7 OR content_html IS NOT ?8) \
+                 RETURNING id",
             )?;
             for e in &feed.entries {
                 let read_at = (first_fill && e.published_at < backlog_before).then(|| ts(a.at));
@@ -124,22 +124,23 @@ impl Store {
                     let id = tx.last_insert_rowid();
                     index_entry(&tx, id, e.title.as_deref(), e.author.as_deref(), html)?;
                 } else {
-                    let changed: Option<(i64, Option<String>)> = update
+                    let changed: Option<i64> = update
                         .query_row(
                             params![
                                 a.feed_id,
                                 e.guid,
                                 e.url,
                                 e.title,
+                                e.author,
                                 e.updated_at.map(ts),
                                 e.summary_html,
                                 e.content_html
                             ],
-                            |r| Ok((r.get(0)?, r.get(1)?)),
+                            |r| r.get(0),
                         )
                         .optional()?;
-                    if let Some((id, author)) = changed {
-                        index_entry(&tx, id, e.title.as_deref(), author.as_deref(), html)?;
+                    if let Some(id) = changed {
+                        index_entry(&tx, id, e.title.as_deref(), e.author.as_deref(), html)?;
                     }
                 }
             }
@@ -453,5 +454,37 @@ mod tests {
         third.feed.as_mut().unwrap().entries = vec![e];
         store.record_attempt("r3", &third).unwrap();
         assert_eq!(store.search_ids("gamma").unwrap(), [1]);
+    }
+
+    /// A new author alone is a change: the row and its search row follow the feed.
+    #[test]
+    fn a_changed_author_reaches_the_entry_and_the_search_index() {
+        let store = store_with_feeds(1);
+        let mut e = entry("a");
+        e.author = Some("Ada Lovelace".into());
+        let mut first = attempt(1, now(), None, &[]);
+        first.feed.as_mut().unwrap().entries = vec![e.clone()];
+        store.record_attempt("r1", &first).unwrap();
+        assert_eq!(store.search_ids("author:ada").unwrap(), [1]);
+
+        e.author = Some("Grace Hopper".into());
+        let mut second = attempt(1, now() + Duration::hours(1), None, &[]);
+        second.feed.as_mut().unwrap().entries = vec![e.clone()];
+        store.record_attempt("r2", &second).unwrap();
+        let author: Option<String> = store
+            .conn()
+            .query_row("SELECT author FROM entry WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(author.as_deref(), Some("Grace Hopper"));
+        assert_eq!(store.search_ids("author:grace").unwrap(), [1]);
+        assert!(store.search_ids("author:ada").unwrap().is_empty());
+
+        // A feed that drops the author clears it too.
+        e.author = None;
+        let mut third = attempt(1, now() + Duration::hours(2), None, &[]);
+        third.feed.as_mut().unwrap().entries = vec![e];
+        store.record_attempt("r3", &third).unwrap();
+        assert!(store.search_ids("author:grace").unwrap().is_empty());
+        assert_eq!(store.search_ids("title:A").unwrap(), [1]);
     }
 }
