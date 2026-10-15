@@ -141,6 +141,184 @@ enum GardenPage {
         Line(id: id, role: .blank, cells: .blank(max(0, cells)))
     }
 
+    // MARK: Inspector
+
+    /// The garden inspector as a teletext page `cells` wide (spec §8): name and folder path, the
+    /// status in double height, then evidence, remarks, links, redirects and the fetch log.
+    static func inspectorLines(_ row: GardenRow?, log: [FetchLogRow], cells: Int,
+                               timeZone: TimeZone = .current) -> [Line] {
+        guard cells > 0 else { return [] }
+        var lines: [Line] = []
+
+        func add(_ spans: [CellSpan], role: Line.Role = .text, doubleHeight: Bool = false, spoken: String) {
+            lines.append(Line(id: "inspector-\(lines.count)", role: role,
+                              cells: CellLine(spans, accessibilityText: spoken), isDoubleHeight: doubleHeight))
+        }
+        func blank() {
+            lines.append(blankLine(id: "inspector-\(lines.count)", cells: cells))
+        }
+        func heading(_ title: String, _ color: TeletextColor) {
+            add([CellSpan(title.uppercased(), cells: cells, foreground: color)], spoken: title)
+        }
+        /// `text` wrapped on words; `lead` (a label, a date, a dash) starts the first row and the
+        /// following rows are indented by its width. Only the first row is read by VoiceOver.
+        func paragraph(_ text: String, color: TeletextColor, lead: (text: String, color: TeletextColor)? = nil,
+                       spokenLead: String = "") {
+            let indent = min(lead?.text.count ?? 0, cells)
+            for (index, piece) in wrap(text, cells: cells - indent).enumerated() {
+                var spans: [CellSpan] = []
+                if let lead {
+                    spans.append(CellSpan(index == 0 ? lead.text : "", cells: indent, foreground: lead.color))
+                }
+                spans.append(CellSpan(piece, cells: cells - indent, foreground: color))
+                add(spans, spoken: index == 0 ? spokenLead + text : "")
+            }
+        }
+        func labeled(_ label: String, _ value: String) {
+            paragraph(value, color: .white,
+                      lead: (label.uppercased().padding(toLength: 10, withPad: " ", startingAt: 0), .cyan),
+                      spokenLead: "\(label): ")
+        }
+
+        guard let row else {
+            blank()
+            var none = CellLine.centred("NO FEED SELECTED", width: cells, foreground: .cyan)
+            none.accessibilityText = "No feed selected"
+            lines.append(Line(id: "inspector-\(lines.count)", role: .text, cells: none))
+            return lines
+        }
+
+        let status = GardenModel.status(of: row)
+        let buried = GardenModel.isBuried(row)
+        paragraph(row.title, color: .white)
+        if let path = row.folderPath, !path.isEmpty {
+            paragraph(path, color: .cyan)
+        }
+        blank()
+        let style = headingStyle(for: status)
+        add([CellSpan(" " + status.uppercased(), cells: cells, foreground: style.foreground, background: style.background)],
+            role: .heading(status), doubleHeight: true, spoken: status)
+        if buried {
+            paragraph("Buried. Press k to restore it.", color: .yellow)
+        }
+        if let reason = row.reason {
+            paragraph(reason, color: .white)
+        }
+        if let bullets = row.evidence?.bullets, !bullets.isEmpty {
+            blank()
+            heading("Evidence", .green)
+            for bullet in bullets {
+                paragraph(bullet, color: .white, lead: ("- ", .green))
+            }
+        }
+        if !row.remarks.isEmpty {
+            blank()
+            heading("Remarks", .yellow)
+            for remark in row.remarks {
+                paragraph(GardenModel.remarkSentence(remark), color: .white, lead: ("- ", .yellow))
+            }
+        }
+        blank()
+        heading("Links", .cyan)
+        if let action = row.proposedAction, !buried {
+            labeled("Proposed", action.label)
+        }
+        if let decision = row.lastDecision {
+            labeled("Decision", decision.capitalized)
+        }
+        labeled("Feed", row.xmlUrl)
+        if let site = LinkPolicy.webURL(row.htmlUrl) {
+            labeled("Site", site.absoluteString)
+        }
+        if let wayback = LinkPolicy.webURL(row.waybackUrl) {
+            labeled("Wayback", wayback.absoluteString)
+        }
+        if let chain = log.first?.redirectChain, !chain.isEmpty {
+            blank()
+            heading("Redirects", .magenta)
+            for hop in chain {
+                paragraph(hop.url, color: .white, lead: ("\(hop.status) ", .magenta), spokenLead: "\(hop.status) to ")
+            }
+        }
+        blank()
+        heading("Fetch log", .green)
+        if log.isEmpty {
+            paragraph("Not fetched yet.", color: .white)
+        }
+        for entry in log {
+            let date = logDate(entry.at, timeZone: timeZone)
+            paragraph(GardenModel.outcome(of: entry), color: .white, lead: (date + "  ", .cyan), spokenLead: "\(date), ")
+        }
+        return lines
+    }
+
+    /// Greedy word wrap into rows of at most `cells` characters; a word longer than a row (a URL)
+    /// is cut into full rows.
+    static func wrap(_ text: String, cells: Int) -> [String] {
+        guard cells > 0 else { return [] }
+        var rows: [String] = []
+        var current = ""
+        for piece in text.split(whereSeparator: \.isWhitespace) {
+            var word = String(piece)
+            while word.count > cells {
+                if !current.isEmpty {
+                    rows.append(current)
+                    current = ""
+                }
+                rows.append(String(word.prefix(cells)))
+                word = String(word.dropFirst(cells))
+            }
+            if current.isEmpty {
+                current = word
+            } else if current.count + 1 + word.count <= cells {
+                current += " " + word
+            } else {
+                rows.append(current)
+                current = word
+            }
+        }
+        if !current.isEmpty {
+            rows.append(current)
+        }
+        return rows
+    }
+
+    /// "10 OCT 26 07:00": fetch log dates, English month in capitals, in `timeZone`.
+    static func logDate(_ date: Date, timeZone: TimeZone) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "dd MMM yy HH:mm"
+        return formatter.string(from: date).uppercased()
+    }
+
+    // MARK: Banner
+
+    /// `RunCoordinator`'s banner as one red reverse-video row (spec §8): the message in white,
+    /// then the clickable keys in yellow, all on red, exactly the window's width.
+    struct BannerRow: Equatable, Sendable {
+        var message: CellLine
+        /// ` LOG `, when the log explains the failure.
+        var log: CellLine?
+        /// ` X `, to dismiss.
+        var dismiss: CellLine
+
+        var width: Int { message.width + (log?.width ?? 0) + dismiss.width }
+    }
+
+    static func bannerRow(_ banner: Banner, cells: Int) -> BannerRow {
+        func key(_ label: String, spoken: String) -> CellLine {
+            CellLine([CellSpan(label, cells: label.count, foreground: .yellow, background: .red)], accessibilityText: spoken)
+        }
+        let log = banner.showLog ? key(" LOG ", spoken: "Show Log") : nil
+        let dismiss = key(" X ", spoken: "Dismiss")
+        let messageCells = max(0, cells - (log?.width ?? 0) - dismiss.width)
+        return BannerRow(message: CellLine([CellSpan(" " + banner.message, cells: messageCells, foreground: .white,
+                                                     background: .red)],
+                                           accessibilityText: banner.message),
+                         log: log, dismiss: dismiss)
+    }
+
     // MARK: Keys
 
     /// `↑` and `↓` walk the garden list unless the index column is active: its arrows pick pages.

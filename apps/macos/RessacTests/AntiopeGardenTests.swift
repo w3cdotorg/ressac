@@ -201,3 +201,131 @@ private func trailingTrimmed(_ text: String) -> String {
         #expect(!fresh.map(\.role).contains(.feed(2)))
     }
 }
+
+@MainActor @Suite struct GardenInspectorPageTests {
+    private let log = [FetchLogRow(id: 1, at: Date(timeIntervalSince1970: 1_791_615_600), httpStatus: 410, errorKind: nil,
+                                   redirectChain: [Hop(status: 301, url: "https://www.unphotographable.com/index.rdf")])]
+
+    @Test func theInspectorIsATeletextPage() throws {
+        let row = gardenRow(7, "Unphotographable", status: "Ailing", folder: "Blogs / Photo",
+                            reason: "The feed is not valid XML.", evidence: ["Parse error at line 3."], remarks: [.httpOnly],
+                            needsTriage: true, site: "http://www.unphotographable.com/")
+        let lines = GardenPage.inspectorLines(row, log: log, cells: 40, timeZone: .gmt)
+        #expect(lines.map { trailingTrimmed($0.text) } == [
+            "Unphotographable",
+            "Blogs / Photo",
+            "",
+            " AILING",
+            "The feed is not valid XML.",
+            "",
+            "EVIDENCE",
+            "- Parse error at line 3.",
+            "",
+            "REMARKS",
+            "- Only served over http://.",
+            "",
+            "LINKS",
+            "FEED      https://feeds.example.org/7",
+            "SITE      http://www.unphotographable.co",
+            "          m/",
+            "",
+            "REDIRECTS",
+            "301 https://www.unphotographable.com/ind",
+            "    ex.rdf",
+            "",
+            "FETCH LOG",
+            "10 OCT 26 07:00  HTTP 410",
+        ])
+        for line in lines {
+            #expect(line.cells.width == 40, "\(line.id): «\(line.text)»")
+        }
+        let status = try #require(lines.first { $0.isDoubleHeight })
+        #expect(status.role == .heading("Ailing"))
+        #expect(status.cells.spans.allSatisfy { $0.foreground == .yellow })
+        #expect(status.cells.accessibilityText == "Ailing")
+        #expect(lines[13].cells.spans.first == CellSpan("FEED      ", cells: 10, foreground: .cyan))
+        #expect(lines[13].cells.accessibilityText == "Feed: https://feeds.example.org/7")
+        #expect(lines[15].cells.accessibilityText.isEmpty, "a wrapped value is read once")
+        #expect(lines[18].cells.accessibilityText == "301 to https://www.unphotographable.com/index.rdf")
+        #expect(lines[22].cells.accessibilityText == "10 OCT 26 07:00, HTTP 410")
+    }
+
+    @Test func aBuriedFossilShowsHowToRestoreIt() throws {
+        let fossil = gardenRow(8, "Old blog", status: "Fossil", state: "buried", action: .bury, decision: "bury")
+        let page = GardenPage.inspectorLines(fossil, log: [], cells: 40, timeZone: .gmt)
+        let status = try #require(page.first { $0.isDoubleHeight })
+        #expect(status.cells.spans.allSatisfy { $0.foreground == .white && $0.background == .blue })
+        let texts = page.map { trailingTrimmed($0.text) }
+        #expect(texts.contains("Buried. Press k to restore it."))
+        #expect(!texts.contains { $0.hasPrefix("PROPOSED") }, "nothing is proposed for a buried feed")
+        #expect(texts.contains("DECISION  Bury"))
+        #expect(texts.contains("Not fetched yet."))
+    }
+
+    @Test func withoutASelectionTheReaderSaysSo() {
+        let none = GardenPage.inspectorLines(nil, log: [], cells: 40)
+        #expect(none.map(\.text) == [spaces(40), spaces(12) + "NO FEED SELECTED" + spaces(12)])
+        #expect(none.last?.cells.spans.allSatisfy { $0.foreground == .cyan } == true)
+        #expect(none.last?.cells.accessibilityText == "No feed selected")
+    }
+
+    /// Spec §5: blue is for separators, backgrounds and mosaics, never for text.
+    @Test func blueNeverColoursText() {
+        let rows = (GardenModel.urgencyOrder + ["Buried"]).enumerated().map {
+            gardenRow(Int64($0.offset + 1), $0.element, status: $0.element, state: $0.element == "Buried" ? "buried" : "active",
+                      needsTriage: true)
+        }
+        var lines = GardenPage.entryLines(rows, scope: .all, retained: [], selected: 3, cells: EntryPageColumn.cells)
+        for row in rows {
+            lines += GardenPage.inspectorLines(row, log: log, cells: 40)
+        }
+        for line in lines where line.role != .progress {
+            #expect(!line.cells.spans.contains { $0.foreground == .blue }, "\(line.id): «\(line.text)»")
+        }
+    }
+
+    @Test func wrapBreaksOnWordsAndSplitsLongWords() {
+        #expect(GardenPage.wrap("The quick brown fox jumps", cells: 10) == ["The quick", "brown fox", "jumps"])
+        #expect(GardenPage.wrap("abcdefghijkl xy", cells: 5) == ["abcde", "fghij", "kl xy"])
+        #expect(GardenPage.wrap("a\nb", cells: 10) == ["a b"])
+        #expect(GardenPage.wrap("", cells: 10).isEmpty)
+        #expect(GardenPage.wrap("anything", cells: 0).isEmpty)
+    }
+
+    @Test func logDatesAreTeletextCapitals() {
+        #expect(GardenPage.logDate(Date(timeIntervalSince1970: 1_791_615_600), timeZone: .gmt) == "10 OCT 26 07:00")
+    }
+}
+
+@MainActor @Suite struct AntiopeBannerTests {
+    @Test func theBannerRowFillsTheWindowWidth() {
+        let failure = Banner(message: "ressac exited with code 1: the database is locked.", showLog: true)
+        let row = GardenPage.bannerRow(failure, cells: 60)
+        #expect(row.width == 60)
+        #expect(row.log?.accessibilityText == "Show Log" && row.dismiss.accessibilityText == "Dismiss")
+        #expect(row.message.spans.allSatisfy { $0.foreground == .white && $0.background == .red })
+        #expect([row.log, row.dismiss].compactMap { $0 }.allSatisfy {
+            $0.spans.allSatisfy { $0.foreground == .yellow && $0.background == .red }
+        })
+        #expect(text(of: row.message.spans[0]).hasPrefix(" ressac exited with code 1"))
+        #expect(row.message.accessibilityText == failure.message)
+
+        let network = Banner(message: "The network looks unreachable: 12 of 186 feeds could not connect.", showLog: false)
+        let short = GardenPage.bannerRow(network, cells: 40)
+        #expect(short.log == nil)
+        #expect(short.width == 40)
+    }
+
+    /// The search prompt keeps its place ahead of all this (phase 9); then the garden's last
+    /// refusal, then the run, then the hints.
+    @Test func theMinitelBarShowsRefusalsThenRunsThenItsHints() {
+        let run = RunProgress(done: 42, total: 155, label: "Fetching feeds")
+        #expect(MinitelBar.status(progress: run, message: nil) == MinitelHint(text: "REFRESHING 42/155", colour: .yellow))
+        #expect(MinitelBar.status(progress: RunProgress(done: 0, total: 0, label: "Fetching feeds"), message: nil)?.text
+            == "REFRESHING")
+        #expect(MinitelBar.status(progress: run, message: "Nothing to repair for this feed.")?.text
+            == "Nothing to repair for this feed.")
+        #expect(MinitelBar.status(progress: nil, message: nil) == nil)
+        #expect(MinitelBar.hintLine(MinitelBar.status(progress: run, message: nil)!, width: 30).width == 30)
+    }
+}

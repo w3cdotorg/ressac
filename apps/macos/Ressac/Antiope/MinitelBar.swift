@@ -92,6 +92,15 @@ struct MinitelBar: View {
         }
     }
 
+    /// What replaces the hints (spec §6): the garden's last refusal ("Nothing to repair for this
+    /// feed."), else "REFRESHING 42/155" while a run is going, in yellow. Nil keeps the hints.
+    static func status(progress: RunProgress?, message: String?) -> MinitelHint? {
+        if let message { return MinitelHint(text: message, colour: .yellow) }
+        guard let progress else { return nil }
+        let text = progress.total > 0 ? "REFRESHING \(progress.done)/\(progress.total)" : "REFRESHING"
+        return MinitelHint(text: text, colour: .yellow)
+    }
+
     /// The hint after one blank cell, exactly `width` cells.
     static func hintLine(_ hint: MinitelHint, width: Int) -> CellLine {
         CellLine([CellSpan(" " + hint.text, cells: width, foreground: hint.colour)], accessibilityText: hint.text)
