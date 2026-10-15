@@ -8,7 +8,10 @@ struct RessacCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) { FileMenuItems(state: state) }
         CommandGroup(replacing: .textEditing) { SearchMenuItem(state: state) }
-        CommandGroup(after: .toolbar) { TextSizeMenuItems() }
+        CommandGroup(after: .toolbar) {
+            UnreadOnlyMenuItem(state: state)
+            TextSizeMenuItems()
+        }
         CommandMenu("Go") { GoMenuItems(state: state) }
         CommandMenu("Article") { ArticleMenuItems(state: state) }
     }
@@ -49,6 +52,29 @@ private struct SearchMenuItem: View {
         Button("Search") { state?.isSearchFocused = true }
             .keyboardShortcut("f")
             .disabled(state == nil)
+    }
+}
+
+/// The All / Unread filter, for both looks: the View menu item and Antiope's entries title.
+/// A Garden page lists its own rows, so the filter does not apply there (as the Native picker).
+@MainActor enum UnreadFilterCommand {
+    static func canToggle(_ state: AppState) -> Bool { !state.selection.isGarden }
+
+    static func toggle(_ state: AppState) {
+        guard canToggle(state) else { return }
+        state.unreadOnly.toggle()
+    }
+}
+
+private struct UnreadOnlyMenuItem: View {
+    let state: AppState?
+
+    var body: some View {
+        Toggle("Show Unread Only", isOn: Binding(
+            get: { state?.unreadOnly ?? false },
+            set: { _ in if let state { UnreadFilterCommand.toggle(state) } }))
+            .keyboardShortcut("u", modifiers: [.command, .option])
+            .disabled(state.map { !UnreadFilterCommand.canToggle($0) } ?? true)
     }
 }
 

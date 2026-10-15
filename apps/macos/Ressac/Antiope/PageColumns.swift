@@ -167,7 +167,8 @@ struct EntryPageColumn: View {
 }
 
 /// The one-row title at the top of each column, as on a Minitel page: the focused column's in
-/// reverse video (black on cyan), the others cyan on black. Exactly as wide as the column.
+/// reverse video (black on cyan), the others cyan on black. Exactly as wide as the column. The
+/// entries title also shows the filter, `ENTRIES  ALL` or `ENTRIES  UNREAD`.
 enum ColumnTitle {
     static func label(for column: AntiopeColumn) -> String {
         switch column {
@@ -177,22 +178,40 @@ enum ColumnTitle {
         }
     }
 
-    static func line(for column: AntiopeColumn, isActive: Bool, width: Int) -> CellLine {
-        let label = label(for: column)
-        let line = CellLine([CellSpan(" " + label, cells: width, foreground: .cyan)], accessibilityText: label)
+    /// `unreadOnly` is nil where the filter does not apply (a Garden page, other columns).
+    static func line(for column: AntiopeColumn, isActive: Bool, width: Int, unreadOnly: Bool? = nil) -> CellLine {
+        var label = label(for: column)
+        var spoken = label.capitalized
+        if let unreadOnly {
+            label += unreadOnly ? "  UNREAD" : "  ALL"
+            spoken += unreadOnly ? ", unread only" : ", all entries"
+        }
+        let line = CellLine([CellSpan(" " + label, cells: width, foreground: .cyan)], accessibilityText: spoken)
         return isActive ? line.reversed(.black, on: .cyan) : line
     }
 }
 
-/// A column's title row, following `AntiopeState.column` live (keys and clicks alike).
+/// A column's title row, following `AntiopeState.column` live (keys and clicks alike). The entries
+/// title is also the All / Unread switch (the View menu item does the same).
 struct ColumnTitleView: View {
     let column: AntiopeColumn
     let width: Int
 
+    @Environment(AppState.self) private var app
     @Environment(AntiopeState.self) private var antiope
 
     var body: some View {
-        CellLineView(line: ColumnTitle.line(for: column, isActive: antiope.column == column, width: width))
-            .accessibilityAddTraits(antiope.column == column ? .isSelected : [])
+        let isActive = antiope.column == column
+        let filters = column == .entries && UnreadFilterCommand.canToggle(app)
+        let line = ColumnTitle.line(for: column, isActive: isActive, width: width, unreadOnly: filters ? app.unreadOnly : nil)
+        if filters {
+            Button { UnreadFilterCommand.toggle(app) } label: { CellLineView(line: line) }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .accessibilityHint("Switches between all entries and unread only")
+                .accessibilityAddTraits(isActive ? .isSelected : [])
+        } else {
+            CellLineView(line: line).accessibilityAddTraits(isActive ? .isSelected : [])
+        }
     }
 }

@@ -210,15 +210,41 @@ func listEntry(title: String?, isRead: Bool = false, isStarred: Bool = false) ->
             let inactive = ColumnTitle.line(for: column, isActive: false, width: 22)
             #expect(inactive.spans.allSatisfy { $0.foreground == .cyan && $0.background == .black })
             #expect(text(of: inactive.spans[0]).hasPrefix(" " + ColumnTitle.label(for: column)))
-            #expect(active.accessibilityText == ColumnTitle.label(for: column))
+            #expect(active.accessibilityText == ColumnTitle.label(for: column).capitalized)
         }
+    }
+
+    @Test func theEntriesTitleShowsTheFilter() {
+        let all = ColumnTitle.line(for: .entries, isActive: false, width: 28, unreadOnly: false)
+        #expect(text(of: all.spans[0]) == " ENTRIES  ALL" + String(repeating: " ", count: 15))
+        let unread = ColumnTitle.line(for: .entries, isActive: true, width: 28, unreadOnly: true)
+        #expect(text(of: unread.spans[0]).hasPrefix(" ENTRIES  UNREAD") && unread.width == 28)
+        #expect(unread.accessibilityText == "Entries, unread only" && all.accessibilityText == "Entries, all entries")
+        #expect(unread.spans.allSatisfy { $0.foreground == .black && $0.background == .cyan })
+        #expect(text(of: ColumnTitle.line(for: .entries, isActive: false, width: 28).spans[0]).hasPrefix(" ENTRIES "))
+        #expect(!text(of: ColumnTitle.line(for: .entries, isActive: false, width: 28).spans[0]).contains("ALL"))
+    }
+
+    @Test func theMenuAndTheTitleShareOneToggle() throws {
+        let (state, _, _) = try makeState()
+        #expect(!state.unreadOnly && UnreadFilterCommand.canToggle(state))
+        UnreadFilterCommand.toggle(state)
+        #expect(state.unreadOnly)
+        UnreadFilterCommand.toggle(state)
+        #expect(!state.unreadOnly)
+        state.selection = .garden(.all)  // the Native picker is disabled there too
+        #expect(!UnreadFilterCommand.canToggle(state))
+        UnreadFilterCommand.toggle(state)
+        #expect(!state.unreadOnly)
     }
 
     @Test func blueNeverColoursATitle() {
         for column in Self.columns {
             for active in [false, true] {
-                let line = ColumnTitle.line(for: column, isActive: active, width: 22)
-                #expect(line.spans.allSatisfy { $0.foreground != .blue })
+                for filter in [nil, false, true] {
+                    let line = ColumnTitle.line(for: column, isActive: active, width: 22, unreadOnly: filter)
+                    #expect(line.spans.allSatisfy { $0.foreground != .blue })
+                }
             }
         }
     }
