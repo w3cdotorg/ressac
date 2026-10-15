@@ -1,0 +1,203 @@
+import Foundation
+import GRDB
+import SwiftUI
+import Testing
+
+@testable import Ressac
+
+private func gardenRow(_ id: Int64, _ title: String, status: String?, folder: String? = "Blogs", state: String = "active",
+                       reason: String? = nil, evidence: [String]? = nil, remarks: [Remark] = [],
+                       action: ProposedAction? = nil, needsTriage: Bool = false, decision: String? = nil,
+                       site: String? = nil, wayback: String? = nil) -> GardenRow {
+    GardenRow(feedId: id, title: title, folderPath: folder, state: state, status: status, reason: reason, clue: nil,
+              evidence: evidence.map { GardenEvidence(bullets: $0, clue: "", language: nil) }, remarks: remarks,
+              proposedAction: action, needsTriage: needsTriage, lastDecision: decision,
+              waybackUrl: wayback, htmlUrl: site, xmlUrl: "https://feeds.example.org/\(id)")
+}
+
+private func spaces(_ count: Int) -> String { String(repeating: " ", count: count) }
+
+private func trailingTrimmed(_ text: String) -> String {
+    String(text.reversed().drop { $0 == " " }.reversed())
+}
+
+/// The rows are phase 8's `CellLine`s: these suites read their text with Bedstead registered in the
+/// test host, as phases 8 and 9 do (`?` stands for a glyph Bedstead lacks).
+@MainActor @Suite struct GardenPageTests {
+    let cells = EntryPageColumn.cells
+
+    /// Review Focus #1 for the garden: whatever the title, every row is exactly the entry column's
+    /// 28 cells, so the column separators stay straight.
+    @Test func everyLineIsExactlyTheColumnWidth() {
+        let rows = [
+            gardenRow(1, "Café 🎉 東京", status: "Dead", action: .bury, needsTriage: true),
+            gardenRow(2, "A title far longer than the twenty-eight cells of the column", status: "Moved",
+                      action: .followRedirect(url: "https://m.example.org/feed"), needsTriage: true),
+            gardenRow(3, "e\u{301}cole", status: "Fossil", needsTriage: false, decision: "keep"),
+            gardenRow(4, "Gone", status: "Dead", state: "buried", decision: "bury"),
+            gardenRow(5, "", status: nil),
+        ]
+        for scope in [GardenScope.needsTriage, .all, .cemetery] {
+            for selected in [nil, Int64(1), 2] {
+                let lines = GardenPage.entryLines(rows, scope: scope, retained: [1, 2, 3, 4], selected: selected, cells: cells)
+                #expect(!lines.isEmpty)
+                for line in lines {
+                    #expect(line.cells.width == 28, "\(scope) \(line.id): «\(line.text)»")
+                    #expect(line.text.count == 28, "\(scope) \(line.id): «\(line.text)»")
+                    #expect(!line.isDoubleHeight)
+                }
+            }
+        }
+    }
+
+    @Test func feedsAreGroupedByStatusInUrgencyOrder() {
+        let statuses: [String?] = ["Alive", "Dead", "Fossil", "Duplicate", "Hijacked", "Moved", "Ailing", "Dormant", nil]
+        let rows = statuses.enumerated().map { gardenRow(Int64($0.offset + 1), "Feed \($0.offset + 1)", status: $0.element) }
+        let roles = GardenPage.entryLines(rows, scope: .all, retained: [], selected: nil, cells: cells).map(\.role)
+        #expect(roles == [
+            .title,
+            .heading("Duplicate"), .feed(4), .heading("Hijacked"), .feed(5), .heading("Moved"), .feed(6),
+            .heading("Dead"), .feed(2), .heading("Ailing"), .feed(7), .heading("Fossil"), .feed(3),
+            .heading("Dormant"), .feed(8), .heading("Alive"), .feed(1), .heading("Unchecked"), .feed(9),
+        ])
+        #expect(GardenPage.orderedRows(rows, scope: .all, retained: []).map(\.feedId) == [4, 5, 6, 2, 7, 3, 8, 1, 9])
+    }
+
+    @Test func headingsTakeTheirTeletextColourAndFossilIsReverseVideo() {
+        let dead = GardenModel.Section(id: "Dead", glyph: "🪦",
+                                       rows: [gardenRow(1, "A", status: "Dead"), gardenRow(2, "B", status: "Dead")])
+        let line = GardenPage.headingLine(dead, cells: cells)
+        #expect(line.text == " DEAD" + spaces(22) + "2")
+        #expect(line.cells.spans.allSatisfy { $0.foreground == .red && $0.background == .black })
+        #expect(line.cells.accessibilityText == "Dead, 2 feeds")
+
+        let fossil = GardenPage.headingLine(GardenModel.Section(id: "Fossil", glyph: "🦴", rows: [gardenRow(3, "C", status: "Fossil")]),
+                                            cells: cells)
+        #expect(fossil.text == " FOSSIL" + spaces(20) + "1")
+        #expect(fossil.cells.spans.allSatisfy { $0.foreground == .white && $0.background == .blue })
+        #expect(fossil.cells.accessibilityText == "Fossil, 1 feed")
+
+        for status in GardenModel.urgencyOrder + ["Buried"] {
+            let style = GardenPage.headingStyle(for: status)
+            let colour = GardenStatusStyle.teletextColor(for: status)
+            #expect(style.foreground != .blue, "\(status): blue never colours text")
+            if colour == .blue {
+                #expect(style.foreground == .white && style.background == .blue, "\(status)")
+            } else {
+                #expect(style.foreground == colour && style.background == .black, "\(status)")
+            }
+        }
+    }
+
+    @Test func titleRowCountsWhatIsLeftOrListed() {
+        let rows = [gardenRow(1, "A", status: "Dead", needsTriage: true),
+                    gardenRow(2, "B", status: "Fossil", needsTriage: false, decision: "keep")]
+        let queue = GardenPage.titleLine(rows, scope: .needsTriage, visibleCount: 2, cells: cells)
+        #expect(queue.text == "NEEDS TRIAGE" + spaces(10) + "1 LEFT")
+        #expect(queue.cells.spans.last == CellSpan(" 1 LEFT", cells: 7, foreground: .yellow))
+        #expect(queue.cells.accessibilityText == "Needs Triage, 1 left")
+        #expect(GardenPage.titleLine(rows, scope: .all, visibleCount: 186, cells: cells).text
+            == "ALL FEEDS" + spaces(10) + "186 FEEDS")
+        #expect(GardenPage.titleLine(rows, scope: .cemetery, visibleCount: 1, cells: cells).text
+            == "CEMETERY" + spaces(14) + "1 FEED")
+    }
+
+    /// The mosaic gauge: `▐`, done cells in green, the rest in blue shade, then done/total, always
+    /// exactly 28 cells, from an empty garden to a five-digit one.
+    @Test func progressRowIsExactlyTheColumnWidth() {
+        let cases: [(left: Int, total: Int, expected: String)] = [
+            (68, 80, "▐" + String(repeating: "█", count: 3) + String(repeating: "░", count: 18) + " 12/80"),
+            (0, 0, "▐" + String(repeating: "░", count: 23) + " 0/0"),
+            (0, 80, "▐" + String(repeating: "█", count: 21) + " 80/80"),
+            (2, 3, "▐" + String(repeating: "█", count: 7) + String(repeating: "░", count: 16) + " 1/3"),
+            (0, 12345, "▐" + String(repeating: "█", count: 15) + " 12345/12345"),
+            (90, 80, "▐" + String(repeating: "░", count: 22) + " 0/80"),
+        ]
+        for (left, total, expected) in cases {
+            let line = GardenPage.progressLine(GardenModel.Progress(left: left, total: total), cells: cells)
+            #expect(line.text == expected, "\(left)/\(total)")
+            #expect(line.cells.width == 28, "\(left)/\(total)")
+            #expect(line.role == .progress)
+        }
+        let line = GardenPage.progressLine(GardenModel.Progress(left: 68, total: 80), cells: cells)
+        #expect(line.cells.spans == [
+            CellSpan("▐", cells: 1, foreground: .cyan),
+            CellSpan("███", cells: 3, foreground: .green),
+            CellSpan(String(repeating: "░", count: 18), cells: 18, foreground: .blue),
+            CellSpan(" 12/80", cells: 6, foreground: .yellow),
+        ])
+        #expect(line.cells.accessibilityText == "12 of 80 triaged")
+        #expect(GardenPage.entryLines([], scope: .all, retained: [], selected: nil, cells: cells)
+            .allSatisfy { $0.role != .progress }, "the gauge belongs to P800 only")
+    }
+
+    @Test func feedRowsShowTheMarkerTheTitleAndTheChip() {
+        let waiting = GardenPage.feedLine(gardenRow(1, "Zed", status: "Dead", action: .bury, needsTriage: true),
+                                          selected: false, cells: cells)
+        #expect(waiting.text == "● Zed" + spaces(19) + "bury")
+        #expect(waiting.cells.spans.first == CellSpan("●", cells: 2, foreground: .yellow))
+        #expect(waiting.cells.spans.last == CellSpan(" bury", cells: 5, foreground: .cyan))
+        #expect(waiting.cells.spans.allSatisfy { $0.background == .black })
+        #expect(!waiting.isSelected)
+        #expect(waiting.role == .feed(1))
+        #expect(waiting.cells.accessibilityText == "Zed, Dead, bury")
+
+        let kept = GardenPage.feedLine(gardenRow(2, "Old", status: "Fossil", needsTriage: false, decision: "keep"),
+                                       selected: false, cells: cells)
+        #expect(kept.text == "  Old" + spaces(19) + "kept")
+        #expect(kept.cells.spans.last == CellSpan(" kept", cells: 5, foreground: .green))
+
+        let selected = GardenPage.feedLine(gardenRow(1, "Zed", status: "Dead", action: .bury, needsTriage: true),
+                                           selected: true, cells: cells)
+        #expect(selected.isSelected)
+        #expect(selected.cells.spans.allSatisfy { $0.foreground == .black && $0.background == .white })
+        #expect(selected.text == waiting.text)
+    }
+
+    /// VoiceOver reads the original title; the cells show a `?` for what Bedstead lacks, which
+    /// `CellSpan` draws in magenta even in reverse video.
+    @Test func missingGlyphsAreReplacedAndVoiceOverReadsTheOriginal() {
+        let line = GardenPage.feedLine(gardenRow(3, "Café 🎉", status: "Dead", action: .bury, needsTriage: true),
+                                       selected: true, cells: cells)
+        #expect(line.text.hasPrefix("● Café ?"))
+        #expect(line.cells.width == 28)
+        #expect(line.cells.spans[1].cells.runs.contains(CellRun(text: "?", isReplacement: true)))
+        #expect(line.cells.accessibilityText == "Café 🎉, Dead, bury")
+    }
+
+    @Test func emptyPagesShowOneCentredCyanLine() {
+        let queue = GardenPage.entryLines([], scope: .needsTriage, retained: [], selected: nil, cells: cells)
+        #expect(queue.map(\.role) == [.title, .progress, .blank, .text])
+        #expect(queue.last?.text == spaces(5) + "NOTHING TO TRIAGE" + spaces(6))
+        #expect(queue.last?.cells.spans.allSatisfy { $0.foreground == .cyan } == true)
+        #expect(queue.last?.cells.accessibilityText == "Nothing to triage")
+        let cemetery = GardenPage.entryLines([gardenRow(1, "Alive", status: "Alive")], scope: .cemetery, retained: [],
+                                             selected: nil, cells: cells)
+        #expect(cemetery.last?.text == spaces(3) + "THE CEMETERY IS EMPTY" + spaces(4))
+    }
+
+    @Test func arrowsMoveTheSelectionAndStopAtTheEnds() {
+        let ordered = [gardenRow(1, "A", status: "Dead"), gardenRow(2, "B", status: "Dead"), gardenRow(3, "C", status: "Dead")]
+        #expect(GardenPage.move(nil, in: ordered, by: 1) == 1)
+        #expect(GardenPage.move(nil, in: ordered, by: -1) == 3)
+        #expect(GardenPage.move(1, in: ordered, by: 1) == 2)
+        #expect(GardenPage.move(1, in: ordered, by: -1) == 1)
+        #expect(GardenPage.move(3, in: ordered, by: 1) == 3)
+        #expect(GardenPage.move(9, in: ordered, by: 1) == 1)
+        #expect(GardenPage.move(9, in: [], by: 1) == 9)
+        #expect(!GardenPage.takesArrows(column: .index))
+        #expect(GardenPage.takesArrows(column: .entries))
+        #expect(GardenPage.takesArrows(column: .reader))
+    }
+
+    /// The queue keeps a feed decided during the visit, without its dot and with its decision.
+    @Test func theQueueKeepsDecidedFeedsUntilThePageIsLeft() {
+        let decided = gardenRow(2, "Decided", status: "Dead", needsTriage: false, decision: "keep")
+        let rows = [gardenRow(1, "Waiting", status: "Dead", needsTriage: true), decided]
+        let kept = GardenPage.entryLines(rows, scope: .needsTriage, retained: [1, 2], selected: nil, cells: cells)
+        #expect(kept.map(\.role).contains(.feed(2)))
+        #expect(kept.first { $0.role == .feed(2) }?.text.hasPrefix("  Decided") == true)
+        let fresh = GardenPage.entryLines(rows, scope: .needsTriage, retained: [1], selected: nil, cells: cells)
+        #expect(!fresh.map(\.role).contains(.feed(2)))
+    }
+}
