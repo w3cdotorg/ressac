@@ -440,3 +440,38 @@ func listEntry(title: String?, isRead: Bool = false, isStarred: Bool = false) ->
         #expect(lines.allSatisfy { $0.spans.allSatisfy { $0.foreground != .blue } })
     }
 }
+
+/// The header formats the date and the time every second: its `DateFormatter`s are built once
+/// per pattern and time zone, and give what a fresh one gives.
+@MainActor @Suite struct TeletextDateFormatTests {
+    @Test func formatsAsAFreshDateFormatter() {
+        let zones = ["Europe/Paris", "GMT", "Asia/Kolkata", "Pacific/Chatham"].compactMap(TimeZone.init(identifier:))
+        #expect(zones.count == 4)
+        for zone in zones {
+            for pattern in ["EEE dd MMM", "HH:mm:ss", "dd MMM yy HH:mm"] {
+                let fresh = DateFormatter()
+                fresh.locale = Locale(identifier: "en_US_POSIX")
+                fresh.calendar = Calendar(identifier: .gregorian)
+                fresh.timeZone = zone
+                fresh.dateFormat = pattern
+                // A year and a half of dates, a second short of a day apart, fractions included.
+                for step in 0..<550 {
+                    let date = Date(timeIntervalSince1970: 1_791_615_600.25 + Double(step) * 86_399.5)
+                    #expect(TeletextDateFormat.string(from: date, pattern: pattern, timeZone: zone)
+                            == fresh.string(from: date), "\(pattern) \(zone.identifier) \(date)")
+                }
+            }
+        }
+    }
+
+    @Test func theHeaderAndTheFetchLogKeepTheirFormatters() throws {
+        // Offsets no other test uses: only these two calls can have filled these keys.
+        let header = try #require(TimeZone(secondsFromGMT: 3 * 3600 + 17 * 60))
+        let log = try #require(TimeZone(secondsFromGMT: -(5 * 3600 + 43 * 60)))
+        _ = PageHeader.line(label: .page(412), date: .now, width: 40, timeZone: header)
+        _ = GardenPage.logDate(.now, timeZone: log)
+        #expect(TeletextDateFormat.isCached("EEE dd MMM", timeZone: header))
+        #expect(TeletextDateFormat.isCached("HH:mm:ss", timeZone: header))
+        #expect(TeletextDateFormat.isCached("dd MMM yy HH:mm", timeZone: log))
+    }
+}

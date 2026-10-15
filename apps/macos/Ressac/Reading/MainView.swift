@@ -65,15 +65,15 @@ struct BannerView: View {
     let banner: Banner
     let dismiss: () -> Void
 
+    @Environment(AppState.self) private var state
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
             Text(banner.message).lineLimit(2).textSelection(.enabled)
             Spacer()
             if banner.showLog {
-                Button("Show Log") {
-                    NSWorkspace.shared.open(URL.homeDirectory.appending(path: "Library/Logs/Ressac"))
-                }
+                Button("Show Log") { state.openURL(DatabaseLocation.logsURL) }
             }
             Button("Dismiss", systemImage: "xmark", action: dismiss).labelStyle(.iconOnly).buttonStyle(.plain)
         }
@@ -146,6 +146,7 @@ struct EntryListView: View {
             List(state.entries, selection: $state.selectedEntryId) { entry in
                 EntryRowView(entry: entry)
                     .tag(entry.entryId)
+                    .onAppear { state.entryRowAppeared(entry.entryId) }
                     .onDrag {
                         guard let link = entry.link else { return NSItemProvider() }
                         let provider = NSItemProvider(object: link as NSURL)

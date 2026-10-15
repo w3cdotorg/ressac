@@ -6,13 +6,20 @@ import Testing
 
 private func row(_ id: Int64, _ title: String, status: String?, folder: String? = "Blogs", state: String = "active",
                  action: ProposedAction? = nil, needsTriage: Bool = false, decision: String? = nil,
-                 site: String? = nil, wayback: String? = nil) -> GardenRow {
+                 site: String? = nil, wayback: String? = nil, unread: Int = 0) -> GardenRow {
     GardenRow(feedId: id, title: title, folderPath: folder, state: state, status: status, reason: nil, clue: nil,
               evidence: nil, remarks: [], proposedAction: action, needsTriage: needsTriage, lastDecision: decision,
-              waybackUrl: wayback, htmlUrl: site, xmlUrl: "https://feeds.example.org/\(id)")
+              waybackUrl: wayback, htmlUrl: site, xmlUrl: "https://feeds.example.org/\(id)", unread: unread)
 }
 
 @Suite struct GardenModelTests {
+    /// Only a buried feed says how many entries it left unread: active feeds have the sidebar.
+    @Test func onlyBuriedFeedsShowTheirUnreadCount() {
+        #expect(GardenModel.unreadLabel(for: row(4, "Gone", status: "Dead", state: "buried", unread: 12)) == "12 unread")
+        #expect(GardenModel.unreadLabel(for: row(4, "Gone", status: "Dead", state: "buried")) == nil)
+        #expect(GardenModel.unreadLabel(for: row(1, "Live", status: "Alive", unread: 3)) == nil)
+    }
+
     @Test func sectionsFollowUrgencyThenFolderThenTitle() {
         let rows = [
             row(1, "Zed", status: "Dead"),
@@ -274,6 +281,34 @@ private func row(_ id: Int64, _ title: String, status: String?, folder: String? 
         #expect(GardenModel.outcome(of: latest) == "HTTP 410")
         #expect(latest.redirectChain.map(\.status) == [301])
         #expect(latest.redirectChain.map(\.url) == ["https://www.unphotographable.com/index.rdf"])
+    }
+
+    /// The reading views hide buried feeds; the Cemetery still counts their unread entries.
+    @Test func cemeteryRowsCountTheUnreadEntriesOfBuriedFeeds() async throws {
+        let url = try fixtureCopy()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        do {
+            let queue = try DatabaseQueue(path: url.path(percentEncoded: false))
+            try await queue.write { db in
+                try db.execute(sql: """
+                    INSERT INTO entry (feed_id, guid, title, published_at, fetched_at, read_at)
+                    SELECT f.id, 'photo-' || n.i, 'Photo ' || n.i, '2026-10-09T08:00:00.000Z', '2026-10-10T08:00:00.000Z',
+                           CASE n.i WHEN 3 THEN '2026-10-10T09:00:00.000Z' END
+                    FROM feed f, (SELECT 1 AS i UNION ALL SELECT 2 UNION ALL SELECT 3) n
+                    WHERE f.title = 'Photos from bouquiniste';
+                    """)
+            }
+        }
+        let database = try AppDatabase.open(at: url)
+        let cemetery = try await firstValue(Queries.garden(scope: .cemetery), in: database.reader)
+        #expect(cemetery.map(\.title) == ["Photos from bouquiniste"])
+        #expect(cemetery.first?.unread == 2, "two unread, one read")
+        let all = try await firstValue(Queries.garden(scope: .all), in: database.reader)
+        #expect(all.allSatisfy { $0.unread == 0 }, "only the Cemetery counts")
+        let listed = try await database.reader.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v_entry WHERE title LIKE 'Photo %'")
+        }
+        #expect(listed == 0, "the reading views still hide them")
     }
 }
 

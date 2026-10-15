@@ -190,8 +190,9 @@ struct TimeoutError: Error {}
     @Test func entry_rows_decode_from_v_entry() async throws {
         let test = try TestDatabase()
         let id = try test.entry(feed: 1, title: "  ", url: nil, summary: "<p>Only a <b>summary</b> &amp; more</p>")
-        let rows = try await value(of: Queries.entries(source: .feed(1), unreadOnly: false), in: test.open())
-        let row = try #require(rows.first)
+        let page = try await value(of: Queries.entries(source: .feed(1), unreadOnly: false), in: test.open())
+        #expect((page.total, page.unread) == (1, 1))
+        let row = try #require(page.rows.first)
         #expect(row.entryId == id)
         #expect(row.feedTitle == "xkcd.com")
         #expect(row.folderId == 1)
@@ -203,13 +204,32 @@ struct TimeoutError: Error {}
         #expect(row.contentHtml == nil)
     }
 
+    /// `EntryRow` decodes by hand (Codable cost 36 µs a row): every column, and a clear error.
+    @Test func entry_rows_decode_every_column_by_hand() async throws {
+        let test = try TestDatabase()
+        let id = try test.entry(feed: 2, title: "T", url: "https://example.org/t", read: true, starred: true)
+        try test.execute("UPDATE entry SET author = 'Ann', content_html = '<p>C</p>' WHERE id = ?", [id])
+        try test.execute(
+            "INSERT INTO entry_fulltext (entry_id, html, fetched_at) VALUES (?, '<p>F</p>', '2026-10-10T08:00:00.000Z')", [id])
+        let db = try test.open()
+        let row = try #require(try await value(of: Queries.entry(id: id), in: db))
+        #expect(row == EntryRow(entryId: id, feedId: 2, feedTitle: "Orange Drenka", folderId: 2, title: "T", author: "Ann",
+                                url: "https://example.org/t", publishedAt: Timestamp.date(from: "2026-10-01T08:00:00.000Z")!,
+                                isRead: true, isStarred: true, hasFulltext: true, summaryHtml: "<p>Summary</p>", contentHtml: "<p>C</p>"))
+        try test.execute("UPDATE entry SET published_at = 'yesterday' WHERE id = ?", [id])
+        let error = await #expect(throws: DatabaseError.self) {
+            try await db.reader.read { try EntryRow.fetchOne($0, sql: "SELECT * FROM v_entry WHERE entry_id = ?", arguments: [id]) }
+        }
+        #expect(error?.message == "published_at is not an RFC 3339 date: yesterday")
+    }
+
     @Test func list_rows_are_shortened_but_entry_is_complete() async throws {
         let test = try TestDatabase()
         let long = String(repeating: "x", count: 5000)
         let id = try test.entry(feed: 1, summary: nil, content: long)
         let db = try test.open()
         let listed = try await value(of: Queries.entries(source: .unread, unreadOnly: false), in: db)
-        #expect(listed.first?.summaryHtml?.count == Queries.listSummaryLength)
+        #expect(listed.rows.first?.summaryHtml?.count == Queries.listSummaryLength)
         let full = try await value(of: Queries.entry(id: id), in: db)
         #expect(full?.contentHtml == long)
         #expect(full?.summaryHtml == nil)
@@ -267,7 +287,7 @@ struct TimeoutError: Error {}
         let c = try test.entry(feed: 8, published: "2026-10-02T08:00:00.000Z", starred: true)
         let db = try test.open()
         func ids(_ source: Source, unreadOnly: Bool = false) async throws -> [Int64] {
-            try await value(of: Queries.entries(source: source, unreadOnly: unreadOnly), in: db).map(\.entryId)
+            try await value(of: Queries.entries(source: source, unreadOnly: unreadOnly), in: db).rows.map(\.entryId)
         }
         #expect(try await ids(.folder(1)) == [b, a])
         #expect(try await ids(.folder(1), unreadOnly: true) == [a])
@@ -277,13 +297,49 @@ struct TimeoutError: Error {}
         #expect(try await ids(.garden(.all)) == [])
     }
 
+    /// A long list loads down to its floor; the counts are the whole list's.
+    @Test func entry_pages_stop_at_the_floor_and_count_the_whole_list() async throws {
+        let test = try TestDatabase()
+        let oldest = try test.entry(feed: 1, published: "2026-10-01T08:00:00.000Z", read: true)
+        let middle = try test.entry(feed: 1, published: "2026-10-02T08:00:00.000Z", body: "cafe")
+        let newest = try test.entry(feed: 1, published: "2026-10-03T08:00:00.000Z", body: "cafe")
+        let db = try test.open()
+        func floor(below: ListFloor? = nil, rows: Int, keeping: Int64? = nil, search: String? = nil) async throws -> ListFloor? {
+            try await db.reader.read { db in
+                try Queries.floor(source: .feed(1), unreadOnly: false, search: search, below: below, rows: rows,
+                                  keeping: keeping, in: db)
+            }
+        }
+        let first = try #require(try await floor(rows: 2))
+        #expect(first == ListFloor(publishedAt: "2026-10-02T08:00:00.000Z", entryId: middle))
+        let page = try await value(of: Queries.entries(source: .feed(1), unreadOnly: false, floor: first), in: db)
+        #expect(page.rows.map(\.entryId) == [newest, middle])
+        #expect((page.total, page.unread) == (3, 2))
+        // One row left below the floor: it fits in the next page, so there is no floor.
+        #expect(try await floor(below: first, rows: 2) == nil)
+        #expect(try await floor(below: first, rows: 1) == ListFloor(publishedAt: "2026-10-01T08:00:00.000Z", entryId: oldest))
+        let whole = try await value(of: Queries.entries(source: .feed(1), unreadOnly: false, floor: .oldest), in: db)
+        #expect(whole.rows.map(\.entryId) == [newest, middle, oldest])
+        #expect(ListFloor.oldest.admits(try #require(whole.rows.last)))
+        // Keeping an older entry loaded lowers the floor to it; a newer one changes nothing.
+        #expect(try await floor(rows: 1, keeping: oldest)?.entryId == oldest)
+        #expect(try await floor(rows: 2, keeping: newest) == first)
+        // Search results are paged the same way.
+        #expect(try await floor(rows: 1, search: "cafe")?.entryId == newest)
+        let found = try await value(of: Queries.search("cafe", in: .feed(1), floor: try await floor(rows: 1, search: "cafe")), in: db)
+        #expect(found.rows.map(\.entryId) == [newest])
+        #expect((found.total, found.unread) == (2, 2))
+        #expect(ListFloor(publishedAt: "2026-10-02T08:00:00.000Z", entryId: middle).admits(page.rows[0]))
+        #expect(!first.admits(try #require(try await value(of: Queries.entries(source: .feed(1), unreadOnly: false), in: db).rows.last)))
+    }
+
     @Test func search_matches_every_word_within_the_source() async throws {
         let test = try TestDatabase()
         let a = try test.entry(feed: 1, title: "Café crème", body: "le petit déjeuner")
         try test.entry(feed: 8, title: "Cafe noir", body: "le soir")
         let db = try test.open()
         func ids(_ text: String, _ source: Source = .unread) async throws -> Set<Int64> {
-            Set(try await value(of: Queries.search(text, in: source), in: db).map(\.entryId))
+            Set(try await value(of: Queries.search(text, in: source), in: db).rows.map(\.entryId))
         }
         #expect(try await ids("cafe").count == 2)  // remove_diacritics 2
         #expect(try await ids("cafe dejeuner") == [a])
@@ -344,12 +400,12 @@ struct TimeoutError: Error {}
         let test = try TestDatabase()
         let db = try test.open()
         let observation = Queries.entries(source: .unread, unreadOnly: false)
-        #expect(try await value(of: observation, in: db).isEmpty)
-        let seen = Task { try await value(of: observation, in: db, where: { $0.count == 1 }) }
+        #expect(try await value(of: observation, in: db).rows.isEmpty)
+        let seen = Task { try await value(of: observation, in: db, where: { $0.rows.count == 1 }) }
         try await Task.sleep(for: .milliseconds(100))
         try test.entry(feed: 1)  // another connection, like `ressac fetch`
         try await db.notifyExternalChanges()
-        #expect(try await seen.value.count == 1)
+        #expect(try await seen.value.rows.count == 1)
     }
 }
 

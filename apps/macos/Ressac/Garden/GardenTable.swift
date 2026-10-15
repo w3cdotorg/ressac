@@ -126,6 +126,13 @@ private struct GardenRowView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            if let unread = GardenModel.unreadLabel(for: row) {
+                Text(unread)
+                    .font(.callout)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
             if let chip = GardenModel.chip(for: row) {
                 Text(chip)
                     .font(.caption)

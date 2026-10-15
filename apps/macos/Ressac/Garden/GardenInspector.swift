@@ -100,11 +100,11 @@ struct GardenInspector: View {
                 KeyHintButton("Bury", key: "b", prominent: action == .bury) { state.gardenDecide(.bury) }
             }
             KeyHintButton("Open Site", key: "o", prominent: false) {
-                LinkPolicy.webURL(row.htmlUrl).map { _ = NSWorkspace.shared.open($0) }
+                if let site = LinkPolicy.webURL(row.htmlUrl) { state.openURL(site) }
             }
             .disabled(LinkPolicy.webURL(row.htmlUrl) == nil)
             KeyHintButton("Wayback", key: "w", prominent: false) {
-                LinkPolicy.webURL(row.waybackUrl).map { _ = NSWorkspace.shared.open($0) }
+                if let wayback = LinkPolicy.webURL(row.waybackUrl) { state.openURL(wayback) }
             }
             .disabled(LinkPolicy.webURL(row.waybackUrl) == nil)
         }

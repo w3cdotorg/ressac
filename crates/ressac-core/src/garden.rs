@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 
 use crate::error::Result;
 use crate::model::{Action, Decision, Diagnosis, FeedId, Status};
-use crate::store::{AttemptRecord, DecisionRecord, Store};
+use crate::store::{AttemptRecord, DecisionRecord, Store, TriageFacts};
 
 /// Entries shown in the detail pane.
 const RECENT_ENTRIES: usize = 3;
@@ -40,22 +40,20 @@ impl GardenRow {
     }
 
     pub fn needs_triage(&self) -> bool {
-        !self.buried
-            && needs_triage(
-                self.status(),
-                self.decision.as_ref().map(|d| self.baseline(d)),
-            )
+        verdict(&self.triage_facts())
     }
 
-    /// The status a decision is measured against. A repair is meant to leave the feed
-    /// healthy, so once the feed was fetched again after it, any problem status brings it
-    /// back (Alive baseline). Until then its diagnosis still describes the old address.
-    fn baseline(&self, d: &DecisionRecord) -> Status {
-        let fetched_since = self.attempts.first().is_some_and(|a| a.at > d.decided_at);
-        if d.decision == Decision::Repair && fetched_since {
-            Status::Alive
-        } else {
-            d.status_at_decision
+    /// The facts `recompute_triage` reads from the store, taken from this row.
+    fn triage_facts(&self) -> TriageFacts {
+        TriageFacts {
+            feed_id: self.feed_id,
+            buried: self.buried,
+            status: self.status(),
+            decision: self
+                .decision
+                .as_ref()
+                .map(|d| (d.decision, d.status_at_decision, d.decided_at)),
+            last_attempt_at: self.attempts.first().map(|a| a.at),
         }
     }
 }
@@ -64,6 +62,22 @@ impl GardenRow {
 /// strictly more urgent than its decision baseline (spec §9).
 pub fn needs_triage(status: Status, decided_at: Option<Status>) -> bool {
     status.needs_triage() && decided_at.is_none_or(|prev| status.urgency() < prev.urgency())
+}
+
+/// One feed's triage verdict. A buried feed never needs triage. A decision is measured
+/// against the status it was taken on, except a repair: it is meant to leave the feed
+/// healthy, so once the feed was fetched again after it, any problem status brings it
+/// back (Alive baseline). Until then its diagnosis still describes the old address.
+fn verdict(f: &TriageFacts) -> bool {
+    let baseline = f.decision.map(|(decision, at_decision, decided_at)| {
+        let fetched_since = f.last_attempt_at.is_some_and(|at| at > decided_at);
+        if decision == Decision::Repair && fetched_since {
+            Status::Alive
+        } else {
+            at_decision
+        }
+    });
+    !f.buried && needs_triage(f.status, baseline)
 }
 
 pub fn load_rows(store: &Store) -> Result<Vec<GardenRow>> {
@@ -120,9 +134,10 @@ pub fn load_rows(store: &Store) -> Result<Vec<GardenRow>> {
 /// read the rule instead of reimplementing it. Called after every diagnosis, decision and undo.
 pub fn recompute_triage(store: &Store) -> Result<()> {
     store.update_triage(|| {
-        Ok(load_rows(store)?
+        Ok(store
+            .triage_facts()?
             .iter()
-            .map(|r| (r.feed_id, r.needs_triage()))
+            .map(|f| (f.feed_id, verdict(f)))
             .collect())
     })
 }
@@ -456,6 +471,62 @@ mod tests {
         assert_eq!(stored_flags(&s)[0], (1, true), "undo brings the feed back");
         apply_safe_repairs(&s, now()).unwrap();
         assert_eq!(stored_flags(&s)[3], (4, false), "repaired");
+        assert_flags_match_rows(&s);
+    }
+
+    /// `recompute_triage` reads `Store::triage_facts`, the TUI reads rows: both must agree,
+    /// through decisions, a burial, later fetches and a feed never diagnosed.
+    #[test]
+    fn stored_triage_facts_match_the_rows() {
+        let s = store();
+        s.import_outlines(
+            &opml::parse(r#"<opml><body><outline text="New" xmlUrl="https://n.example.org/feed"/></body></opml>"#)
+                .unwrap(),
+            false,
+            now(),
+        )
+        .unwrap();
+        let check = |s: &Store| {
+            let mut from_rows: Vec<TriageFacts> = load_rows(s)
+                .unwrap()
+                .iter()
+                .map(GardenRow::triage_facts)
+                .collect();
+            from_rows.sort_by_key(|f| f.feed_id);
+            assert_eq!(s.triage_facts().unwrap(), from_rows);
+        };
+        check(&s);
+        assert_eq!(s.triage_facts().unwrap()[4].status, Status::Unchecked);
+        decide(&s, 3, Decision::Keep, now()).unwrap();
+        decide(&s, 3, Decision::Bury, now()).unwrap();
+        decide(&s, 4, Decision::Repair, now()).unwrap();
+        for hours in [1, 2] {
+            s.record_attempt(
+                "r",
+                &failed_attempt(4, now() + chrono::Duration::hours(hours)),
+            )
+            .unwrap();
+        }
+        s.save_diagnoses(&HashMap::from([(4, diag(Status::Dead, None))]), now())
+            .unwrap();
+        check(&s);
+        let facts = s.triage_facts().unwrap();
+        assert_eq!(
+            facts[2].decision.map(|(d, _, _)| d),
+            Some(Decision::Bury),
+            "the latest decision"
+        );
+        assert!(facts[2].buried);
+        assert_eq!(
+            facts[3].last_attempt_at,
+            Some(now() + chrono::Duration::hours(2))
+        );
+        recompute_triage(&s).unwrap();
+        assert_eq!(
+            stored_flags(&s)[3],
+            (4, true),
+            "Dead after a repair and a fetch"
+        );
         assert_flags_match_rows(&s);
     }
 

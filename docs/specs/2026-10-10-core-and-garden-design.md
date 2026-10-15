@@ -179,7 +179,7 @@ A feed that has never been fetched has status `Unchecked`.
 - `date_fallback`: more than half the entries use the fallback date.
 - `blocked`: the last attempt failed with `403` or with an anti-bot challenge page. It is a fact about the last fetch, not a status: it is usually paired with Ailing, but an off-site shutdown ending in `403` (ioudgine) is Dead and still carries it.
 
-**Evidence note:** when `hijack_score > 0` but the feed is not Hijacked (and is neither Duplicate nor Unchecked), the evidence bullets end with `Possible spam signs (score 0.4, below the 0.6 threshold):` followed by the hijack bullets. The reason and clue are unchanged, and the language hint stays Hijacked-only (a Dead feed with a 0.4 score is shown as Dead, with the hint underneath).
+**Evidence note:** when `hijack_score > 0` but the feed is not Hijacked (and is neither Alive, Duplicate nor Unchecked), the evidence bullets end with `Possible spam signs (score 0.4, below the 0.6 threshold):` followed by the hijack bullets. The reason and clue are unchanged, and the language hint stays Hijacked-only (a Dead feed with a 0.4 score is shown as Dead, with the hint underneath). Alive feeds never get the hint (decision of 15/10/2026: on the real run, ReadWriteWeb showed it for betting words in a tech site); their score is still stored.
 
 **Proposed actions:**
 

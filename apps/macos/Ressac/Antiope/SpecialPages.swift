@@ -71,6 +71,7 @@ struct SommairePage: View {
         let line = Self.line(for: row, width: width, in: directory)
         return Button { antiope.jump(to: row.number) } label: { CellLineView(line: line) }
             .buttonStyle(.plain)
+            .focusable(false)  // Full Keyboard Access would give Space to the button, not to SUITE
             .accessibilityLabel(line.accessibilityText)
     }
 

@@ -1,7 +1,7 @@
 //! The single entry point for new content. `LocalSource` fetches over HTTP politely;
 //! a future sync source (FreshRSS, Miniflux) implements the same `Source` trait.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -226,9 +226,10 @@ impl LocalSource {
         Self::build(limits, false)
     }
 
-    /// A source for article pages, whose URLs come from feeds: http(s) only, and local or
-    /// private targets are refused at the start URL, at every redirect hop and after DNS
-    /// resolution. `allow_private` turns that off (tests against a local mock server).
+    /// A source for URLs read from third-party content (article pages, feed addresses found
+    /// by autodiscovery): http(s) only, local or private targets are refused at the start
+    /// URL, at every redirect hop and after DNS resolution, and proxy variables are ignored.
+    /// `allow_private` turns all of that off (tests against a local mock server).
     pub fn for_articles(limits: FetchLimits, allow_private: bool) -> Result<Self> {
         Self::build(limits, !allow_private)
     }
@@ -239,7 +240,11 @@ impl LocalSource {
             .timeout(limits.timeout)
             .user_agent(USER_AGENT);
         if public_only {
-            builder = builder.dns_resolver(Arc::new(PublicOnlyResolver));
+            // No proxy either: a proxy resolves the target name itself, which would skip
+            // `PublicOnlyResolver`, and it may sit on the very network the guard protects.
+            builder = builder
+                .dns_resolver(Arc::new(PublicOnlyResolver))
+                .no_proxy();
         }
         Ok(Self {
             client: builder.build()?,
@@ -558,6 +563,52 @@ fn host_of(url: &str) -> String {
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))
         .unwrap_or_default()
+}
+
+/// Paces requests made one after the other (the full-article pass): at most one request per
+/// `gap` to a host. Every host is remembered, not only the previous one, and the feed
+/// fetches of the same run are noted too, so A, B, A and a feed followed by one of its
+/// articles both wait out the gap.
+#[derive(Debug)]
+pub(crate) struct HostPacer {
+    gap: Duration,
+    last: HashMap<String, Instant>,
+}
+
+impl HostPacer {
+    pub(crate) fn new(gap: Duration) -> Self {
+        Self {
+            gap,
+            last: HashMap::new(),
+        }
+    }
+
+    /// Records a request to the host of `url` at `at`. An earlier `at` never moves it back;
+    /// a URL without a host is ignored.
+    pub(crate) fn note(&mut self, url: &str, at: Instant) {
+        let host = host_of(url);
+        if host.is_empty() {
+            return;
+        }
+        let last = self.last.entry(host).or_insert(at);
+        *last = (*last).max(at);
+    }
+
+    /// Records every host a fetch attempt reached: the requested URL and each redirect hop.
+    pub(crate) fn note_attempt(&mut self, attempt: &FetchAttempt, at: Instant) {
+        self.note(&attempt.requested_url, at);
+        for hop in &attempt.redirect_chain {
+            self.note(&hop.url, at);
+        }
+    }
+
+    /// How long to wait at `now` before requesting `url`: what is left of the gap since the
+    /// host's last request, zero for a host not requested yet.
+    pub(crate) fn delay(&self, url: &str, now: Instant) -> Duration {
+        self.last.get(&host_of(url)).map_or(Duration::ZERO, |&at| {
+            self.gap.saturating_sub(now.saturating_duration_since(at))
+        })
+    }
 }
 
 /// Maps a reqwest error to an `ErrorKind` by inspecting the whole source chain.
@@ -1154,6 +1205,67 @@ mod tests {
             .fetch_one(&feed(1, "http://ressac-test.invalid/feed".into()))
             .await;
         assert_eq!(a.error, Some(ErrorKind::Dns));
+    }
+
+    #[test]
+    fn the_pacer_waits_out_the_gap_per_host_whatever_came_between() {
+        let gap = Duration::from_secs(1);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let mut pacer = HostPacer::new(gap);
+        assert_eq!(pacer.delay("https://a.example/1", t0), Duration::ZERO);
+        pacer.note("https://a.example/1", t0);
+        pacer.note("https://b.example/1", t0 + ms(300));
+        // A, B, A: the second A still owes what is left of the gap since the first one.
+        assert_eq!(pacer.delay("https://a.example/2", t0 + ms(400)), ms(600));
+        assert_eq!(pacer.delay("https://b.example/2", t0 + ms(400)), ms(900));
+        assert_eq!(pacer.delay("https://A.Example/3", t0 + ms(400)), ms(600));
+        assert_eq!(pacer.delay("https://a.example/4", t0 + gap), Duration::ZERO);
+        assert_eq!(pacer.delay("https://c.example/1", t0), Duration::ZERO);
+        assert_eq!(pacer.delay("not a url", t0), Duration::ZERO);
+    }
+
+    #[test]
+    fn the_pacer_keeps_the_latest_request_of_a_host() {
+        let gap = Duration::from_secs(1);
+        let t0 = Instant::now();
+        let mut pacer = HostPacer::new(gap);
+        pacer.note("https://a.example/late", t0 + Duration::from_millis(500));
+        pacer.note("https://a.example/early", t0);
+        assert_eq!(
+            pacer.delay("https://a.example/x", t0 + Duration::from_millis(500)),
+            gap
+        );
+    }
+
+    #[test]
+    fn the_pacer_notes_every_host_a_feed_fetch_touched() {
+        let gap = Duration::from_secs(1);
+        let t0 = Instant::now();
+        let mut pacer = HostPacer::new(gap);
+        let attempt = FetchAttempt {
+            feed_id: 1,
+            at: Utc::now(),
+            requested_url: "http://old.example/feed".into(),
+            final_url: "https://new.example/feed".into(),
+            http_status: Some(200),
+            error: None,
+            redirect_chain: vec![Hop {
+                status: 301,
+                url: "https://new.example/feed".into(),
+            }],
+            content_type: None,
+            bytes: 0,
+            duration_ms: 0,
+            not_modified: false,
+            etag: None,
+            last_modified: None,
+            feed: None,
+        };
+        pacer.note_attempt(&attempt, t0);
+        for url in ["http://old.example/a", "https://new.example/a"] {
+            assert_eq!(pacer.delay(url, t0), gap, "{url}");
+        }
     }
 
     #[tokio::test]

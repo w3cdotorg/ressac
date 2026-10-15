@@ -144,8 +144,8 @@ ressac/
 **Garden subcommands.**
 
 - `decide`, `undo` and `apply-safe` call `garden::decide`, `garden::undo` and `garden::apply_safe_repairs`, then re-diagnose the touched feeds and recompute `needs_triage`.
-- They emit `Decided { feed_id, decision }`, `Undone { feed_id }` and `Finished { summary }`.
-- A decision on a buried or unknown feed exits `2` with a message.
+- They emit `Decided { feed_id, decision }`, `Undone { feed_id }` and `Finished { summary }`. The `finished` line of `apply-safe` also has `applied` (the number of repairs applied) and `skipped` (one `"#id: reason"` string per repair skipped).
+- A decision on a buried or unknown feed, a repair with nothing to repair, and a decision or an undo the store refuses (an address another active feed already uses, a merge target that is not active) exit `2` with a message.
 
 **Exit codes:** unchanged (`0`, `1`, `2`, `130`).
 
@@ -273,7 +273,7 @@ Every menu item shows its shortcut. A shortcut that does nothing in the current 
 - **Subprocess exit `1`:**
   - a non-modal banner under the toolbar shows the last stderr line and a **Show log** button, which opens `~/Library/Logs/Ressac/`;
   - the banner dismisses itself on the next successful run.
-- **Subprocess exit `2`:** this is a bug in the app's call. It is logged and shown in the same banner.
+- **Subprocess exit `2`:** a bug in the app's call, logged as a fault and shown in the same banner. Except from `garden decide` and `garden undo`, which exit `2` when the store refuses the decision (an address another active feed already uses): the app cannot foresee that, so it logs it as an error and the banner shows the CLI's sentence without **Show log**.
 - **Binary missing from the bundle:** a fatal alert at launch.
 - **Schema version:**
   - **Older than 2:** the app runs `ressac migrate` before opening the database, with a progress sheet.

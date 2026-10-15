@@ -5,13 +5,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
 use tokio::sync::mpsc;
-use url::Url;
 
 use crate::discover::{alternate_feeds, same_feed};
 use crate::error::Result;
@@ -24,7 +23,9 @@ use crate::opml::{self, clean_description};
 use crate::parse::{
     CHALLENGE_SNIFF_BYTES, ParsedFeed, is_challenge_page, looks_like_html, parse_feed,
 };
-use crate::source::{FeedRef, FetchAttempt, FetchLimits, LocalSource, RawResponse, Source};
+use crate::source::{
+    FeedRef, FetchAttempt, FetchLimits, HostPacer, LocalSource, RawResponse, Source,
+};
 use crate::store::pages::{self, PageKind, PageRow};
 use crate::store::{FeedRow, ImportReport, Store};
 use crate::url_key::{https_variant, url_key};
@@ -145,12 +146,13 @@ impl Summary {
 pub struct Ressac {
     store: Store,
     source: LocalSource,
-    /// Fetches article pages, whose URLs come from feeds: refuses local and private targets.
+    /// Fetches URLs read from third-party content (article pages, feed addresses announced by
+    /// a site page): refuses local and private targets.
     articles: LocalSource,
     limits: FetchLimits,
     wayback: Wayback,
-    /// Pause between two requests to the same host: Wayback lookups and consecutive
-    /// article pages (1 request per second in production).
+    /// Pause between two requests to the same host: Wayback lookups, and article pages after
+    /// any request of the run to their host (1 request per second in production).
     host_gap: Duration,
 }
 
@@ -175,8 +177,9 @@ impl Ressac {
         })
     }
 
-    /// Lets article pages be fetched from local and private addresses. For tests against a
-    /// local mock server and for the `RESSAC_ALLOW_PRIVATE_ARTICLES` test hook of the CLI.
+    /// Lets article pages and autodiscovered feed addresses be fetched from local and private
+    /// addresses. For tests against a local mock server and for the
+    /// `RESSAC_ALLOW_PRIVATE_ARTICLES` test hook of the CLI.
     pub fn allow_private_articles(mut self) -> Result<Self> {
         self.articles = LocalSource::for_articles(self.limits.clone(), true)?;
         Ok(self)
@@ -221,8 +224,10 @@ impl Ressac {
         let fetching = tokio::spawn(async move { source.refresh(due, tx, lane_stop).await });
         let (mut attempted, mut network_failures) = (0usize, 0usize);
         let mut fresh: HashMap<FeedId, ParsedFeed> = HashMap::new();
+        let mut pacer = HostPacer::new(self.host_gap);
         while let Some(attempt) = rx.recv().await {
             attempted += 1;
+            pacer.note_attempt(&attempt, Instant::now());
             if attempt.error.as_ref().is_some_and(|e| e.is_network()) {
                 network_failures += 1;
             }
@@ -254,16 +259,18 @@ impl Ressac {
                 attempted,
             });
         } else if !stop.load(Ordering::Relaxed) {
-            self.probe_https(&fresh, sink, stop.clone()).await?;
+            self.probe_https(&fresh, &mut pacer, sink, stop.clone())
+                .await?;
             if !stop.load(Ordering::Relaxed) {
-                self.diagnose_all(Utc::now())?;
+                // Triage waits for the final diagnosis below.
+                self.save_fresh_diagnoses(Utc::now())?;
                 self.discover_replacements(sink, Utc::now(), &stop).await?;
             }
         }
         if !unreachable && !stop.load(Ordering::Relaxed) {
             let mut fetched: Vec<FeedId> = fresh.keys().copied().collect();
             fetched.sort_unstable();
-            self.fetch_full_texts(&fetched, started, sink, &stop)
+            self.fetch_full_texts(&fetched, started, &mut pacer, sink, &stop)
                 .await?;
         }
         let mut summary = self.diagnose_all(Utc::now())?;
@@ -276,9 +283,11 @@ impl Ressac {
     }
 
     /// For freshly fetched `http://` feeds never probed: does `https://` serve the same feed?
+    /// Each probe is noted in `pacer`.
     async fn probe_https(
         &self,
         fresh: &HashMap<FeedId, ParsedFeed>,
+        pacer: &mut HostPacer,
         sink: &dyn EventSink,
         stop: Arc<AtomicBool>,
     ) -> Result<()> {
@@ -309,6 +318,7 @@ impl Ressac {
         let source = self.source.clone();
         let probing = tokio::spawn(async move { source.refresh(candidates, tx, stop).await });
         while let Some(attempt) = rx.recv().await {
+            pacer.note_attempt(&attempt, Instant::now());
             if let Some(http) = fresh.get(&attempt.feed_id)
                 && let Some(verdict) = https_verdict(&attempt, http)
             {
@@ -351,13 +361,13 @@ impl Ressac {
             what: "autodiscovery".into(),
             total: candidates.len(),
         });
-        let source = &self.source;
+        let (site, guarded) = (&self.source, &self.articles);
         let found: Vec<(FeedId, Option<Option<String>>)> = stream::iter(candidates)
             .map(|f| async move {
                 if stop.load(Ordering::Relaxed) {
                     return (f.id, None);
                 }
-                (f.id, discover_one(source, &f, now).await)
+                (f.id, discover_one(site, guarded, &f, now).await)
             })
             .buffer_unordered(PROBE_CONCURRENCY)
             .collect()
@@ -372,12 +382,13 @@ impl Ressac {
     }
 
     /// Extracts the entries this run stored for `prefer_full_text` feeds, at most
-    /// `FULLTEXT_PER_FEED_PER_RUN` per feed. Stops between entries on request, and waits
-    /// `host_gap` between two pages of the same host.
+    /// `FULLTEXT_PER_FEED_PER_RUN` per feed. Stops between entries on request, and keeps
+    /// `host_gap` between two requests to the same host, counting those already in `pacer`.
     async fn fetch_full_texts(
         &self,
         fetched: &[FeedId],
         since: DateTime<Utc>,
+        pacer: &mut HostPacer,
         sink: &dyn EventSink,
         stop: &AtomicBool,
     ) -> Result<()> {
@@ -399,30 +410,36 @@ impl Ressac {
             total: queue.len(),
         });
         tracing::info!(entries = queue.len(), "fetching full articles");
-        let mut previous_host: Option<String> = None;
         for (entry_id, url) in queue {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            let host = page_host(&url);
-            if host.is_some() && host == previous_host {
-                tokio::time::sleep(self.host_gap).await;
+            let wait = pacer.delay(&url, Instant::now());
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
             }
             let outcome = fetch_article(&self.articles, &url).await;
+            pacer.note(&url, Instant::now());
             if let Err(e) = self.save_extraction(entry_id, &outcome, sink) {
                 // One entry's store error must not end the pass or the refresh.
                 tracing::warn!(entry_id, error = %e, "storing a full article failed");
             }
-            previous_host = host;
         }
         Ok(())
     }
 
     /// Diagnoses every active feed, stores the results and the garden's triage flags.
     pub fn diagnose_all(&self, now: DateTime<Utc>) -> Result<Summary> {
+        self.save_fresh_diagnoses(now)?;
+        garden::recompute_triage(&self.store)?;
+        self.summary()
+    }
+
+    /// Diagnoses every active feed and stores the results, leaving the triage flags alone.
+    fn save_fresh_diagnoses(&self, now: DateTime<Utc>) -> Result<()> {
         let feeds: Vec<FeedRow> = self
             .store
             .feeds()?
@@ -472,9 +489,7 @@ impl Ressac {
             })
             .collect();
         apply_similar_titles(&inputs, &mut diags);
-        self.store.save_diagnoses(&diags, now)?;
-        garden::recompute_triage(&self.store)?;
-        self.summary()
+        self.store.save_diagnoses(&diags, now)
     }
 
     /// Looks up a Wayback snapshot for Dead and Hijacked feeds that have none yet.
@@ -636,11 +651,6 @@ async fn fetch_article(source: &LocalSource, url: &str) -> Extraction {
     article_from(&source.fetch_raw(url, None, None).await)
 }
 
-/// The host of an article URL, for the per-host pause.
-fn page_host(url: &str) -> Option<String> {
-    Url::parse(url).ok()?.host_str().map(str::to_owned)
-}
-
 /// Maps a page fetch to an extraction outcome. A 401 asks for credentials, so it reads as a
 /// login wall; other fetch errors keep their kind ("HTTP 404.", "Timeout.").
 fn article_from(raw: &RawResponse) -> Extraction {
@@ -663,14 +673,16 @@ fn article_from(raw: &RawResponse) -> Extraction {
 
 /// `Some(found)` once the site was checked (`found` is `None` when it announces nothing new);
 /// `None` when it could not be checked (transient page-fetch failure, no site address).
+/// The site address comes from the user's OPML and goes through `site`, like feeds; the feed
+/// address the page announces is third-party content and goes through `guarded`, which
+/// refuses local and private targets (a refused candidate counts as nothing found).
 async fn discover_one(
-    source: &LocalSource,
+    site: &LocalSource,
+    guarded: &LocalSource,
     feed: &FeedRow,
     now: DateTime<Utc>,
 ) -> Option<Option<String>> {
-    let page = source
-        .fetch_raw(feed.html_url.as_deref()?, None, None)
-        .await;
+    let page = site.fetch_raw(feed.html_url.as_deref()?, None, None).await;
     if is_challenged(&page) {
         return None;
     }
@@ -686,7 +698,10 @@ async fn discover_one(
     else {
         return Some(None);
     };
-    let raw = source.fetch_raw(&candidate, None, None).await;
+    let raw = guarded.fetch_raw(&candidate, None, None).await;
+    if raw.refused {
+        return Some(None);
+    }
     if is_challenged(&raw) {
         return None;
     }
@@ -740,8 +755,15 @@ mod tests {
     }
 
     async fn discover(server: &MockServer) -> Option<Option<String>> {
-        let source = LocalSource::new(FetchLimits::default()).unwrap();
-        discover_one(&source, &row(format!("{}/", server.uri())), Utc::now()).await
+        let site = LocalSource::new(FetchLimits::default()).unwrap();
+        let candidates = LocalSource::for_articles(FetchLimits::default(), true).unwrap();
+        discover_one(
+            &site,
+            &candidates,
+            &row(format!("{}/", server.uri())),
+            Utc::now(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -786,6 +808,34 @@ mod tests {
         )
         .await;
         assert_eq!(discover(&server).await, Some(None));
+    }
+
+    /// SSRF guard: the feed address a site page announces is third-party content, so one on
+    /// a local address is refused without being requested, and the site counts as checked.
+    #[tokio::test]
+    async fn a_candidate_on_a_local_address_is_refused_without_a_request() {
+        let server = MockServer::start().await;
+        let page = r#"<html><head><link rel="alternate" type="application/rss+xml" href="/new.xml"></head></html>"#;
+        serve(&server, "/", 200, page, "text/html").await;
+        serve(&server, "/new.xml", 200, RSS, "application/rss+xml").await;
+        let site = LocalSource::new(FetchLimits::default()).unwrap();
+        let guarded = LocalSource::for_articles(FetchLimits::default(), false).unwrap();
+        let found = discover_one(
+            &site,
+            &guarded,
+            &row(format!("{}/", server.uri())),
+            Utc::now(),
+        )
+        .await;
+        assert_eq!(found, Some(None));
+        let paths: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.url.path().to_owned())
+            .collect();
+        assert_eq!(paths, ["/"], "only the site page is requested");
     }
 
     #[tokio::test]
@@ -955,6 +1005,46 @@ mod tests {
             )
             .unwrap();
         assert!(flag, "diagnose_all stores the triage flags");
+    }
+
+    /// A refresh diagnoses twice; only its last diagnosis, `diagnose_all`, writes the triage
+    /// flags, so the first one leaves them alone.
+    #[test]
+    fn only_diagnose_all_writes_the_triage_flags() {
+        let app = Ressac::with_parts(
+            Store::open_in_memory().unwrap(),
+            FetchLimits::default(),
+            "http://127.0.0.1:9",
+        )
+        .unwrap();
+        app.import_opml(
+            r#"<opml><body><outline text="A" xmlUrl="https://a.example.org/feed"/></body></opml>"#,
+            false,
+        )
+        .unwrap();
+        let flag = |app: &Ressac| -> bool {
+            app.store()
+                .conn()
+                .query_row(
+                    "SELECT needs_triage FROM v_garden_row WHERE feed_id = 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        app.save_fresh_diagnoses(Utc::now()).unwrap();
+        // A stale flag on the Unchecked feed shows who writes it.
+        app.store()
+            .conn()
+            .execute(
+                "UPDATE feed_health SET needs_triage = 1 WHERE feed_id = 1",
+                [],
+            )
+            .unwrap();
+        app.save_fresh_diagnoses(Utc::now()).unwrap();
+        assert!(flag(&app), "the first diagnosis leaves the flag alone");
+        app.diagnose_all(Utc::now()).unwrap();
+        assert!(!flag(&app), "diagnose_all recomputes it");
     }
 
     #[test]
@@ -1284,11 +1374,70 @@ mod tests {
             .unwrap();
         let stop = AtomicBool::new(false);
         let since = "2000-01-01T00:00:00Z".parse().unwrap();
-        app.fetch_full_texts(&[1], since, &NullSink, &stop)
-            .await
-            .expect("the pass survives a store error");
+        app.fetch_full_texts(
+            &[1],
+            since,
+            &mut HostPacer::new(Duration::ZERO),
+            &NullSink,
+            &stop,
+        )
+        .await
+        .expect("the pass survives a store error");
         assert!(app.store().fulltext(linked).unwrap().is_none());
         assert!(app.store().fulltext(second).unwrap().is_some());
+    }
+
+    /// The first article of a feed waits out the per-host gap after that feed's fetch (and
+    /// its https probe): the pause used to count from the previous article only.
+    #[tokio::test]
+    async fn the_first_article_waits_out_the_gap_after_its_feed() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let rss = format!(
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title><link>{base}/</link><description>d</description><item><guid>one</guid><title>One</title><link>{base}/article</link></item></channel></rss>"#
+        );
+        serve(&server, "/feed.xml", 200, &rss, "application/rss+xml").await;
+        serve(&server, "/article", 200, &article_page(), "text/html").await;
+        let gap = Duration::from_millis(400);
+        let limits = FetchLimits {
+            per_host_gap: gap,
+            timeout: Duration::from_secs(5),
+            ..FetchLimits::default()
+        };
+        let app = Ressac::with_parts(Store::open_in_memory().unwrap(), limits, &base)
+            .unwrap()
+            .allow_private_articles()
+            .unwrap();
+        app.import_opml(
+            &format!(r#"<opml><body><outline text="T" xmlUrl="{base}/feed.xml"/></body></opml>"#),
+            false,
+        )
+        .unwrap();
+        app.store().set_prefer_full_text(1, true).unwrap();
+
+        let started = std::time::Instant::now();
+        app.refresh(
+            RefreshOptions::default(),
+            &NullSink,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        let entry: i64 = app
+            .store()
+            .conn()
+            .query_row("SELECT id FROM entry WHERE guid = 'one'", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            app.store().fulltext(entry).unwrap().is_some(),
+            "the full-article pass ran"
+        );
+        assert!(
+            elapsed >= gap,
+            "the article followed its feed without a pause: {elapsed:?}"
+        );
     }
 
     /// Review Focus 1: an entry with no link (and no title) cannot be extracted; nothing is

@@ -111,6 +111,7 @@ Base : construite depuis l'OPML Vienna (import puis check) dans un dossier tempo
 
 ### CI macOS
 
+- `xcode-27` (15/10/2026) : le job macOS passe sur cette image de préversion (macOS 27, Xcode 27.0) pour construire et tester l'appli à chaque envoi. Une étape compare les tests déclarés dans `RessacTests` aux tests exécutés et échoue si le compte est illisible. Le workflow a `permissions: contents: read` et `persist-credentials: false`, avec des délais de 30 minutes (`check`) et 60 minutes (`macos`). Si l'image pose problème, revenir à `runs-on: macos-latest`, une seule ligne de `ci.yml`.
 - `macos-latest` (11/10/2026) : Xcode 26.6 et SDK macOS 26.5, donc la construction et les tests de l'appli sont sautés, échec autorisé, job vert avec un avertissement (exécution 38126512109). L'appli n'est vérifiée qu'en local tant que GitHub n'a pas Xcode 27.
 
 ## Thème Antiope (sous-projet 4)
@@ -147,6 +148,30 @@ Le seul KO (4) venait du choix de l'article de test, pas du code. Trois remarque
 - **`sqlite3 -readonly` et les copies `.backup`** : une copie faite par `.backup` d'une base WAL garde l'indicateur WAL sans fichiers `-wal` ni `-shm`, et l'ouverture en lecture seule échoue. Le `recette.sh` utilise `file:…?immutable=1`. Sur la vraie base, `.backup` n'a changé que la date du fichier `-shm`.
 - **Numéros de page** : 202 pages de 200 à 548, racines en 200, 300, 400 et 500, aucune collision ; l'attribution est déterministe, l'essai sur copie a donné les mêmes numéros.
 - **Mineurs reportés** : les remarques mineures des relectures restent ouvertes (caches de `PageDirectory` et de `DateFormatter`, focus des boutons au clavier complet, `GardenInspector` et la bannière du journal qui appellent `NSWorkspace` en direct, quelques tests à renforcer, `main.rs` à découper avant le sous-projet 2b). Le détail est dans le registre local `.superpowers/`, hors dépôt.
+
+## Corrections du TODO (todo-fixes, 15/10/2026)
+
+Plan en neuf phases (`docs/plans/todo-fixes/`), rejoué dans l'ordre sur une copie du dépôt avant l'exécution. Décisions de Clément du 15/10/2026 :
+
+- **Tailscale** : la plage CGNAT 100.64/10 reste refusée pour l'article complet, par choix. Rien à changer.
+- **Indice de spam** : plus jamais sur un flux vivant (ReadWriteWeb et quatre autres l'affichaient pour du bruit). Le score reste stocké.
+- **Refus du jardin** : `keep`, `repair` ou `undo` vers une adresse déjà prise sortent en code 2. L'appli y voit un refus et non un bogue de son appel : bandeau avec la phrase de la CLI, sans bouton du journal, et journal au niveau erreur. Les autres sorties en code 2 restent des fautes.
+- **Cimetière** : il compte les non-lus des flux enterrés directement sur `entry`, sans changer le schéma (toujours v3).
+- **CI** : job macOS sur l'image de préversion `xcode-27`, voir « CI macOS ».
+
+Le reste : garde anti-SSRF de l'autodécouverte, client protégé sans proxy, pause par hôte sur tout le rafraîchissement, `main.rs` découpé, auteur des articles suivi, triage recalculé une fois, listes d'articles par pages de 500, nettoyage HTML borné et plafond à 512 Ko, tailles d'images reprises du flux, lancement unique, alerte quand `ressac` manque, `DateFormatter` gardés, boutons Antiope hors du clavier complet. Restent ouverts : l'avertissement NSTableView (n'agir qu'avec une trace) et les accrocs de défilement des gros dossiers en Antiope (reportés).
+
+Correctifs faits pendant l'exécution, après l'écriture du plan :
+
+- **Phase 5** : `Espace` trouve le prochain non lu au-delà des lignes chargées avec une seule requête (`Queries.nextUnread`) et un seul changement de page.
+- **Phase 6** : la hauteur réservée de la mosaïque est posée sur la boîte `.mosaic`, pas sur l'image ; la borne d'attributs est 2048 et non 256 ; la porte des fils d'analyse admet 2 fils (un abandonné, un vivant), donc un nouvel article n'est jamais bloqué par une analyse abandonnée.
+- **Phase 7** : l'étape de comptage des tests de la CI échoue quand le compte est illisible ; le workflow a `permissions: contents: read` et `persist-credentials: false` ; délais de 30 minutes pour `check` et 60 minutes pour `macos`.
+
+Comptes à la fin : `ressac` 35 tests unitaires et 19 tests de CLI, cœur 260 (et 1 ignoré), puis 1 (`article_proxy`), 9 (contrat) et 4 (`end_to_end`) dans ses tests d'intégration ; appli 349 tests dans 84 suites, sans avertissement.
+
+À vérifier à la main par Clément : l'alerte quand `ressac` manque, une fenêtre rouverte (⌘W puis Dock) qui garde la sélection, « Show Log » et « Open Site », le clavier complet sur P100 et la bannière, les comptes du Cimetière dans les deux apparences, et le premier passage de la CI sur l'image `xcode-27`.
+
+Durcissement proposé, non fait : épingler les actions GitHub par SHA.
 
 ## Paysage existant (10/10/2026)
 

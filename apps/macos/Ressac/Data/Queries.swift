@@ -26,6 +26,36 @@ struct SidebarSnapshot: Equatable, Sendable {
     var needsTriage = 0
 }
 
+/// Where a long entry list stops: the `published_at` text and the id of its oldest loaded row.
+/// Rows at or after it (the lists run newest first) are loaded. The raw text, so that SQLite
+/// compares it the way it sorts the column.
+struct ListFloor: Comparable, Sendable {
+    var publishedAt: String
+    var entryId: Int64
+
+    /// Below every row: the whole list, loaded to its end on purpose.
+    static let oldest = ListFloor(publishedAt: "", entryId: .min)
+
+    static func < (a: ListFloor, b: ListFloor) -> Bool {
+        (a.publishedAt, a.entryId) < (b.publishedAt, b.entryId)
+    }
+
+    /// Whether `row` sorts at or after the floor.
+    func admits(_ row: EntryRow) -> Bool {
+        guard let date = Timestamp.date(from: publishedAt) else { return true }
+        return (row.publishedAt, row.entryId) >= (date, entryId)
+    }
+}
+
+/// The loaded rows of an entry list, newest first, and the size of the whole list.
+struct EntryPage: Equatable, Sendable {
+    var rows: [EntryRow] = []
+    /// Rows of the whole list, loaded or not.
+    var total = 0
+    /// Unread rows of the whole list, loaded or not.
+    var unread = 0
+}
+
 /// A live query: refetched when GRDB sees a change, duplicates dropped.
 typealias LiveQuery<Value: Equatable & Sendable> = ValueObservation<ValueReducers.RemoveDuplicates<ValueReducers.Fetch<Value>>>
 
@@ -69,32 +99,34 @@ struct Queries {
         .removeDuplicates()
     }
 
-    /// The entry list of a source, newest first. Garden sources have no entries.
-    static func entries(source: Source, unreadOnly: Bool, now: Date = Date()) -> LiveQuery<[EntryRow]> {
-        ValueObservation.tracking { db in
-            guard let filter = predicate(for: source, now: now) else { return [] }
-            let unread = unreadOnly ? " AND NOT is_read" : ""
-            return try EntryRow.fetchAll(db, sql: """
-                SELECT \(listColumns) FROM v_entry
-                WHERE \(filter.sql)\(unread)
-                ORDER BY published_at DESC, entry_id DESC
-                """, arguments: filter.arguments)
-        }
-        .removeDuplicates()
+    /// The entry list of a source, newest first, down to `floor` (every row when nil). Garden
+    /// sources have no entries.
+    static func entries(source: Source, unreadOnly: Bool, floor: ListFloor? = nil, now: Date = Date()) -> LiveQuery<EntryPage> {
+        page(of: condition(source: source, unreadOnly: unreadOnly, search: nil, now: now), floor: floor)
     }
 
-    /// Full-text search within a source (spec §7, Search). Every word must appear (see `ftsQuery`).
-    static func search(_ text: String, in source: Source, now: Date = Date()) -> LiveQuery<[EntryRow]> {
-        ValueObservation.tracking { db in
-            guard let match = ftsQuery(text), let filter = predicate(for: source, now: now) else { return [] }
-            return try EntryRow.fetchAll(db, sql: """
-                SELECT \(listColumns) FROM v_entry
-                WHERE entry_id IN (SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?)
-                  AND \(filter.sql)
-                ORDER BY published_at DESC, entry_id DESC
-                """, arguments: [match] + filter.arguments)
-        }
-        .removeDuplicates()
+    /// Full-text search within a source (spec §7, Search), down to `floor` like `entries`. Every
+    /// word must appear (see `ftsQuery`).
+    static func search(_ text: String, in source: Source, floor: ListFloor? = nil, now: Date = Date()) -> LiveQuery<EntryPage> {
+        page(of: condition(source: source, unreadOnly: false, search: text, now: now), floor: floor)
+    }
+
+    /// The floor that loads `rows` more rows of a list after `below` (from its newest row when
+    /// nil), lowered to entry `keeping` when that entry sorts older. Nil when fewer rows are
+    /// left: they all load. `search` nil is the plain list.
+    static func floor(source: Source, unreadOnly: Bool, search: String?, below: ListFloor?, rows: Int,
+                      keeping entryId: Int64? = nil, now: Date = Date(), in db: Database) throws -> ListFloor? {
+        guard let list = condition(source: source, unreadOnly: unreadOnly, search: search, now: now) else { return nil }
+        let rest = bounded(list, by: below, "<")
+        guard let row = try Row.fetchOne(db, sql: """
+            SELECT published_at, entry_id FROM v_entry WHERE \(rest.sql)
+            ORDER BY published_at DESC, entry_id DESC LIMIT 1 OFFSET ?
+            """, arguments: rest.arguments + [max(rows, 1) - 1])
+        else { return nil }
+        let floor = ListFloor(publishedAt: row["published_at"], entryId: row["entry_id"])
+        guard let entryId, let kept = try Row.fetchOne(db, sql: "SELECT published_at, id FROM entry WHERE id = ?", arguments: [entryId])
+        else { return floor }
+        return min(floor, ListFloor(publishedAt: kept["published_at"], entryId: kept["id"]))
     }
 
     /// One complete entry (with `content_html`), for the reader.
@@ -115,11 +147,16 @@ struct Queries {
         case .all: "state = 'active'"
         case .cemetery: "state = 'buried'"
         }
+        // `v_unread_count` covers active feeds only, so the Cemetery counts on `entry` itself. The
+        // other scopes leave `entry` out: reading or fetching entries does not refetch them.
+        let unread = scope == .cemetery
+            ? "(SELECT COUNT(*) FROM entry e WHERE e.feed_id = v_garden_row.feed_id AND e.read_at IS NULL)"
+            : "0"
         return ValueObservation.tracking { db in
             try GardenRow.fetchAll(db, sql: """
                 SELECT feed_id, title, folder_path, state, status, reason, clue, evidence,
                        COALESCE(remarks, '[]') AS remarks, proposed_action, needs_triage, last_decision,
-                       wayback_url, html_url, xml_url
+                       wayback_url, html_url, xml_url, \(unread) AS unread
                 FROM v_garden_row WHERE \(filter)
                 ORDER BY \(urgencyOrder), title COLLATE NOCASE, feed_id
                 """)
@@ -179,6 +216,60 @@ struct Queries {
         case .garden:
             nil
         }
+    }
+
+    /// The first unread row of a list after entry `entryId` (older, in the list's order; from its
+    /// newest row when nil), as the floor that loads it. Nil when none is left.
+    static func nextUnread(source: Source, unreadOnly: Bool, search: String?, after entryId: Int64?,
+                           now: Date = Date(), in db: Database) throws -> ListFloor? {
+        guard let list = condition(source: source, unreadOnly: unreadOnly, search: search, now: now) else { return nil }
+        var rest = Predicate(sql: list.sql + " AND NOT is_read", arguments: list.arguments)
+        if let entryId, let from = try Row.fetchOne(db, sql: "SELECT published_at, id FROM entry WHERE id = ?", arguments: [entryId]) {
+            rest = bounded(rest, by: ListFloor(publishedAt: from["published_at"], entryId: from["id"]), "<")
+        }
+        return try Row.fetchOne(db, sql: """
+            SELECT published_at, entry_id FROM v_entry WHERE \(rest.sql)
+            ORDER BY published_at DESC, entry_id DESC LIMIT 1
+            """, arguments: rest.arguments).map { ListFloor(publishedAt: $0["published_at"], entryId: $0["entry_id"]) }
+    }
+
+    /// The `v_entry` rows of a list: a source's, unread only or not, or those matching `search`
+    /// (which ignores the unread filter). Nil when the list is empty by definition: a garden
+    /// source, a search without words.
+    private static func condition(source: Source, unreadOnly: Bool, search: String?, now: Date) -> Predicate? {
+        guard let filter = predicate(for: source, now: now) else { return nil }
+        guard let search else {
+            return unreadOnly ? Predicate(sql: filter.sql + " AND NOT is_read", arguments: filter.arguments) : filter
+        }
+        guard let match = ftsQuery(search) else { return nil }
+        return Predicate(sql: "entry_id IN (SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?) AND \(filter.sql)",
+                         arguments: [match] + filter.arguments)
+    }
+
+    /// `list` cut at `floor` with `comparison` (`>=`: the rows at or after it; `<`: the older
+    /// ones); `list` itself when there is no floor.
+    private static func bounded(_ list: Predicate, by floor: ListFloor?, _ comparison: String) -> Predicate {
+        guard let floor else { return list }
+        return Predicate(sql: list.sql + " AND (published_at, entry_id) \(comparison) (?, ?)",
+                         arguments: list.arguments + [floor.publishedAt, floor.entryId])
+    }
+
+    /// The rows of `list` down to `floor`, and the counts of the whole list.
+    private static func page(of list: Predicate?, floor: ListFloor?) -> LiveQuery<EntryPage> {
+        ValueObservation.tracking { db in
+            guard let list else { return EntryPage() }
+            let loaded = bounded(list, by: floor, ">=")
+            let rows = try EntryRow.fetchAll(db, sql: """
+                SELECT \(listColumns) FROM v_entry WHERE \(loaded.sql)
+                ORDER BY published_at DESC, entry_id DESC
+                """, arguments: loaded.arguments)
+            guard let counts = try Row.fetchOne(db, sql: """
+                SELECT COUNT(*) AS total, COALESCE(SUM(NOT is_read), 0) AS unread FROM v_entry WHERE \(list.sql)
+                """, arguments: list.arguments)
+            else { return EntryPage(rows: rows, total: rows.count) }
+            return EntryPage(rows: rows, total: counts["total"], unread: counts["unread"])
+        }
+        .removeDuplicates()
     }
 
     /// `"word1" "word2"`: every token quoted, so FTS5 operators typed by the user stay literal.

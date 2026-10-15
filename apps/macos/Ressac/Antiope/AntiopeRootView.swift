@@ -1,4 +1,5 @@
 import AppKit
+import Synchronization
 import SwiftUI
 
 /// The Antiope look of the reading window (spec §5, Window): the page header, the index, entry and
@@ -170,8 +171,8 @@ struct PageHeader: View {
     /// close the row, inside `width` (never more than a quarter of it, and never at the time's expense).
     static func line(label: HeaderLabel, date: Date, width: Int, rightMargin: Int = 0,
                      timeZone: TimeZone = .current) -> CellLine {
-        let day = format(date, "EEE dd MMM", timeZone: timeZone).uppercased() + " "
-        let time = format(date, "HH:mm:ss", timeZone: timeZone)
+        let day = TeletextDateFormat.string(from: date, pattern: "EEE dd MMM", timeZone: timeZone).uppercased() + " "
+        let time = TeletextDateFormat.string(from: date, pattern: "HH:mm:ss", timeZone: timeZone)
         let (page, colour, showsName): (String, TeletextColor, Bool) = switch label {
         case let .page(number): ("P" + (number.map { String($0) } ?? "---"), .yellow, true)
         case let .typing(digits): ("P" + digits, .yellow, true)
@@ -198,14 +199,38 @@ struct PageHeader: View {
         if margin > 0 { spans.append(CellSpan("", cells: margin, foreground: .white)) }
         return CellLine(spans)
     }
+}
 
-    private static func format(_ date: Date, _ pattern: String, timeZone: TimeZone) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.timeZone = timeZone
-        formatter.dateFormat = pattern
-        return formatter.string(from: date)
+/// Fixed-pattern dates for the teletext pages, in English whatever the system language. One
+/// `DateFormatter` per pattern and time zone, kept: the header formats the date and the time every
+/// second (every tenth of a second while the counter rolls), and building a `DateFormatter` costs
+/// about a hundred times more than using one.
+enum TeletextDateFormat {
+    private struct Key: Hashable {
+        var pattern: String
+        var timeZone: TimeZone
+    }
+
+    /// A handful of keys in practice: three patterns, times the zones the app has run in.
+    private static let formatters = Mutex<[Key: DateFormatter]>([:])
+
+    static func string(from date: Date, pattern: String, timeZone: TimeZone) -> String {
+        formatters.withLock { cache in
+            let key = Key(pattern: pattern, timeZone: timeZone)
+            if let formatter = cache[key] { return formatter.string(from: date) }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.timeZone = timeZone
+            formatter.dateFormat = pattern
+            cache[key] = formatter
+            return formatter.string(from: date)
+        }
+    }
+
+    /// Whether `pattern` in `timeZone` already has its formatter (for the tests).
+    static func isCached(_ pattern: String, timeZone: TimeZone) -> Bool {
+        formatters.withLock { $0[Key(pattern: pattern, timeZone: timeZone)] != nil }
     }
 }
 

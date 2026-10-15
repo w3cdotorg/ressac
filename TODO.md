@@ -2,10 +2,6 @@
 
 Prochaines étapes de Ressac, au 15/10/2026. Le détail des décisions passées est dans `notes.md`.
 
-## À décider
-
-- [ ] **CI macOS : `|| true` sur la détection de Xcode.** Les deux lignes `xcode=$(xcodebuild -version | head -n 1)` et `sdk=$(xcrun --sdk macosx --show-sdk-version)` de `.github/workflows/ci.yml` feraient échouer l'étape si `xcodebuild` lui-même plantait. La modification a été refusée par le garde-fou automatique de Claude Code ; le relecteur la juge sans conséquence (les images macOS de GitHub ont toujours un Xcode).
-
 ## Mise en service
 
 - [x] Compiler l'appli en Release ; elle tourne depuis `apps/macos/build/Ressac.app` (commandes dans le README, section « The Mac app »).
@@ -28,36 +24,48 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 
 ### Sécurité et réseau
 
-- [ ] `discover_one` (sous-projet 1) suit une adresse de flux lue dans une page HTML avec le client non protégé : SSRF aveugle (Ressac ne lit pas la réponse). Lui appliquer la même garde que pour les articles.
-- [ ] Client des articles : les variables `HTTP_PROXY`, `HTTPS_PROXY` et `ALL_PROXY` sont honorées, donc la vérification à la résolution DNS est sautée derrière un proxy. Envisager `.no_proxy()`.
-- [ ] Les adresses Tailscale (plage CGNAT 100.64/10) sont refusées pour l'article complet : à assouplir si besoin.
-- [ ] Pause par hôte des articles : seul l'hôte de l'entrée précédente est mémorisé (A, B, A ne fait pas de pause), et aucune pause entre le dernier flux et le premier article d'un même hôte.
+- [x] `discover_one` : l'adresse de flux lue dans la page du site passe par le client protégé des articles ; refusée, elle compte comme « rien trouvé » (todo-fixes, phase 1).
+- [x] Client protégé (articles, autodécouverte) : `.no_proxy()`, les variables de proxy sont ignorées ; les flux gardent le proxy (todo-fixes, phase 1).
+- [x] Pause par hôte des articles : chaque hôte est mémorisé, et les flux et sondes https du même rafraîchissement comptent (todo-fixes, phase 1).
 
 ### Lecture
 
-- [ ] La liste d'articles n'a pas de limite et elle est relue à chaque marque « lu » : un dossier de plusieurs milliers d'entrées en mode « All » le sentira.
-- [ ] Plafond de 256 Ko de HTML : les très gros articles s'affichent en texte simple.
-- [ ] Environ 600 Ko de HTML « plat » mais invalide prennent 2 à 3 s à nettoyer, et les fils de nettoyage abandonnés peuvent se chevaucher.
-- [ ] Une image sans dimensions en fin d'article peut faire passer `Espace` à l'article suivant un peu trop tôt : écrire largeur et hauteur quand le flux les donne.
+- [x] Listes d'articles : 500 lignes à la fois, la suite au défilement ou au clavier ; `Espace` trouve le prochain non lu au-delà des lignes chargées par une requête et un changement de page ; une marque « lu » ne relit plus que la page chargée et deux comptes (todo-fixes, phases 5 et 6).
+- [x] Plafond du HTML analysé porté à 512 Ko (todo-fixes, phase 6).
+- [x] Nettoyage : l'estimation de profondeur suit libxml, plus de 2048 attributs sur une balise donnent du texte simple, deux fils de nettoyage au plus (un abandonné, un vivant) pour qu'un nouvel article ne soit jamais bloqué (todo-fixes, phase 6).
+- [x] Images : largeur et hauteur reprises des attributs `width` et `height` ou du style en pixels (jamais des attributs `data-`, qui décrivent l'image d'origine et non celle servie) ; en Antiope, la boîte `.mosaic` réserve sa hauteur avant l'arrivée de l'image (todo-fixes, phase 6).
 - [ ] Avertissement « reentrant operation in its NSTableView delegate » : une source corrigée, une autre possible non reproduite. N'agir qu'avec une trace.
 
 ### Cœur et CLI
 
-- [ ] `keep` ou `repair` vers une adresse déjà utilisée par un flux actif sort en code 1 au lieu de 2.
-- [ ] `garden apply-safe --json` ne donne que le résumé, pas le nombre de réparations appliquées et sautées.
-- [ ] Un changement d'auteur d'un article n'atteint ni `entry` ni l'index de recherche (comportement hérité de la v1).
-- [ ] `v_entry` et `v_unread_count` cachent les flux enterrés : le Cimetière ne peut pas afficher leurs non-lus.
-- [ ] `recompute_triage` relit toutes les lignes, deux fois par rafraîchissement.
+- [x] `keep`, `repair` ou `undo` vers une adresse déjà utilisée par un flux actif sortent en code 2 ; l'appli le montre comme un refus, pas comme un bogue (todo-fixes, phases 3a et 3c).
+- [x] `garden apply-safe --json` : la ligne `finished` donne aussi `applied` et `skipped` (todo-fixes, phase 3a).
+- [x] Un changement d'auteur atteint `entry` et l'index de recherche (todo-fixes, phase 3b).
+- [x] Le Cimetière compte les non-lus des flux enterrés sur `entry`, schéma inchangé ; `v_entry` et `v_unread_count` restent limitées aux flux actifs (todo-fixes, phase 4).
+- [x] `recompute_triage` lit une ligne légère par flux, et un rafraîchissement ne calcule les indicateurs qu'une fois (todo-fixes, phase 3b).
 
 ### Appli et outillage
 
-- [ ] Binaire `ressac` absent du paquet : message dans la fenêtre au lieu d'une alerte système (`NSAlert`) comme le dit la spec.
-- [ ] Le lancement n'est pas protégé contre une double exécution, et le branchement `onDatabaseChange` n'a pas de test.
-- [ ] CI macOS : aucune vérification du nombre de tests réellement exécutés ; à revoir quand GitHub aura Xcode 27.
-- [ ] CI : `actions/checkout@v4` tourne sur Node 20, déprécié (avertissement GitHub) ; passer à une version Node 24.
-- [ ] Indice de spam affiché sur 5 flux du vrai jeu (dont ReadWriteWeb, vivant) : le restreindre plus tard aux statuts non vivants ou au seul lexique, si ça gêne.
+- [x] Binaire `ressac` absent du paquet : alerte système fatale au lancement (todo-fixes, phase 7).
+- [x] Un seul lancement à la fois, quel que soit le nombre de fenêtres ; le branchement `onDatabaseChange` a son test (todo-fixes, phase 7).
+- [x] CI macOS sur l'image de préversion `xcode-27`, avec une étape qui compare les tests déclarés aux tests exécutés et échoue si le compte est illisible ; droits `contents: read`, `persist-credentials: false`, délais de 30 min (`check`) et 60 min (`macos`) (todo-fixes, phase 7).
+- [x] CI : `actions/checkout@v7` (Node 24) dans les deux jobs (todo-fixes, phase 7).
+- [x] Indice de spam réservé aux flux non vivants, décision du 15/10/2026 (todo-fixes, phase 3a).
 
 ### Antiope (sous-projet 4)
 
 - [ ] Défilement des gros dossiers : accrocs même sans écran CRT (38 ms/s sur la page 400), optimisation possible (voir `notes.md`).
-- [ ] Mineurs des relectures restés ouverts : `DateFormatter` recréé à chaque seconde par l'en-tête, lignes de P100 et boutons de la bannière encore focalisables au clavier complet, `NSWorkspace` appelé en direct par la bannière native et `GardenInspector`, `main.rs` à découper avant le sous-projet 2b.
+- [x] Mineurs des relectures : un `DateFormatter` gardé par motif et fuseau, lignes de P100 et boutons de la bannière hors de la boucle du clavier complet (todo-fixes, phase 8), liens de la bannière native et de `GardenInspector` par `AppState.openURL` (phase 7), `main.rs` découpé (phase 2).
+
+### Durcissement proposé, non fait
+
+- [ ] CI : épingler les actions GitHub par SHA plutôt que par étiquette.
+
+### À vérifier à la main (Clément)
+
+- [ ] Alerte « binaire `ressac` absent » au lancement.
+- [ ] Une fenêtre rouverte (⌘W puis clic sur l'icône du Dock) garde la sélection.
+- [ ] « Show Log » et « Open Site » dans le jardin.
+- [ ] Clavier complet : P100 et la bannière.
+- [ ] Comptes du Cimetière dans les deux apparences.
+- [ ] Premier passage de la CI sur l'image de préversion `xcode-27`.

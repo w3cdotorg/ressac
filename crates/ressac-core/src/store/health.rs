@@ -6,8 +6,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Row, params};
 
 use super::Store;
+use super::fetch::bad_timestamp;
 use crate::error::Result;
-use crate::model::{Cadence, Diagnosis, FeedId, Status, parse_ts, ts};
+use crate::model::{Cadence, Decision, Diagnosis, FeedId, Status, parse_ts, ts};
 
 const HEALTH_COLUMNS: &str = "feed_id, status, reason, evidence, remarks, proposed_action, hijack_score, \
      last_entry_at, median_interval_days, entries_per_month";
@@ -47,6 +48,58 @@ fn health_row(r: &Row<'_>) -> rusqlite::Result<(FeedId, Diagnosis)> {
             },
         },
     ))
+}
+
+/// What the garden's triage rule reads for one feed (`garden::recompute_triage`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriageFacts {
+    pub feed_id: FeedId,
+    pub buried: bool,
+    /// `Unchecked` while the feed has no diagnosis.
+    pub status: Status,
+    /// The latest decision: what was decided, the status at the time, and when.
+    pub decision: Option<(Decision, Status, DateTime<Utc>)>,
+    /// When the newest fetch attempt ran.
+    pub last_attempt_at: Option<DateTime<Utc>>,
+}
+
+/// A status or decision name `parse` does not know, as a column conversion error.
+fn unknown(col: usize, what: &str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        col,
+        rusqlite::types::Type::Text,
+        format!("unknown {what} {value:?}").into(),
+    )
+}
+
+fn triage_row(r: &Row<'_>) -> rusqlite::Result<TriageFacts> {
+    let status: Option<String> = r.get(2)?;
+    let decision: Option<String> = r.get(3)?;
+    let decision = match decision {
+        None => None,
+        Some(name) => {
+            let at_decision: String = r.get(4)?;
+            let decided_at: String = r.get(5)?;
+            Some((
+                Decision::parse(&name).ok_or_else(|| unknown(3, "decision", &name))?,
+                Status::parse(&at_decision).ok_or_else(|| unknown(4, "status", &at_decision))?,
+                parse_ts(&decided_at).ok_or_else(|| bad_timestamp(5))?,
+            ))
+        }
+    };
+    let last_attempt: Option<String> = r.get(6)?;
+    Ok(TriageFacts {
+        feed_id: r.get(0)?,
+        buried: r.get(1)?,
+        status: match status {
+            None => Status::Unchecked,
+            Some(name) => Status::parse(&name).ok_or_else(|| unknown(2, "status", &name))?,
+        },
+        decision,
+        last_attempt_at: last_attempt
+            .map(|at| parse_ts(&at).ok_or_else(|| bad_timestamp(6)))
+            .transpose()?,
+    })
 }
 
 fn write_triage(conn: &rusqlite::Connection, flags: &HashMap<FeedId, bool>) -> Result<()> {
@@ -117,6 +170,24 @@ impl Store {
         write_triage(&tx, &flags)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The triage facts of every feed, by id, in one query: no entries, no folder paths,
+    /// and only the newest fetch attempt's time.
+    pub fn triage_facts(&self) -> Result<Vec<TriageFacts>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT f.id, f.state = 'buried', h.status, d.decision, d.status_at_decision, d.decided_at, \
+             (SELECT l.at FROM fetch_log l WHERE l.feed_id = f.id ORDER BY l.at DESC, l.id DESC LIMIT 1) \
+             FROM feed f \
+             LEFT JOIN feed_health h ON h.feed_id = f.id \
+             LEFT JOIN garden_decision d \
+               ON d.id = (SELECT max(g.id) FROM garden_decision g WHERE g.feed_id = f.id) \
+             ORDER BY f.id",
+        )?;
+        let rows = stmt
+            .query_map([], triage_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     pub fn diagnosis(&self, feed_id: FeedId) -> Result<Option<Diagnosis>> {

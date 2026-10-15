@@ -56,10 +56,11 @@ enum ArticleTemplate {
 
     private static func sanitizeUncached(_ html: String, baseURL: URL?, budget: TimeInterval, mosaics: Bool) -> (html: String, timedOut: Bool) {
         // Tidy and the recursive renderer overflow the stack on pathological nesting, and libxml's
-        // repair of misnested end tags is quadratic, so such input (or anything big) skips the
-        // parser and is shown as escaped plain text.
+        // work grows with the square of the depth and of a tag's attributes, so such input (or
+        // anything big) skips the parser and is shown as escaped plain text.
         let size = html.utf8.count
-        if size > maxParsedBytes || estimatedNestingDepth(html) > maxNestingDepth {
+        if size > maxParsedBytes || estimatedNestingDepth(html, stoppingAbove: maxNestingDepth) > maxNestingDepth
+            || mostAttributesOnATag(html, stoppingAbove: maxAttributesPerTag) > maxAttributesPerTag {
             let text = size > maxInputBytes ? String(decoding: html.utf8.prefix(maxInputBytes), as: UTF8.self) : html
             return (plainTextFallback(text), false)
         }
@@ -122,29 +123,55 @@ enum ArticleTemplate {
         return renderer.out
     }
 
-    private final class ResultBox: @unchecked Sendable { var value = "" }
+    /// A worker's result, and whether its caller stopped waiting for it.
+    private final class Job: Sendable {
+        private let state = Mutex<(result: String?, abandoned: Bool)>((nil, false))
+
+        var result: String? { state.withLock { $0.result } }
+        var isAbandoned: Bool { state.withLock { $0.abandoned } }
+        func finish(_ result: String) { state.withLock { $0.result = result } }
+        func abandon() { state.withLock { $0.abandoned = true } }
+    }
+
+    /// At most `maxWorkers` at a time: abandoned parses never pile up.
+    private static let workerGate = DispatchSemaphore(value: maxWorkers)
+    /// A running abandoned worker plus the live one: a new article always gets a worker.
+    static let maxWorkers = 2
 
     /// Runs `work` on a thread with a 256 MB stack (a virtual reservation) and waits for it, so
     /// libxml's recursive parser cannot exhaust the stack on input the depth guard let through.
-    /// Returns `nil` when `timeout` passes first. The worker cannot be cancelled: it finishes in
-    /// the background and its late result is discarded; its cost is bounded by `maxParsedBytes`.
-    static func onLargeStack(timeout: TimeInterval = .infinity, _ work: @escaping @Sendable () -> String) -> String? {
-        let box = ResultBox()
+    /// Returns `nil` when `timeout` passes first. Workers pass through `gate` (two at a time by default): a worker waits for
+    /// a free slot, and skips its work when its caller stopped waiting meanwhile. A worker
+    /// already running cannot be cancelled: it finishes and its late result is discarded.
+    static func onLargeStack(timeout: TimeInterval = .infinity, gate: DispatchSemaphore = workerGate,
+                             _ work: @escaping @Sendable () -> String) -> String? {
+        let job = Job()
         let done = DispatchSemaphore(value: 0)
         let thread = Thread {
-            box.value = work()
+            gate.wait()
+            if !job.isAbandoned { job.finish(work()) }
+            gate.signal()
             done.signal()
         }
         thread.stackSize = 256 << 20
         thread.qualityOfService = .userInteractive
         thread.start()
         let deadline: DispatchTime = timeout.isFinite ? .now() + timeout : .distantFuture
-        return done.wait(timeout: deadline) == .success ? box.value : nil
+        guard done.wait(timeout: deadline) == .success else {
+            job.abandon()
+            return nil
+        }
+        return job.result
     }
 
     static let parseBudget: TimeInterval = 1.0
-    private static let maxParsedBytes = 256 * 1024
+    /// Past this, the plain-text fallback. Once the guards below keep libxml linear, its worst
+    /// measured cost is about 0.85 ms per KB of dense markup (real articles: 0.1), so 512 KB
+    /// stays within half the budget; the largest stored article was 358 KB on 15/10/2026.
+    private static let maxParsedBytes = 512 * 1024
     static let maxNestingDepth = 256
+    /// libxml checks a tag's attributes pairwise for duplicates: 60,000 on one tag took 5 s, 2,000 about 6 ms.
+    static let maxAttributesPerTag = 2048
     private static let maxInputBytes = 2_000_000
     /// HTML's void elements: never closed, never nested (the renderer and the depth estimate).
     private static let voidTags: Set<String> = [
@@ -152,11 +179,14 @@ enum ArticleTemplate {
     ]
 
     /// Linear, non-recursive estimate of the deepest element nesting: opening tags minus closing
-    /// tags, ignoring void and self-closing tags, comments, `<!…>` and `<?…>`.
-    static func estimatedNestingDepth(_ html: String) -> Int {
+    /// tags, ignoring void and self-closing tags, comments, `<!…>` and `<?…>`. Stops as soon as
+    /// the depth passes `limit`, which bounds the work per close tag.
+    static func estimatedNestingDepth(_ html: String, stoppingAbove limit: Int = .max) -> Int {
         let bytes = Array(html.utf8)
-        // Conservative: it may overestimate, never underestimate. A close tag pops only down to a
-        // matching open name (a stray one pops nothing), and a tag ends at the first `>`.
+        // Conservative: it may overestimate, and underestimates only by the few elements libxml
+        // adds on its own (an implied `p`: 5 levels at most over 1,500 random tag soups). A close
+        // tag pops down to its open name only where libxml would (`closes(_:above:)`), a stray one
+        // pops nothing, and a tag ends at the first `>`.
         var stack: [String] = []
         var open: [String: Int] = [:]
         var deepest = 0, i = 0
@@ -183,19 +213,84 @@ enum ArticleTemplate {
             var k = j
             while k < bytes.count, bytes[k] != 0x3E { k += 1 }
             if closing {
-                if open[tag, default: 0] > 0 {
-                    while let top = stack.last, top != tag { pop() }
-                    pop()
+                if open[tag, default: 0] > 0, let match = stack.lastIndex(of: tag),
+                   closes(tag, above: stack[(match + 1)...]) {
+                    while stack.count > match { pop() }
                 }
             } else if !voidTags.contains(tag) {
                 closeOptionalEndTags(before: tag, stack: stack, pop: pop)
                 stack.append(tag)
                 open[tag, default: 0] += 1
                 deepest = max(deepest, stack.count)
+                if deepest > limit { return deepest }
             }
             i = k + 1
         }
         return deepest
+    }
+
+    /// libxml's rule for a misplaced end tag (`htmlAutoCloseOnClose`): it closes the elements
+    /// opened after its match only when none of them has a higher end priority than its own;
+    /// otherwise it is ignored. So `</b>` never closes an open `div`, and `<b><div>x</b>`,
+    /// repeated, nests two levels deeper each time (60 KB of it took 0.8 s, 250 KB 23 s).
+    private static func closes(_ tag: String, above opened: ArraySlice<String>) -> Bool {
+        let priority = endPriority(tag)
+        return opened.allSatisfy { endPriority($0) <= priority }
+    }
+
+    /// libxml's `htmlEndPriority` table; every other element has 100.
+    private static func endPriority(_ tag: String) -> Int {
+        switch tag {
+        case "div": 150
+        case "td", "th": 160
+        case "tr": 170
+        case "thead", "tbody", "tfoot": 180
+        case "table": 190
+        case "head", "body": 200
+        case "html": 220
+        default: 100
+        }
+    }
+
+    /// The most attributes on one start tag. A value is skipped whole (quoted, it may hold
+    /// spaces and `>`), so only names count; an unquoted value is read up to a space or `>`.
+    /// Linear; stops as soon as a tag has more than `limit` (and returns `limit + 1`).
+    static func mostAttributesOnATag(_ html: String, stoppingAbove limit: Int = .max) -> Int {
+        let bytes = Array(html.utf8)
+        func isSpace(_ b: UInt8) -> Bool { b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0C || b == 0x0D }
+        var most = 0, i = 0
+        while i < bytes.count {
+            guard bytes[i] == 0x3C, i + 1 < bytes.count, isASCIILetter(bytes[i + 1]) else { i += 1; continue }  // <a
+            var j = i + 1
+            while j < bytes.count, !isSpace(bytes[j]), bytes[j] != 0x3E, bytes[j] != 0x2F { j += 1 }  // the tag name
+            var count = 0
+            scan: while j < bytes.count {
+                switch bytes[j] {
+                case 0x3E:  // >
+                    break scan
+                case 0x3D:  // =: skip the value
+                    j += 1
+                    while j < bytes.count, isSpace(bytes[j]) { j += 1 }
+                    if j < bytes.count, bytes[j] == 0x22 || bytes[j] == 0x27 {
+                        let quote = bytes[j]
+                        j += 1
+                        while j < bytes.count, bytes[j] != quote { j += 1 }
+                        j += 1
+                    } else {
+                        while j < bytes.count, !isSpace(bytes[j]), bytes[j] != 0x3E { j += 1 }
+                    }
+                case let b where isSpace(b) || b == 0x2F:  // spaces and /
+                    j += 1
+                default:  // a name
+                    count += 1
+                    if count > limit { return count }
+                    while j < bytes.count, !isSpace(bytes[j]), bytes[j] != 0x3E, bytes[j] != 0x3D, bytes[j] != 0x2F { j += 1 }
+                }
+            }
+            most = max(most, count)
+            i = j + 1
+        }
+        return most
     }
 
     /// HTML's optional end tags: what an opening tag closes when it sits on top of the stack.
@@ -301,12 +396,17 @@ enum ArticleTemplate {
                     for child in element.children ?? [] { render(child, depth: depth + 1, inLink: inLink) }
                     return
                 }
-                let attributes = safeAttributes(of: element, tag: tag, baseURL: baseURL)
+                var attributes = safeAttributes(of: element, tag: tag, baseURL: baseURL)
                 if tag == "img" {
                     guard let source = attributes.first(where: { $0.name == "src" })?.value else { return }
+                    // Its height is known before it loads, so Space never takes the page's end too early.
+                    let size = declaredSize(allAttributes(of: element))
                     if mosaics, let original = LinkPolicy.webURL(source) {
                         let alt = attributes.first(where: { $0.name == "alt" })?.value ?? ""
-                        return mosaic(original: original, alt: alt, inLink: inLink)
+                        return mosaic(original: original, alt: alt, size: size, inLink: inLink)
+                    }
+                    if let size, !attributes.contains(where: { $0.name == "width" || $0.name == "height" }) {
+                        attributes += [("width", String(size.width)), ("height", String(size.height))]
                     }
                 }
                 out += "<\(tag)"
@@ -326,19 +426,71 @@ enum ArticleTemplate {
         }
 
         /// Image `n` as a mosaic box. The box keeps both addresses for the swap and an IMAGE line
-        /// with the alt text, shown by the stylesheet when the mosaic fails (`data-failed`).
-        private mutating func mosaic(original: URL, alt: String, inLink: Bool) {
+        /// with the alt text, shown by the stylesheet when the mosaic fails (`data-failed`). With
+        /// the original's `size`, the box keeps the mosaic's height before it arrives: the rows its
+        /// renderer will draw, in PNG pixels (one per font pixel) times `--font-pixel`. The box
+        /// holds it, not the `img`, which is always drawn at its real grid, never stretched.
+        private mutating func mosaic(original: URL, alt: String, size: ImageSize?, inLink: Bool) {
             let index = images
             images += 1
             let source = escapeAttribute(MosaicRequest.url(for: original, columns: MosaicRenderer.maxColumns))
-            let box = #"id="m\#(index)" data-original="\#(escapeAttribute(original.absoluteString))" data-mosaic="\#(source)""#
+            var box = #"id="m\#(index)" data-original="\#(escapeAttribute(original.absoluteString))" data-mosaic="\#(source)""#
             let label = escapeText(alt.isEmpty ? "IMAGE" : "IMAGE \(alt)")
+            if let size {  // integers only: the values come from untrusted attributes
+                let grid = MosaicRenderer.grid(width: size.width, height: size.height,
+                                               columns: MosaicRenderer.columns(forPixelWidth: size.width))
+                box += #" style="min-height: calc(\#(grid.rows * MosaicRenderer.cellHeight)px * var(--font-pixel))""#
+            }
             let content = #"<img src="\#(source)" alt="\#(escapeAttribute(alt))" loading="lazy">"#
                 + #"<span class="mosaic-alt">\#(label)</span>"#
             out += inLink
                 ? #"<span class="mosaic" \#(box)>\#(content)</span>"#
                 : #"<a class="mosaic" href="\#(LinkPolicy.toggleScheme):\#(index)" \#(box)>\#(content)</a>"#
         }
+    }
+
+    /// An image's size in CSS pixels, as its feed gives it.
+    struct ImageSize: Equatable, Sendable {
+        var width: Int
+        var height: Int
+    }
+
+    /// The size an image's attributes give: `width` and `height`, else `width` and `height` in
+    /// pixels in `style`. Nil when none gives both as whole pixels from 1 to 20,000 (a percentage
+    /// gives none). Only sizes of this very `src` count: the `data-*` sizes of WordPress and
+    /// Blogger describe the original upload and are ignored.
+    static func declaredSize(_ attributes: [String: String]) -> ImageSize? {
+        func pixels(_ text: Substring?) -> Int? {
+            guard var text = text?.trimmingCharacters(in: .whitespaces).lowercased() else { return nil }
+            if text.hasSuffix("px") { text.removeLast(2) }
+            guard let value = Int(text), (1...20_000).contains(value) else { return nil }
+            return value
+        }
+        func size(_ width: Substring?, _ height: Substring?) -> ImageSize? {
+            guard let width = pixels(width), let height = pixels(height) else { return nil }
+            return ImageSize(width: width, height: height)
+        }
+        if let found = size(attributes["width"]?[...], attributes["height"]?[...]) { return found }
+        if let style = attributes["style"] {
+            var declarations: [String: Substring] = [:]
+            for declaration in style.split(separator: ";") {
+                let parts = declaration.split(separator: ":", maxSplits: 1)
+                if parts.count == 2 { declarations[parts[0].trimmingCharacters(in: .whitespaces).lowercased()] = parts[1] }
+            }
+            if let found = size(declarations["width"], declarations["height"]) { return found }
+        }
+        // No `data-orig-size` nor `data-original-*`: they describe the original upload, not the
+        // (often smaller) image served at this `src`, and would stretch a thumbnail.
+        return nil
+    }
+
+    /// Every attribute of `element`, names lowercased, unfiltered: only for reading sizes.
+    private static func allAttributes(of element: XMLElement) -> [String: String] {
+        var attributes: [String: String] = [:]
+        for attribute in element.attributes ?? [] {
+            if let value = attribute.stringValue { attributes[name(of: attribute)] = value }
+        }
+        return attributes
     }
 
     private static func safeAttributes(of element: XMLElement, tag: String, baseURL: URL?) -> [(name: String, value: String)] {

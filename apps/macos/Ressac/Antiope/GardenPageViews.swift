@@ -143,11 +143,13 @@ struct AntiopeBannerRow: View {
                         CellLineView(line: log)
                     }
                     .buttonStyle(.plain)
+                    .focusable(false)
                 }
                 Button(action: dismiss) {
                     CellLineView(line: row.dismiss)
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
             }
         }
         .frame(height: cell.height)
