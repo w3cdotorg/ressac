@@ -203,6 +203,25 @@ struct TimeoutError: Error {}
         #expect(row.contentHtml == nil)
     }
 
+    /// `EntryRow` decodes by hand (Codable cost 36 µs a row): every column, and a clear error.
+    @Test func entry_rows_decode_every_column_by_hand() async throws {
+        let test = try TestDatabase()
+        let id = try test.entry(feed: 2, title: "T", url: "https://example.org/t", read: true, starred: true)
+        try test.execute("UPDATE entry SET author = 'Ann', content_html = '<p>C</p>' WHERE id = ?", [id])
+        try test.execute(
+            "INSERT INTO entry_fulltext (entry_id, html, fetched_at) VALUES (?, '<p>F</p>', '2026-10-10T08:00:00.000Z')", [id])
+        let db = try test.open()
+        let row = try #require(try await value(of: Queries.entry(id: id), in: db))
+        #expect(row == EntryRow(entryId: id, feedId: 2, feedTitle: "Orange Drenka", folderId: 2, title: "T", author: "Ann",
+                                url: "https://example.org/t", publishedAt: Timestamp.date(from: "2026-10-01T08:00:00.000Z")!,
+                                isRead: true, isStarred: true, hasFulltext: true, summaryHtml: "<p>Summary</p>", contentHtml: "<p>C</p>"))
+        try test.execute("UPDATE entry SET published_at = 'yesterday' WHERE id = ?", [id])
+        let error = await #expect(throws: DatabaseError.self) {
+            try await db.reader.read { try EntryRow.fetchOne($0, sql: "SELECT * FROM v_entry WHERE entry_id = ?", arguments: [id]) }
+        }
+        #expect(error?.message == "published_at is not an RFC 3339 date: yesterday")
+    }
+
     @Test func list_rows_are_shortened_but_entry_is_complete() async throws {
         let test = try TestDatabase()
         let long = String(repeating: "x", count: 5000)
