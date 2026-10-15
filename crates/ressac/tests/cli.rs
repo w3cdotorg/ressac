@@ -1,8 +1,11 @@
 //! Runs the real binary.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use ressac_core::model::{Action, Cadence, Diagnosis, Evidence, FeedId, Status};
+use ressac_core::store::Store;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -463,6 +466,79 @@ fn garden_subcommands_decide_undo_and_apply_safe() {
         "Applied 0 safe repairs.\n"
     );
 }
+
+/// Stores diagnoses as a refresh would, so that the garden has repairs to propose.
+fn seed_diagnoses(home: &Path, diagnoses: &[(FeedId, Status, Action)]) {
+    let store = Store::open(&home.join("db.sqlite")).unwrap();
+    let diagnoses: HashMap<FeedId, Diagnosis> = diagnoses
+        .iter()
+        .map(|(id, status, action)| {
+            let diagnosis = Diagnosis {
+                status: *status,
+                reason: format!("{status:?}"),
+                evidence: Evidence::default(),
+                remarks: vec![],
+                action: Some(action.clone()),
+                hijack_score: 0.0,
+                cadence: Cadence::default(),
+            };
+            (*id, diagnosis)
+        })
+        .collect();
+    store
+        .save_diagnoses(&diagnoses, chrono::Utc::now())
+        .unwrap();
+}
+
+/// A repair or a restore onto an address another active feed already uses is refused like
+/// the other refusals: exit 2, the bare message, nothing on stdout.
+#[test]
+fn decisions_on_a_taken_address_exit_2() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let run = |args: &[&str]| ressac(home.path(), args);
+    // Feed #2 is Orange Drenka (https://orange.example.org/feed/), #3 Orange-Drenka,
+    // #9 Six Colors (https://sixcolors.com/feed.json), #10 Center for Humane Technology.
+    seed_diagnoses(
+        home.path(),
+        &[
+            (
+                3,
+                Status::Moved,
+                Action::FollowRedirect {
+                    url: "https://orange.example.org/feed/".into(),
+                },
+            ),
+            (
+                10,
+                Status::Moved,
+                Action::FollowRedirect {
+                    url: "https://sixcolors.com/feed.json".into(),
+                },
+            ),
+        ],
+    );
+
+    let repair = run(&["--json", "garden", "decide", "3", "repair"]);
+    assert_eq!(repair.status.code(), Some(2), "{repair:?}");
+    assert_eq!(
+        stderr(&repair),
+        "Feed #2 already uses https://orange.example.org/feed/; merge into it instead.\n"
+    );
+    assert!(repair.stdout.is_empty());
+
+    // Six Colors buried, its address goes to #10; restoring Six Colors is then refused.
+    assert!(run(&["garden", "decide", "9", "bury"]).status.success());
+    assert!(run(&["garden", "decide", "10", "repair"]).status.success());
+    let keep = run(&["garden", "decide", "9", "keep"]);
+    assert_eq!(keep.status.code(), Some(2), "{keep:?}");
+    assert_eq!(
+        stderr(&keep),
+        "Feed #10 already uses https://sixcolors.com/feed.json; cannot restore.\n"
+    );
+    assert!(keep.stdout.is_empty());
+}
+
 
 #[test]
 fn migrate_reports_the_schema_version() {

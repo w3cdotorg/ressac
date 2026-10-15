@@ -50,6 +50,16 @@ fn check_decision(store: &Store, feed_id: FeedId, decision: Decision) -> anyhow:
     Ok(())
 }
 
+/// The refusals of `garden::decide` and `garden::undo` (an address another active feed
+/// already uses, a merge target that is not active) are usage errors (exit 2), as
+/// `check_decision`'s are; any other error stays fatal (exit 1).
+fn decision_error(e: ressac_core::Error) -> anyhow::Error {
+    match e {
+        ressac_core::Error::Invalid(message) => usage(message),
+        other => other.into(),
+    }
+}
+
 /// `ressac garden decide | undo | apply-safe`: the TUI's keys, one result line each.
 fn garden_command(
     app: &Ressac,
@@ -62,7 +72,7 @@ fn garden_command(
         GardenCommand::Decide { feed_id, decision } => {
             let decision = Decision::from(decision);
             check_decision(store, feed_id, decision)?;
-            garden::decide(store, feed_id, decision, Utc::now())?;
+            garden::decide(store, feed_id, decision, Utc::now()).map_err(decision_error)?;
             let event = Event::Decided {
                 feed_id,
                 decision: decision.as_str().to_string(),
@@ -70,7 +80,7 @@ fn garden_command(
             output::write_result(out, json, &event, &output::decided_text(feed_id, decision))?;
         }
         GardenCommand::Undo => {
-            let feed_id = garden::undo(store)?;
+            let feed_id = garden::undo(store).map_err(decision_error)?;
             output::write_result(
                 out,
                 json,
@@ -92,4 +102,24 @@ fn garden_command(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::UsageError;
+
+    #[test]
+    fn decision_refusals_are_usage_errors_and_others_stay_fatal() {
+        let text = "Feed #2 already uses https://e.org/feed; merge into it instead.";
+        let refusal = decision_error(ressac_core::Error::Invalid(text.into()));
+        assert_eq!(
+            refusal
+                .downcast_ref::<UsageError>()
+                .map(ToString::to_string),
+            Some(text.to_string())
+        );
+        let fatal = decision_error(ressac_core::Error::Io(std::io::Error::other("disk")));
+        assert!(fatal.downcast_ref::<UsageError>().is_none());
+    }
 }
