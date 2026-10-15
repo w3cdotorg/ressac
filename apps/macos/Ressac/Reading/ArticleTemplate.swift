@@ -123,24 +123,42 @@ enum ArticleTemplate {
         return renderer.out
     }
 
-    private final class ResultBox: @unchecked Sendable { var value = "" }
+    /// A worker's result, and whether its caller stopped waiting for it.
+    private final class Job: Sendable {
+        private let state = Mutex<(result: String?, abandoned: Bool)>((nil, false))
+
+        var result: String? { state.withLock { $0.result } }
+        var isAbandoned: Bool { state.withLock { $0.abandoned } }
+        func finish(_ result: String) { state.withLock { $0.result = result } }
+        func abandon() { state.withLock { $0.abandoned = true } }
+    }
+
+    /// One worker at a time: abandoned parses never pile up.
+    private static let workerGate = DispatchSemaphore(value: 1)
 
     /// Runs `work` on a thread with a 256 MB stack (a virtual reservation) and waits for it, so
     /// libxml's recursive parser cannot exhaust the stack on input the depth guard let through.
-    /// Returns `nil` when `timeout` passes first. The worker cannot be cancelled: it finishes in
-    /// the background and its late result is discarded; its cost is bounded by `maxParsedBytes`.
+    /// Returns `nil` when `timeout` passes first. Workers run one at a time: a worker waits for
+    /// the previous one, and skips its work when its caller stopped waiting meanwhile. A worker
+    /// already running cannot be cancelled: it finishes and its late result is discarded.
     static func onLargeStack(timeout: TimeInterval = .infinity, _ work: @escaping @Sendable () -> String) -> String? {
-        let box = ResultBox()
+        let job = Job()
         let done = DispatchSemaphore(value: 0)
         let thread = Thread {
-            box.value = work()
+            workerGate.wait()
+            if !job.isAbandoned { job.finish(work()) }
+            workerGate.signal()
             done.signal()
         }
         thread.stackSize = 256 << 20
         thread.qualityOfService = .userInteractive
         thread.start()
         let deadline: DispatchTime = timeout.isFinite ? .now() + timeout : .distantFuture
-        return done.wait(timeout: deadline) == .success ? box.value : nil
+        guard done.wait(timeout: deadline) == .success else {
+            job.abandon()
+            return nil
+        }
+        return job.result
     }
 
     static let parseBudget: TimeInterval = 1.0

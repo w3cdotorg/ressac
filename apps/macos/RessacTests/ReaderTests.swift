@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Synchronization
 import Testing
 import WebKit
 @testable import Ressac
@@ -210,6 +211,31 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(ArticleTemplate.mostAttributesOnATag("<p>no attributes</p><br/>") == 0)
         let fine = "<p " + (0..<200).map { "a\($0)=x" }.joined(separator: " ") + ">kept</p>"
         #expect(ArticleTemplate.sanitize(fine).hasPrefix("<p>kept"))
+    }
+
+    /// One worker at a time: abandoned parses wait their turn, then skip it.
+    @Test func abandonedWorkersNeverOverlap() {
+        final class Probe: Sendable {
+            let running = Mutex(0)
+            let peak = Mutex(0)
+            let runs = Mutex(0)
+        }
+        let probe = Probe()
+        let work: @Sendable () -> String = {
+            let now = probe.running.withLock { $0 += 1; return $0 }
+            probe.peak.withLock { $0 = max($0, now) }
+            probe.runs.withLock { $0 += 1 }
+            Thread.sleep(forTimeInterval: 1)
+            probe.running.withLock { $0 -= 1 }
+            return "done"
+        }
+        #expect(ArticleTemplate.onLargeStack(timeout: 0.3, work) == nil)  // abandoned while it runs
+        for _ in 0..<3 {
+            #expect(ArticleTemplate.onLargeStack(timeout: 0.05, work) == nil)  // abandoned before their turn
+        }
+        #expect(ArticleTemplate.onLargeStack(timeout: 5, work) == "done")
+        #expect(probe.peak.withLock { $0 } == 1)
+        #expect(probe.runs.withLock { $0 } <= 2)
     }
 
     @Test func optionalEndTagsStayOnTheParsedPath() {
