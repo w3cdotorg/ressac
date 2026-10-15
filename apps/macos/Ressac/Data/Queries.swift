@@ -46,11 +46,11 @@ struct Queries {
         return ValueObservation.tracking { db in
             SidebarSnapshot(
                 folders: try FolderItem.fetchAll(db, sql: """
-                    SELECT id AS folder_id, parent_id, name, position FROM folder ORDER BY position, id
+                    SELECT id AS folder_id, parent_id, name, position, page FROM folder ORDER BY position, id
                     """),
                 feeds: try FeedItem.fetchAll(db, sql: """
                     SELECT f.id AS feed_id, f.title, f.folder_id, f.position, COALESCE(u.unread, 0) AS unread,
-                           h.status, f.prefer_full_text, f.html_url
+                           h.status, f.prefer_full_text, f.html_url, f.page
                     FROM feed f
                     LEFT JOIN v_unread_count u ON u.feed_id = f.id
                     LEFT JOIN feed_health h ON h.feed_id = f.id

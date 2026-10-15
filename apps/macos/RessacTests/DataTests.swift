@@ -234,6 +234,32 @@ struct TimeoutError: Error {}
         #expect((snapshot.unread, snapshot.today, snapshot.starred, snapshot.needsTriage) == (2, 1, 1, 1))
     }
 
+    /// Schema v3: the numbers the core gave the fixture (see the table in phase 6).
+    @Test func sidebar_snapshot_carries_page_numbers() async throws {
+        let test = try TestDatabase()
+        let db = try test.open()
+        let snapshot = try await value(of: Queries.sidebar(), in: db)
+        let folders = Dictionary(uniqueKeysWithValues: snapshot.folders.map { ($0.folderId, $0.page) })
+        #expect(folders == [1: 200, 2: 202, 3: 300, 4: 400, 5: 403, 6: 500, 7: 501])
+        let feeds = Dictionary(uniqueKeysWithValues: snapshot.feeds.map { ($0.feedId, $0.page) })
+        #expect(feeds == [1: 201, 2: 203, 3: 204, 4: 205, 5: 206, 6: 301, 7: 302, 8: 401, 9: 402, 10: 404, 11: 502])
+        // The view of the contract lists the same 18 numbers (through the app's pool, in WAL mode).
+        let viewRows = try await db.reader.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v_page") }
+        #expect(viewRows == 18)
+    }
+
+    @Test func a_row_not_numbered_yet_reads_as_nil() async throws {
+        let test = try TestDatabase()
+        try test.execute("UPDATE feed SET page = NULL WHERE id = 8; UPDATE folder SET page = NULL WHERE id = 5")
+        let snapshot = try await value(of: Queries.sidebar(), in: test.open())
+        #expect(snapshot.feeds.first { $0.feedId == 8 }?.page == nil)
+        #expect(snapshot.feeds.first { $0.feedId == 9 }?.page == 402)
+        #expect(snapshot.folders.first { $0.folderId == 5 }?.page == nil)
+        #expect(FeedItem(feedId: 1, title: "x", folderId: nil, position: 0, unread: 0, status: nil,
+                         preferFullText: false, htmlUrl: nil).page == nil)
+        #expect(FolderItem(folderId: 1, parentId: nil, name: "Blogs", position: 0, page: 200).page == 200)
+    }
+
     @Test func entries_follow_source_and_unread_filter() async throws {
         let test = try TestDatabase()
         let a = try test.entry(feed: 1, published: "2026-10-01T08:00:00.000Z")

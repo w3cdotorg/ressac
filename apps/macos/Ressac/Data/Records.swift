@@ -86,6 +86,8 @@ struct FeedItem: RessacRecord, Identifiable {
     var status: String?
     var preferFullText: Bool
     var htmlUrl: String?
+    /// Teletext page number (schema v3), given once by the core; nil only before it ran.
+    var page: Int?
 
     var id: Int64 { feedId }
 
@@ -100,6 +102,8 @@ struct FolderItem: RessacRecord, Identifiable {
     var parentId: Int64?
     var name: String
     var position: Int
+    /// Teletext page number (schema v3): a root folder holds a hundred (200, 300, …).
+    var page: Int?
 
     var id: Int64 { folderId }
 }
