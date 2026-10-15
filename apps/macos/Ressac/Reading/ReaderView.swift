@@ -60,7 +60,7 @@ struct ReaderView: View {
     /// "412 3/20" in Antiope (spec §6); nil in Native, so the native page never changes with it.
     private func subpage(for entry: EntryRow, theme: ReaderTheme) -> SubpageLabel? {
         guard theme.appearance == .antiope, let directory = antiope?.directory else { return nil }
-        return SubpageLabel.of(entryId: entry.entryId, in: state.entries, page: directory.page(forFeed:))
+        return SubpageLabel.of(entryId: entry.entryId, in: state.entries, total: state.entryTotal, page: directory.page(forFeed:))
     }
 
     /// `fullTextNotice` when the extraction failed without storing an error row (the run itself
@@ -150,10 +150,11 @@ struct SubpageLabel: Equatable, Sendable {
     /// "412 3/20", or "3/20" for a feed without a page number yet.
     var text: String { (page.map { "\($0) " } ?? "") + "\(index)/\(count)" }
 
-    /// Numbered from 1 in `entries`; nil when the entry is not in the list (filtered out).
-    static func of(entryId: Int64, in entries: [EntryRow], page: (Int64) -> Int?) -> SubpageLabel? {
+    /// Numbered from 1 in `entries`, out of `total`: the whole list's size when only its first
+    /// rows are loaded, `entries.count` when nil. Nil when the entry is not in the list (filtered out).
+    static func of(entryId: Int64, in entries: [EntryRow], total: Int? = nil, page: (Int64) -> Int?) -> SubpageLabel? {
         guard let position = entries.firstIndex(where: { $0.entryId == entryId }) else { return nil }
-        return SubpageLabel(page: page(entries[position].feedId), index: position + 1, count: entries.count)
+        return SubpageLabel(page: page(entries[position].feedId), index: position + 1, count: total ?? entries.count)
     }
 }
 

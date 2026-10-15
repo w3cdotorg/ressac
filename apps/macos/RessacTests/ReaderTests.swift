@@ -399,6 +399,8 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         let list = [entry(id: 5), entry(id: 6), entry(id: 7)]
         #expect(SubpageLabel.of(entryId: 6, in: list) { $0 == 7 ? 412 : nil } == SubpageLabel(page: 412, index: 2, count: 3))
         #expect(SubpageLabel.of(entryId: 9, in: list) { _ in 412 } == nil)
+        // A long list loads its first rows only: the count is the whole list's.
+        #expect(SubpageLabel.of(entryId: 6, in: list, total: 5_907) { _ in 412 } == SubpageLabel(page: 412, index: 2, count: 5_907))
     }
 }
 
