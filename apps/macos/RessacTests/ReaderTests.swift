@@ -19,7 +19,7 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(style.font == .sfPro)
         #expect(style.size == 17)
         #expect(style.width == .medium)
-        #expect(LineWidth.allCases.map(\.maxCh) == [58, 68, 80])
+        #expect(LineWidth.allCases.map(\.maxCh) == [58, 68, 80, 40])
         #expect(ReaderFont.allCases.map(\.displayName) == ["SF Pro", "New York", "Charter", "Newsreader", "Atkinson Hyperlegible Next"])
     }
 
@@ -305,5 +305,89 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(help(entry(), showing: true) == "Showing the full article. Click to show the feed's text")
         #expect(help(entry(), failure: "Full article unavailable: HTTP 403.")
             == "Full article unavailable: HTTP 403. Click to try again")
+    }
+}
+
+@Suite struct AntiopeReaderStyleTests {
+    @Test func antiopeStepsThroughBedsteadSizes() {
+        #expect(ReaderStyle.effectiveSize(17, appearance: .antiope) == 15)
+        #expect(ReaderStyle.effectiveSize(17, appearance: .native) == 17)
+        #expect(ReaderStyle.effectiveSize(.nan, appearance: .antiope) == 20)
+        #expect(ReaderStyle.effectiveSize(40, appearance: .native) == 28)
+        #expect(ReaderStyle.bigger(17, appearance: .antiope) == 20)  // drawn at 15, so the next step is 20
+        #expect(ReaderStyle.smaller(17, appearance: .antiope) == 15)
+        #expect(ReaderStyle.bigger(20, appearance: .antiope) == 25)
+        #expect(ReaderStyle.bigger(30, appearance: .antiope) == 30)
+        #expect(ReaderStyle.smaller(25, appearance: .antiope) == 20)
+        #expect(ReaderStyle.smaller(15, appearance: .antiope) == 15)
+        #expect(ReaderStyle.bigger(17, appearance: .native) == 18)
+        #expect(ReaderStyle.smaller(17, appearance: .native) == 16)
+        #expect(ReaderStyle.actualSize(for: .antiope) == 20)
+        #expect(ReaderStyle.actualSize(for: .native) == 17)
+    }
+
+    @Test func fortyColumnsAndTheTheme() {
+        #expect(LineWidth.forty.maxCh == 40)
+        #expect(LineWidth.forty.displayName == "40 columns")
+        #expect(LineWidth.allCases.map(\.maxCh) == [58, 68, 80, 40])
+        #expect(ReaderTheme.native == ReaderTheme(appearance: .native, crt: false))
+        #expect(!ReaderTheme(appearance: .native, crt: true).showsCRT)
+        #expect(!ReaderTheme(appearance: .antiope, crt: false).showsCRT)
+        #expect(ReaderTheme(appearance: .antiope, crt: true).showsCRT)
+    }
+}
+
+/// Decision of 2026-10-14: each look keeps its own text size, and ⌘+, ⌘− and ⌘0 act on the
+/// look shown. Every test writes a throwaway defaults suite: the test host's are Clément's.
+@Suite struct TextSizePerLookTests {
+    private func withDefaults(_ body: (UserDefaults) throws -> Void) throws {
+        let suite = "ressac.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        try body(defaults)
+    }
+
+    @Test func switchingLooksNeverChangesTheOtherSize() throws {
+        #expect(ReaderStyle.sizeKey(for: .native) == "reader.size")
+        #expect(ReaderStyle.sizeKey(for: .antiope) == "reader.size.antiope")
+        try withDefaults { defaults in
+            #expect(ReaderStyle.storedSize(for: .native, in: defaults) == 17)
+            #expect(ReaderStyle.storedSize(for: .antiope, in: defaults) == 20)  // not Native's 17 snapped to 15
+            ReaderStyle.resize(.bigger, appearance: .antiope, in: defaults)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.antiopeSize) == 25)
+            #expect(defaults.object(forKey: ReaderStyle.Keys.size) == nil)  // Native is found as it was
+            ReaderStyle.resize(.smaller, appearance: .native, in: defaults)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.size) == 16)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.antiopeSize) == 25)
+        }
+    }
+
+    @Test func actualSizeRestoresTheDefaultOfTheLookShown() throws {
+        try withDefaults { defaults in
+            defaults.set(22.0, forKey: ReaderStyle.Keys.size)
+            defaults.set(30.0, forKey: ReaderStyle.Keys.antiopeSize)
+            ReaderStyle.resize(.actualSize, appearance: .antiope, in: defaults)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.antiopeSize) == 20)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.size) == 22)
+            ReaderStyle.resize(.actualSize, appearance: .native, in: defaults)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.size) == 17)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.antiopeSize) == 20)
+        }
+    }
+
+    /// Whatever is stored (a hand edit, an older build), Antiope draws a step and the menu
+    /// stores a step.
+    @Test func theAntiopeSizeIsAlwaysAStep() throws {
+        try withDefaults { defaults in
+            for stored in [17.0, 0, -3, 22.5, 99] {
+                #expect(TeletextFont.sizeSteps.contains(ReaderStyle.effectiveSize(stored, appearance: .antiope)), "\(stored)")
+                for command in [TextSizeCommand.bigger, .smaller, .actualSize] {
+                    defaults.set(stored, forKey: ReaderStyle.Keys.antiopeSize)
+                    ReaderStyle.resize(command, appearance: .antiope, in: defaults)
+                    #expect(TeletextFont.sizeSteps.contains(defaults.double(forKey: ReaderStyle.Keys.antiopeSize)),
+                            "\(stored) \(command)")
+                }
+            }
+        }
     }
 }
