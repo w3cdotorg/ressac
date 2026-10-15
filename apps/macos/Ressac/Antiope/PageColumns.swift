@@ -93,6 +93,11 @@ struct EntryPageColumn: View {
                 }
             }
             .scrollIndicators(.hidden)
+            .overlay {
+                if app.entries.isEmpty {
+                    CellLineView(line: Self.emptyLine(app.emptyListMessage, width: Self.cells))
+                }
+            }
             // `j`, `k` and Space select from the keyboard: the column follows the selection.
             .onChange(of: app.selectedEntryId) { _, id in
                 if let id { proxy.scrollTo(id) }
@@ -148,5 +153,13 @@ struct EntryPageColumn: View {
         if !entry.isRead { parts.append("unread") }
         if entry.isStarred { parts.append("starred") }
         return parts.joined(separator: ", ")
+    }
+
+    /// `NO UNREAD ENTRIES`: `AppState.emptyListMessage` in capitals, one cyan line, centred
+    /// (spec §5); VoiceOver reads the sentence as written.
+    static func emptyLine(_ message: String, width: Int) -> CellLine {
+        var line = CellLine.centred(message.uppercased(), width: width, foreground: .cyan)
+        line.accessibilityText = message
+        return line
     }
 }

@@ -133,3 +133,31 @@ import Testing
         #expect(state.entries.count == 2)
     }
 }
+
+@MainActor @Suite struct EmptyStateTests {
+    @Test func theMessageIsOneCentredCyanLine() {
+        let line = EntryPageColumn.emptyLine("No unread entries", width: 28)
+        #expect(line.width == 28)
+        #expect(text(of: line.spans[0]) == "     NO UNREAD ENTRIES      ")
+        #expect(line.spans[0].foreground == .cyan)
+        #expect(line.accessibilityText == "No unread entries")  // VoiceOver reads the sentence
+        #expect(EntryPageColumn.emptyLine("A message far longer than the twenty-eight cells", width: 28).width == 28)
+    }
+
+    @Test func theMessagesComeFromAppState() async throws {
+        let (state, test, _) = try makeState()
+        try test.entry(feed: 8, read: true)
+        try await state.database.notifyExternalChanges()
+        state.selection = .feed(8)
+        #expect(!state.entries.isEmpty)
+        func shown() -> String { text(of: EntryPageColumn.emptyLine(state.emptyListMessage, width: 28).spans[0]) }
+        state.unreadOnly = true
+        #expect(state.entries.isEmpty && shown().contains("NO UNREAD ENTRIES"))
+        state.unreadOnly = false
+        state.searchText = "zzz"
+        #expect(state.entries.isEmpty && shown().contains("NO RESULTS"))
+        state.searchText = ""
+        state.selection = .starred
+        #expect(state.entries.isEmpty && shown().contains("NO ENTRIES"))
+    }
+}
