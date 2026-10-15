@@ -39,7 +39,8 @@ struct AntiopeRootView: View {
                     titled(.entries, width: EntryPageColumn.cells) { entriesColumn }
                         .frame(width: CGFloat(EntryPageColumn.cells) * cell.width)
                     ColumnSeparator()
-                    titled(.reader, width: max(0, width - Self.minimumCells + Self.minimumReaderCells)) { readerColumn }
+                    titled(.reader, width: max(0, width - Self.minimumCells + Self.minimumReaderCells),
+                           blankWhenInactive: antiope.readerPage != .article) { readerColumn }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
@@ -63,10 +64,10 @@ struct AntiopeRootView: View {
         .crtScreen()
     }
 
-    /// A column under its one-row title.
-    private func titled(_ column: AntiopeColumn, width: Int, @ViewBuilder content: () -> some View) -> some View {
+    /// A column under its one-row title (blank while inactive on P100 and P899, which have their own heading).
+    private func titled(_ column: AntiopeColumn, width: Int, blankWhenInactive: Bool = false, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            ColumnTitleView(column: column, width: width)
+            ColumnTitleView(column: column, width: width, blankWhenInactive: blankWhenInactive)
             content()
         }
     }

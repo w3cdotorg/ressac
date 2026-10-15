@@ -238,6 +238,30 @@ func listEntry(title: String?, isRead: Bool = false, isStarred: Bool = false) ->
         #expect(!state.unreadOnly)
     }
 
+    @Test func theHeadingPagesBlankTheReaderTitleUnlessActive() {
+        for width in [0, 24, 31, 80] {
+            let blank = ColumnTitle.line(for: .reader, isActive: false, width: width, blankWhenInactive: true)
+            let active = ColumnTitle.line(for: .reader, isActive: true, width: width, blankWhenInactive: true)
+            #expect(blank.width == width && active.width == width)
+            #expect(blank.spans.allSatisfy { text(of: $0).allSatisfy { $0 == " " } })
+            #expect(blank.accessibilityText.isEmpty)
+        }
+        let active = ColumnTitle.line(for: .reader, isActive: true, width: 30, blankWhenInactive: true)
+        #expect(text(of: active.spans[0]).hasPrefix(" READER"))
+        #expect(active.spans.allSatisfy { $0.foreground == .black && $0.background == .cyan })
+        // Other pages keep the plain behaviour.
+        let plain = ColumnTitle.line(for: .reader, isActive: false, width: 30)
+        #expect(text(of: plain.spans[0]).hasPrefix(" READER"))
+    }
+
+    @Test func clickingTheEntriesTitleFocusesTheEntriesColumn() throws {
+        let (state, _, _) = try makeState()
+        let antiope = AntiopeState(app: state)
+        antiope.column = .index
+        ColumnTitleView.filterClicked(app: state, antiope: antiope)
+        #expect(antiope.column == .entries && state.unreadOnly)
+    }
+
     @Test func blueNeverColoursATitle() {
         for column in Self.columns {
             for active in [false, true] {

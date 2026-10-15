@@ -179,7 +179,9 @@ enum ColumnTitle {
     }
 
     /// `unreadOnly` is nil where the filter does not apply (a Garden page, other columns).
-    static func line(for column: AntiopeColumn, isActive: Bool, width: Int, unreadOnly: Bool? = nil) -> CellLine {
+    static func line(for column: AntiopeColumn, isActive: Bool, width: Int, unreadOnly: Bool? = nil,
+                     blankWhenInactive: Bool = false) -> CellLine {
+        if blankWhenInactive, !isActive { return CellLine([CellSpan("", cells: width, foreground: .cyan)]) }
         var label = label(for: column)
         var spoken = label.capitalized
         if let unreadOnly {
@@ -196,22 +198,33 @@ enum ColumnTitle {
 struct ColumnTitleView: View {
     let column: AntiopeColumn
     let width: Int
+    /// P100 and P899 carry their own heading: the title shows only while its column is active.
+    var blankWhenInactive = false
 
     @Environment(AppState.self) private var app
     @Environment(AntiopeState.self) private var antiope
 
+    /// The click on the entries title: like a click on a row, it focuses the column, then toggles.
+    static func filterClicked(app: AppState, antiope: AntiopeState) {
+        antiope.column = .entries
+        UnreadFilterCommand.toggle(app)
+    }
+
     var body: some View {
         let isActive = antiope.column == column
         let filters = column == .entries && UnreadFilterCommand.canToggle(app)
-        let line = ColumnTitle.line(for: column, isActive: isActive, width: width, unreadOnly: filters ? app.unreadOnly : nil)
+        let line = ColumnTitle.line(for: column, isActive: isActive, width: width,
+                               unreadOnly: filters ? app.unreadOnly : nil, blankWhenInactive: blankWhenInactive)
         if filters {
-            Button { UnreadFilterCommand.toggle(app) } label: { CellLineView(line: line) }
+            Button { Self.filterClicked(app: app, antiope: antiope) } label: { CellLineView(line: line) }
                 .buttonStyle(.plain)
                 .focusable(false)
                 .accessibilityHint("Switches between all entries and unread only")
                 .accessibilityAddTraits(isActive ? .isSelected : [])
         } else {
-            CellLineView(line: line).accessibilityAddTraits(isActive ? .isSelected : [])
+            CellLineView(line: line)
+                .accessibilityHidden(blankWhenInactive && !isActive)
+                .accessibilityAddTraits(isActive ? .isSelected : [])
         }
     }
 }
