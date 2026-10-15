@@ -344,7 +344,9 @@ enum ArticleTemplate {
     private static let contentSecurityPolicy =
         "default-src 'none'; img-src http: https: data:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'"
 
-    static func page(for entry: EntryRow, fulltext: FulltextRow?, showFull: Bool, style: ReaderStyle, colorScheme: ColorScheme) -> String {
+    static func page(for entry: EntryRow, fulltext: FulltextRow?, showFull: Bool, style: ReaderStyle, colorScheme: ColorScheme,
+                     theme: ReaderTheme = .native, subpage: SubpageLabel? = nil) -> String {
+        let antiope = theme.appearance == .antiope
         let base = LinkPolicy.webURL(entry.url)
         let full = showFull ? fulltext.flatMap { $0.entryId == entry.entryId ? $0 : nil } : nil
         let fullHTML = full?.html
@@ -361,24 +363,26 @@ enum ArticleTemplate {
         let byline = (fullHTML != nil ? full?.byline : nil) ?? entry.author
         let notice = showFull ? full?.error.map { "Full article unavailable: \($0)" } : nil
         let emptyText = base == nil ? "This entry has no text." : "This entry has no text. Open it in the browser to read it."
+        let size = ReaderStyle.effectiveSize(style.size, appearance: theme.appearance)
 
         return """
         <!doctype html>
-        <html lang="en" data-scheme="\(colorScheme == .dark ? "dark" : "light")">
+        <html \(rootAttributes(colorScheme: colorScheme, theme: theme))>
         <head>
         <meta charset="utf-8">
         <meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy)">
         <meta name="referrer" content="no-referrer">
         <style>
-        \(fontFaces(for: style.font))
+        \(antiope ? teletextFace : fontFaces(for: style.font))
         \(readerCSS)
-        :root { --reader-font: \(style.font.cssFamily); --reader-size: \(Int(ReaderStyle.clampedSize(style.size)))px; --reader-measure: \(style.width.maxCh)ch; }
+        :root { --reader-font: \(style.font.cssFamily); --reader-size: \(Int(size))px; --reader-measure: \(style.width.maxCh)ch;\(antiope ? teletextVariables : "") }
         </style>
         </head>
         <body>
         <article>
+        \(antiope ? #"<p class="subpage" id="subpage">\#(escapeText(subpage?.text ?? ""))</p>"# : "")
         <p class="meta">\(meta.joined(separator: #"<span class="dot">·</span>"#))</p>
-        <h1 class="title">\(heading)</h1>
+        <h1 class="title">\(antiope ? doubleHeight(text: title, heading: heading) : heading)</h1>
         \(byline.map { #"<p class="byline">\#(escapeText($0))</p>"# } ?? "")
         \(notice.map { #"<p class="notice">\#(escapeText($0))</p>"# } ?? "")
         <div class="content">\(body.isEmpty ? #"<p class="empty">\#(emptyText)</p>"# : body)</div>
@@ -388,6 +392,25 @@ enum ArticleTemplate {
         """
     }
 
+    /// `:root`'s attributes: the light or dark scheme, plus `data-theme="antiope"` and, with the
+    /// CRT screen on, `data-crt` (spec §7 and §9).
+    private static func rootAttributes(colorScheme: ColorScheme, theme: ReaderTheme) -> String {
+        var attributes = #"lang="en" data-scheme="\#(colorScheme == .dark ? "dark" : "light")""#
+        if theme.appearance == .antiope { attributes += #" data-theme="antiope""# }
+        if theme.showsCRT { attributes += " data-crt" }
+        return attributes
+    }
+
+    /// The Antiope title over two rows (spec §7): a hidden copy at twice the row height gives the
+    /// layout its height, whatever the number of lines, and the visible copy is stretched over
+    /// it with `scaleY(2)`. Only the visible copy carries the link and reaches VoiceOver.
+    private static func doubleHeight(text: String, heading: String) -> String {
+        #"<span class="dh-space" aria-hidden="true">\#(text)</span><span class="dh-ink">\#(heading)</span>"#
+    }
+
+    /// Antiope's extra custom properties: the teletext font for every role of `reader.css`.
+    private static let teletextVariables = #" --teletext-font: "\#(TeletextFont.familyName)", monospace;"#
+
     // MARK: Resources
 
     /// `reader.css` from the app bundle (unit tests run hosted in the app, so `Bundle.main` is it).
@@ -396,6 +419,18 @@ enum ArticleTemplate {
 
     private static let newsreaderFaces = makeFontFaces(for: .newsreader)
     private static let atkinsonFaces = makeFontFaces(for: .atkinson)
+
+    /// Bedstead embedded the same way (spec §7). Empty when the file is missing, but Antiope is
+    /// never the effective appearance then (`Appearance.effective`).
+    private static let teletextFace: String = {
+        guard let url = Bundle.main.url(forResource: TeletextFont.fileName, withExtension: "otf", subdirectory: "Fonts"),
+              let data = try? Data(contentsOf: url)
+        else { return "" }
+        return """
+        @font-face { font-family: "\(TeletextFont.familyName)"; font-style: normal; font-weight: 400; \
+        src: url("data:font/otf;base64,\(data.base64EncodedString())") format("opentype"); }
+        """
+    }()
 
     static func fontFaces(for font: ReaderFont) -> String {
         switch font {

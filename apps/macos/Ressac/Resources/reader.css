@@ -277,3 +277,213 @@ small, sub, sup {
     padding: 20px 20px 80px;
   }
 }
+
+/*
+ * Antiope begin. The teletext look (spec §7): Bedstead everywhere, one size, the eight
+ * teletext colours on black, every vertical distance a whole number of rows. It ignores
+ * data-scheme. ArticleTemplate sets data-theme="antiope" and --teletext-font on :root.
+ * Only the eight colours appear in this section (a test checks it).
+ */
+
+:root[data-theme="antiope"] {
+  color-scheme: dark;
+  --tt-black: #000000;
+  --tt-red: #FF0000;
+  --tt-green: #00FF00;
+  --tt-yellow: #FFFF00;
+  --tt-blue: #0000FF;
+  --tt-magenta: #FF00FF;
+  --tt-cyan: #00FFFF;
+  --tt-white: #FFFFFF;
+  --row: 1.2em;
+  --cell: 0.6em;
+  --ui-font: var(--teletext-font);
+  --mono-font: var(--teletext-font);
+  --reader-font: var(--teletext-font);
+  --paper: var(--tt-black);
+  --ink: var(--tt-white);
+  --ink-secondary: var(--tt-cyan);
+  --ink-tertiary: var(--tt-cyan);
+  --link: var(--tt-cyan);
+  --link-underline: var(--tt-cyan);
+  --rule: var(--tt-blue);
+  --code-bg: var(--tt-black);
+  --quote-bar: var(--tt-magenta);
+  --mark: var(--tt-yellow);
+  --badge-bg: var(--tt-green);
+  --notice-bg: var(--tt-red);
+  --notice-ink: var(--tt-black);
+  --selection: var(--tt-cyan);
+  --image-filter: none;
+  --leading: var(--row);
+  --smoothing: none;
+}
+
+:root[data-theme="antiope"] body {
+  padding: var(--row) calc(2 * var(--cell)) calc(4 * var(--row));
+  font-kerning: none;
+  font-variant-ligatures: none;
+  font-synthesis: none;
+  text-rendering: optimizeSpeed;
+  hanging-punctuation: none;
+  letter-spacing: 0;
+}
+
+:root[data-theme="antiope"] ::selection {
+  background: var(--tt-cyan);
+  color: var(--tt-black);
+}
+
+/* One size, one weight, one row: teletext has no other. */
+:root[data-theme="antiope"] :is(h1, h2, h3, h4, h5, h6, .meta, .badge, .byline, .notice, code, kbd, samp, pre, small, sub, sup, table) {
+  font-size: 1em;
+  font-weight: normal;
+  font-style: normal;
+  letter-spacing: 0;
+  line-height: var(--row);
+}
+
+:root[data-theme="antiope"] :is(sub, sup) {
+  vertical-align: baseline;
+}
+
+:root[data-theme="antiope"] :is(p, ul, ol, dl, pre, blockquote, table, figure) {
+  margin: 0 0 var(--row);
+}
+
+:root[data-theme="antiope"] :is(h2, h3, h4, h5, h6, .content h1) {
+  margin: var(--row) 0 0;
+}
+
+:root[data-theme="antiope"] h2,
+:root[data-theme="antiope"] .content h1 {
+  color: var(--tt-green);
+}
+
+:root[data-theme="antiope"] h3 {
+  color: var(--tt-cyan);
+}
+
+/* Header: the sub-page line (412 3/20), the meta line, the double-height title. */
+
+:root[data-theme="antiope"] .subpage {
+  min-height: var(--row);
+  margin: 0;
+  color: var(--tt-yellow);
+}
+
+:root[data-theme="antiope"] .meta {
+  gap: 0 var(--cell);
+  margin: 0;
+}
+
+:root[data-theme="antiope"] .meta .badge {
+  padding: 0 var(--cell);
+  border-radius: 0;
+  color: var(--tt-black);
+}
+
+/*
+ * Double height: the hidden copy, at twice the row height, gives the title its height in
+ * whole rows whatever the number of lines; the visible copy, at one row, is stretched over it.
+ */
+:root[data-theme="antiope"] h1.title {
+  display: grid;
+  margin: var(--row) 0;
+  color: var(--tt-yellow);
+}
+
+:root[data-theme="antiope"] h1.title > span {
+  grid-area: 1 / 1;
+}
+
+:root[data-theme="antiope"] h1.title .dh-space {
+  visibility: hidden;
+  line-height: calc(2 * var(--row));
+}
+
+:root[data-theme="antiope"] h1.title .dh-ink {
+  transform: scaleY(2);
+  transform-origin: 0 0;
+}
+
+:root[data-theme="antiope"] .byline {
+  margin: 0;
+}
+
+:root[data-theme="antiope"] .notice {
+  margin: var(--row) 0 0;
+  padding: 0 var(--cell);
+  border-radius: 0;
+}
+
+:root[data-theme="antiope"] .content {
+  margin-top: var(--row);
+}
+
+:root[data-theme="antiope"] .empty {
+  font-style: normal;
+}
+
+/* Body. */
+
+:root[data-theme="antiope"] a,
+:root[data-theme="antiope"] a:hover {
+  text-decoration: none;
+}
+
+:root[data-theme="antiope"] :is(ul, ol) {
+  padding-left: calc(2 * var(--cell));
+}
+
+:root[data-theme="antiope"] li + li {
+  margin-top: 0;
+}
+
+/* A magenta mosaic bar: the left sub-pixel column of each cell, then one cell of space. */
+:root[data-theme="antiope"] blockquote {
+  padding-left: calc(1.5 * var(--cell));
+  border-left: calc(0.5 * var(--cell)) solid var(--quote-bar);
+  color: var(--ink);
+}
+
+:root[data-theme="antiope"] :is(code, pre) {
+  padding: 0;
+  border-radius: 0;
+  color: var(--tt-green);
+}
+
+:root[data-theme="antiope"] mark {
+  color: var(--tt-black);
+}
+
+/* One font pixel of blue, centred in one row. */
+:root[data-theme="antiope"] hr {
+  margin: calc(0.5 * var(--row) - 0.05em) 0;
+  border-top-width: 0.1em;
+}
+
+:root[data-theme="antiope"] :is(th, td) {
+  padding: 0 var(--cell);
+  border-bottom-width: 0.1em;
+}
+
+:root[data-theme="antiope"] th {
+  color: var(--tt-yellow);
+}
+
+:root[data-theme="antiope"] img {
+  border-radius: 0;
+}
+
+/* Antiope end. */
+
+/*
+ * CRT begin. The screen's colour bleed (spec §9): ArticleTemplate adds data-crt in Antiope when
+ * the CRT screen box is checked. Text only: images and mosaics get none.
+ */
+:root[data-theme="antiope"][data-crt] body {
+  text-shadow: 1px 0 rgba(255, 0, 0, 0.45), -1px 0 rgba(0, 0, 255, 0.45), 0 0 2px currentColor;
+}
+
+/* CRT end. */

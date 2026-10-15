@@ -401,3 +401,75 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(SubpageLabel.of(entryId: 9, in: list) { _ in 412 } == nil)
     }
 }
+
+@Suite struct AntiopePageTests {
+    private let antiope = ReaderTheme(appearance: .antiope, crt: false)
+
+    private func page(theme: ReaderTheme, subpage: SubpageLabel? = nil, style: ReaderStyle = ReaderStyle(), title: String? = "A title") -> String {
+        ArticleTemplate.page(for: entry(title: title), fulltext: nil, showFull: false, style: style, colorScheme: .dark,
+                             theme: theme, subpage: subpage)
+    }
+
+    @Test func nativeStaysAsItWas() {
+        // The page embeds reader.css, whose text names the Antiope selectors: check the markup itself.
+        let native = page(theme: .native, subpage: SubpageLabel(page: 412, index: 3, count: 20))
+        #expect(native.contains(#"<html lang="en" data-scheme="dark">"#))
+        #expect(!native.contains(#"<p class="subpage""#))
+        #expect(!native.contains(#"--teletext-font: "Bedstead""#))
+        #expect(native.contains(#"<h1 class="title"><a href="https://blog.example.org/2026/10/post.html">A title</a></h1>"#))
+    }
+
+    @Test func antiopeMarksTheRootSnapsTheSizeAndDoublesTheTitle() {
+        let html = page(theme: antiope, subpage: SubpageLabel(page: 412, index: 3, count: 20),
+                        style: ReaderStyle(font: .charter, size: 17, width: .forty))
+        #expect(html.contains(#"<html lang="en" data-scheme="dark" data-theme="antiope">"#))
+        #expect(html.contains("--reader-size: 15px"))
+        #expect(html.contains("--reader-measure: 40ch"))
+        #expect(html.contains(#"--teletext-font: "Bedstead", monospace;"#))
+        #expect(html.contains(#"<p class="subpage" id="subpage">412 3/20</p>"#))
+        #expect(html.contains(#"<h1 class="title"><span class="dh-space" aria-hidden="true">A title</span><span class="dh-ink"><a href="https://blog.example.org/2026/10/post.html">A title</a></span></h1>"#))
+        // The sub-page line exists even before the list knows the entry, so it can be filled in place.
+        #expect(page(theme: antiope).contains(#"<p class="subpage" id="subpage"></p>"#))
+        #expect(page(theme: antiope, title: "<b>&</b>").contains(#"<span class="dh-space" aria-hidden="true">&lt;b&gt;&amp;&lt;/b&gt;</span>"#))
+    }
+
+    @Test func dataCRTOnlyForAntiopeWithTheBoxChecked() {
+        #expect(page(theme: ReaderTheme(appearance: .native, crt: true)).contains(#"<html lang="en" data-scheme="dark">"#))
+        #expect(page(theme: antiope).contains(#"<html lang="en" data-scheme="dark" data-theme="antiope">"#))
+        #expect(page(theme: ReaderTheme(appearance: .antiope, crt: true))
+            .contains(#"<html lang="en" data-scheme="dark" data-theme="antiope" data-crt>"#))
+    }
+}
+
+/// Spec §5: no colour but the eight in an Antiope view; §9: the bleed is text-only, under data-crt.
+@Suite struct AntiopeStylesheetTests {
+    @Test func theAntiopeSectionUsesOnlyTheEightColours() throws {
+        let css = ArticleTemplate.readerCSS
+        let start = try #require(css.range(of: "Antiope begin"))
+        let end = try #require(css.range(of: "Antiope end"))
+        let section = String(css[start.upperBound..<end.lowerBound])
+        let colours = Set(section.matches(of: /#[0-9A-Fa-f]{3,8}\b/).map { String($0.output).uppercased() })
+        #expect(colours == Set(TeletextColor.allCases.map(\.css)))
+        for function in ["rgb(", "rgba(", "hsl(", "hsla("] {
+            #expect(!section.contains(function), "\(function)")
+        }
+        #expect(section.contains("--smoothing: none;"))
+        #expect(section.contains("transform: scaleY(2);"))
+    }
+
+    @Test func theCRTBleedIsTextOnlyAndOnlyUnderDataCRT() {
+        #expect(ArticleTemplate.readerCSS.contains(#":root[data-theme="antiope"][data-crt] body {"#
+            + "\n  text-shadow: 1px 0 rgba(255, 0, 0, 0.45), -1px 0 rgba(0, 0, 255, 0.45), 0 0 2px currentColor;"))
+    }
+
+    @Test func bedsteadIsEmbeddedInAntiopeOnly() {
+        let face = #"@font-face { font-family: "Bedstead"; font-style: normal; font-weight: 400; src: url("data:font/otf;base64,"#
+        let antiope = ArticleTemplate.page(for: entry(), fulltext: nil, showFull: false, style: ReaderStyle(font: .newsreader),
+                                           colorScheme: .light, theme: ReaderTheme(appearance: .antiope, crt: false))
+        let native = ArticleTemplate.page(for: entry(), fulltext: nil, showFull: false, style: ReaderStyle(font: .newsreader),
+                                          colorScheme: .light)
+        #expect(antiope.contains(face))
+        #expect(!antiope.contains(#"font-family: "Newsreader""#))
+        #expect(!native.contains(face))
+    }
+}
