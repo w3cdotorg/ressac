@@ -222,3 +222,106 @@ func listEntry(title: String?, isRead: Bool = false, isStarred: Bool = false) ->
         #expect(MinitelBar.hintLine(hint, width: 30).accessibilityText == "m read · s star · i images")
     }
 }
+
+@MainActor @Suite struct PageHeaderTests {
+    /// 2026-10-14 07:47:12 UTC, 09:47:12 in Paris.
+    let date = Date(timeIntervalSince1970: 1_791_964_032)
+    let paris = TimeZone(identifier: "Europe/Paris")!
+
+    @Test func labelPrecedence() {
+        var typing = PageEntry()
+        _ = typing.type(4)
+        #expect(PageHeader.label(entry: typing, notFound: 437, current: 412, rolling: 300) == .typing("4__"))
+        #expect(PageHeader.label(entry: PageEntry(), notFound: 437, current: 412, rolling: 300) == .notFound(437))
+        #expect(PageHeader.label(entry: PageEntry(), notFound: nil, current: 412, rolling: 300) == .searching(300))
+        #expect(PageHeader.label(entry: PageEntry(), notFound: nil, current: 412, rolling: nil) == .page(412))
+        #expect(PageHeader.label(entry: PageEntry(), notFound: nil, current: nil, rolling: nil) == .page(nil))
+    }
+
+    @Test func theHeaderFillsTheWidthWithPageNameDateAndTime() {
+        let line = PageHeader.line(label: .page(412), date: date, width: 40, timeZone: paris)
+        #expect(line.width == 40)
+        #expect(line.spans.map(text(of:)) == ["P412 ", "RESSAC          ", "WED 14 OCT ", "09:47:12"])
+        #expect(line.spans.map(\.foreground) == [.yellow, .white, .cyan, .yellow])
+        for width in [0, 5, 8, 19, 24, 75, 160] {
+            #expect(PageHeader.line(label: .notFound(437), date: date, width: width, timeZone: paris).width == width)
+            #expect(PageHeader.line(label: .page(412), date: date, width: width, timeZone: paris).width == width)
+        }
+        #expect(text(of: PageHeader.line(label: .page(412), date: date, width: 8, timeZone: paris).spans[3]) == "09:47:12")
+    }
+
+    @Test func typingNotFoundAndNoPage() {
+        let typing = PageHeader.line(label: .typing("41_"), date: date, width: 40, timeZone: paris)
+        #expect(text(of: typing.spans[0]) == "P41_ " && typing.spans[0].foreground == .yellow)
+        let notFound = PageHeader.line(label: .notFound(437), date: date, width: 40, timeZone: paris)
+        #expect(text(of: notFound.spans[0]) == "P437 NOT FOUND " && notFound.spans[0].foreground == .red)
+        #expect(text(of: notFound.spans[1]).allSatisfy { $0 == " " })  // no RESSAC beside NOT FOUND
+        let none = PageHeader.line(label: .page(nil), date: date, width: 40, timeZone: paris)
+        #expect(text(of: none.spans[0]) == "P--- ")
+    }
+
+    @Test func theCounterRollsThroughEveryPage() {
+        let start = Date(timeIntervalSinceReferenceDate: 1_000_000.05)  // away from a tenth's edge
+        let first = PageHeader.rollingPage(at: start)
+        #expect(PageHeader.rollingPage(at: start.addingTimeInterval(0.1)) == (first - 100 + 1) % 800 + 100)
+        for step in 0..<1_600 {
+            #expect((100...899).contains(PageHeader.rollingPage(at: start.addingTimeInterval(Double(step) / 10))))
+        }
+        #expect((100...899).contains(PageHeader.rollingPage(at: Date(timeIntervalSinceReferenceDate: -12.34))))
+    }
+}
+
+@MainActor @Suite struct AntiopeRootTests {
+    /// A live switch back to Native must find the window as it was.
+    @Test func theWindowIsDressedForAntiopeAndPutBack() {
+        #expect(AntiopeRootView.minimumCells == 76)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.contentView = NSView()
+        let background = window.backgroundColor
+        let chrome = AntiopeWindowChrome.ChromeView()
+        window.contentView?.addSubview(chrome)
+        #expect(window.titlebarAppearsTransparent && window.titleVisibility == .hidden)
+        #expect(window.styleMask.contains(.fullSizeContentView))
+        #expect(window.backgroundColor == .black)
+        #expect(window.appearance?.name == .darkAqua)
+        chrome.removeFromSuperview()
+        #expect(!window.titlebarAppearsTransparent && window.titleVisibility == .visible)
+        #expect(!window.styleMask.contains(.fullSizeContentView))
+        #expect(window.backgroundColor == background && window.appearance == nil)
+    }
+
+    /// Spec §5: blue is for separators, backgrounds and mosaics, never for text.
+    @Test func blueNeverColoursText() {
+        let directory = PageDirectory(snapshot: pagedSnapshot())
+        let date = Date(timeIntervalSince1970: 1_791_964_032)
+        var lines: [CellLine] = []
+        for row in directory.rows {
+            for selected in [false, true] {
+                for highlights in [false, true] {
+                    lines.append(PageIndexColumn.line(for: row, width: 22, isRootFolder: PageIndexColumn.isRootFolder(row, in: directory),
+                                                      isSelected: selected, highlightsReserved: highlights))
+                }
+            }
+        }
+        for isRead in [false, true] {
+            for selected in [false, true] {
+                lines += EntryPageColumn.lines(for: listEntry(title: "A title", isRead: isRead, isStarred: true),
+                                               width: 28, isSelected: selected)
+            }
+        }
+        for label in [HeaderLabel.page(412), .page(nil), .typing("4__"), .notFound(437), .searching(300)] {
+            lines.append(PageHeader.line(label: label, date: date, width: 60))
+        }
+        lines += MinitelKey.allCases.map(\.line)
+        for column in [AntiopeColumn.index, .entries, .reader] {
+            for isGarden in [false, true] {
+                for search in ["", "tidal"] {
+                    lines.append(MinitelBar.hintLine(MinitelBar.hint(column: column, isGarden: isGarden, searchText: search),
+                                                     width: 30))
+                }
+            }
+        }
+        #expect(lines.allSatisfy { $0.spans.allSatisfy { $0.foreground != .blue } })
+    }
+}
