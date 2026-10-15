@@ -65,6 +65,7 @@ struct MinitelBar: View {
             ForEach(MinitelKey.allCases, id: \.self) { key in
                 Button { press(key) } label: { CellLineView(line: key.line) }
                     .buttonStyle(.plain)
+                    .focusable(false)
                     .accessibilityLabel(key.accessibilityLabel)
                 CellLineView(line: .blank(1))
             }

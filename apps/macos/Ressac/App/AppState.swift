@@ -195,8 +195,12 @@ enum PendingPanel: Equatable, Sendable {
 
     /// Called by a root view's `ReadingWindowReader` when it enters a window.
     func registerReadingWindow(_ window: NSWindow) {
+        let id = ObjectIdentifier(window)
+        // The table is weak: a window freed without `leave()` leaves its count behind, and a new
+        // window can reuse the address. Not in the table means no live holder, so start over.
+        if !readingWindows.contains(window) { readingWindowHolds[id] = 0 }
         readingWindows.add(window)
-        readingWindowHolds[ObjectIdentifier(window), default: 0] += 1
+        readingWindowHolds[id, default: 0] += 1
         readingWindowIsKey = window.isKeyWindow
     }
 

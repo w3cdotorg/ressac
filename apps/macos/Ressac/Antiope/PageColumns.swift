@@ -18,6 +18,7 @@ struct PageIndexColumn: View {
                                              isRootFolder: Self.isRootFolder(row, in: directory), isSelected: selected)
                         Button { antiope.jump(to: row.number) } label: { CellLineView(line: line) }
                             .buttonStyle(.plain)
+                            .focusable(false)  // Full Keyboard Access would give Space to the button, not to SUITE
                             .accessibilityLabel(line.accessibilityText)
                             .accessibilityAddTraits(selected ? .isSelected : [])
                             .id(row.number)
@@ -86,6 +87,7 @@ struct EntryPageColumn: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .focusable(false)
                         .accessibilityLabel(Self.accessibilityLabel(for: entry))
                         .accessibilityAddTraits(selected ? .isSelected : [])
                         .id(entry.entryId)

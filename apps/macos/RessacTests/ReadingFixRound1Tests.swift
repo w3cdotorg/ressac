@@ -252,12 +252,37 @@ final class HangingServer {
         state.unregisterReadingWindow(second)
         #expect(!state.letterShortcutsEnabled)  // no reading window: no letters
     }
+
+    /// A window freed without its reader's `leave()` running leaves its hold count behind; the
+    /// next window allocated at the same address (same `ObjectIdentifier`) must start from 1.
+    @Test func aFreedWindowLeavesNoStaleHoldCountBehind() throws {
+        let state = try makeState().0
+        var staleIdentifiers = 0
+        for _ in 0..<200 {
+            var freedId: ObjectIdentifier?
+            autoreleasepool {
+                let window = NSWindow()
+                window.isReleasedWhenClosed = false
+                freedId = ObjectIdentifier(window)
+                state.registerReadingWindow(window)  // freed below with no unregister
+            }
+            let next = NSWindow()
+            next.isReleasedWhenClosed = false
+            if ObjectIdentifier(next) == freedId { staleIdentifiers += 1 }
+            state.registerReadingWindow(next)
+            state.unregisterReadingWindow(next)  // one register, one unregister
+            state.windowDidChangeKey(next, isKey: true)
+            // Only freed windows remain, so no reading window is left and the letters are off.
+            #expect(!state.letterShortcutsEnabled)
+        }
+        #expect(staleIdentifiers > 0, "the allocator never reused an address: the test proves nothing")
+    }
 }
 
 /// Acceptance finding A: `ressac migrate` leaves a WAL database with no `-wal` or `-shm` file,
 /// which a read-only connection cannot open (SQLITE_CANTOPEN, "unable to open database file").
 @MainActor @Suite struct FirstRunWALTests {
-    /// A schema v2 database in WAL mode, closed so that its `-wal` and `-shm` files are gone.
+    /// A schema v3 database in WAL mode, closed so that its `-wal` and `-shm` files are gone.
     func makeClosedWAL(in dir: URL) throws -> URL {
         let url = dir.appending(path: "template.sqlite")
         try FileManager.default.copyItem(at: TestDatabase.fixture, to: url)
