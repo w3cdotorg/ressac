@@ -146,6 +146,7 @@ struct EntryListView: View {
             List(state.entries, selection: $state.selectedEntryId) { entry in
                 EntryRowView(entry: entry)
                     .tag(entry.entryId)
+                    .onAppear { state.entryRowAppeared(entry.entryId) }
                     .onDrag {
                         guard let link = entry.link else { return NSItemProvider() }
                         let provider = NSItemProvider(object: link as NSURL)

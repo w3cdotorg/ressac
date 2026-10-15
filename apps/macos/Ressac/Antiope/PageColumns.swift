@@ -91,6 +91,7 @@ struct EntryPageColumn: View {
                         .accessibilityLabel(Self.accessibilityLabel(for: entry))
                         .accessibilityAddTraits(selected ? .isSelected : [])
                         .id(entry.entryId)
+                        .onAppear { app.entryRowAppeared(entry.entryId) }
                     }
                 }
             }

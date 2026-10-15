@@ -531,3 +531,33 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect((scroll as? Double ?? 0) > 0)  // same document: the position is kept
     }
 }
+
+/// Both looks load the next page of a long list as its last rows appear.
+@MainActor @Suite struct EntryListPagingTests {
+    /// Five entries listed two at a time, hosted in `root` (an offscreen window, laid out by hand).
+    private func pagesIn(_ root: (AppState) -> some View) async throws -> Bool {
+        let (state, test, _) = try makeState()
+        defer { withExtendedLifetime(test) {} }  // its directory holds the database
+        for day in 1...5 {
+            try test.entry(feed: 1, published: String(format: "2026-10-%02dT08:00:00.000Z", day))
+        }
+        state.listPageSize = 2
+        state.selection = .feed(1)
+        #expect(state.entries.count == 2)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = NSHostingView(rootView: root(state))
+        defer { window.contentView = nil }
+        return await eventually {
+            window.contentView?.layoutSubtreeIfNeeded()
+            return state.entries.count == 5
+        }
+    }
+
+    @Test func theNativeListLoadsMoreAsItsLastRowsAppear() async throws {
+        #expect(try await pagesIn { EntryListView(state: $0) })
+    }
+
+    @Test func theAntiopeColumnLoadsMoreAsItsLastRowsAppear() async throws {
+        #expect(try await pagesIn { EntryPageColumn().environment($0).environment(AntiopeState(app: $0)) })
+    }
+}
