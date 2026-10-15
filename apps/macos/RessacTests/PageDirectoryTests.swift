@@ -95,3 +95,53 @@ func pagedSnapshot() -> SidebarSnapshot {
         #expect(directory.number(for: .feed(13)) == nil)
     }
 }
+
+@Suite struct PageEntryTests {
+    @Test func theThirdDigitCompletesTheNumber() {
+        var entry = PageEntry()
+        #expect(!entry.isActive && entry.display == "")
+        #expect(entry.type(4) == .pending)
+        #expect(entry.isActive && entry.display == "4__")
+        #expect(entry.type(1) == .pending)
+        #expect(entry.display == "41_")
+        #expect(entry.type(2) == .complete(412))
+        #expect(!entry.isActive && entry.display == "" && entry.digits == "")
+        #expect(entry.type(8) == .pending)  // the next digit starts a new number
+        #expect(entry.display == "8__")
+    }
+
+    @Test func correctionErasesTheLastDigit() {
+        var entry = PageEntry()
+        entry.correct()  // nothing typed: nothing happens
+        #expect(!entry.isActive)
+        _ = entry.type(4)
+        _ = entry.type(1)
+        entry.correct()
+        #expect(entry.display == "4__")
+        entry.correct()
+        #expect(!entry.isActive)
+        _ = entry.type(8)
+        _ = entry.type(0)
+        #expect(entry.type(1) == .complete(801))
+    }
+
+    @Test func cancelEmptiesTheEntry() {
+        var entry = PageEntry()
+        _ = entry.type(4)
+        _ = entry.type(1)
+        entry.cancel()
+        #expect(entry == PageEntry())
+        #expect(entry.type(1) == .pending)
+    }
+
+    @Test func leadingZerosAndStrayValues() {
+        var entry = PageEntry()
+        #expect(entry.type(12) == .pending)  // not a digit: ignored
+        #expect(entry.type(-1) == .pending)
+        #expect(!entry.isActive)
+        _ = entry.type(0)
+        _ = entry.type(4)
+        #expect(entry.display == "04_")
+        #expect(entry.type(2) == .complete(42))  // no page has it: the caller shows NOT FOUND
+    }
+}
