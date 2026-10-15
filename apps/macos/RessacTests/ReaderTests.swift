@@ -473,3 +473,39 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(!native.contains(face))
     }
 }
+
+@Suite struct AntiopeReaderViewTests {
+    @Test func pageIdentityIgnoresTheSubpageButNotTheTheme() {
+        let a = ArticlePage(entry: entry(), fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .dark,
+                            theme: ReaderTheme(appearance: .antiope, crt: false), subpage: SubpageLabel(page: 412, index: 1, count: 2))
+        var b = a
+        b.subpage = SubpageLabel(page: 412, index: 1, count: 3)
+        var c = a
+        c.theme = ReaderTheme(appearance: .antiope, crt: true)
+        #expect(a == b)
+        #expect(a != c)
+    }
+}
+
+@MainActor @Suite struct SubpageLineTests {
+    @Test func theLineChangesInPlaceWithoutAReload() async throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+        let webView = WKWebView(frame: window.contentLayoutRect)
+        window.contentView = webView
+        let controller = ReaderController()
+        controller.webView = webView
+        let coordinator = ArticleWebView.Coordinator(controller: controller)
+        webView.navigationDelegate = coordinator
+        let html = ArticleTemplate.page(for: entry(content: String(repeating: "<p>Line of a long article.</p>", count: 200)),
+                                        fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .dark,
+                                        theme: ReaderTheme(appearance: .antiope, crt: false), subpage: SubpageLabel(page: 412, index: 3, count: 20))
+        controller.load(entryId: 1, html: html)
+        #expect(await eventually { controller.loadedEntryId == 1 })
+        _ = try await webView.callAsyncJavaScript("window.scrollTo(0, 300)", contentWorld: .page)
+        await controller.showSubpage(SubpageLabel(page: 412, index: 3, count: 21))
+        let line = try await webView.callAsyncJavaScript(#"return document.getElementById("subpage").textContent"#, contentWorld: .page)
+        #expect(line as? String == "412 3/21")
+        let scroll = try await webView.callAsyncJavaScript("return window.scrollY", contentWorld: .page)
+        #expect((scroll as? Double ?? 0) > 0)  // same document: the position is kept
+    }
+}

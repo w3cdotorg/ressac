@@ -10,6 +10,9 @@ struct ReaderView: View {
     @AppStorage(ReaderStyle.Keys.font) private var font = ReaderFont.sfPro
     @AppStorage(ReaderStyle.Keys.size) private var size = ReaderStyle.defaultSize
     @AppStorage(ReaderStyle.Keys.width) private var width = LineWidth.medium
+    @AppStorage(ReaderStyle.Keys.antiopeSize) private var antiopeSize = TeletextFont.defaultSize
+    @AppStorage(Appearance.Keys.appearance) private var storedAppearance = Appearance.native
+    @AppStorage(Appearance.Keys.crt) private var crt = false
     @State private var controller = ReaderController()
 
     var body: some View {
@@ -28,9 +31,25 @@ struct ReaderView: View {
     }
 
     private func page(for entry: EntryRow) -> ArticlePage {
-        ArticlePage(entry: entry, fulltext: state.selectedFulltext, showFull: state.readerShowsFullText,
-                    style: ReaderStyle(font: font, size: ReaderStyle.clampedSize(size), width: width),
-                    colorScheme: colorScheme)
+        let theme = theme
+        return ArticlePage(entry: entry, fulltext: state.selectedFulltext, showFull: state.readerShowsFullText,
+                           style: ReaderStyle(font: font, size: ReaderStyle.effectiveSize(theme.appearance == .antiope ? antiopeSize : size,
+                                                                                         appearance: theme.appearance), width: width),
+                           colorScheme: colorScheme, theme: theme, subpage: subpage(for: entry, theme: theme))
+    }
+
+    /// Antiope only when Bedstead is there (spec §5). `crt` is the CRT screen box; phase 13 also
+    /// turns it off under Increase contrast, in this call (spec §9).
+    private var theme: ReaderTheme {
+        ReaderTheme(appearance: Appearance.effective(stored: storedAppearance, fontAvailable: TeletextFont.isAvailable),
+                    crt: crt)
+    }
+
+    /// "412 3/20" in Antiope (spec §6); nil in Native, so the native page never changes with it.
+    private func subpage(for entry: EntryRow, theme: ReaderTheme) -> SubpageLabel? {
+        guard theme.appearance == .antiope else { return nil }
+        let directory = PageDirectory(snapshot: state.sidebar)
+        return SubpageLabel.of(entryId: entry.entryId, in: state.entries, page: directory.page(forFeed:))
     }
 
     /// `fullTextNotice` when the extraction failed without storing an error row (the run itself
@@ -124,23 +143,27 @@ struct SubpageLabel: Equatable, Sendable {
 }
 
 /// Everything the page depends on. Read and starred flags are left out on purpose: marking the
-/// entry read must not reload the page and lose the scroll position.
+/// entry read must not reload the page and lose the scroll position. The sub-page line is left
+/// out too: the list grows during a refresh, and `ArticleWebView` rewrites that line in place.
 struct ArticlePage: Equatable {
     let entry: EntryRow
     let fulltext: FulltextRow?
     let showFull: Bool
     let style: ReaderStyle
     let colorScheme: ColorScheme
+    var theme: ReaderTheme = .native
+    var subpage: SubpageLabel?
 
     static func == (a: ArticlePage, b: ArticlePage) -> Bool {
         a.entry.entryId == b.entry.entryId && a.entry.title == b.entry.title && a.entry.url == b.entry.url
             && a.entry.author == b.entry.author && a.entry.summaryHtml == b.entry.summaryHtml
             && a.entry.contentHtml == b.entry.contentHtml && a.fulltext == b.fulltext && a.showFull == b.showFull
-            && a.style == b.style && a.colorScheme == b.colorScheme
+            && a.style == b.style && a.colorScheme == b.colorScheme && a.theme == b.theme
     }
 
     func html() -> String {
-        ArticleTemplate.page(for: entry, fulltext: fulltext, showFull: showFull, style: style, colorScheme: colorScheme)
+        ArticleTemplate.page(for: entry, fulltext: fulltext, showFull: showFull, style: style, colorScheme: colorScheme,
+                             theme: theme, subpage: subpage)
     }
 }
 
@@ -184,6 +207,13 @@ struct ArticlePage: Equatable {
         let result = try? await webView.callAsyncJavaScript(script, contentWorld: .page)
         return (result as? Bool) ?? false
     }
+
+    /// Rewrites the Antiope sub-page line of the page on screen, keeping its scroll position.
+    func showSubpage(_ label: SubpageLabel?) async {
+        guard let webView else { return }
+        let script = #"const line = document.getElementById("subpage"); if (line) { line.textContent = text; }"#
+        _ = try? await webView.callAsyncJavaScript(script, arguments: ["text": label?.text ?? ""], contentWorld: .page)
+    }
 }
 
 /// `WKWebView` with JavaScript off, no persistent website data, and every link sent to the browser.
@@ -202,19 +232,32 @@ struct ArticleWebView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsMagnification = false
-        webView.underPageBackgroundColor = NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                ? NSColor(srgbRed: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, alpha: 1)
-                : .white
-        }
         controller.webView = webView
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        guard context.coordinator.page != page else { return }
+        webView.underPageBackgroundColor = page.theme.appearance == .antiope ? .black : Self.nativeUnderPage
+        guard context.coordinator.page != page else {
+            // Same document: only the sub-page line may have changed (the list moved under it).
+            guard context.coordinator.page?.subpage != page.subpage else { return }
+            context.coordinator.page = page
+            if controller.loadedEntryId == page.entry.entryId {
+                Task { await controller.showSubpage(page.subpage) }
+            } else {
+                controller.load(entryId: page.entry.entryId, html: page.html())  // still loading: nothing to keep
+            }
+            return
+        }
         context.coordinator.page = page
         controller.load(entryId: page.entry.entryId, html: page.html())
+    }
+
+    /// The colour past the page's edges in Native; Antiope's is black (spec §7).
+    private static let nativeUnderPage = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, alpha: 1)
+            : .white
     }
 
     @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
