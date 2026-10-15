@@ -471,6 +471,35 @@ final class ManualClock: Clock, @unchecked Sendable {
         #expect(state.selectedEntryId == older)
     }
 
+    @Test func suiteFromAReservedPageOnlyBringsTheArticleBack() async throws {
+        let (antiope, state, test, _) = try make()
+        let first = try test.entry(feed: 1, published: "2026-10-02T08:00:00.000Z")
+        let second = try test.entry(feed: 1, published: "2026-10-01T08:00:00.000Z")
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { state.entries.count == 2 })
+        state.autoReadDelay = .seconds(60)
+        state.selectedEntryId = first
+        #expect(await eventually { state.selectedEntry != nil })
+        for page in [ReaderPage.guide, .index] {
+            for command in [ReadingCommand.advance, .nextEntry, .previousEntry] {
+                antiope.readerPage = page
+                #expect(antiope.handle(command))  // Antiope's: AppState must not move on in the same press
+                #expect(antiope.readerPage == .article)
+                #expect(state.selectedEntryId == first)
+                #expect(!antiope.handle(command))  // the article is back: now AppState's
+            }
+        }
+        // The SUITE button of the Minitel bar takes the same path (`MinitelBar.press`).
+        antiope.readerPage = .guide
+        let key = MinitelKey.suite
+        if !antiope.handle(key.command) { state.perform(key.command) }
+        #expect(state.selectedEntryId == first && antiope.readerPage == .article)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(state.selectedEntryId == first)
+        #expect(state.entries.first { $0.entryId == first }?.isRead == false)
+        #expect(state.entries.first { $0.entryId == second }?.isRead == false)
+    }
+
     @Test func repetitionRefreshesTheSelection() async throws {
         let (antiope, state, _, stub) = try make()
         state.selection = .feed(3)

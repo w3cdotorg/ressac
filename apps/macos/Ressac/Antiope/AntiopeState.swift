@@ -133,9 +133,12 @@ enum ReaderPage: Equatable, Sendable {
             return moveInIndex(by: -1)
         case .nextEntry, .previousEntry, .advance:
             // SUITE and RETOUR are today's commands and `AppState` performs them (Space still
-            // scrolls the article first). Leaving P100 or P899 brings the article back.
-            if readerPage != .article, app.canNavigateEntries { readerPage = .article }
-            return false
+            // scrolls the article first). Leaving P100 or P899 brings the article back, and that
+            // first press is all it does: `AppState` would otherwise move on in the same press,
+            // with no reader on screen to scroll, and skip the entry unseen.
+            guard readerPage != .article, app.canNavigateEntries else { return false }
+            readerPage = .article
+            return app.selectedEntryId != nil
         case .toggleRead, .toggleStar, .focusEntryList, .focusSidebar:
             return false
         }
