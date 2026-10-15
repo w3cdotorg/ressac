@@ -188,3 +188,37 @@ func listEntry(title: String?, isRead: Bool = false, isStarred: Bool = false) ->
         #expect(EntryPageColumn.wrap("anything", width: 0) == ["anything"])
     }
 }
+
+@MainActor @Suite struct MinitelBarTests {
+    @Test func theKeysAreTheMinitelsInReverseVideo() {
+        #expect(MinitelKey.allCases.map(\.label) == ["SOMMAIRE", "SUITE", "RETOUR", "GUIDE", "RÉPÉTITION"])
+        #expect(MinitelKey.allCases.map(\.command) == [.sommaire, .advance, .previousEntry, .guide, .repetition])
+        #expect(MinitelKey.sommaire.accessibilityLabel == "Sommaire, go to page 100")
+        for key in MinitelKey.allCases {
+            #expect(key.line.width == key.label.count + 2)
+            #expect(text(of: key.line.spans[0]) == " \(key.label) ")
+            #expect(key.line.spans.allSatisfy { $0.foreground == .black && $0.background == .cyan })
+            #expect(key.line.accessibilityText == key.accessibilityLabel)
+        }
+        #expect(MinitelBar.keysCells == 49)
+    }
+
+    @Test func hintsFollowTheSearchTheGardenAndTheFocus() {
+        #expect(MinitelBar.hint(column: .entries, isGarden: true, searchText: "tidal")
+            == MinitelHint(text: "SEARCH: tidal", colour: .cyan))
+        #expect(MinitelBar.hint(column: .entries, isGarden: true, searchText: "")
+            == MinitelHint(text: "k keep · r repair · b bury · u undo", colour: .white))
+        #expect(MinitelBar.hint(column: .index, isGarden: false, searchText: "").text == "type a page number · ? guide")
+        #expect(MinitelBar.hint(column: .entries, isGarden: false, searchText: "").text == "j next · k previous · m read")
+        #expect(MinitelBar.hint(column: .reader, isGarden: false, searchText: "").text == "m read · s star · i images")
+    }
+
+    @Test func theHintLineFillsTheRestOfTheBar() {
+        let hint = MinitelHint(text: "m read · s star · i images", colour: .white)
+        for width in [0, 10, 26, 80] {
+            #expect(MinitelBar.hintLine(hint, width: width).width == width)
+        }
+        #expect(text(of: MinitelBar.hintLine(hint, width: 30).spans[0]).hasPrefix(" m read"))
+        #expect(MinitelBar.hintLine(hint, width: 30).accessibilityText == "m read · s star · i images")
+    }
+}
