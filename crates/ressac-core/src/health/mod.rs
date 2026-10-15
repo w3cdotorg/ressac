@@ -76,11 +76,14 @@ pub fn diagnose(ev: &FeedEvidence) -> Diagnosis {
             url: https_target(ev),
         });
     let mut v = verdict(ev, &cadence, &hijack, upgrade);
-    let assessed = !matches!(
+    // The hint is for feeds already in doubt: never on an Alive feed, where a few
+    // spam-like words are noise (decision of 15/10/2026), nor on a verdict that is not an
+    // assessment of the feed itself.
+    let hinted = !matches!(
         v.status,
-        Status::Hijacked | Status::Duplicate | Status::Unchecked
+        Status::Alive | Status::Hijacked | Status::Duplicate | Status::Unchecked
     );
-    if assessed && hijack.score > 0.0 {
+    if hinted && hijack.score > 0.0 {
         v.bullets.push(format!(
             "Possible spam signs (score {:.1}, below the {HIJACK_THRESHOLD:.1} threshold):",
             hijack.score
@@ -870,6 +873,43 @@ mod tests {
             .position(|b| b == "Possible spam signs (score 0.4, below the 0.6 threshold):")
             .unwrap_or_else(|| panic!("{:?}", d.evidence.bullets));
         assert!(d.evidence.bullets[at + 1].contains("casino"));
+    }
+
+    /// Decision of 15/10/2026: the hint is for feeds that are not alive. On the real run,
+    /// ReadWriteWeb (Alive) showed it for betting words in a tech site.
+    #[test]
+    fn alive_feed_with_spam_words_gets_no_hint() {
+        let mut e = ev(vec![ok(0)], vec![entry(3)]);
+        e.description = Some("Les meilleurs casino en ligne pour les joueurs français.".into());
+        let d = diagnose(&e);
+        assert_eq!(d.status, Status::Alive);
+        assert!(d.hijack_score > 0.0, "the score itself is still stored");
+        assert!(
+            d.evidence
+                .bullets
+                .iter()
+                .all(|b| !b.contains("spam") && !b.contains("casino")),
+            "{:?}",
+            d.evidence.bullets
+        );
+    }
+
+    #[test]
+    fn dormant_and_fossil_feeds_keep_the_hint() {
+        for (days, status) in [(200, Status::Dormant), (800, Status::Fossil)] {
+            let mut e = ev(vec![ok(0)], vec![entry(days)]);
+            e.description = Some("Les meilleurs casino en ligne pour les joueurs français.".into());
+            let d = diagnose(&e);
+            assert_eq!(d.status, status);
+            assert!(
+                d.evidence
+                    .bullets
+                    .iter()
+                    .any(|b| b.starts_with("Possible spam signs (score 0.4")),
+                "{status:?}: {:?}",
+                d.evidence.bullets
+            );
+        }
     }
 
     #[test]
