@@ -248,6 +248,33 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(!ArticleTemplate.sanitize(huge, budget: 10).contains("<b>"))
     }
 
+    /// Space reads the page's height: an image holds its place before it loads when its feed
+    /// gives its size, in an attribute pair, a style or WordPress's or Blogger's data attributes.
+    @Test func imagesGetTheSizeTheirFeedGives() {
+        let html = #"<img src="https://e.org/a.png" style="width: 600px; height:400px"><img src="https://e.org/b.png" data-orig-size="1200,800">"#
+            + #"<img src="https://e.org/c.png" data-original-width="640" data-original-height="480"><img src="https://e.org/d.png" width="50%" style="height: 10px">"#
+            + #"<img src="https://e.org/e.png" width="320"><img src="https://e.org/f.png">"#
+        let clean = ArticleTemplate.sanitize(html)
+        #expect(clean.contains(#"<img src="https://e.org/a.png" width="600" height="400" loading="lazy">"#))
+        #expect(clean.contains(#"<img src="https://e.org/b.png" width="1200" height="800" loading="lazy">"#))
+        #expect(clean.contains(#"<img src="https://e.org/c.png" width="640" height="480" loading="lazy">"#))
+        #expect(clean.contains(#"<img src="https://e.org/d.png" width="50%" loading="lazy">"#))  // its own attribute wins
+        #expect(clean.contains(#"<img src="https://e.org/e.png" width="320" loading="lazy">"#))
+        #expect(clean.contains(#"<img src="https://e.org/f.png" loading="lazy">"#))
+        #expect(!clean.contains("style") && !clean.contains("data-"))
+        #expect(ArticleTemplate.declaredSize(["width": "600px", "height": " 400 "]) == ArticleTemplate.ImageSize(width: 600, height: 400))
+        #expect(ArticleTemplate.declaredSize(["width": "0", "height": "400"]) == nil)
+        #expect(ArticleTemplate.declaredSize(["style": "width:100%;height:auto"]) == nil)
+    }
+
+    /// Antiope: the mosaic holds the height its renderer will draw.
+    @Test func mosaicsHoldTheirHeightWhenTheFeedGivesASize() {
+        let clean = ArticleTemplate.sanitize(#"<img src="https://e.org/a.png" width="600" height="400"><img src="https://e.org/b.png">"#, mosaics: true)
+        // 600 pixels: 40 columns (the most); 0.6 × 40 × 400 / 600 = 16 rows of 10 font pixels.
+        #expect(clean.contains(#"alt="" loading="lazy" style="min-height: 160px"><span class="mosaic-alt">"#))
+        #expect(clean.components(separatedBy: "min-height").count == 2)  // the image without a size has none
+    }
+
     @Test func optionalEndTagsStayOnTheParsedPath() {
         let rows = String(repeating: "<tr><td>a<td>b", count: 150)
         let defs = String(repeating: "<dt>t<dd>d", count: 150)
@@ -646,5 +673,28 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
 
     @Test func theAntiopeColumnLoadsMoreAsItsLastRowsAppear() async throws {
         #expect(try await pagesIn { EntryPageColumn().environment($0).environment(AntiopeState(app: $0)) })
+    }
+}
+
+/// The image box holds its height before the image arrives, in both looks.
+@MainActor @Suite struct ImageBoxTests {
+    @Test func anImageOfKnownSizeHoldsItsPlace() async throws {
+        let content = #"<p>Text.</p><img src="http://127.0.0.1:9/a.png" style="width:600px;height:400px">"#
+        for theme in [ReaderTheme.native, ReaderTheme(appearance: .antiope, crt: false)] {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+            let webView = WKWebView(frame: window.contentLayoutRect)
+            window.contentView = webView
+            let controller = ReaderController()
+            controller.webView = webView
+            let coordinator = ArticleWebView.Coordinator(controller: controller)
+            webView.navigationDelegate = coordinator
+            let html = ArticleTemplate.page(for: entry(content: content), fulltext: nil, showFull: false, style: ReaderStyle(),
+                                            colorScheme: .dark, theme: theme)
+            controller.load(entryId: 1, html: html)
+            #expect(await eventually { controller.loadedEntryId == 1 })
+            let height = try await webView.callAsyncJavaScript(
+                #"return document.querySelector(".content img").getBoundingClientRect().height"#, contentWorld: .page)
+            #expect((height as? Double ?? 0) > 100, "\(theme.appearance)")
+        }
     }
 }

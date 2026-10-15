@@ -393,12 +393,17 @@ enum ArticleTemplate {
                     for child in element.children ?? [] { render(child, depth: depth + 1, inLink: inLink) }
                     return
                 }
-                let attributes = safeAttributes(of: element, tag: tag, baseURL: baseURL)
+                var attributes = safeAttributes(of: element, tag: tag, baseURL: baseURL)
                 if tag == "img" {
                     guard let source = attributes.first(where: { $0.name == "src" })?.value else { return }
+                    // Its height is known before it loads, so Space never takes the page's end too early.
+                    let size = declaredSize(allAttributes(of: element))
                     if mosaics, let original = LinkPolicy.webURL(source) {
                         let alt = attributes.first(where: { $0.name == "alt" })?.value ?? ""
-                        return mosaic(original: original, alt: alt, inLink: inLink)
+                        return mosaic(original: original, alt: alt, size: size, inLink: inLink)
+                    }
+                    if let size, !attributes.contains(where: { $0.name == "width" || $0.name == "height" }) {
+                        attributes += [("width", String(size.width)), ("height", String(size.height))]
                     }
                 }
                 out += "<\(tag)"
@@ -418,19 +423,70 @@ enum ArticleTemplate {
         }
 
         /// Image `n` as a mosaic box. The box keeps both addresses for the swap and an IMAGE line
-        /// with the alt text, shown by the stylesheet when the mosaic fails (`data-failed`).
-        private mutating func mosaic(original: URL, alt: String, inLink: Bool) {
+        /// with the alt text, shown by the stylesheet when the mosaic fails (`data-failed`). With
+        /// the original's `size`, the mosaic keeps its height before it arrives: the rows its
+        /// renderer will draw, in PNG pixels (one per font pixel), which the stylesheet zooms.
+        private mutating func mosaic(original: URL, alt: String, size: ImageSize?, inLink: Bool) {
             let index = images
             images += 1
             let source = escapeAttribute(MosaicRequest.url(for: original, columns: MosaicRenderer.maxColumns))
             let box = #"id="m\#(index)" data-original="\#(escapeAttribute(original.absoluteString))" data-mosaic="\#(source)""#
             let label = escapeText(alt.isEmpty ? "IMAGE" : "IMAGE \(alt)")
-            let content = #"<img src="\#(source)" alt="\#(escapeAttribute(alt))" loading="lazy">"#
+            let height = size.map { size in
+                let grid = MosaicRenderer.grid(width: size.width, height: size.height,
+                                               columns: MosaicRenderer.columns(forPixelWidth: size.width))
+                return #" style="min-height: \#(grid.rows * MosaicRenderer.cellHeight)px""#
+            } ?? ""
+            let content = #"<img src="\#(source)" alt="\#(escapeAttribute(alt))" loading="lazy"\#(height)>"#
                 + #"<span class="mosaic-alt">\#(label)</span>"#
             out += inLink
                 ? #"<span class="mosaic" \#(box)>\#(content)</span>"#
                 : #"<a class="mosaic" href="\#(LinkPolicy.toggleScheme):\#(index)" \#(box)>\#(content)</a>"#
         }
+    }
+
+    /// An image's size in CSS pixels, as its feed gives it.
+    struct ImageSize: Equatable, Sendable {
+        var width: Int
+        var height: Int
+    }
+
+    /// The size an image's attributes give: `width` and `height`, else `width` and `height` in
+    /// pixels in `style`, else WordPress's `data-orig-size` ("1200,800"), else Blogger's
+    /// `data-original-width` and `data-original-height`. Nil when none gives both as whole
+    /// pixels from 1 to 20,000 (a percentage gives none).
+    static func declaredSize(_ attributes: [String: String]) -> ImageSize? {
+        func pixels(_ text: Substring?) -> Int? {
+            guard var text = text?.trimmingCharacters(in: .whitespaces).lowercased() else { return nil }
+            if text.hasSuffix("px") { text.removeLast(2) }
+            guard let value = Int(text), (1...20_000).contains(value) else { return nil }
+            return value
+        }
+        func size(_ width: Substring?, _ height: Substring?) -> ImageSize? {
+            guard let width = pixels(width), let height = pixels(height) else { return nil }
+            return ImageSize(width: width, height: height)
+        }
+        if let found = size(attributes["width"]?[...], attributes["height"]?[...]) { return found }
+        if let style = attributes["style"] {
+            var declarations: [String: Substring] = [:]
+            for declaration in style.split(separator: ";") {
+                let parts = declaration.split(separator: ":", maxSplits: 1)
+                if parts.count == 2 { declarations[parts[0].trimmingCharacters(in: .whitespaces).lowercased()] = parts[1] }
+            }
+            if let found = size(declarations["width"], declarations["height"]) { return found }
+        }
+        if let pair = attributes["data-orig-size"]?.split(separator: ","), pair.count == 2,
+           let found = size(pair[0], pair[1]) { return found }
+        return size(attributes["data-original-width"]?[...], attributes["data-original-height"]?[...])
+    }
+
+    /// Every attribute of `element`, names lowercased, unfiltered: only for reading sizes.
+    private static func allAttributes(of element: XMLElement) -> [String: String] {
+        var attributes: [String: String] = [:]
+        for attribute in element.attributes ?? [] {
+            if let value = attribute.stringValue { attributes[name(of: attribute)] = value }
+        }
+        return attributes
     }
 
     private static func safeAttributes(of element: XMLElement, tag: String, baseURL: URL?) -> [(name: String, value: String)] {
