@@ -60,6 +60,7 @@ struct AntiopeRootView: View {
         // Neither look inherits an open search prompt; the search text stays (Review Focus #5).
         .onAppear { antiope.closeSearchPrompt(clearing: false) }
         .onDisappear { antiope.closeSearchPrompt(clearing: false) }
+        .crtScreen()
     }
 
     /// The entry list, or P800–P802 in a Garden scope.

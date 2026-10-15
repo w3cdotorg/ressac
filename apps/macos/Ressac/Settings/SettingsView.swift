@@ -80,6 +80,7 @@ struct SettingsView: View {
 
 private struct ReadingSettings: View {
     @AppStorage(Appearance.Keys.appearance) private var appearance = Appearance.native
+    @AppStorage(Appearance.Keys.crt) private var crt = false
     @AppStorage(ReaderStyle.Keys.font) private var font = ReaderFont.sfPro
     @AppStorage(ReaderStyle.Keys.size) private var size = ReaderStyle.defaultSize
     /// Antiope's own text size (decision of 2026-10-14), for the preview in Antiope.
@@ -105,6 +106,11 @@ private struct ReadingSettings: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+            Toggle("CRT screen", isOn: $crt)
+                .disabled(!CRTGeometry.isActive(appearance: shown, crt: true))
+            Text("Scanlines, a vignette and color bleed over the Antiope window. Increase Contrast turns the bleed off.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
 
             Picker("Font:", selection: $font) {
                 ForEach(ReaderFont.allCases) { option in

@@ -13,6 +13,7 @@ struct ReaderView: View {
     @AppStorage(ReaderStyle.Keys.antiopeSize) private var antiopeSize = TeletextFont.defaultSize
     @AppStorage(Appearance.Keys.appearance) private var storedAppearance = Appearance.native
     @AppStorage(Appearance.Keys.crt) private var crt = false
+    @Environment(\.colorSchemeContrast) private var contrast
     @Environment(AntiopeState.self) private var antiope: AntiopeState?
     @State private var controller = ReaderController()
 
@@ -45,11 +46,13 @@ struct ReaderView: View {
                            colorScheme: colorScheme, theme: theme, subpage: subpage(for: entry, theme: theme))
     }
 
-    /// Antiope only when Bedstead is there (spec §5). `crt` is the CRT screen box; phase 13 also
-    /// turns it off under Increase contrast, in this call (spec §9).
+    /// Antiope only when Bedstead is there (spec §5). `crt` is true exactly when the CRT bleed
+    /// applies: Antiope, the CRT screen box checked, Increase contrast off (spec §9).
     private var theme: ReaderTheme {
-        ReaderTheme(appearance: Appearance.effective(stored: storedAppearance, fontAvailable: TeletextFont.isAvailable),
-                    crt: crt)
+        let appearance = Appearance.effective(stored: storedAppearance, fontAvailable: TeletextFont.isAvailable)
+        return ReaderTheme(appearance: appearance,
+                           crt: CRTGeometry.bleedIsActive(CRTGeometry.isActive(appearance: appearance, crt: crt),
+                                                          contrast: contrast))
     }
 
     /// "412 3/20" in Antiope (spec §6); nil in Native, so the native page never changes with it.
