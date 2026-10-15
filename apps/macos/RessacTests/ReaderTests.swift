@@ -238,7 +238,7 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(ArticleTemplate.onLargeStack(timeout: 0.3, gate: gate, work) == nil)  // abandoned while it runs
         // One abandoned worker is running: the next article still gets its worker, within its budget.
         #expect(ArticleTemplate.onLargeStack(timeout: 5, gate: gate, work) == "done")
-        #expect(probe.peak.withLock { $0 } <= 2)
+        #expect(probe.peak.withLock { $0 } == 2)  // it ran beside the abandoned one, not after it
         // Two running (one abandoned), then more callers that give up: they wait, then skip.
         #expect(ArticleTemplate.onLargeStack(timeout: 0.3, gate: gate, work) == nil)
         for _ in 0..<3 {
