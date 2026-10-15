@@ -138,3 +138,246 @@ private func uniform(_ color: TeletextColor) -> MosaicCell {
         #expect(MosaicRenderer.png(MosaicImage(columns: 2, rows: 1, cells: [])).isEmpty)
     }
 }
+
+// MARK: Addresses
+
+@Suite struct MosaicRequestTests {
+    @Test func theOriginalSurvivesTheRoundTrip() throws {
+        let original = try #require(URL(string: "https://img.example.org/a b/photo.jpg?w=800&h=600#x"))
+        let address = MosaicRequest.url(for: original, columns: 40)
+        #expect(address.hasPrefix("ressac-mosaic:image?cols=40&src=https%3A%2F%2Fimg.example.org"))
+        let request = try #require(MosaicRequest(URL(string: address)))
+        #expect(request.original == original)
+        #expect(request.columns == 40)
+    }
+
+    @Test func otherSchemesAndBadColumnsAreRefused() {
+        for source in ["file:///etc/passwd", "javascript:alert(1)", "data:image/png;base64,AAAA", "ftp://example.org/a.png", "https:///nohost"] {
+            let address = MosaicRequest.url(for: URL(string: source)!, columns: 40)
+            #expect(MosaicRequest(URL(string: address)) == nil, "\(source)")
+        }
+        let good = "https%3A%2F%2Fexample.org%2Fa.png"
+        #expect(MosaicRequest(URL(string: "ressac-mosaic:image?cols=0&src=\(good)")) == nil)
+        #expect(MosaicRequest(URL(string: "ressac-mosaic:image?cols=41&src=\(good)")) == nil)
+        #expect(MosaicRequest(URL(string: "ressac-mosaic:image?src=\(good)")) == nil)
+        #expect(MosaicRequest(URL(string: "https://example.org/a.png")) == nil)
+        #expect(MosaicRequest(nil) == nil)
+    }
+}
+
+// MARK: Fetching (Review Focus #4)
+
+/// Serves canned answers to `MosaicFetcher` in process: a status, headers and body chunks.
+final class StubProtocol: URLProtocol, @unchecked Sendable {
+    struct Answer: Sendable {
+        var status = 200
+        var headers: [String: String] = [:]
+        var chunks: [Data] = []
+        /// Seconds before the response, to keep a load in flight.
+        var delay: TimeInterval = 0
+    }
+
+    static let answers = Mutex<[String: Answer]>([:])
+    private let stopped = Mutex(false)
+
+    static func serve(_ path: String, _ answer: Answer) {
+        answers.withLock { $0[path] = answer }
+    }
+
+    static func configuration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubProtocol.self]
+        return configuration
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host() == "stub.ressac.test" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let url = request.url!
+        guard let answer = Self.answers.withLock({ $0[url.path()] }) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.cannotFindHost))
+            return
+        }
+        Thread.detachNewThread { [self] in
+            Thread.sleep(forTimeInterval: answer.delay)
+            let response = HTTPURLResponse(url: url, statusCode: answer.status, httpVersion: "HTTP/1.1", headerFields: answer.headers)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            for chunk in answer.chunks {
+                if stopped.withLock({ $0 }) { return }
+                client?.urlProtocol(self, didLoad: chunk)
+            }
+            if !stopped.withLock({ $0 }) { client?.urlProtocolDidFinishLoading(self) }
+        }
+    }
+
+    override func stopLoading() {
+        stopped.withLock { $0 = true }
+    }
+}
+
+private func stub(_ path: String) -> MosaicRequest {
+    MosaicRequest(URL(string: MosaicRequest.url(for: URL(string: "https://stub.ressac.test\(path)")!, columns: 40)))!
+}
+
+@Suite(.serialized) struct MosaicFetchTests {
+    let fetcher = MosaicFetcher(configuration: StubProtocol.configuration())
+
+    @Test func anImageBecomesAMosaicPNG() async throws {
+        StubProtocol.serve("/red.png", .init(headers: ["Content-Type": "image/png"],
+                                             chunks: [encoded([flat(255, 0, 0, width: 120, height: 200)], as: .png)]))
+        let png = try await MosaicSchemeHandler.mosaic(for: stub("/red.png"), fetcher: fetcher).get()
+        let decoded = try #require(decodePNG(png))
+        #expect(decoded.width == 10 * 6)  // 120 pixels: 10 columns of 6 font pixels
+        #expect(decoded.height == 10 * 10)  // 0.6 × 10 × 200 / 120 = 10 rows of 10 font pixels
+        #expect(decoded.rgb(5, 5) == (255, 0, 0))
+    }
+
+    @Test func aGIFUsesItsFirstFrame() async throws {
+        let gif = encoded([flat(255, 0, 0, width: 24, height: 40), flat(0, 0, 255, width: 24, height: 40)], as: .gif)
+        StubProtocol.serve("/anim.gif", .init(chunks: [gif]))
+        let png = try await MosaicSchemeHandler.mosaic(for: stub("/anim.gif"), fetcher: fetcher).get()
+        #expect(try #require(decodePNG(png)).rgb(0, 0) == (255, 0, 0))
+    }
+
+    @Test func htmlEmptyAndSVGBodiesAreUnreadable() async {
+        StubProtocol.serve("/page.html", .init(headers: ["Content-Type": "text/html"], chunks: [Data("<html><body>Not an image</body></html>".utf8)]))
+        StubProtocol.serve("/empty.png", .init(chunks: []))
+        StubProtocol.serve("/logo.svg", .init(chunks: [Data(#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#.utf8)]))
+        for path in ["/page.html", "/empty.png", "/logo.svg"] {
+            #expect(await MosaicSchemeHandler.mosaic(for: stub(path), fetcher: fetcher) == .failure(.unreadable), "\(path)")
+        }
+    }
+
+    @Test func anHTTPErrorIsAFailure() async {
+        StubProtocol.serve("/gone.png", .init(status: 404, chunks: [Data("Not found".utf8)]))
+        #expect(await MosaicSchemeHandler.mosaic(for: stub("/gone.png"), fetcher: fetcher) == .failure(.status(404)))
+    }
+
+    @Test func aBodyOverTenMegabytesIsCutOffWithoutHanging() async {
+        let megabyte = Data(repeating: 0x41, count: 1 << 20)
+        // No Content-Length: the cap is enforced while the body streams in.
+        StubProtocol.serve("/huge.jpg", .init(chunks: Array(repeating: megabyte, count: 50)))
+        let start = ContinuousClock.now
+        #expect(await MosaicSchemeHandler.mosaic(for: stub("/huge.jpg"), fetcher: fetcher) == .failure(.tooLarge))
+        #expect(ContinuousClock.now - start < .seconds(5))
+        // An announced length over the cap is refused before the body.
+        StubProtocol.serve("/announced.jpg", .init(headers: ["Content-Length": "\(50 << 20)"], chunks: [megabyte]))
+        #expect(await MosaicSchemeHandler.mosaic(for: stub("/announced.jpg"), fetcher: fetcher) == .failure(.tooLarge))
+    }
+
+    /// 190 KB of PNG can announce 8000 × 8000 pixels, which ImageIO would decode in full: the
+    /// size is checked from the header first. A small real PNG under a small limit stands for it.
+    @Test func tooManyPixelsAreRefusedBeforeDecoding() {
+        let png = encoded([flat(255, 255, 255, width: 100, height: 100)], as: .png)
+        guard case .failure(let failure) = MosaicDecoder.thumbnail(of: png, maxColumns: 40, maxPixels: 9_999) else {
+            Issue.record("decoded an image over the pixel limit")
+            return
+        }
+        #expect(failure == .tooLarge)
+        guard case .success(let thumbnail) = MosaicDecoder.thumbnail(of: png, maxColumns: 40, maxPixels: 10_000) else {
+            Issue.record("refused an image at the pixel limit")
+            return
+        }
+        #expect(thumbnail.columns == 9)
+    }
+
+    @Test func aServerThatNeverAnswersTimesOut() async throws {
+        let server = try HangingServer()
+        let quick = MosaicFetcher(timeout: 0.5)
+        let request = try #require(MosaicRequest(URL(string: MosaicRequest.url(
+            for: URL(string: "http://127.0.0.1:\(server.port)/slow.png")!, columns: 40))))
+        let start = ContinuousClock.now
+        #expect(await MosaicSchemeHandler.mosaic(for: request, fetcher: quick) == .failure(.network))
+        #expect(ContinuousClock.now - start < .seconds(3))
+    }
+}
+
+// MARK: Handler
+
+/// Records what the handler sends to one WebKit task.
+final class FakeSchemeTask: NSObject, WKURLSchemeTask {
+    let request: URLRequest
+    private(set) var events: [String] = []
+    private(set) var body = Data()
+    private(set) var response: HTTPURLResponse?
+
+    init(_ url: String) {
+        request = URLRequest(url: URL(string: url)!)
+    }
+
+    func didReceive(_ response: URLResponse) {
+        self.response = response as? HTTPURLResponse
+        events.append("response")
+    }
+
+    func didReceive(_ data: Data) {
+        body.append(data)
+        events.append("data")
+    }
+
+    func didFinish() { events.append("finish") }
+    func didFailWithError(_ error: any Error) { events.append("fail") }
+}
+
+@MainActor @Suite(.serialized) struct MosaicSchemeHandlerTests {
+    let webView = WKWebView()
+
+    func handler() -> MosaicSchemeHandler {
+        MosaicSchemeHandler(fetcher: MosaicFetcher(configuration: StubProtocol.configuration()), cache: NSCache())
+    }
+
+    @Test func aMosaicIsAnsweredAsAPNG() async throws {
+        StubProtocol.serve("/blue.png", .init(chunks: [encoded([flat(0, 0, 255, width: 60, height: 60)], as: .png)]))
+        let handler = handler()
+        let task = FakeSchemeTask(MosaicRequest.url(for: URL(string: "https://stub.ressac.test/blue.png")!, columns: 40))
+        handler.webView(webView, start: task)
+        #expect(await eventually { task.events == ["response", "data", "finish"] })
+        #expect(task.response?.statusCode == 200)
+        #expect(task.response?.value(forHTTPHeaderField: "Content-Type") == "image/png")
+        #expect(try #require(decodePNG(task.body)).width == 5 * 6)
+        #expect(handler.runningCount == 0)
+    }
+
+    /// A cached mosaic is answered at once, without a download. (A real `NSCache` may evict at
+    /// any time, even right after `setObject`, under the memory pressure of the full suite: the
+    /// test hands the handler a cache that keeps what it is given.)
+    @Test func aCachedMosaicIsAnsweredAtOnce() throws {
+        let cache = KeepingCache()
+        let handler = MosaicSchemeHandler(fetcher: MosaicFetcher(configuration: StubProtocol.configuration()), cache: cache)
+        let address = MosaicRequest.url(for: URL(string: "https://stub.ressac.test/never-fetched.png")!, columns: 40)
+        let request = try #require(MosaicRequest(URL(string: address)))
+        cache.setObject(MosaicSchemeHandler.CachedMosaic(.success(Data("cached".utf8))), forKey: request.cacheKey)
+        let task = FakeSchemeTask(address)
+        handler.webView(webView, start: task)
+        #expect(task.events == ["response", "data", "finish"])
+        #expect(task.body == Data("cached".utf8))
+        #expect(handler.runningCount == 0)
+    }
+
+    @Test func aFailureAnswersTheBlackPlaceholder() async {
+        StubProtocol.serve("/not-an-image.html", .init(chunks: [Data("<html></html>".utf8)]))
+        let handler = handler()
+        let task = FakeSchemeTask(MosaicRequest.url(for: URL(string: "https://stub.ressac.test/not-an-image.html")!, columns: 40))
+        handler.webView(webView, start: task)
+        #expect(await eventually { task.events == ["response", "data", "finish"] })
+        #expect(task.body == MosaicSchemeHandler.failurePNG)
+        let refused = FakeSchemeTask("ressac-mosaic:image?cols=40&src=file%3A%2F%2F%2Fetc%2Fpasswd")
+        handler.webView(webView, start: refused)
+        #expect(refused.events == ["response", "data", "finish"])
+        #expect(refused.body == MosaicSchemeHandler.failurePNG)
+    }
+
+    /// WebKit throws if a stopped task is called back: nothing may reach it after `stop`.
+    @Test func aStoppedTaskIsNeverCalledBack() async throws {
+        StubProtocol.serve("/slow.png", .init(chunks: [encoded([flat(0, 255, 0)], as: .png)], delay: 0.3))
+        let handler = handler()
+        let task = FakeSchemeTask(MosaicRequest.url(for: URL(string: "https://stub.ressac.test/slow.png")!, columns: 40))
+        handler.webView(webView, start: task)
+        #expect(handler.runningCount == 1)
+        handler.webView(webView, stop: task)
+        #expect(handler.runningCount == 0)
+        try await Task.sleep(for: .milliseconds(800))
+        #expect(task.events.isEmpty)
+    }
+}
