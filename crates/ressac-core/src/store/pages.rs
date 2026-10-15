@@ -14,6 +14,17 @@ use crate::error::Result;
 pub const RESERVED_PAGES: [u16; 8] = [100, 101, 102, 103, 800, 801, 802, 899];
 /// The pages a folder or a feed may hold.
 pub const ASSIGNABLE: RangeInclusive<u16> = 110..=799;
+/// Titles of `RESERVED_PAGES`, in the same order.
+const RESERVED_TITLES: [&str; 8] = [
+    "Index",
+    "Unread",
+    "Today",
+    "Starred",
+    "Needs triage",
+    "All feeds",
+    "Cemetery",
+    "Guide",
+];
 
 /// Feeds without a folder.
 const ROOT_FEEDS: RangeInclusive<u16> = 110..=199;
@@ -37,6 +48,16 @@ impl PageKind {
             PageKind::Reserved => "reserved",
         }
     }
+}
+
+/// One line of `ressac page list`: a reserved page (no id), or a numbered folder or feed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PageRow {
+    pub page: u16,
+    pub kind: PageKind,
+    pub id: Option<i64>,
+    pub title: String,
+    pub parent_page: Option<u16>,
 }
 
 /// A folder or a feed as the assignment sees it.
@@ -228,9 +249,53 @@ pub fn assign_missing(conn: &Connection) -> Result<usize> {
     Ok(pass.assigned.len())
 }
 
+/// Reserved pages first (in `RESERVED_PAGES` order), then every row of `v_page` by page.
+pub fn list(conn: &Connection) -> Result<Vec<PageRow>> {
+    let mut rows: Vec<PageRow> = RESERVED_PAGES
+        .iter()
+        .zip(RESERVED_TITLES)
+        .map(|(&page, title)| PageRow {
+            page,
+            kind: PageKind::Reserved,
+            id: None,
+            title: title.to_string(),
+            parent_page: None,
+        })
+        .collect();
+    let mut stmt = conn.prepare(
+        "SELECT page, kind, ref_id, title, parent_page FROM v_page ORDER BY page, kind, ref_id",
+    )?;
+    let stored = stmt
+        .query_map([], |r| {
+            let kind: String = r.get(1)?;
+            let kind = match kind.as_str() {
+                "folder" => PageKind::Folder,
+                "feed" => PageKind::Feed,
+                _ => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        format!("invalid kind {kind:?} in v_page").into(),
+                    ));
+                }
+            };
+            Ok(PageRow {
+                page: r.get(0)?,
+                kind,
+                id: Some(r.get(2)?),
+                title: r.get(3)?,
+                parent_page: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.extend(stored);
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Utc};
+    use serde_json::json;
 
     use super::*;
     use crate::model::{Action, Decision, Status};
@@ -504,6 +569,63 @@ mod tests {
             folder_page(&s, 3),
             Some(110),
             "300 is a feed's, so the second root folder overflows"
+        );
+    }
+
+    #[test]
+    fn list_gives_reserved_pages_then_v_page_by_page() {
+        let s = Store::open_in_memory().unwrap();
+        folder(&s, 1, None, 0);
+        feed(&s, 10, Some(1), 0);
+        folder(&s, 2, Some(1), 1);
+        feed(&s, 11, None, 1);
+        assign(&s);
+        s.record_decision(10, Decision::Bury, Status::Dead, None, now())
+            .unwrap();
+        let rows = list(s.conn()).unwrap();
+        let reserved: Vec<(u16, &str)> = rows[..8]
+            .iter()
+            .map(|r| (r.page, r.title.as_str()))
+            .collect();
+        assert_eq!(
+            reserved,
+            [
+                (100, "Index"),
+                (101, "Unread"),
+                (102, "Today"),
+                (103, "Starred"),
+                (800, "Needs triage"),
+                (801, "All feeds"),
+                (802, "Cemetery"),
+                (899, "Guide")
+            ]
+        );
+        assert!(
+            rows[..8]
+                .iter()
+                .all(|r| r.kind == PageKind::Reserved && r.id.is_none())
+        );
+        let stored: Vec<(u16, PageKind, Option<i64>, Option<u16>)> = rows[8..]
+            .iter()
+            .map(|r| (r.page, r.kind, r.id, r.parent_page))
+            .collect();
+        assert_eq!(
+            stored,
+            [
+                (110, PageKind::Feed, Some(11), None),
+                (200, PageKind::Folder, Some(1), None),
+                (201, PageKind::Feed, Some(10), Some(200)),
+                (202, PageKind::Folder, Some(2), Some(200)),
+            ],
+            "the buried feed 10 stays listed"
+        );
+        assert_eq!(
+            serde_json::to_value(&rows[10]).unwrap(),
+            json!({"page": 201, "kind": "feed", "id": 10, "title": "Feed 10", "parent_page": 200})
+        );
+        assert_eq!(
+            serde_json::to_value(&rows[0]).unwrap(),
+            json!({"page": 100, "kind": "reserved", "id": null, "title": "Index", "parent_page": null})
         );
     }
 }
