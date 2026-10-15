@@ -59,8 +59,7 @@ struct ReaderView: View {
 
     /// "412 3/20" in Antiope (spec §6); nil in Native, so the native page never changes with it.
     private func subpage(for entry: EntryRow, theme: ReaderTheme) -> SubpageLabel? {
-        guard theme.appearance == .antiope else { return nil }
-        let directory = PageDirectory(snapshot: state.sidebar)
+        guard theme.appearance == .antiope, let directory = antiope?.directory else { return nil }
         return SubpageLabel.of(entryId: entry.entryId, in: state.entries, page: directory.page(forFeed:))
     }
 

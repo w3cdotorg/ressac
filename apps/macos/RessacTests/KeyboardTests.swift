@@ -500,6 +500,22 @@ final class ManualClock: Clock, @unchecked Sendable {
         #expect(state.entries.first { $0.entryId == second }?.isRead == false)
     }
 
+    @Test func theDirectoryIsRebuiltOnlyWhenTheSidebarChanges() async throws {
+        let (antiope, state, test, _) = try make()
+        let first = antiope.directory
+        let builds = antiope.directoryBuilds
+        #expect(antiope.directory == first && antiope.currentPage == antiope.currentPage)
+        #expect(antiope.directoryBuilds == builds)  // same snapshot: the cached directory
+        let before = state.sidebar
+        _ = try test.entry(feed: 1)  // one more unread entry: a different sidebar snapshot
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { state.sidebar != before })
+        let second = antiope.directory
+        #expect(antiope.directoryBuilds == builds + 1)
+        #expect(second != first)
+        #expect(antiope.directory == second && antiope.directoryBuilds == builds + 1)
+    }
+
     @Test func repetitionRefreshesTheSelection() async throws {
         let (antiope, state, _, stub) = try make()
         state.selection = .feed(3)

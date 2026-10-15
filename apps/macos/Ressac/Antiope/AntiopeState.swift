@@ -52,14 +52,26 @@ enum ReaderPage: Equatable, Sendable {
     let app: AppState
     private let clock: any Clock<Duration>
     @ObservationIgnored private var notFoundReset: Task<Void, Never>?
+    @ObservationIgnored private var directoryCache: (snapshot: SidebarSnapshot, directory: PageDirectory)?
+    /// How many times `directory` was rebuilt, for the tests.
+    @ObservationIgnored private(set) var directoryBuilds = 0
 
     init(app: AppState, clock: any Clock<Duration> = ContinuousClock()) {
         self.app = app
         self.clock = clock
     }
 
-    /// Every page of the library, from the live sidebar snapshot.
-    var directory: PageDirectory { PageDirectory(snapshot: app.sidebar) }
+    /// Every page of the library, from the live sidebar snapshot. It is rebuilt only when the
+    /// snapshot changed: the header, both columns and the reader read it on every body evaluation.
+    /// Reading `app.sidebar` keeps the observation tracking.
+    var directory: PageDirectory {
+        let snapshot = app.sidebar
+        if let cached = directoryCache, cached.snapshot == snapshot { return cached.directory }
+        let directory = PageDirectory(snapshot: snapshot)
+        directoryCache = (snapshot, directory)
+        directoryBuilds += 1
+        return directory
+    }
 
     /// The page on screen: P100 or P899 in the reader column, else the selection's page (nil
     /// while the selected folder or feed has no number yet).
