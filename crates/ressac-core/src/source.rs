@@ -226,9 +226,10 @@ impl LocalSource {
         Self::build(limits, false)
     }
 
-    /// A source for article pages, whose URLs come from feeds: http(s) only, and local or
-    /// private targets are refused at the start URL, at every redirect hop and after DNS
-    /// resolution. `allow_private` turns that off (tests against a local mock server).
+    /// A source for URLs read from third-party content (article pages, feed addresses found
+    /// by autodiscovery): http(s) only, local or private targets are refused at the start
+    /// URL, at every redirect hop and after DNS resolution, and proxy variables are ignored.
+    /// `allow_private` turns all of that off (tests against a local mock server).
     pub fn for_articles(limits: FetchLimits, allow_private: bool) -> Result<Self> {
         Self::build(limits, !allow_private)
     }
@@ -239,7 +240,11 @@ impl LocalSource {
             .timeout(limits.timeout)
             .user_agent(USER_AGENT);
         if public_only {
-            builder = builder.dns_resolver(Arc::new(PublicOnlyResolver));
+            // No proxy either: a proxy resolves the target name itself, which would skip
+            // `PublicOnlyResolver`, and it may sit on the very network the guard protects.
+            builder = builder
+                .dns_resolver(Arc::new(PublicOnlyResolver))
+                .no_proxy();
         }
         Ok(Self {
             client: builder.build()?,
