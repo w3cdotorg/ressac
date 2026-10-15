@@ -145,7 +145,8 @@ impl Summary {
 pub struct Ressac {
     store: Store,
     source: LocalSource,
-    /// Fetches article pages, whose URLs come from feeds: refuses local and private targets.
+    /// Fetches URLs read from third-party content (article pages, feed addresses announced by
+    /// a site page): refuses local and private targets.
     articles: LocalSource,
     limits: FetchLimits,
     wayback: Wayback,
@@ -175,8 +176,9 @@ impl Ressac {
         })
     }
 
-    /// Lets article pages be fetched from local and private addresses. For tests against a
-    /// local mock server and for the `RESSAC_ALLOW_PRIVATE_ARTICLES` test hook of the CLI.
+    /// Lets article pages and autodiscovered feed addresses be fetched from local and private
+    /// addresses. For tests against a local mock server and for the
+    /// `RESSAC_ALLOW_PRIVATE_ARTICLES` test hook of the CLI.
     pub fn allow_private_articles(mut self) -> Result<Self> {
         self.articles = LocalSource::for_articles(self.limits.clone(), true)?;
         Ok(self)
@@ -351,13 +353,13 @@ impl Ressac {
             what: "autodiscovery".into(),
             total: candidates.len(),
         });
-        let source = &self.source;
+        let (site, guarded) = (&self.source, &self.articles);
         let found: Vec<(FeedId, Option<Option<String>>)> = stream::iter(candidates)
             .map(|f| async move {
                 if stop.load(Ordering::Relaxed) {
                     return (f.id, None);
                 }
-                (f.id, discover_one(source, &f, now).await)
+                (f.id, discover_one(site, guarded, &f, now).await)
             })
             .buffer_unordered(PROBE_CONCURRENCY)
             .collect()
@@ -663,14 +665,16 @@ fn article_from(raw: &RawResponse) -> Extraction {
 
 /// `Some(found)` once the site was checked (`found` is `None` when it announces nothing new);
 /// `None` when it could not be checked (transient page-fetch failure, no site address).
+/// The site address comes from the user's OPML and goes through `site`, like feeds; the feed
+/// address the page announces is third-party content and goes through `guarded`, which
+/// refuses local and private targets (a refused candidate counts as nothing found).
 async fn discover_one(
-    source: &LocalSource,
+    site: &LocalSource,
+    guarded: &LocalSource,
     feed: &FeedRow,
     now: DateTime<Utc>,
 ) -> Option<Option<String>> {
-    let page = source
-        .fetch_raw(feed.html_url.as_deref()?, None, None)
-        .await;
+    let page = site.fetch_raw(feed.html_url.as_deref()?, None, None).await;
     if is_challenged(&page) {
         return None;
     }
@@ -686,7 +690,10 @@ async fn discover_one(
     else {
         return Some(None);
     };
-    let raw = source.fetch_raw(&candidate, None, None).await;
+    let raw = guarded.fetch_raw(&candidate, None, None).await;
+    if raw.refused {
+        return Some(None);
+    }
     if is_challenged(&raw) {
         return None;
     }
@@ -740,8 +747,15 @@ mod tests {
     }
 
     async fn discover(server: &MockServer) -> Option<Option<String>> {
-        let source = LocalSource::new(FetchLimits::default()).unwrap();
-        discover_one(&source, &row(format!("{}/", server.uri())), Utc::now()).await
+        let site = LocalSource::new(FetchLimits::default()).unwrap();
+        let candidates = LocalSource::for_articles(FetchLimits::default(), true).unwrap();
+        discover_one(
+            &site,
+            &candidates,
+            &row(format!("{}/", server.uri())),
+            Utc::now(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -786,6 +800,34 @@ mod tests {
         )
         .await;
         assert_eq!(discover(&server).await, Some(None));
+    }
+
+    /// SSRF guard: the feed address a site page announces is third-party content, so one on
+    /// a local address is refused without being requested, and the site counts as checked.
+    #[tokio::test]
+    async fn a_candidate_on_a_local_address_is_refused_without_a_request() {
+        let server = MockServer::start().await;
+        let page = r#"<html><head><link rel="alternate" type="application/rss+xml" href="/new.xml"></head></html>"#;
+        serve(&server, "/", 200, page, "text/html").await;
+        serve(&server, "/new.xml", 200, RSS, "application/rss+xml").await;
+        let site = LocalSource::new(FetchLimits::default()).unwrap();
+        let guarded = LocalSource::for_articles(FetchLimits::default(), false).unwrap();
+        let found = discover_one(
+            &site,
+            &guarded,
+            &row(format!("{}/", server.uri())),
+            Utc::now(),
+        )
+        .await;
+        assert_eq!(found, Some(None));
+        let paths: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.url.path().to_owned())
+            .collect();
+        assert_eq!(paths, ["/"], "only the site page is requested");
     }
 
     #[tokio::test]

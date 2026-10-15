@@ -131,7 +131,11 @@ async fn full_pipeline_classifies_every_kind_of_feed() {
         </outline></body></opml>"#
     );
 
-    let app = Ressac::with_parts(Store::open_in_memory().unwrap(), limits(), &base).unwrap();
+    // The mock web is on 127.0.0.1: lift the guard so autodiscovery may reach `/found.xml`.
+    let app = Ressac::with_parts(Store::open_in_memory().unwrap(), limits(), &base)
+        .unwrap()
+        .allow_private_articles()
+        .unwrap();
     assert_eq!(app.import_opml(&opml, false).unwrap().feeds_added, 7);
     let recorder = Recorder::default();
     let summary = app
