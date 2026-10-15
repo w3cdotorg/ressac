@@ -154,11 +154,47 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         let clean = ArticleTemplate.sanitize(big)
         #expect(Date().timeIntervalSince(start) < 1.5)
         #expect(!clean.contains("<div"))
-        // 200 KB of the same shape: within the cap, so it returns within the budget (parsed or fallback).
+        // 200 KB of the same shape: the depth estimate sends it to the plain-text path, unparsed.
         let medium = String(repeating: "<b><div>x</b>", count: 15_000)
         let mediumStart = Date()
         _ = ArticleTemplate.sanitize(medium)
-        #expect(Date().timeIntervalSince(mediumStart) < 1.5)
+        #expect(Date().timeIntervalSince(mediumStart) < 0.2)
+    }
+
+    /// libxml ignores `</b>` while a `div` is open, so this nests one level deeper each time and
+    /// libxml's time grows with the square of the depth: the estimate follows it, the text is plain.
+    @Test func inlineEndTagsThatCannotCloseABlockCountAsDepth() {
+        let html = String(repeating: "<b><div>x</b>", count: 5_000)  // 63 KB: 0.8 s in libxml
+        #expect(ArticleTemplate.estimatedNestingDepth(html) == 10_000)
+        let start = Date()
+        let clean = ArticleTemplate.sanitize(html)
+        #expect(Date().timeIntervalSince(start) < 0.2)
+        #expect(!clean.contains("<div") && clean.contains("x"))
+        // Where libxml does close: `</div>` closes a `b`, and `</i>` a `p` (the same priority).
+        #expect(ArticleTemplate.estimatedNestingDepth(String(repeating: "<div><b>x</div>", count: 1_000)) == 2)
+        #expect(ArticleTemplate.estimatedNestingDepth(String(repeating: "<i><p>x</i>", count: 1_000)) == 2)
+        // The scan stops once past the limit.
+        #expect(ArticleTemplate.estimatedNestingDepth(html, stoppingAbove: 256) == 257)
+    }
+
+    /// The estimate against libxml itself: never below its depth by more than the few elements
+    /// libxml adds on its own.
+    @Test func theDepthEstimateFollowsLibxml() throws {
+        func depth(_ node: XMLNode) -> Int {
+            1 + (node.children ?? []).filter { $0.kind == .element }.map(depth).reduce(0, max)
+        }
+        let shapes = [
+            String(repeating: "<b><div>x</b>", count: 300), String(repeating: "<div><b>x</div>", count: 300),
+            String(repeating: "<i><p>x</i>", count: 300), String(repeating: #"<a href="https://e.org">x<p>y</a>"#, count: 300),
+            String(repeating: "<span><div>x</span>", count: 300), String(repeating: "<td><div>x</td>", count: 300),
+            String(repeating: "<table><tr><td>x</b>", count: 100), String(repeating: "<ul><li>x<p>y</ul>", count: 300),
+        ]
+        for html in shapes {
+            let document = try XMLDocument(xmlString: "<html><body>\(html)</body></html>",
+                                           options: [.documentTidyHTML, .nodeLoadExternalEntitiesNever])
+            let body = try #require(document.rootElement()?.children?.first { $0.name == "body" })
+            #expect(ArticleTemplate.estimatedNestingDepth(html) + 5 >= depth(body) - 1, "\(html.prefix(30))")
+        }
     }
 
     @Test func optionalEndTagsStayOnTheParsedPath() {

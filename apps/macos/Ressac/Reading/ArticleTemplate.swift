@@ -56,10 +56,10 @@ enum ArticleTemplate {
 
     private static func sanitizeUncached(_ html: String, baseURL: URL?, budget: TimeInterval, mosaics: Bool) -> (html: String, timedOut: Bool) {
         // Tidy and the recursive renderer overflow the stack on pathological nesting, and libxml's
-        // repair of misnested end tags is quadratic, so such input (or anything big) skips the
+        // work grows with the square of the depth, so such input (or anything big) skips the
         // parser and is shown as escaped plain text.
         let size = html.utf8.count
-        if size > maxParsedBytes || estimatedNestingDepth(html) > maxNestingDepth {
+        if size > maxParsedBytes || estimatedNestingDepth(html, stoppingAbove: maxNestingDepth) > maxNestingDepth {
             let text = size > maxInputBytes ? String(decoding: html.utf8.prefix(maxInputBytes), as: UTF8.self) : html
             return (plainTextFallback(text), false)
         }
@@ -152,11 +152,14 @@ enum ArticleTemplate {
     ]
 
     /// Linear, non-recursive estimate of the deepest element nesting: opening tags minus closing
-    /// tags, ignoring void and self-closing tags, comments, `<!…>` and `<?…>`.
-    static func estimatedNestingDepth(_ html: String) -> Int {
+    /// tags, ignoring void and self-closing tags, comments, `<!…>` and `<?…>`. Stops as soon as
+    /// the depth passes `limit`, which bounds the work per close tag.
+    static func estimatedNestingDepth(_ html: String, stoppingAbove limit: Int = .max) -> Int {
         let bytes = Array(html.utf8)
-        // Conservative: it may overestimate, never underestimate. A close tag pops only down to a
-        // matching open name (a stray one pops nothing), and a tag ends at the first `>`.
+        // Conservative: it may overestimate, and underestimates only by the few elements libxml
+        // adds on its own (an implied `p`: 5 levels at most over 1,500 random tag soups). A close
+        // tag pops down to its open name only where libxml would (`closes(_:above:)`), a stray one
+        // pops nothing, and a tag ends at the first `>`.
         var stack: [String] = []
         var open: [String: Int] = [:]
         var deepest = 0, i = 0
@@ -183,19 +186,43 @@ enum ArticleTemplate {
             var k = j
             while k < bytes.count, bytes[k] != 0x3E { k += 1 }
             if closing {
-                if open[tag, default: 0] > 0 {
-                    while let top = stack.last, top != tag { pop() }
-                    pop()
+                if open[tag, default: 0] > 0, let match = stack.lastIndex(of: tag),
+                   closes(tag, above: stack[(match + 1)...]) {
+                    while stack.count > match { pop() }
                 }
             } else if !voidTags.contains(tag) {
                 closeOptionalEndTags(before: tag, stack: stack, pop: pop)
                 stack.append(tag)
                 open[tag, default: 0] += 1
                 deepest = max(deepest, stack.count)
+                if deepest > limit { return deepest }
             }
             i = k + 1
         }
         return deepest
+    }
+
+    /// libxml's rule for a misplaced end tag (`htmlAutoCloseOnClose`): it closes the elements
+    /// opened after its match only when none of them has a higher end priority than its own;
+    /// otherwise it is ignored. So `</b>` never closes an open `div`, and `<b><div>x</b>`,
+    /// repeated, nests one level deeper each time (60 KB of it took 0.8 s, 250 KB 23 s).
+    private static func closes(_ tag: String, above opened: ArraySlice<String>) -> Bool {
+        let priority = endPriority(tag)
+        return opened.allSatisfy { endPriority($0) <= priority }
+    }
+
+    /// libxml's `htmlEndPriority` table; every other element has 100.
+    private static func endPriority(_ tag: String) -> Int {
+        switch tag {
+        case "div": 150
+        case "td", "th": 160
+        case "tr": 170
+        case "thead", "tbody", "tfoot": 180
+        case "table": 190
+        case "head", "body": 200
+        case "html": 220
+        default: 100
+        }
     }
 
     /// HTML's optional end tags: what an opening tag closes when it sits on top of the stack.
