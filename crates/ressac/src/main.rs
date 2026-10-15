@@ -21,6 +21,7 @@ use ressac_core::service::{
 };
 use ressac_core::source::FetchLimits;
 use ressac_core::store::Store;
+use ressac_core::store::pages::PageKind;
 
 #[derive(Parser)]
 #[command(
@@ -93,6 +94,11 @@ enum Command {
     },
     /// Open the database and apply pending schema migrations, nothing else
     Migrate,
+    /// List the teletext page numbers, or give a folder or a feed another one
+    Page {
+        #[command(subcommand)]
+        action: PageCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -114,6 +120,35 @@ enum DecisionArg {
     Keep,
     Repair,
     Bury,
+}
+
+#[derive(Subcommand)]
+enum PageCommand {
+    /// Every page, reserved ones first: page, kind, id, title
+    List,
+    /// Give a folder or a feed another page (110 to 799, not reserved, not taken)
+    Set {
+        #[arg(value_enum)]
+        kind: PageKindArg,
+        /// The folder's or the feed's id
+        id: i64,
+        page: u16,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PageKindArg {
+    Feed,
+    Folder,
+}
+
+impl From<PageKindArg> for PageKind {
+    fn from(k: PageKindArg) -> Self {
+        match k {
+            PageKindArg::Feed => PageKind::Feed,
+            PageKindArg::Folder => PageKind::Folder,
+        }
+    }
 }
 
 impl From<DecisionArg> for Decision {
@@ -304,6 +339,48 @@ fn garden_command(
     Ok(())
 }
 
+/// The refusals of `page set` (reserved, out of range, taken, unknown id) are usage errors
+/// (exit 2); any other error stays fatal (exit 1).
+fn page_error(e: ressac_core::Error) -> anyhow::Error {
+    use ressac_core::Error;
+    match e {
+        Error::PageReserved(_)
+        | Error::PageOutOfRange(_)
+        | Error::PageTaken { .. }
+        | Error::UnknownPageTarget { .. } => usage(e.to_string()),
+        other => other.into(),
+    }
+}
+
+/// `ressac page list | set`: one line (or one `page` event) per page.
+fn page_command(
+    app: &Ressac,
+    action: PageCommand,
+    json: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    match action {
+        PageCommand::List => {
+            for row in app.pages()? {
+                let text = output::page_text(&row);
+                output::write_result(out, json, &Event::Page(row), &text)?;
+            }
+        }
+        PageCommand::Set { kind, id, page } => {
+            let kind = PageKind::from(kind);
+            app.set_page(kind, id, page).map_err(page_error)?;
+            let row = app
+                .pages()?
+                .into_iter()
+                .find(|r| r.kind == kind && r.id == Some(id))
+                .context("the renumbered page is missing from v_page")?;
+            let text = output::page_text(&row);
+            output::write_result(out, json, &Event::Page(row), &text)?;
+        }
+    }
+    Ok(())
+}
+
 async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let db = cli
         .db
@@ -457,12 +534,18 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let app = open(&db)?;
             // A v1 → v2 migration leaves every `needs_triage` at 0 until the next
             // diagnosis or decision: compute the flags now, so the app's Garden is right.
-            ressac_core::garden::recompute_triage(app.store())?;
+            garden::recompute_triage(app.store())?;
             let event = Event::Finished {
                 summary: app.summary()?,
             };
             let text = output::migrated_text(app.store().schema_version()?);
             output::write_result(&mut out, cli.json, &event, &text)?;
+        }
+        Command::Page { action } => {
+            let Some(app) = open_with_feeds(&db)? else {
+                return Ok(ExitCode::SUCCESS);
+            };
+            page_command(&app, action, cli.json, &mut out)?;
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -534,5 +617,51 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn page_set_parses_its_kind_id_and_page() {
+        let set = Cli::try_parse_from(["ressac", "page", "set", "folder", "4", "450"]).unwrap();
+        assert!(matches!(
+            set.command,
+            Command::Page {
+                action: PageCommand::Set {
+                    kind: PageKindArg::Folder,
+                    id: 4,
+                    page: 450
+                }
+            }
+        ));
+        for bad in [
+            &["ressac", "page"][..],
+            &["ressac", "page", "set", "entry", "1", "300"],
+            &["ressac", "page", "set", "feed", "1", "70000"],
+            &["ressac", "page", "set", "feed", "1", "-3"],
+        ] {
+            assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn page_refusals_are_usage_errors_and_others_stay_fatal() {
+        use ressac_core::Error;
+        for refusal in [
+            Error::PageReserved(800),
+            Error::PageOutOfRange(900),
+            Error::PageTaken { page: 201 },
+            Error::UnknownPageTarget {
+                kind: "feed",
+                id: 99,
+            },
+        ] {
+            let text = refusal.to_string();
+            let e = page_error(refusal);
+            assert_eq!(
+                e.downcast_ref::<UsageError>().map(ToString::to_string),
+                Some(text)
+            );
+        }
+        let fatal = page_error(Error::Invalid("disk".into()));
+        assert!(fatal.downcast_ref::<UsageError>().is_none());
     }
 }

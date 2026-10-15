@@ -261,7 +261,7 @@ func calls(_ stub: Stub) throws -> [String] {
         let test = try TestDatabase()
         let v1 = test.dir.appending(path: "v1.sqlite")
         try TestDatabase.makeV1(at: v1)
-        // The stub "migrates" by copying the v2 fixture over the --db file.
+        // The stub "migrates" by copying the v3 fixture over the --db file.
         let stub = try Stub("""
             [ "$4" = migrate ] || exit 2
             cp "\(TestDatabase.fixture.path)" "$2"
@@ -289,11 +289,11 @@ func calls(_ stub: Stub) throws -> [String] {
 
     @Test func newer_database_is_refused() async throws {
         let test = try TestDatabase()
-        try test.execute("UPDATE schema_meta SET version = 3")
+        try test.execute("UPDATE schema_meta SET version = 4")
         let launcher = Launcher()
         await launcher.launch(database: test.url, executable: try Stub("exit 0").executable)
-        guard case .tooNew(3) = launcher.phase else {
-            Issue.record("expected tooNew(3), got \(launcher.phase)")
+        guard case .tooNew(4) = launcher.phase else {
+            Issue.record("expected tooNew(4), got \(launcher.phase)")
             return
         }
     }

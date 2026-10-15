@@ -158,8 +158,19 @@ fn reading_columns_and_views_are_stable() {
     let version: i64 = conn
         .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     assert_eq!(version, ressac_core::store::SCHEMA_VERSION);
+}
+
+#[test]
+fn page_columns_and_view_are_stable() {
+    let (_dir, conn) = live_store();
+    assert_eq!(
+        columns(&conn, "v_page"),
+        ["page", "kind", "ref_id", "title", "parent_page"]
+    );
+    assert!(columns(&conn, "folder").contains(&"page".to_string()));
+    assert!(columns(&conn, "feed").contains(&"page".to_string()));
 }
 
 /// What the Swift tests rely on in the committed fixture (rows found by guid or title).
@@ -168,7 +179,7 @@ fn contract_fixture_covers_the_reading_cases() {
     let db = fixture();
     let int = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
     let text = |sql: &str| -> String { db.query_row(sql, [], |r| r.get(0)).unwrap() };
-    assert_eq!(int("SELECT version FROM schema_meta"), 2);
+    assert_eq!(int("SELECT version FROM schema_meta"), 3);
 
     // One FTS row per entry; the backlog rule on xkcd's first fill.
     assert_eq!(int("SELECT count(*) FROM entry"), 6);
@@ -252,6 +263,50 @@ fn contract_fixture_covers_the_reading_cases() {
         1
     );
     assert_eq!(int("SELECT count(*) FROM fetch_log"), 3);
+}
+
+/// Spec §11: page assignment on the contract database. The Swift tests rely on these
+/// numbers (looked up by title, never by id).
+#[test]
+fn contract_fixture_numbers_every_folder_and_feed() {
+    let db = fixture();
+    let mut stmt = db
+        .prepare("SELECT page, kind, title, parent_page FROM v_page ORDER BY page")
+        .unwrap();
+    let rows: Vec<(u16, String, String, Option<u16>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    let expected = [
+        (200, "folder", "Blogs", None),
+        (201, "feed", "xkcd.com", Some(200)),
+        (202, "folder", "potes", Some(200)),
+        (203, "feed", "Orange Drenka", Some(202)),
+        (204, "feed", "Orange-Drenka", Some(202)),
+        (205, "feed", "Photos from bouquiniste", Some(202)),
+        (206, "feed", "Girl on the Couch", Some(200)),
+        (300, "folder", "Biblis", None),
+        (301, "feed", "Bibliobsession 2.0", Some(300)),
+        (302, "feed", "Unphotographable", Some(300)),
+        (400, "folder", "Infos", None),
+        (401, "feed", "Daring Fireball", Some(400)),
+        (402, "feed", "Six Colors", Some(400)),
+        (403, "folder", "Science", Some(400)),
+        (404, "feed", "Center for Humane Technology", Some(403)),
+        (500, "folder", "Jon", None),
+        (501, "folder", "YouTube", Some(500)),
+        (502, "feed", "Center for Humane Technology (1)", Some(501)),
+    ]
+    .map(|(page, kind, title, parent)| (page, kind.to_string(), title.to_string(), parent));
+    assert_eq!(
+        rows, expected,
+        "every folder and feed, the buried Photos included"
+    );
+    let state: String = db
+        .query_row("SELECT state FROM feed WHERE page = 205", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "buried");
 }
 
 /// Regenerates the fixture shared with the Swift tests:

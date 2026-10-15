@@ -1,6 +1,6 @@
 # TODO
 
-Prochaines étapes de Ressac, au 11/10/2026. Le détail des décisions passées est dans `notes.md`.
+Prochaines étapes de Ressac, au 15/10/2026. Le détail des décisions passées est dans `notes.md`.
 
 ## À décider
 
@@ -8,17 +8,19 @@ Prochaines étapes de Ressac, au 11/10/2026. Le détail des décisions passées 
 
 ## Mise en service
 
-- [ ] Compiler l'appli en Release et la copier dans `/Applications` (commandes dans le README, section « The Mac app »).
-- [ ] Premier lancement : déposer `~/Documents/vienna_20260415.opml` sur la fenêtre, laisser l'import et le premier rafraîchissement se faire.
-- [ ] Faire le tri dans le jardin, dont la fusion de « Google Blog: Research » dans « Google Blog: Innovation & AI ».
-- [ ] Exporter un OPML propre une fois le tri fini.
-- [ ] Optionnel : lien `ressac` dans le `PATH` vers `/Applications/Ressac.app/Contents/Helpers/ressac`.
+- [x] Compiler l'appli en Release ; elle tourne depuis `apps/macos/build/Ressac.app` (commandes dans le README, section « The Mac app »).
+- [x] Premier lancement : déposer `~/Documents/vienna_20260415.opml` sur la fenêtre, laisser l'import et le premier rafraîchissement se faire.
+- [x] Faire le tri dans le jardin, dont la fusion de « Google Blog: Research » dans « Google Blog: Innovation & AI ».
+- [x] Exporter un OPML propre une fois le tri fini.
+- [ ] Optionnel : lien `ressac` dans le `PATH` vers `~/Sites/ressac/apps/macos/build/Ressac.app/Contents/Helpers/ressac`.
 
 ## Sous-projets suivants
 
-- [ ] **2b : la lecture dans le terminal.** Trois colonnes en ratatui sur le même schéma v2 (lu, favori, recherche, article complet), avec clappuccino comme référence.
+Ordre convenu le 14/10/2026 : 3, puis 2b.
+
 - [ ] **3 : rythme et journal du matin.** Tri des flux par rythme de publication, édition du matin.
-- [ ] **4 : thème Antiope.** Le télétexte, pour la TUI et l'appli.
+- [ ] **2b : la lecture dans le terminal.** Trois colonnes en ratatui sur le même schéma (v3) : lu, favori, recherche, article complet, avec clappuccino comme référence. Habillage Antiope du terminal compris (palette et numéros de page du sous-projet 4).
+- [x] **4 : thème Antiope (appli Mac).** Fait le 15/10/2026 sur la branche `antiope` ; recette et trouvailles dans `notes.md`.
 
 ## Reporté (relectures du sous-projet 2a)
 
@@ -54,3 +56,8 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] CI macOS : aucune vérification du nombre de tests réellement exécutés ; à revoir quand GitHub aura Xcode 27.
 - [ ] CI : `actions/checkout@v4` tourne sur Node 20, déprécié (avertissement GitHub) ; passer à une version Node 24.
 - [ ] Indice de spam affiché sur 5 flux du vrai jeu (dont ReadWriteWeb, vivant) : le restreindre plus tard aux statuts non vivants ou au seul lexique, si ça gêne.
+
+### Antiope (sous-projet 4)
+
+- [ ] Défilement des gros dossiers : accrocs même sans écran CRT (38 ms/s sur la page 400), optimisation possible (voir `notes.md`).
+- [ ] Mineurs des relectures restés ouverts : `DateFormatter` recréé à chaque seconde par l'en-tête, lignes de P100 et boutons de la bannière encore focalisables au clavier complet, `NSWorkspace` appelé en direct par la bannière native et `GardenInspector`, `main.rs` à découper avant le sous-projet 2b.

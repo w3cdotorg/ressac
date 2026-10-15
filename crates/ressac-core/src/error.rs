@@ -20,6 +20,14 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Invalid(String),
+    #[error("Page {0} is reserved.")]
+    PageReserved(u16),
+    #[error("Page {0} is not between 110 and 799.")]
+    PageOutOfRange(u16),
+    #[error("Page {page} is already taken.")]
+    PageTaken { page: u16 },
+    #[error("No {kind} #{id}.")]
+    UnknownPageTarget { kind: &'static str, id: i64 },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

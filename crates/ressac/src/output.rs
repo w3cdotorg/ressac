@@ -7,6 +7,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ressac_core::model::{Decision, FeedId, Status};
 use ressac_core::service::{Event, EventSink, FULL_ARTICLES, Summary};
 use ressac_core::store::ImportReport;
+use ressac_core::store::pages::PageRow;
 
 /// Order of the `check` summary grid (three per line).
 const SUMMARY_ORDER: [Status; 9] = [
@@ -128,7 +129,8 @@ impl EventSink for Sink {
                 | Event::Finished { .. }
                 | Event::Extracted { .. }
                 | Event::Decided { .. }
-                | Event::Undone { .. } => {}
+                | Event::Undone { .. }
+                | Event::Page(_) => {}
             },
         }
     }
@@ -200,6 +202,13 @@ pub fn extracted_text(entry_id: i64, error: Option<&str>) -> String {
 
 pub fn migrated_text(version: i64) -> String {
     format!("Schema version {version}.")
+}
+
+/// One line of `ressac page list` and `ressac page set`: `page kind id title`, with `-`
+/// for the id of a reserved page.
+pub fn page_text(row: &PageRow) -> String {
+    let id = row.id.map_or("-".to_string(), |id| id.to_string());
+    format!("{} {} {id} {}", row.page, row.kind.as_str(), row.title)
 }
 
 /// Printed on stderr after a run stopped by Ctrl-C.
@@ -402,5 +411,26 @@ mod tests {
             String::from_utf8(text).unwrap(),
             "Undid the last decision (#4).\n"
         );
+    }
+
+    #[test]
+    fn page_text_is_page_kind_id_title() {
+        use ressac_core::store::pages::PageKind;
+        let feed = PageRow {
+            page: 412,
+            kind: PageKind::Feed,
+            id: Some(12),
+            title: "Courrier international".into(),
+            parent_page: Some(400),
+        };
+        assert_eq!(page_text(&feed), "412 feed 12 Courrier international");
+        let index = PageRow {
+            page: 100,
+            kind: PageKind::Reserved,
+            id: None,
+            title: "Index".into(),
+            parent_page: None,
+        };
+        assert_eq!(page_text(&index), "100 reserved - Index");
     }
 }

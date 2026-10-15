@@ -19,7 +19,7 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(style.font == .sfPro)
         #expect(style.size == 17)
         #expect(style.width == .medium)
-        #expect(LineWidth.allCases.map(\.maxCh) == [58, 68, 80])
+        #expect(LineWidth.allCases.map(\.maxCh) == [58, 68, 80, 40])
         #expect(ReaderFont.allCases.map(\.displayName) == ["SF Pro", "New York", "Charter", "Newsreader", "Atkinson Hyperlegible Next"])
     }
 
@@ -305,5 +305,227 @@ private func entry(id: Int64 = 1, title: String? = "A title", url: String? = art
         #expect(help(entry(), showing: true) == "Showing the full article. Click to show the feed's text")
         #expect(help(entry(), failure: "Full article unavailable: HTTP 403.")
             == "Full article unavailable: HTTP 403. Click to try again")
+    }
+}
+
+@Suite struct AntiopeReaderStyleTests {
+    @Test func antiopeStepsThroughBedsteadSizes() {
+        #expect(ReaderStyle.effectiveSize(17, appearance: .antiope) == 15)
+        #expect(ReaderStyle.effectiveSize(17, appearance: .native) == 17)
+        #expect(ReaderStyle.effectiveSize(.nan, appearance: .antiope) == 20)
+        #expect(ReaderStyle.effectiveSize(40, appearance: .native) == 28)
+        #expect(ReaderStyle.bigger(17, appearance: .antiope) == 20)  // drawn at 15, so the next step is 20
+        #expect(ReaderStyle.smaller(17, appearance: .antiope) == 15)
+        #expect(ReaderStyle.bigger(20, appearance: .antiope) == 25)
+        #expect(ReaderStyle.bigger(30, appearance: .antiope) == 30)
+        #expect(ReaderStyle.smaller(25, appearance: .antiope) == 20)
+        #expect(ReaderStyle.smaller(15, appearance: .antiope) == 15)
+        #expect(ReaderStyle.bigger(17, appearance: .native) == 18)
+        #expect(ReaderStyle.smaller(17, appearance: .native) == 16)
+        #expect(ReaderStyle.actualSize(for: .antiope) == 20)
+        #expect(ReaderStyle.actualSize(for: .native) == 17)
+    }
+
+    @Test func fortyColumnsAndTheTheme() {
+        #expect(LineWidth.forty.maxCh == 40)
+        #expect(LineWidth.forty.displayName == "40 columns")
+        #expect(LineWidth.allCases.map(\.maxCh) == [58, 68, 80, 40])
+        #expect(ReaderTheme.native == ReaderTheme(appearance: .native, crt: false))
+        #expect(!ReaderTheme(appearance: .native, crt: true).showsCRT)
+        #expect(!ReaderTheme(appearance: .antiope, crt: false).showsCRT)
+        #expect(ReaderTheme(appearance: .antiope, crt: true).showsCRT)
+    }
+}
+
+/// Decision of 2026-10-14: each look keeps its own text size, and ⌘+, ⌘− and ⌘0 act on the
+/// look shown. Every test writes a throwaway defaults suite: the test host's are Clément's.
+@Suite struct TextSizePerLookTests {
+    private func withDefaults(_ body: (UserDefaults) throws -> Void) throws {
+        let suite = "ressac.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        try body(defaults)
+    }
+
+    @Test func switchingLooksNeverChangesTheOtherSize() throws {
+        #expect(ReaderStyle.sizeKey(for: .native) == "reader.size")
+        #expect(ReaderStyle.sizeKey(for: .antiope) == "reader.size.antiope")
+        try withDefaults { defaults in
+            #expect(ReaderStyle.storedSize(for: .native, in: defaults) == 17)
+            #expect(ReaderStyle.storedSize(for: .antiope, in: defaults) == 20)  // not Native's 17 snapped to 15
+            ReaderStyle.resize(.bigger, appearance: .antiope, in: defaults)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.antiopeSize) == 25)
+            #expect(defaults.object(forKey: ReaderStyle.Keys.size) == nil)  // Native is found as it was
+            ReaderStyle.resize(.smaller, appearance: .native, in: defaults)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.size) == 16)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.antiopeSize) == 25)
+        }
+    }
+
+    @Test func actualSizeRestoresTheDefaultOfTheLookShown() throws {
+        try withDefaults { defaults in
+            defaults.set(22.0, forKey: ReaderStyle.Keys.size)
+            defaults.set(30.0, forKey: ReaderStyle.Keys.antiopeSize)
+            ReaderStyle.resize(.actualSize, appearance: .antiope, in: defaults)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.antiopeSize) == 20)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.size) == 22)
+            ReaderStyle.resize(.actualSize, appearance: .native, in: defaults)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.size) == 17)
+            #expect(defaults.double(forKey: ReaderStyle.Keys.antiopeSize) == 20)
+        }
+    }
+
+    /// Whatever is stored (a hand edit, an older build), Antiope draws a step and the menu
+    /// stores a step.
+    @Test func theAntiopeSizeIsAlwaysAStep() throws {
+        try withDefaults { defaults in
+            for stored in [17.0, 0, -3, 22.5, 99] {
+                #expect(TeletextFont.sizeSteps.contains(ReaderStyle.effectiveSize(stored, appearance: .antiope)), "\(stored)")
+                for command in [TextSizeCommand.bigger, .smaller, .actualSize] {
+                    defaults.set(stored, forKey: ReaderStyle.Keys.antiopeSize)
+                    ReaderStyle.resize(command, appearance: .antiope, in: defaults)
+                    #expect(TeletextFont.sizeSteps.contains(defaults.double(forKey: ReaderStyle.Keys.antiopeSize)),
+                            "\(stored) \(command)")
+                }
+            }
+        }
+    }
+}
+
+@Suite struct SubpageLabelTests {
+    @Test func theLabelReadsPageIndexAndCount() {
+        #expect(SubpageLabel(page: 412, index: 3, count: 20).text == "412 3/20")
+        #expect(SubpageLabel(page: nil, index: 1, count: 1).text == "1/1")
+        let list = [entry(id: 5), entry(id: 6), entry(id: 7)]
+        #expect(SubpageLabel.of(entryId: 6, in: list) { $0 == 7 ? 412 : nil } == SubpageLabel(page: 412, index: 2, count: 3))
+        #expect(SubpageLabel.of(entryId: 9, in: list) { _ in 412 } == nil)
+    }
+}
+
+@Suite struct AntiopePageTests {
+    private let antiope = ReaderTheme(appearance: .antiope, crt: false)
+
+    private func page(theme: ReaderTheme, subpage: SubpageLabel? = nil, style: ReaderStyle = ReaderStyle(), title: String? = "A title") -> String {
+        ArticleTemplate.page(for: entry(title: title), fulltext: nil, showFull: false, style: style, colorScheme: .dark,
+                             theme: theme, subpage: subpage)
+    }
+
+    @Test func nativeStaysAsItWas() {
+        // The page embeds reader.css, whose text names the Antiope selectors: check the markup itself.
+        let native = page(theme: .native, subpage: SubpageLabel(page: 412, index: 3, count: 20))
+        #expect(native.contains(#"<html lang="en" data-scheme="dark">"#))
+        #expect(!native.contains(#"<p class="subpage""#))
+        #expect(!native.contains(#"--teletext-font: "Bedstead""#))
+        #expect(native.contains(#"<h1 class="title"><a href="https://blog.example.org/2026/10/post.html">A title</a></h1>"#))
+    }
+
+    @Test func antiopeMarksTheRootSnapsTheSizeAndDoublesTheTitle() {
+        let html = page(theme: antiope, subpage: SubpageLabel(page: 412, index: 3, count: 20),
+                        style: ReaderStyle(font: .charter, size: 17, width: .forty))
+        #expect(html.contains(#"<html lang="en" data-scheme="dark" data-theme="antiope">"#))
+        #expect(html.contains("--reader-size: 15px"))
+        #expect(html.contains("--reader-measure: 40ch"))
+        #expect(html.contains(#"--teletext-font: "Bedstead", monospace;"#))
+        #expect(html.contains(#"<p class="subpage" id="subpage">412 3/20</p>"#))
+        #expect(html.contains(#"<h1 class="title"><span class="dh-space" aria-hidden="true">A title</span><span class="dh-ink"><a href="https://blog.example.org/2026/10/post.html">A title</a></span></h1>"#))
+        // The sub-page line exists even before the list knows the entry, so it can be filled in place.
+        #expect(page(theme: antiope).contains(#"<p class="subpage" id="subpage"></p>"#))
+        #expect(page(theme: antiope, title: "<b>&</b>").contains(#"<span class="dh-space" aria-hidden="true">&lt;b&gt;&amp;&lt;/b&gt;</span>"#))
+    }
+
+    @Test func dataCRTOnlyForAntiopeWithTheBoxChecked() {
+        #expect(page(theme: ReaderTheme(appearance: .native, crt: true)).contains(#"<html lang="en" data-scheme="dark">"#))
+        #expect(page(theme: antiope).contains(#"<html lang="en" data-scheme="dark" data-theme="antiope">"#))
+        #expect(page(theme: ReaderTheme(appearance: .antiope, crt: true))
+            .contains(#"<html lang="en" data-scheme="dark" data-theme="antiope" data-crt>"#))
+    }
+}
+
+/// Spec §5: no colour but the eight in an Antiope view; §9: the bleed is text-only, under data-crt.
+@Suite struct AntiopeStylesheetTests {
+    @Test func theAntiopeSectionUsesOnlyTheEightColours() throws {
+        let css = ArticleTemplate.readerCSS
+        let start = try #require(css.range(of: "Antiope begin"))
+        let end = try #require(css.range(of: "Antiope end"))
+        let section = String(css[start.upperBound..<end.lowerBound])
+        let colours = Set(section.matches(of: /#[0-9A-Fa-f]{3,8}\b/).map { String($0.output).uppercased() })
+        #expect(colours == Set(TeletextColor.allCases.map(\.css)))
+        for function in ["rgb(", "rgba(", "hsl(", "hsla("] {
+            #expect(!section.contains(function), "\(function)")
+        }
+        #expect(section.contains("--smoothing: none;"))
+        #expect(section.contains("transform: scaleY(2);"))
+    }
+
+    @Test func theCRTBleedIsTextOnlyAndOnlyUnderDataCRT() {
+        #expect(ArticleTemplate.readerCSS.contains(#":root[data-theme="antiope"][data-crt] body {"#
+            + "\n  text-shadow: 1px 0 rgba(255, 0, 0, 0.45), -1px 0 rgba(0, 0, 255, 0.45), 0 0 2px currentColor;"))
+    }
+
+    @Test func bedsteadIsEmbeddedInAntiopeOnly() {
+        let face = #"@font-face { font-family: "Bedstead"; font-style: normal; font-weight: 400; src: url("data:font/otf;base64,"#
+        let antiope = ArticleTemplate.page(for: entry(), fulltext: nil, showFull: false, style: ReaderStyle(font: .newsreader),
+                                           colorScheme: .light, theme: ReaderTheme(appearance: .antiope, crt: false))
+        let native = ArticleTemplate.page(for: entry(), fulltext: nil, showFull: false, style: ReaderStyle(font: .newsreader),
+                                          colorScheme: .light)
+        #expect(antiope.contains(face))
+        #expect(!antiope.contains(#"font-family: "Newsreader""#))
+        #expect(!native.contains(face))
+    }
+}
+
+@Suite struct AntiopeReaderViewTests {
+    @Test func pageIdentityIgnoresTheSubpageButNotTheTheme() {
+        let a = ArticlePage(entry: entry(), fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .dark,
+                            theme: ReaderTheme(appearance: .antiope, crt: false), subpage: SubpageLabel(page: 412, index: 1, count: 2))
+        var b = a
+        b.subpage = SubpageLabel(page: 412, index: 1, count: 3)
+        var c = a
+        c.theme = ReaderTheme(appearance: .antiope, crt: true)
+        #expect(a == b)
+        #expect(a != c)
+    }
+
+    @Test func theEmptyReaderIsOneCyanEnglishLineAsWideAsTheColumn() {
+        for width in [0, 10, 17, 40, 41] {
+            let line = AntiopeReaderLines.noEntry(width: width)
+            #expect(line.width == width)
+            #expect(line.accessibilityText == "No entry selected")
+            #expect(line.spans.allSatisfy { $0.foreground == .cyan && $0.background == .black })
+        }
+        let line = AntiopeReaderLines.noEntry(width: 40)
+        #expect(line.spans.map(\.cells.accessibilityText).joined().trimmingCharacters(in: .whitespaces) == "NO ENTRY SELECTED")
+    }
+
+    @Test func theRunFailureNoticeIsRedReverseVideoAsWideAsTheColumn() {
+        for width in [0, 10, 40, 80] {
+            let line = AntiopeReaderLines.failureNotice("Could not fetch the page.", width: width)
+            #expect(line.width == width)
+            #expect(line.accessibilityText == "Could not fetch the page.")
+            #expect(line.spans.allSatisfy { $0.foreground == .black && $0.background == .red })
+        }
+    }
+}
+
+@MainActor @Suite struct SubpageLineTests {
+    @Test func theLineChangesInPlaceWithoutAReload() async throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+        let webView = WKWebView(frame: window.contentLayoutRect)
+        window.contentView = webView
+        let controller = ReaderController()
+        controller.webView = webView
+        let coordinator = ArticleWebView.Coordinator(controller: controller)
+        webView.navigationDelegate = coordinator
+        let html = ArticleTemplate.page(for: entry(content: String(repeating: "<p>Line of a long article.</p>", count: 200)),
+                                        fulltext: nil, showFull: false, style: ReaderStyle(), colorScheme: .dark,
+                                        theme: ReaderTheme(appearance: .antiope, crt: false), subpage: SubpageLabel(page: 412, index: 3, count: 20))
+        controller.load(entryId: 1, html: html)
+        #expect(await eventually { controller.loadedEntryId == 1 })
+        _ = try await webView.callAsyncJavaScript("window.scrollTo(0, 300)", contentWorld: .page)
+        await controller.showSubpage(SubpageLabel(page: 412, index: 3, count: 21))
+        let line = try await webView.callAsyncJavaScript(#"return document.getElementById("subpage").textContent"#, contentWorld: .page)
+        #expect(line as? String == "412 3/21")
+        let scroll = try await webView.callAsyncJavaScript("return window.scrollY", contentWorld: .page)
+        #expect((scroll as? Double ?? 0) > 0)  // same document: the position is kept
     }
 }

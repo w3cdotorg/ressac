@@ -66,6 +66,8 @@ struct BundledFace: Equatable, Sendable {
 
 enum LineWidth: String, CaseIterable, Identifiable, Sendable {
     case narrow, medium, wide
+    /// Exactly 40 cells in Antiope, where `1ch` is one Bedstead cell (spec §5); offered in both looks.
+    case forty
 
     var id: Self { self }
 
@@ -75,6 +77,7 @@ enum LineWidth: String, CaseIterable, Identifiable, Sendable {
         case .narrow: 58
         case .medium: 68
         case .wide: 80
+        case .forty: 40
         }
     }
 
@@ -83,12 +86,25 @@ enum LineWidth: String, CaseIterable, Identifiable, Sendable {
         case .narrow: "Narrow"
         case .medium: "Medium"
         case .wide: "Wide"
+        case .forty: "40 columns"
         }
     }
 }
 
-/// How articles look. Persisted with `@AppStorage` under `Keys`; Phase 9's View menu
-/// (Bigger Text ⌘+, Smaller Text ⌘−, Actual Size ⌘0) writes `Keys.size` directly.
+/// The look the reader draws in (spec §5 and §9).
+struct ReaderTheme: Equatable, Sendable {
+    var appearance: Appearance
+    /// The CRT screen box (`Appearance.Keys.crt`); phase 13 also passes it off under Increase contrast.
+    var crt: Bool
+
+    static let native = ReaderTheme(appearance: .native, crt: false)
+
+    /// The colour bleed applies only to Antiope with the box checked (spec §9).
+    var showsCRT: Bool { appearance == .antiope && crt }
+}
+
+/// How articles look. Persisted with `@AppStorage` under `Keys`; the View menu (Bigger Text ⌘+,
+/// Smaller Text ⌘−, Actual Size ⌘0) changes the size of the look shown, `resize(_:appearance:in:)`.
 struct ReaderStyle: Equatable, Sendable {
     var font: ReaderFont = .sfPro
     var size: Double = ReaderStyle.defaultSize
@@ -101,6 +117,10 @@ struct ReaderStyle: Equatable, Sendable {
     enum Keys {
         static let font = "reader.font"
         static let size = "reader.size"
+        /// Antiope's own text size (decision of 2026-10-14), one of `TeletextFont.sizeSteps`,
+        /// `TeletextFont.defaultSize` until changed. `size` stays the Native size: switching looks
+        /// never changes the other one.
+        static let antiopeSize = "reader.size.antiope"
         static let width = "reader.width"
     }
 
@@ -125,5 +145,70 @@ struct ReaderStyle: Equatable, Sendable {
             style.width = width
         }
         return style
+    }
+}
+
+/// What View ▸ Bigger Text (⌘+), Smaller Text (⌘−) and Actual Size (⌘0) ask for.
+enum TextSizeCommand: Sendable {
+    case bigger, smaller, actualSize
+}
+
+/// Text size per look (spec §5): Native moves by 1 pt in 12...28; Antiope draws only Bedstead's
+/// steps (15, 20, 25, 30), so one font pixel lands on whole Retina pixels. Each look has its own
+/// stored size (decision of 2026-10-14); Antiope snaps its size when drawing and steps from what
+/// it draws.
+extension ReaderStyle {
+    static func effectiveSize(_ size: Double, appearance: Appearance) -> Double {
+        switch appearance {
+        case .native: clampedSize(size)
+        case .antiope: TeletextFont.snapped(size.isFinite ? size : TeletextFont.defaultSize)
+        }
+    }
+
+    static func bigger(_ size: Double, appearance: Appearance) -> Double {
+        switch appearance {
+        case .native: bigger(size)
+        case .antiope: TeletextFont.step(effectiveSize(size, appearance: .antiope), by: 1)
+        }
+    }
+
+    static func smaller(_ size: Double, appearance: Appearance) -> Double {
+        switch appearance {
+        case .native: smaller(size)
+        case .antiope: TeletextFont.step(effectiveSize(size, appearance: .antiope), by: -1)
+        }
+    }
+
+    /// What View ▸ Actual Size (⌘0) restores, and each look's size before any change.
+    static func actualSize(for appearance: Appearance) -> Double {
+        switch appearance {
+        case .native: defaultSize
+        case .antiope: TeletextFont.defaultSize
+        }
+    }
+
+    /// Where each look stores its size: switching looks never changes the other one.
+    static func sizeKey(for appearance: Appearance) -> String {
+        switch appearance {
+        case .native: Keys.size
+        case .antiope: Keys.antiopeSize
+        }
+    }
+
+    /// The size `appearance` stores, or its default while none is stored.
+    static func storedSize(for appearance: Appearance, in defaults: UserDefaults) -> Double {
+        let key = sizeKey(for: appearance)
+        return defaults.object(forKey: key) == nil ? actualSize(for: appearance) : defaults.double(forKey: key)
+    }
+
+    /// ⌘+, ⌘− or ⌘0 on the size of the look shown, and only on it.
+    static func resize(_ command: TextSizeCommand, appearance: Appearance, in defaults: UserDefaults) {
+        let size = storedSize(for: appearance, in: defaults)
+        let resized = switch command {
+        case .bigger: bigger(size, appearance: appearance)
+        case .smaller: smaller(size, appearance: appearance)
+        case .actualSize: actualSize(for: appearance)
+        }
+        defaults.set(resized, forKey: sizeKey(for: appearance))
     }
 }

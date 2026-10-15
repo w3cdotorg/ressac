@@ -25,7 +25,9 @@ struct MainView: View {
                 ReaderView(state: state)
             }
         }
-        .background(ReadingWindowReader(state: state))
+        .background(ReadingWindowReader { [state] in
+            ReadingKeyRouter(state: state, focus: ResponderFocusProvider(), antiope: nil)
+        })
         .searchable(text: $state.searchText, placement: .toolbar, prompt: "Search")
         .searchFocused($searchFocused)
         .onChange(of: searchFocused) { _, focused in state.isSearchFocused = focused }
@@ -119,7 +121,7 @@ struct SidebarRow: View {
             HStack(spacing: 6) {
                 Text(feed.title).lineLimit(1)
                 if feed.isSick, let status = feed.status {
-                    Circle().fill(Self.color(for: status)).frame(width: 7, height: 7).help(status)
+                    Circle().fill(GardenStatusStyle.nativeColor(for: status)).frame(width: 7, height: 7).help(status)
                 }
             }
             .badge(feed.unread)
@@ -132,16 +134,6 @@ struct SidebarRow: View {
                 Button("Open Site") { state.openSite(feedId: feed.feedId) }.disabled(feed.htmlUrl == nil)
                 Button("Show in Garden") { state.showInGarden(feedId: feed.feedId) }
             }
-        }
-    }
-
-    static func color(for status: String) -> Color {
-        switch status {
-        case "Dead": .red
-        case "Hijacked": .purple
-        case "Moved": .blue
-        case "Duplicate": .teal
-        default: .orange
         }
     }
 }
@@ -200,48 +192,5 @@ struct EntryRowView: View {
             }
         }
         .padding(.vertical, 3)
-    }
-}
-
-/// Tells `AppState` which window is the reading window, to gate single-letter shortcuts, and
-/// routes that window's keys (`ReadingKeyRouter`).
-private struct ReadingWindowReader: NSViewRepresentable {
-    let state: AppState
-
-    func makeNSView(context: Context) -> WindowView { WindowView(router: ReadingKeyRouter(state: state)) }
-
-    func updateNSView(_ view: WindowView, context: Context) {}
-
-    static func dismantleNSView(_ view: WindowView, coordinator: ()) {
-        view.router.stop()
-        if let window = view.window { view.router.state.unregisterReadingWindow(window) }
-    }
-
-    final class WindowView: NSView {
-        let router: ReadingKeyRouter
-
-        init(router: ReadingKeyRouter) {
-            self.router = router
-            super.init(frame: .zero)
-        }
-
-        @available(*, unavailable)
-        required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-
-        override func viewWillMove(toWindow newWindow: NSWindow?) {
-            super.viewWillMove(toWindow: newWindow)
-            if let window, newWindow !== window { router.state.unregisterReadingWindow(window) }
-        }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            router.window = window
-            if let window {
-                router.state.registerReadingWindow(window)
-                router.start()
-            } else {
-                router.stop()
-            }
-        }
     }
 }

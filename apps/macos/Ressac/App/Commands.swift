@@ -8,7 +8,10 @@ struct RessacCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) { FileMenuItems(state: state) }
         CommandGroup(replacing: .textEditing) { SearchMenuItem(state: state) }
-        CommandGroup(after: .toolbar) { TextSizeMenuItems() }
+        CommandGroup(after: .toolbar) {
+            UnreadOnlyMenuItem(state: state)
+            TextSizeMenuItems()
+        }
         CommandMenu("Go") { GoMenuItems(state: state) }
         CommandMenu("Article") { ArticleMenuItems(state: state) }
     }
@@ -52,16 +55,45 @@ private struct SearchMenuItem: View {
     }
 }
 
-/// Reader text size in points (12...28, default 17). The key is phase 10's `ReaderStyle.Keys.size`.
-private struct TextSizeMenuItems: View {
-    @AppStorage("reader.size") private var textSize = 17.0
+/// The All / Unread filter, for both looks: the View menu item and Antiope's entries title.
+/// A Garden page lists its own rows, so the filter does not apply there (as the Native picker).
+@MainActor enum UnreadFilterCommand {
+    static func canToggle(_ state: AppState) -> Bool { !state.selection.isGarden }
+
+    static func toggle(_ state: AppState) {
+        guard canToggle(state) else { return }
+        state.unreadOnly.toggle()
+    }
+}
+
+private struct UnreadOnlyMenuItem: View {
+    let state: AppState?
 
     var body: some View {
-        Button("Bigger Text") { textSize = min(28, textSize + 1) }
+        Toggle("Show Unread Only", isOn: Binding(
+            get: { state?.unreadOnly ?? false },
+            set: { _ in if let state { UnreadFilterCommand.toggle(state) } }))
+            .keyboardShortcut("u", modifiers: [.command, .option])
+            .disabled(state.map { !UnreadFilterCommand.canToggle($0) } ?? true)
+    }
+}
+
+/// Reader text size (spec §5): 12...28 by 1 pt in Native, Bedstead's steps in Antiope. Each look
+/// has its own stored size (`ReaderStyle.sizeKey(for:)`); the commands act on the look shown.
+/// The standard defaults are the store `@AppStorage` reads everywhere outside the tests.
+private struct TextSizeMenuItems: View {
+    @AppStorage(Appearance.Keys.appearance) private var storedAppearance = Appearance.native
+
+    private var appearance: Appearance {
+        Appearance.effective(stored: storedAppearance, fontAvailable: TeletextFont.isAvailable)
+    }
+
+    var body: some View {
+        Button("Bigger Text") { ReaderStyle.resize(.bigger, appearance: appearance, in: .standard) }
             .keyboardShortcut("+")
-        Button("Smaller Text") { textSize = max(12, textSize - 1) }
+        Button("Smaller Text") { ReaderStyle.resize(.smaller, appearance: appearance, in: .standard) }
             .keyboardShortcut("-")
-        Button("Actual Size") { textSize = 17 }
+        Button("Actual Size") { ReaderStyle.resize(.actualSize, appearance: appearance, in: .standard) }
             .keyboardShortcut("0")
         Divider()
     }

@@ -79,12 +79,39 @@ struct SettingsView: View {
 }
 
 private struct ReadingSettings: View {
+    @AppStorage(Appearance.Keys.appearance) private var appearance = Appearance.native
+    @AppStorage(Appearance.Keys.crt) private var crt = false
     @AppStorage(ReaderStyle.Keys.font) private var font = ReaderFont.sfPro
     @AppStorage(ReaderStyle.Keys.size) private var size = ReaderStyle.defaultSize
+    /// Antiope's own text size (decision of 2026-10-14), for the preview in Antiope.
+    @AppStorage(ReaderStyle.Keys.antiopeSize) private var antiopeSize = TeletextFont.defaultSize
     @AppStorage(ReaderStyle.Keys.width) private var width = LineWidth.medium
+
+    /// What the window shows: Native whenever Bedstead failed to load.
+    private var shown: Appearance {
+        Appearance.effective(stored: appearance, fontAvailable: TeletextFont.isAvailable)
+    }
 
     var body: some View {
         Form {
+            Picker("Appearance:", selection: Binding(get: { shown }, set: { appearance = $0 })) {
+                ForEach(Appearance.allCases) { option in
+                    Text(option.displayName).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(!TeletextFont.isAvailable)
+            if !TeletextFont.isAvailable {
+                Text("Antiope needs the Bedstead font, which did not load.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            Toggle("CRT screen", isOn: $crt)
+                .disabled(!CRTGeometry.isActive(appearance: shown, crt: true))
+            Text("Scanlines, a vignette and color bleed over the Antiope window. Increase Contrast turns the bleed off.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
             Picker("Font:", selection: $font) {
                 ForEach(ReaderFont.allCases) { option in
                     Text(option.displayName)
@@ -92,23 +119,14 @@ private struct ReadingSettings: View {
                         .tag(option)
                 }
             }
-
-            LabeledContent("Text size:") {
-                HStack(spacing: 8) {
-                    Slider(value: $size, in: ReaderStyle.sizeRange, step: ReaderStyle.sizeStep) {
-                        Text("Text size")
-                    } minimumValueLabel: {
-                        Image(systemName: "textformat.size.smaller")
-                    } maximumValueLabel: {
-                        Image(systemName: "textformat.size.larger")
-                    }
-                    .labelsHidden()
-                    Text("\(Int(ReaderStyle.clampedSize(size))) pt")
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .frame(width: 40, alignment: .trailing)
-                }
+            .disabled(shown == .antiope)
+            if shown == .antiope {
+                Text("Bedstead in Antiope")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
+
+            TextSizeRow()
 
             Picker("Line width:", selection: $width) {
                 ForEach(LineWidth.allCases) { option in
@@ -119,7 +137,9 @@ private struct ReadingSettings: View {
 
             LabeledContent("Preview:") {
                 Text("The quick brown fox jumps over 1 234 lazy dogs. Il1 O0, « l'écart » se creuse.")
-                    .font(font.swiftUIFont(size: ReaderStyle.clampedSize(size)))
+                    .font(shown == .antiope
+                          ? TeletextFont.font(size: TeletextFont.snapped(antiopeSize))
+                          : font.swiftUIFont(size: ReaderStyle.clampedSize(size)))
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -129,6 +149,69 @@ private struct ReadingSettings: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+/// The text size row of Settings ▸ Reading: a 1 pt slider over the Native size in Native, a
+/// four-step slider over Antiope's own size in Antiope (spec §5, decision of 2026-10-14). It
+/// reads the appearance itself, so it does not depend on how `ReadingSettings` holds it.
+private struct TextSizeRow: View {
+    @AppStorage(ReaderStyle.Keys.size) private var size = ReaderStyle.defaultSize
+    @AppStorage(ReaderStyle.Keys.antiopeSize) private var antiopeSize = TeletextFont.defaultSize
+    @AppStorage(Appearance.Keys.appearance) private var storedAppearance = Appearance.native
+
+    private var appearance: Appearance {
+        Appearance.effective(stored: storedAppearance, fontAvailable: TeletextFont.isAvailable)
+    }
+
+    /// The size the look shown draws at.
+    private var shownSize: Double {
+        ReaderStyle.effectiveSize(appearance == .antiope ? antiopeSize : size, appearance: appearance)
+    }
+
+    var body: some View {
+        LabeledContent("Text size:") {
+            HStack(spacing: 8) {
+                slider
+                    .labelsHidden()
+                Text("\(Int(shownSize)) pt")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 40, alignment: .trailing)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var slider: some View {
+        switch appearance {
+        case .native:
+            Slider(value: $size, in: ReaderStyle.sizeRange, step: ReaderStyle.sizeStep) {
+                Text("Text size")
+            } minimumValueLabel: {
+                Image(systemName: "textformat.size.smaller")
+            } maximumValueLabel: {
+                Image(systemName: "textformat.size.larger")
+            }
+        case .antiope:
+            Slider(value: teletextStep, in: 0...Double(TeletextFont.sizeSteps.count - 1), step: 1) {
+                Text("Text size")
+            } minimumValueLabel: {
+                Image(systemName: "textformat.size.smaller")
+            } maximumValueLabel: {
+                Image(systemName: "textformat.size.larger")
+            }
+        }
+    }
+
+    /// The index of Antiope's drawn size in `TeletextFont.sizeSteps`; moving it stores that step.
+    private var teletextStep: Binding<Double> {
+        Binding(
+            get: { Double(TeletextFont.sizeSteps.firstIndex(of: ReaderStyle.effectiveSize(antiopeSize, appearance: .antiope)) ?? 0) },
+            set: { index in
+                let steps = TeletextFont.sizeSteps
+                antiopeSize = steps[min(max(Int(index.rounded()), 0), steps.count - 1)]
+            })
     }
 }
 
