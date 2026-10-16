@@ -19,12 +19,18 @@ fn keys_hint(repairs: usize) -> String {
 }
 
 pub fn render(frame: &mut Frame, state: &GardenState) {
+    render_in(frame, frame.area(), state);
+}
+
+/// The garden inside `area` (the whole frame for `ressac garden`, the reader's columns for
+/// the garden destinations). Popups are centred on `area`.
+pub fn render_in(frame: &mut Frame, area: Rect, state: &GardenState) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(2),
     ])
-    .areas(frame.area());
+    .areas(area);
     frame.render_widget(Paragraph::new(header_line(state)), header);
     if state.mode == Mode::Detail {
         render_detail(frame, state, body);
@@ -44,8 +50,8 @@ pub fn render(frame: &mut Frame, state: &GardenState) {
         footer,
     );
     match state.mode {
-        Mode::ConfirmRepairs => popup(frame, " Apply safe repairs ", confirm_lines(state)),
-        Mode::Help => popup(frame, " Help ", help_lines()),
+        Mode::ConfirmRepairs => popup(frame, area, " Apply safe repairs ", confirm_lines(state)),
+        Mode::Help => popup(frame, area, " Help ", help_lines()),
         Mode::Queue | Mode::Detail => {}
     }
 }
@@ -302,11 +308,11 @@ fn help_lines() -> Vec<Line<'static>> {
     .collect()
 }
 
-fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'static>>) {
+fn popup(frame: &mut Frame, within: Rect, title: &str, lines: Vec<Line<'static>>) {
     let height = (lines.len() as u16).saturating_add(2);
     let [vertical] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
-        .areas(frame.area());
+        .areas(within);
     let [area] = Layout::horizontal([Constraint::Percentage(70)])
         .flex(Flex::Center)
         .areas(vertical);
@@ -398,5 +404,57 @@ mod tests {
         let mut rows = sample_rows();
         rows.retain(|r| !r.needs_triage());
         insta::assert_snapshot!(draw(&GardenState::new(rows, false), 80, 12));
+    }
+
+    #[test]
+    fn render_in_draws_the_garden_inside_an_area_only() {
+        let state = GardenState::new(sample_rows(), false);
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal
+            .draw(|frame| render_in(frame, Rect::new(30, 2, 110, 20), &state))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        for y in 0..24 {
+            for x in 0..30 {
+                assert_eq!(buffer[(x, y)].symbol(), " ", "({x},{y})");
+            }
+        }
+        for x in 0..140 {
+            assert_eq!(buffer[(x, 0)].symbol(), " ");
+        }
+        let text: String = (2..22)
+            .map(|y| {
+                (30..140)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(text.contains("Bibliobsession 2.0"));
+    }
+
+    #[test]
+    fn popups_stay_inside_the_area() {
+        let mut state = GardenState::new(sample_rows(), false);
+        press(&mut state, KeyCode::Char('?'));
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal
+            .draw(|frame| render_in(frame, Rect::new(30, 2, 110, 20), &state))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        for y in 0..24 {
+            for x in 0..30 {
+                assert_eq!(buffer[(x, y)].symbol(), " ");
+            }
+        }
+        let text: String = (2..22)
+            .map(|y| {
+                (30..140)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(text.contains("Help"));
     }
 }

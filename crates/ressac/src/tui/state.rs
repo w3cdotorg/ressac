@@ -23,8 +23,10 @@ pub enum Filter {
     Status(Status),
     Folder(String),
     /// Every active feed (the reader's "All feeds").
+    #[allow(dead_code)] // built by the reader's garden destinations (phase 8b)
     All,
     /// The buried feeds (the reader's "Cemetery").
+    #[allow(dead_code)] // built by the reader's garden destinations (phase 8b)
     Cemetery,
 }
 
@@ -92,6 +94,7 @@ impl GardenState {
     }
 
     /// A garden opened on another filter than the queue (the reader's garden destinations).
+    #[allow(dead_code)] // called by the reader's garden destinations (phase 8b)
     pub fn with_filter(rows: Vec<GardenRow>, ascii: bool, filter: Filter) -> Self {
         let mut state = GardenState::new(rows, ascii);
         state.filter = filter;
