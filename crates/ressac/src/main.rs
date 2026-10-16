@@ -78,6 +78,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Check { force } => commands::network::check(&g, force, &mut out).await,
         Command::Extract { entry_id } => commands::network::extract(&g, entry_id, &mut out).await,
         Command::Garden { action } => commands::garden::garden(&g, action, &mut out),
+        Command::Read => commands::read(&g),
         Command::Export { output, cemetery } => commands::export(&g, output, cemetery, &mut out),
         Command::Migrate => commands::migrate(&g, &mut out),
         Command::Page { action } => commands::page(&g, action, &mut out),

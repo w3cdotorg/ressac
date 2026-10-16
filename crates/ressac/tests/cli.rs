@@ -1181,3 +1181,24 @@ fn page_commands_know_the_journal_and_rhythm_pages() {
         "unchanged"
     );
 }
+
+#[test]
+fn read_on_an_empty_database_prints_the_first_run_hint() {
+    let home = tempfile::tempdir().unwrap();
+    let out = ressac(home.path(), &["read"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(stderr(&out).contains("No feeds yet"), "{}", stderr(&out));
+}
+
+#[test]
+fn read_without_a_terminal_says_so() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let out = ressac(home.path(), &["read"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("is this a terminal?"),
+        "{}",
+        stderr(&out)
+    );
+}

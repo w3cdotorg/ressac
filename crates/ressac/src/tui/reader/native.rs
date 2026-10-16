@@ -18,12 +18,10 @@ use crate::output::printable;
 
 pub const EDITION_PROGRESS_LABEL: &str = "Building this morning's edition…";
 pub const FETCH_PROGRESS_LABEL: &str = "Fetching feeds";
-#[cfg_attr(
-    test,
-    allow(dead_code, reason = "used by the extraction job in phase 5b")
-)]
 pub const EXTRACT_PROGRESS_LABEL: &str = "Fetching the full article";
 pub const TOO_SMALL: &str = "Window too small";
+const HELP_HINT: &str = "? help";
+const EDITING_HINT: &str = "Enter apply  Esc cancel";
 
 /// Rows of the article header: the title; feed, author and date; the entry's state.
 const HEADER_ROWS: u16 = 3;
@@ -77,7 +75,7 @@ pub fn render(frame: &mut Frame, state: &ReaderState) -> ReaderMetrics {
     }
     let rects = columns(area, view.layout, view.focus, view.look);
     render_top_line(frame, &view, rects.top);
-    frame.render_widget(bottom_line(&view), rects.bottom);
+    frame.render_widget(bottom_line(&view, rects.bottom.width), rects.bottom);
     if let Some(rect) = rects.entries {
         render_entries(frame, &view, rect, view.focus == Column::Entries);
     }
@@ -127,15 +125,42 @@ fn render_top_line(frame: &mut Frame, view: &ReaderView<'_>, area: Rect) {
     );
 }
 
-fn bottom_line(view: &ReaderView<'_>) -> Paragraph<'static> {
-    let keys = match view.focus {
-        Column::Sources => "↑↓ source  → list  r refresh  t Antiope  ? help  q quit",
-        Column::Entries => {
-            "j/k entry  Space next  m read  s star  A all read  u unread  / search  ? help"
-        }
-        Column::Reader => "Space scroll  j/k entry  f full text  o open  i images  ? help",
+/// The keys of the focused column, the last hint (`? help`) always kept.
+fn bottom_line(view: &ReaderView<'_>, width: u16) -> Paragraph<'static> {
+    if view.editing {
+        return Paragraph::new(Span::styled(EDITING_HINT, DIM));
+    }
+    let hints: &[&str] = match view.focus {
+        Column::Sources => &["↑↓ source", "→ list", "r refresh", "t Antiope", "q quit"],
+        Column::Entries => &[
+            "j/k entry",
+            "Space next",
+            "m read",
+            "s star",
+            "A all read",
+            "u unread",
+            "/ search",
+        ],
+        Column::Reader => &[
+            "Space scroll",
+            "j/k entry",
+            "f full text",
+            "o open",
+            "i images",
+        ],
     };
-    Paragraph::new(Span::styled(keys, DIM))
+    let mut line = String::new();
+    for hint in hints {
+        let fits =
+            line.chars().count() + hint.chars().count() + 2 + HELP_HINT.len() <= usize::from(width);
+        if !fits {
+            break;
+        }
+        line.push_str(hint);
+        line.push_str("  ");
+    }
+    line.push_str(HELP_HINT);
+    Paragraph::new(Span::styled(line, DIM))
 }
 
 fn render_sources(frame: &mut Frame, view: &ReaderView<'_>, area: Rect, focused: bool) {
@@ -594,6 +619,33 @@ mod tests {
         );
         s.on_event(Event::JobDone(JobOutcome::Refreshed));
         assert!(!draw(&s, 140, 30).contains("34/156"));
+    }
+
+    fn last_line(out: &str) -> &str {
+        out.lines().last().unwrap().trim_matches('"').trim_end()
+    }
+
+    #[test]
+    fn the_bottom_line_keeps_help_when_the_hints_do_not_fit() {
+        let s = state(140, 30, rows());
+        assert!(last_line(&draw(&s, 140, 30)).ends_with("/ search  ? help"));
+        let narrow = draw(&s, 40, 30);
+        let line = last_line(&narrow);
+        assert!(
+            line.ends_with("? help") && line.starts_with("j/k entry"),
+            "{line}"
+        );
+        assert!(line.chars().count() <= 40, "{line}");
+    }
+
+    #[test]
+    fn the_bottom_line_says_how_to_end_a_search_or_a_link_choice() {
+        let mut s = state(140, 30, rows());
+        s.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert_eq!(last_line(&draw(&s, 140, 30)), "Enter apply  Esc cancel");
+        s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        s.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(last_line(&draw(&s, 140, 30)), "Enter apply  Esc cancel");
     }
 
     #[test]

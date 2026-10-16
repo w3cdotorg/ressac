@@ -67,6 +67,8 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<GardenCommand>,
     },
+    /// Read your feeds in the terminal: the Journal first, then sources, entries and the article
+    Read,
     /// Export active feeds (or the cemetery) as OPML
     Export {
         /// Write to this file instead of stdout

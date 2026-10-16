@@ -43,13 +43,6 @@ pub const RHYTHM_CHOICES: [Option<CadenceGroup>; 6] = [
 
 /// What the event loop must do (phase 5b runs them).
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(
-    test,
-    allow(
-        dead_code,
-        reason = "FetchImage, BuildEdition and Garden are produced by phases 6 to 8"
-    )
-)]
 pub enum Command {
     LoadSources,
     /// A page of a list. `after: None` is a fresh list (it replaces the rows), `Some` the next
@@ -77,12 +70,15 @@ pub enum Command {
     SetStarred(i64, bool),
     MarkAllRead(Source),
     Extract(i64),
+    #[allow(dead_code, reason = "phase 6 asks for the images")]
     FetchImage(String),
+    #[allow(dead_code, reason = "phase 7 builds the edition when the reader opens")]
     BuildEdition,
     Refresh(Option<Source>),
     OpenUrl(String),
     SetCadence(FeedId, Option<CadenceGroup>),
     /// A garden command from the garden screen (phase 8).
+    #[allow(dead_code, reason = "phase 8 runs the garden screen's commands")]
     Garden(crate::tui::state::Command),
     /// Persist `state.settings` with `TerminalSettings::save`. The caller ignores the
     /// `io::Result` (spec §5: writing never blocks or fails reading): an unwritable file only
@@ -92,8 +88,7 @@ pub enum Command {
 }
 
 /// What the event loop reports back.
-#[derive(Debug, Clone)]
-#[cfg_attr(test, allow(dead_code, reason = "the image URLs are read by phase 6"))]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Sources(SourcesSnapshot),
     /// The answer to a `Command::LoadEntries` or `Command::Search`: `request` is echoed from the
@@ -107,9 +102,11 @@ pub enum Event {
     Journal(Option<JournalView>),
     /// Boxed: far larger than the other variants (`clippy::large_enum_variant`).
     Entry(Box<EntryDetail>),
+    #[allow(dead_code, reason = "phase 6 answers the image commands")]
     ImageReady {
         url: String,
     },
+    #[allow(dead_code, reason = "phase 6 answers the image commands")]
     ImageFailed {
         url: String,
     },
@@ -219,19 +216,14 @@ pub struct SourceLine {
 /// The state as the renderers see it: borrowed, read-only, every feed string already through
 /// `output::printable` where it is built here (the renderers do the rest).
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    test,
-    allow(
-        dead_code,
-        reason = "total, journal and images are read by phases 5b, 6, 7 and 9"
-    )
-)]
 pub struct ReaderView<'a> {
     pub look: Look,
     pub layout: LayoutClass,
     pub focus: Column,
+    #[allow(dead_code, reason = "read by the Journal look (phase 7)")]
     pub sources_overlay: bool,
     pub now_local: DateTime<FixedOffset>,
+    #[allow(dead_code, reason = "read by the Journal look (phase 7)")]
     pub source: Source,
     pub source_title: String,
     pub source_lines: Vec<SourceLine>,
@@ -239,17 +231,22 @@ pub struct ReaderView<'a> {
     pub search: Option<&'a str>,
     pub entries: &'a [EntryRow],
     pub entry_cursor: Option<usize>,
+    #[allow(dead_code, reason = "read by the Journal look (phase 7)")]
     pub total: usize,
     pub unread: usize,
+    #[allow(dead_code, reason = "read by the Journal look (phase 7)")]
     pub journal: Option<&'a JournalView>,
     pub entry: Option<&'a EntryDetail>,
     pub article: Option<&'a RenderedArticle>,
     pub show_fulltext: bool,
     pub reader_scroll: usize,
+    #[allow(dead_code, reason = "read by the image drawing (phase 6)")]
     pub images: bool,
     pub progress: Option<(&'a str, usize, usize)>,
     pub message: Option<&'a str>,
     pub help: bool,
+    /// The search text or the link number is being typed: the bottom line shows how to end it.
+    pub editing: bool,
     pub rhythm: Option<(usize, usize)>,
 }
 
@@ -312,10 +309,12 @@ impl ReaderState {
     }
 
     /// Entry points for other screens (Antiope page jumps, phase 9).
+    #[allow(dead_code, reason = "used by Antiope page jumps (phase 9)")]
     pub fn go_to(&mut self, source: Source) -> Vec<Command> {
         self.switch_source(source)
     }
 
+    #[allow(dead_code, reason = "used by Antiope page jumps (phase 9)")]
     pub fn select_entry(&mut self, entry_id: i64) -> Vec<Command> {
         match self.entries.iter().position(|row| row.entry_id == entry_id) {
             Some(index) => self.select(index, true),
@@ -323,6 +322,7 @@ impl ReaderState {
         }
     }
 
+    #[allow(dead_code, reason = "used by the garden screen (phase 8)")]
     pub fn set_focus(&mut self, column: Column) {
         self.focus = column;
     }
@@ -331,18 +331,22 @@ impl ReaderState {
         self.settings.look
     }
 
+    #[allow(dead_code, reason = "used by the garden screen (phase 8)")]
     pub fn focus(&self) -> Column {
         self.focus
     }
 
+    #[allow(dead_code, reason = "used by the garden screen (phase 8)")]
     pub fn source(&self) -> Source {
         self.source
     }
 
+    #[allow(dead_code, reason = "used by the image and Antiope phases (6 and 9)")]
     pub fn selected_entry(&self) -> Option<i64> {
         self.selected
     }
 
+    #[allow(dead_code, reason = "used by the image and garden phases (6 and 8)")]
     pub fn class(&self) -> LayoutClass {
         self.class
     }
@@ -397,6 +401,7 @@ impl ReaderState {
                 .map(|(label, done, total)| (label.as_str(), *done, *total)),
             message: self.message.as_deref(),
             help: self.overlay == Overlay::Help,
+            editing: self.search_editing || self.overlay == Overlay::LinkPrompt,
             rhythm: match self.overlay {
                 Overlay::Rhythm { choice, .. } => Some((choice, RHYTHM_CHOICES.len())),
                 _ => None,
@@ -1037,6 +1042,8 @@ impl ReaderState {
                 Vec::new()
             }
             JobOutcome::Failed(sentence) => {
+                // A list load that failed answers with this too: the next page may be asked again.
+                self.loading_more = false;
                 self.extracting = None;
                 self.message = Some(sentence);
                 Vec::new()
@@ -1399,6 +1406,27 @@ mod tests {
             state.on_event(more),
             [Command::LoadEntry(5), Command::SetRead(5, true)]
         );
+    }
+
+    #[test]
+    fn a_failed_next_page_can_be_asked_again() {
+        let mut state = ReaderState::new(TerminalSettings::default(), 140, 40);
+        state.source = Source::Unread;
+        state.on_event(entries(
+            &state,
+            Source::Unread,
+            vec![row(1, 7, true)],
+            Some(cursor()),
+        ));
+        assert_eq!(char_key(&mut state, ' ').len(), 1, "the page is asked");
+        assert!(state.loading_more);
+        state.on_event(Event::JobDone(JobOutcome::Failed("busy".into())));
+        assert!(
+            !state.loading_more,
+            "the failed load no longer blocks the next"
+        );
+        assert_eq!(state.message.as_deref(), Some("busy"));
+        assert_eq!(char_key(&mut state, ' ').len(), 1, "asked again");
     }
 
     #[test]
