@@ -315,7 +315,14 @@ mod tests {
         let full = view(vec![(1, 1, Section::Wire, false)], vec![], 0);
         let empty = view(vec![], vec![], 0);
         assert_eq!(
-            placeholder(&JournalPhase::Building { done: 34, total: 156 }, Some(&full)).as_deref(),
+            placeholder(
+                &JournalPhase::Building {
+                    done: 34,
+                    total: 156
+                },
+                Some(&full)
+            )
+            .as_deref(),
             Some("Building this morning's edition… 34/156")
         );
         assert_eq!(

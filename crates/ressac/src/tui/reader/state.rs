@@ -230,9 +230,10 @@ pub struct ReaderView<'a> {
     pub look: Look,
     pub layout: LayoutClass,
     pub focus: Column,
-    #[allow(dead_code, reason = "read by the Journal look (phase 7)")]
+    #[allow(dead_code, reason = "read by the Antiope look (phase 9)")]
     pub sources_overlay: bool,
     pub now_local: DateTime<FixedOffset>,
+    #[allow(dead_code, reason = "read by the Antiope look (phase 9)")]
     pub source: Source,
     pub source_title: String,
     pub source_lines: Vec<SourceLine>,
@@ -240,7 +241,7 @@ pub struct ReaderView<'a> {
     pub search: Option<&'a str>,
     pub entries: &'a [EntryRow],
     pub entry_cursor: Option<usize>,
-    #[allow(dead_code, reason = "read by the Journal look (phase 7)")]
+    #[allow(dead_code, reason = "read by the Antiope look (phase 9)")]
     pub total: usize,
     pub unread: usize,
     /// The Journal column is showing (the Journal, unfiltered, no search): its rows or, while
@@ -409,7 +410,10 @@ impl ReaderState {
                 .to_string()
             });
         let journal_lines = if self.journal_active() {
-            self.journal.as_ref().map(journal::journal_lines).unwrap_or_default()
+            self.journal
+                .as_ref()
+                .map(journal::journal_lines)
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -2552,12 +2556,17 @@ mod tests {
             });
             assert_eq!(
                 state.journal_phase(),
-                &JournalPhase::Building { done: 3, total: 156 }
+                &JournalPhase::Building {
+                    done: 3,
+                    total: 156
+                }
             );
             // The rollover while the first build runs asks for nothing.
-            assert!(!state
-                .on_event(tick("2026-10-17T04:00:01"))
-                .contains(&Command::BuildEdition));
+            assert!(
+                !state
+                    .on_event(tick("2026-10-17T04:00:01"))
+                    .contains(&Command::BuildEdition)
+            );
             // Other jobs' progress is not the Journal's.
             let mut other = started("2026-10-16T08:00:00");
             other.on_event(Event::Progress {
@@ -2612,11 +2621,16 @@ mod tests {
             let mut state = started("2026-10-16T08:00:00");
             state.on_event(Event::JobDone(JobOutcome::EditionOffline));
             assert_eq!(state.journal_phase(), &JournalPhase::Offline);
-            assert_eq!(state.message, None, "the placeholder says it, not the top line");
+            assert_eq!(
+                state.message, None,
+                "the placeholder says it, not the top line"
+            );
             assert_eq!(char_key(&mut state, 'r'), [Command::BuildEdition]);
             // Asked once: a second `r` while the build is out does nothing.
             assert!(char_key(&mut state, 'r').is_empty());
-            state.on_event(Event::JobDone(JobOutcome::EditionFailed("disk full".into())));
+            state.on_event(Event::JobDone(JobOutcome::EditionFailed(
+                "disk full".into(),
+            )));
             assert_eq!(
                 state.journal_phase(),
                 &JournalPhase::Failed("disk full".into())
@@ -2652,14 +2666,20 @@ mod tests {
                 done: 1,
                 total: 4,
             });
-            state.on_event(Event::JobDone(JobOutcome::Failed("The database is busy.".into())));
+            state.on_event(Event::JobDone(JobOutcome::Failed(
+                "The database is busy.".into(),
+            )));
             state.on_event(Event::JobDone(JobOutcome::Offline));
             assert_eq!(
                 state.journal_phase(),
                 &JournalPhase::Building { done: 1, total: 4 }
             );
             // The edition is still out: no second build, then its own failure lands.
-            assert!(char_key(&mut state, 'r').iter().all(|c| *c != Command::BuildEdition));
+            assert!(
+                char_key(&mut state, 'r')
+                    .iter()
+                    .all(|c| *c != Command::BuildEdition)
+            );
             state.on_event(Event::JobDone(JobOutcome::EditionFailed("boom".into())));
             assert_eq!(state.journal_phase(), &JournalPhase::Failed("boom".into()));
         }
@@ -2779,8 +2799,16 @@ mod tests {
             let rows: Vec<_> = view.items.iter().map(|i| i.row.clone()).collect();
             state.on_event(Event::Journal(Some(view.clone())));
             state.on_event(entries(&state, Source::Journal, rows.clone(), None));
-            assert_eq!(state.view().journal_cursor, Some(3), "still on the overflow row");
-            assert_eq!(state.selected_entry(), None, "and nothing selected behind it");
+            assert_eq!(
+                state.view().journal_cursor,
+                Some(3),
+                "still on the overflow row"
+            );
+            assert_eq!(
+                state.selected_entry(),
+                None,
+                "and nothing selected behind it"
+            );
             // The row is gone from the next edition: the cursor falls back to an entry.
             let mut next = view;
             next.overflow.clear();

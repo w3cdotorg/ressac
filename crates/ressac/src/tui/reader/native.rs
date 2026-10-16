@@ -10,18 +10,18 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_image::StatefulImage;
 use ratatui_image::protocol::StatefulProtocol;
 use ressac_core::store::{EntryDetail, EntryRow, ListFilter};
 
 use super::html::{ImageRef, MAX_TEXT_WIDTH};
 use super::images::{ImageState, ImageStore, Variant};
+use super::journal::{self, JournalLine};
 use super::layout::{Column, LayoutClass, columns};
 use super::state::{RHYTHM_CHOICES, ReaderState, ReaderView, SourceLine, group_label};
 use crate::output::printable;
 
-pub const EDITION_PROGRESS_LABEL: &str = "Building this morning's edition…";
 pub const FETCH_PROGRESS_LABEL: &str = "Fetching feeds";
 pub const EXTRACT_PROGRESS_LABEL: &str = "Fetching the full article";
 pub const TOO_SMALL: &str = "Window too small";
@@ -42,14 +42,14 @@ pub struct ReaderMetrics {
 }
 
 /// The progress line, shortened when the space is short: the edition's label becomes
-/// `Edition… n/N`; other labels keep their first word and an ellipsis.
+/// `Edition… n/N` (`journal::progress_text`); other labels keep their first word and an ellipsis.
 pub fn progress_text(label: &str, done: usize, total: usize, width: u16) -> String {
+    if label == journal::BUILDING {
+        return journal::progress_text(done, total, width);
+    }
     let full = format!("{label} {done}/{total}");
     if full.chars().count() <= usize::from(width) {
         return full;
-    }
-    if label == EDITION_PROGRESS_LABEL {
-        return format!("Edition… {done}/{total}");
     }
     let first = label.split_whitespace().next().unwrap_or(label);
     format!("{first}…")
@@ -136,18 +136,17 @@ fn bottom_line(view: &ReaderView<'_>, width: u16) -> Paragraph<'static> {
     if view.editing {
         return Paragraph::new(Span::styled(EDITING_HINT, DIM));
     }
-    let hints: &[&str] = match view.focus {
-        Column::Sources => &["↑↓ source", "→ list", "r refresh", "t Antiope", "q quit"],
-        Column::Entries => &[
-            "j/k entry",
-            "Space next",
-            "m read",
-            "s star",
-            "A all read",
-            "u unread",
-            "/ search",
-        ],
-        Column::Reader => &[
+    let retry = view.journal_mode && journal::offers_retry(view.journal_phase);
+    let hints: Vec<&str> = match view.focus {
+        Column::Sources => vec!["↑↓ source", "→ list", "r refresh", "t Antiope", "q quit"],
+        // On the Journal, `r` rebuilds the edition when it is offline or failed.
+        Column::Entries => retry
+            .then_some("r retry")
+            .into_iter()
+            .chain(["j/k entry", "Space next", "m read", "s star"])
+            .chain(["A all read", "u unread", "/ search"])
+            .collect(),
+        Column::Reader => vec![
             "Space scroll",
             "j/k entry",
             "f full text",
@@ -156,7 +155,7 @@ fn bottom_line(view: &ReaderView<'_>, width: u16) -> Paragraph<'static> {
         ],
     };
     let mut line = String::new();
-    for hint in hints {
+    for hint in &hints {
         let fits =
             line.chars().count() + hint.chars().count() + 2 + HELP_HINT.len() <= usize::from(width);
         if !fits {
@@ -199,6 +198,10 @@ fn source_item(line: &SourceLine) -> ListItem<'static> {
 }
 
 fn render_entries(frame: &mut Frame, view: &ReaderView<'_>, area: Rect, focused: bool) {
+    if view.journal_mode {
+        render_journal(frame, view, area, focused);
+        return;
+    }
     let items: Vec<ListItem> = view
         .entries
         .iter()
@@ -209,6 +212,106 @@ fn render_entries(frame: &mut Frame, view: &ReaderView<'_>, area: Rect, focused:
         .block(frame_block(&view.source_title, focused))
         .highlight_style(SELECTED);
     frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+/// The Journal column (spec §6): the edition's header, then its sections, entries and overflow
+/// rows, or a placeholder in its place. Feed-supplied text goes through `printable`; the column
+/// clips what is too long.
+fn render_journal(frame: &mut Frame, view: &ReaderView<'_>, area: Rect, focused: bool) {
+    let block = frame_block(&view.source_title, focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut body = inner;
+    if let Some(edition) = view.journal {
+        // The header wraps in a narrow column (the unreachable count is the part worth keeping).
+        let header = Line::styled(
+            journal::journal_header(edition, view.now_local.offset()),
+            BOLD,
+        );
+        let rows = header
+            .width()
+            .div_ceil(usize::from(inner.width).max(1))
+            .max(1);
+        let [head, rest] = Layout::vertical([
+            Constraint::Length(u16::try_from(rows).unwrap_or(u16::MAX).min(inner.height)),
+            Constraint::Min(0),
+        ])
+        .areas(inner);
+        frame.render_widget(Paragraph::new(header).wrap(Wrap { trim: true }), head);
+        body = rest;
+    }
+    if let Some(text) = journal::placeholder(view.journal_phase, view.journal) {
+        render_placeholder(frame, view, body, &text);
+        return;
+    }
+    let Some(edition) = view.journal else {
+        return;
+    };
+    let mut items: Vec<ListItem> = view
+        .journal_lines
+        .iter()
+        .enumerate()
+        .map(|(at, line)| match *line {
+            JournalLine::Heading(section) => {
+                let title = Line::styled(journal::section_title(section), BOLD);
+                // A blank line before every heading but the first.
+                ListItem::new(if at == 0 {
+                    vec![title]
+                } else {
+                    vec![Line::raw(""), title]
+                })
+            }
+            JournalLine::Entry(i) => entry_item(&edition.items[i].row, view.now_local),
+            JournalLine::Overflow(o) => {
+                let more = &edition.overflow[o];
+                ListItem::new(Line::styled(
+                    format!(
+                        "  +{} more in {}",
+                        more.hidden_count,
+                        printable(&more.feed_title)
+                    ),
+                    DIM.add_modifier(Modifier::ITALIC),
+                ))
+            }
+        })
+        .collect();
+    if journal::is_finished(edition) {
+        items.push(ListItem::new(vec![
+            Line::raw(""),
+            Line::styled(journal::END_LINE, DIM),
+        ]));
+    }
+    let mut list_state = ListState::default().with_selected(view.journal_cursor);
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(SELECTED),
+        body,
+        &mut list_state,
+    );
+}
+
+/// What the Journal shows instead of the edition: dimmed, centred in the column, and the
+/// retry key when it helps.
+fn render_placeholder(frame: &mut Frame, view: &ReaderView<'_>, body: Rect, text: &str) {
+    let mut lines = vec![Line::styled(printable(text).into_owned(), DIM)];
+    if journal::offers_retry(view.journal_phase) {
+        lines.push(Line::styled("r retry", DIM));
+    }
+    // A long sentence wraps: count its rows so that the block stays centred.
+    let rows: usize = lines
+        .iter()
+        .map(|line| line.width().div_ceil(usize::from(body.width).max(1)).max(1))
+        .sum();
+    let [place] = Layout::vertical([Constraint::Length(
+        u16::try_from(rows).unwrap_or(u16::MAX).min(body.height),
+    )])
+    .flex(Flex::Center)
+    .areas(body);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        place,
+    );
 }
 
 fn entry_item(row: &EntryRow, now: DateTime<FixedOffset>) -> ListItem<'static> {
@@ -444,9 +547,11 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui_image::picker::Picker;
+    use ressac_core::edition::Section;
     use ressac_core::model::CadenceGroup;
     use ressac_core::store::{
-        EntryPage, Source, SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot,
+        EditionOverflowRow, EditionRecord, EntryPage, JournalItem, JournalView, Source,
+        SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot,
     };
     use std::collections::BTreeMap;
 
@@ -658,11 +763,11 @@ mod tests {
     #[test]
     fn progress_text_shortens_the_edition_label_when_needed() {
         assert_eq!(
-            progress_text(EDITION_PROGRESS_LABEL, 34, 156, 60),
+            progress_text(journal::BUILDING, 34, 156, 60),
             "Building this morning's edition… 34/156"
         );
         assert_eq!(
-            progress_text(EDITION_PROGRESS_LABEL, 34, 156, 30),
+            progress_text(journal::BUILDING, 34, 156, 30),
             "Edition… 34/156"
         );
         assert_eq!(
@@ -676,7 +781,7 @@ mod tests {
     fn the_progress_line_replaces_the_message_on_the_top_line() {
         let mut s = state(140, 30, rows());
         s.on_event(Event::Progress {
-            label: EDITION_PROGRESS_LABEL.into(),
+            label: journal::BUILDING.into(),
             done: 34,
             total: 156,
         });
@@ -858,5 +963,248 @@ mod tests {
         let mut images = ImageStore::new(Picker::halfblocks());
         images.ingest(PHOTO, photo());
         insta::assert_snapshot!(draw_with(&s, &mut images, 140, 30));
+    }
+
+    fn journal_item(
+        id: i64,
+        feed: i64,
+        feed_title: &str,
+        title: &str,
+        section: Section,
+        read: bool,
+    ) -> JournalItem {
+        JournalItem {
+            row: EntryRow {
+                feed_id: feed,
+                feed_title: feed_title.into(),
+                ..row(id, title, read)
+            },
+            section,
+            rank: id as u32,
+        }
+    }
+
+    /// Front: one entry; Week: two of Actualitté with 12 more hidden, then one of Le Monde;
+    /// Wire: one with control characters in its title.
+    fn sample_journal(read: bool, unreachable: u32) -> JournalView {
+        JournalView {
+            edition: EditionRecord {
+                id: 1,
+                built_at: Utc.with_ymd_and_hms(2026, 10, 16, 6, 10, 0).unwrap(),
+                window_start: Utc.with_ymd_and_hms(2026, 10, 15, 6, 10, 0).unwrap(),
+                window_end: Utc.with_ymd_and_hms(2026, 10, 16, 6, 10, 0).unwrap(),
+                unreachable,
+            },
+            items: vec![
+                journal_item(
+                    1,
+                    3,
+                    "Le Monde diplomatique",
+                    "Le mois en cartes",
+                    Section::Front,
+                    read,
+                ),
+                journal_item(
+                    2,
+                    7,
+                    "Actualitté",
+                    "Un roman de la rentrée",
+                    Section::Week,
+                    read,
+                ),
+                journal_item(3, 7, "Actualitté", "Le prix du livre", Section::Week, read),
+                journal_item(
+                    4,
+                    8,
+                    "Le Monde",
+                    "Une analyse de la semaine",
+                    Section::Week,
+                    read,
+                ),
+                journal_item(
+                    5,
+                    9,
+                    "Les Échos",
+                    "Bourse\u{1b}]0;x\u{7} du jour",
+                    Section::Wire,
+                    read,
+                ),
+            ],
+            overflow: vec![EditionOverflowRow {
+                section: Section::Week,
+                feed_id: 7,
+                feed_title: "Actualitté".into(),
+                page: Some(403),
+                hidden_count: 12,
+            }],
+        }
+    }
+
+    fn journal_state(read: bool, unreachable: u32) -> ReaderState {
+        let mut s = ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            140,
+            30,
+        );
+        let local = FixedOffset::east_opt(7200)
+            .unwrap()
+            .with_ymd_and_hms(2026, 10, 16, 8, 0, 0)
+            .unwrap();
+        s.start(local.with_timezone(&Utc), local);
+        s.on_event(Event::Sources(snapshot()));
+        s.on_event(Event::JobDone(JobOutcome::EditionNotDue));
+        let view = sample_journal(read, unreachable);
+        let rows: Vec<EntryRow> = view.items.iter().map(|i| i.row.clone()).collect();
+        s.on_event(Event::Journal(Some(view)));
+        s.on_event(Event::Entries {
+            source: Source::Journal,
+            page: EntryPage {
+                total: rows.len(),
+                unread: rows.iter().filter(|r| !r.is_read).count(),
+                rows,
+                next: None,
+            },
+            appended: false,
+            request: s.request,
+        });
+        let open = s.entries[0].clone();
+        s.on_event(Event::Entry(Box::new(detail_for(open, None))));
+        s
+    }
+
+    #[test]
+    fn journal_wide() {
+        insta::assert_snapshot!(draw(&journal_state(false, 3), 140, 30));
+    }
+
+    #[test]
+    fn journal_the_cursor_rests_on_an_overflow_row() {
+        let mut s = journal_state(false, 0);
+        for _ in 0..3 {
+            s.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        insta::assert_snapshot!(draw(&s, 140, 30));
+    }
+
+    #[test]
+    fn journal_finished_shows_the_end_line() {
+        let out = draw(&journal_state(true, 0), 140, 30);
+        assert!(out.contains("That's the edition."), "{out}");
+        insta::assert_snapshot!(out);
+        assert!(!draw(&journal_state(false, 0), 140, 30).contains("That's the edition."));
+    }
+
+    #[test]
+    fn journal_header_counts_the_entries_and_the_unreachable_feeds() {
+        let out = draw(&journal_state(false, 1), 140, 30);
+        // The 40-cell column wraps the header: the count of unreachable feeds is kept.
+        assert!(
+            out.contains("Friday 16 October · 5 entries · 0 read"),
+            "{out}"
+        );
+        assert!(out.contains("· 1 feed unreachable"), "{out}");
+        let three = draw(&journal_state(false, 3), 140, 30);
+        assert!(three.contains("· 3 feeds unreachable"), "{three}");
+    }
+
+    #[test]
+    fn journal_building_progress_on_the_top_line() {
+        let mut s = journal_state(false, 0);
+        s.on_event(Event::Progress {
+            label: journal::BUILDING.into(),
+            done: 34,
+            total: 156,
+        });
+        let wide = draw(&s, 140, 30);
+        assert!(
+            wide.lines()
+                .next()
+                .unwrap()
+                .contains("Building this morning's edition… 34/156"),
+            "{wide}"
+        );
+        let narrow = draw(&s, 70, 30);
+        assert!(
+            narrow.lines().next().unwrap().contains("Edition… 34/156"),
+            "{narrow}"
+        );
+        // Before the refresh reports its total there is no count to show.
+        s.on_event(Event::Progress {
+            label: journal::BUILDING.into(),
+            done: 0,
+            total: 0,
+        });
+        let first = draw(&s, 140, 30);
+        assert!(!first.lines().next().unwrap().contains("0/0"), "{first}");
+        assert!(
+            draw(&s, 50, 30)
+                .lines()
+                .next()
+                .unwrap()
+                .contains("Edition…")
+        );
+    }
+
+    #[test]
+    fn journal_placeholders() {
+        let mut s = ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            100,
+            20,
+        );
+        s.on_event(Event::Journal(None));
+        let none = draw(&s, 100, 20);
+        assert!(none.contains("No edition yet"), "{none}");
+        assert!(!none.contains("r retry"), "nothing to retry: {none}");
+        s.on_event(Event::JobDone(JobOutcome::EditionOffline));
+        let offline = draw(&s, 100, 20);
+        assert!(offline.contains("Offline: no edition yet"), "{offline}");
+        assert!(offline.contains("r retry"), "{offline}");
+        s.on_event(Event::JobDone(JobOutcome::EditionFailed(
+            "disk \u{1b}full".into(),
+        )));
+        let failed = draw(&s, 100, 20);
+        assert!(
+            failed.contains("disk \u{FFFD}full") && failed.contains("r retry"),
+            "{failed}"
+        );
+        s.on_event(Event::JobDone(JobOutcome::EditionBuilt));
+        let mut empty = sample_journal(false, 0);
+        empty.items.clear();
+        empty.overflow.clear();
+        s.on_event(Event::Journal(Some(empty)));
+        assert!(draw(&s, 100, 20).contains("Nothing new this morning."));
+    }
+
+    #[test]
+    fn journal_retry_is_on_the_bottom_line_only_when_offered() {
+        let mut s = journal_state(false, 0);
+        assert!(!last_line(&draw(&s, 140, 30)).contains("r retry"));
+        s.on_event(Event::JobDone(JobOutcome::EditionOffline));
+        assert!(last_line(&draw(&s, 140, 30)).contains("r retry"));
+    }
+
+    #[test]
+    fn journal_a_filter_shows_the_plain_list() {
+        let mut s = journal_state(false, 0);
+        s.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        let out = draw(&s, 140, 30);
+        assert!(
+            !out.contains("Front Page") && !out.contains("more in"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn journal_escape_sequences_never_reach_the_terminal() {
+        let out = draw(&journal_state(false, 0), 140, 30);
+        assert!(!out.contains('\u{1b}') && !out.contains('\u{7}') && !out.contains('\u{9b}'));
+        assert!(out.contains("Bourse\u{FFFD}]0;x\u{FFFD} du jour"), "{out}");
     }
 }
