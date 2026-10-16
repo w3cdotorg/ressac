@@ -107,6 +107,7 @@ struct GardenInspectorPage: View {
         let cell = TeletextFont.cell(forSize: size)
         GeometryReader { proxy in
             let cells = Int(proxy.size.width / cell.width)
+            let cadence = GardenPage.cadence(cadence, forSelected: state.selectedFeedId)
             let lines = GardenPage.inspectorLines(store.selectedRow(state), log: store.log, cells: cells,
                                                   cadence: cadence, now: Date())
             ScrollView(.vertical) {

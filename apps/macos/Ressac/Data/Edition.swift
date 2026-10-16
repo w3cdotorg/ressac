@@ -110,7 +110,7 @@ enum EditionClock {
 
     /// 04:00 local of the day `now` belongs to: before 04:00, the previous day's 04:00.
     /// Mirrors the core's `edition::day_start`, DST changes included.
-    static func dayStart(for now: Date, calendar: Calendar = .current) -> Date {
+    static func dayStart(for now: Date, calendar: Calendar = .autoupdatingCurrent) -> Date {
         let today = fourOClock(on: now, calendar)
         if now >= today { return today }
         let yesterday = calendar.date(byAdding: .day, value: -1, to: now) ?? now.addingTimeInterval(-86_400)

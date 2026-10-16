@@ -196,6 +196,15 @@ private func overflowItem(_ section: EditionSection, feed: Int64, _ hidden: Int,
         #expect(JournalLayout.sections(entries: [listRow(2, feed: 3)], edition: nil).isEmpty)
     }
 
+    @Test func retry_is_offered_whenever_the_edition_could_not_be_built() {
+        for phase in [JournalModel.Phase.offline, .failed("Database is locked."), .due] {
+            #expect(JournalListView.offersRetry(phase))
+        }
+        for phase in [JournalModel.Phase.idle, .building(done: 1, total: 2)] {
+            #expect(!JournalListView.offersRetry(phase))
+        }
+    }
+
     @Test func the_header_counts_entries_read_entries_and_unreachable_feeds() {
         let items: [(Int64, EditionSection, Int, Int64)] = [(1, .front, 1, 1), (2, .wire, 2, 2), (3, .wire, 3, 3)]
         #expect(JournalLayout.header(sampleEdition(items, read: [2]), calendar: .paris)

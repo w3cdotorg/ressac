@@ -276,6 +276,13 @@ enum GardenPage {
         var id: String { line.id }
     }
 
+    /// The observed rhythm row, only while it is the selected feed's: a selection change leaves the
+    /// previous feed's row in place until the new observation lands, and it must not be drawn or clicked.
+    static func cadence(_ row: CadenceRow?, forSelected feedId: Int64?) -> CadenceRow? {
+        guard let row, row.feedId == feedId else { return nil }
+        return row
+    }
+
     /// `AUTO`, then the five groups, one row each, cyan; the choice in force (Auto unless the feed
     /// is overridden) in reverse video, black on cyan. Every row is exactly `cells` wide.
     static func cadenceChoices(_ cadence: CadenceRow, cells: Int) -> [CadenceChoice] {

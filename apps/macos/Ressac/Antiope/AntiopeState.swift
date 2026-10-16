@@ -184,11 +184,12 @@ enum ReaderPage: Equatable, Sendable {
 
     // MARK: Private
 
-    /// Whether RÉPÉTITION on P104 retries the edition rather than refreshing: offline or failed.
+    /// Whether RÉPÉTITION on P104 retries the edition rather than refreshing: offline, failed, or
+    /// turned away by another long run (`due`).
     static func retriesJournal(_ phase: JournalModel.Phase) -> Bool {
         switch phase {
-        case .offline, .failed: true
-        case .idle, .due, .building: false
+        case .offline, .failed, .due: true
+        case .idle, .building: false
         }
     }
 

@@ -48,7 +48,7 @@ struct JournalSection: Identifiable, Equatable {
     }
 
     /// "Friday 16 October · 43 entries · 12 read", plus " · 3 feeds unreachable".
-    static func header(_ edition: Edition, calendar: Calendar = .current) -> String {
+    static func header(_ edition: Edition, calendar: Calendar = .autoupdatingCurrent) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = calendar
@@ -127,10 +127,11 @@ struct JournalListView: View {
         }
     }
 
-    private static func offersRetry(_ phase: JournalModel.Phase) -> Bool {
+    /// Whether the placeholder offers Retry: the build failed, or was turned away (`due`).
+    static func offersRetry(_ phase: JournalModel.Phase) -> Bool {
         switch phase {
-        case .offline, .failed: true
-        case .idle, .due, .building: false
+        case .offline, .failed, .due: true
+        case .idle, .building: false
         }
     }
 

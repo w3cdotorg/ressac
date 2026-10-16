@@ -241,7 +241,9 @@ private func trimmed(_ text: String) -> String {
     @Test func repetitionRetriesOnlyAnEditionThatCouldNotBeBuilt() {
         #expect(AntiopeState.retriesJournal(.offline))
         #expect(AntiopeState.retriesJournal(.failed("Database is locked.")))
-        for phase in [JournalModel.Phase.idle, .due, .building(done: 1, total: 2)] {
+        // Turned away by another long run: the edition is still due, RÉPÉTITION asks again.
+        #expect(AntiopeState.retriesJournal(.due))
+        for phase in [JournalModel.Phase.idle, .building(done: 1, total: 2)] {
             #expect(!AntiopeState.retriesJournal(phase))
         }
     }

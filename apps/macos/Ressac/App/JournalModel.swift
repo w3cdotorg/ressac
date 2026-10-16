@@ -30,7 +30,7 @@ import Observation
     @ObservationIgnored private let database: AppDatabase
     @ObservationIgnored private let coordinator: RunCoordinator
     @ObservationIgnored private let clock: @Sendable () -> Date
-    @ObservationIgnored private let calendar: Calendar
+    @ObservationIgnored let calendar: Calendar
     @ObservationIgnored private var editionObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var rolloverTask: Task<Void, Never>?
     /// A check or a build is under way: launch, activation and the rollover can fire together.
@@ -38,7 +38,7 @@ import Observation
     @ObservationIgnored private var sawNetworkUnreachable = false
 
     init(database: AppDatabase, coordinator: RunCoordinator,
-         clock: @escaping @Sendable () -> Date = { Date() }, calendar: Calendar = .current) {
+         clock: @escaping @Sendable () -> Date = { Date() }, calendar: Calendar = .autoupdatingCurrent) {
         self.database = database
         self.coordinator = coordinator
         self.clock = clock

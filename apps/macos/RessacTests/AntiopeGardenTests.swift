@@ -451,6 +451,14 @@ private func cadenceRow(_ id: Int64, effective: CadenceGroup = .weekly, computed
             .contains { $0.role == .rhythm || $0.text.hasPrefix("RHYTHM") })
     }
 
+    @Test func theRhythmRowsBelongToTheSelectedFeedOnly() {
+        let row = cadenceRow(7)
+        #expect(GardenPage.cadence(row, forSelected: 7) == row)
+        #expect(GardenPage.cadence(row, forSelected: 8) == nil)  // the previous feed's row, one beat late
+        #expect(GardenPage.cadence(row, forSelected: nil) == nil)
+        #expect(GardenPage.cadence(nil, forSelected: 7) == nil)
+    }
+
     @Test func theOverrideRowsShowTheChoiceInForce() {
         let auto = GardenPage.cadenceChoices(cadenceRow(7), cells: 24)
         #expect(auto.map(\.group) == [nil, .daily, .weekly, .monthly, .rare, .silent])

@@ -97,6 +97,12 @@ actor SleepLog {
 }
 
 @MainActor @Suite struct JournalModelTests {
+    @Test func the_app_follows_a_time_zone_change_while_running() throws {
+        let (state, test, _) = try makeState()
+        defer { withExtendedLifetime(test) {} }
+        #expect(JournalModel(database: state.database, coordinator: state.runs).calendar == .autoupdatingCurrent)
+    }
+
     @Test func a_due_edition_is_built_and_shown() async throws {
         let (journal, _, test, stub) = try makeJournal()
         defer { withExtendedLifetime(test) {} }  // the temporary database goes with it
