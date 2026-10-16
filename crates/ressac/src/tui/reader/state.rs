@@ -19,6 +19,7 @@ use crate::tui::state::{self as garden_state, GardenState};
 use super::html::{RenderedArticle, is_web_url, render_html};
 use super::journal::{self, END_LINE, JournalLine, JournalPhase, OFFLINE};
 use super::layout::{Column, LayoutClass, Look, columns, layout_class, text_height, text_width};
+use super::rhythm::{self, RhythmInfo};
 use super::settings::TerminalSettings;
 use super::sidebar::{self, SidebarRow};
 
@@ -77,6 +78,9 @@ pub enum Command {
     Refresh(Option<Source>),
     OpenUrl(String),
     SetCadence(FeedId, Option<CadenceGroup>),
+    /// The feed's rhythm line (`Event::Cadence`): asked whenever the selected garden row or the
+    /// feed source in view changes.
+    LoadCadence(FeedId),
     /// The garden's rows (a garden page is showing or about to).
     LoadGarden,
     /// A garden command from a garden page; the runner answers with the fresh rows, the message
@@ -105,6 +109,8 @@ pub enum Event {
     GardenRows(Vec<GardenRow>),
     /// The line a garden command leaves on the garden page (`None` clears it).
     GardenMessage(Option<String>),
+    /// A feed's rhythm, from `v_cadence`; kept when it is the selected feed's.
+    Cadence(RhythmInfo),
     /// Boxed: far larger than the other variants (`clippy::large_enum_variant`).
     Entry(Box<EntryDetail>),
     #[allow(dead_code, reason = "phase 6 answers the image commands")]
@@ -227,6 +233,11 @@ pub struct ReaderState {
     last_day: Option<DateTime<Utc>>,
     /// The Journal's cursor is on this feed's overflow row (no entry is selected then).
     journal_overflow: Option<FeedId>,
+    /// The rhythm of the feed in view (the selected garden row, a feed source) or of the feed
+    /// `c` was pressed on; the line is drawn only when it is the feed in view's.
+    pub rhythm: Option<RhythmInfo>,
+    /// The feed whose rhythm was last asked for: a change of the feed in view asks again.
+    rhythm_feed: Option<FeedId>,
     pub selected: Option<i64>,
     pub detail: Option<EntryDetail>,
     pub article: Option<RenderedArticle>,
@@ -312,6 +323,11 @@ pub struct ReaderView<'a> {
     /// The search text or the link number is being typed: the bottom line shows how to end it.
     pub editing: bool,
     pub rhythm: Option<(usize, usize)>,
+    /// The menu's item that is the feed's current setting (`Auto` when not overridden): marked.
+    pub rhythm_current: Option<usize>,
+    /// "Rhythm: Daily · median 0.4 d · last entry 2 h ago" for the feed in view: the selected
+    /// garden row (not a buried one) or the feed source; `None` until the info arrives.
+    pub rhythm_line: Option<String>,
 }
 
 /// `Daily`, `Weekly`...: the group's name as the sources column and the menu show it.
@@ -349,6 +365,8 @@ impl ReaderState {
             edition_job: false,
             last_day: None,
             journal_overflow: None,
+            rhythm: None,
+            rhythm_feed: None,
             selected: None,
             detail: None,
             article: None,
@@ -379,6 +397,7 @@ impl ReaderState {
         self.last_day = Some(journal::day_of(local));
         let mut commands = vec![Command::LoadSources, Command::LoadJournal, self.reload()];
         commands.extend(self.build_edition());
+        commands.extend(self.sync_rhythm());
         commands
     }
 
@@ -390,6 +409,15 @@ impl ReaderState {
     #[allow(dead_code, reason = "read by the Antiope Journal page (phase 9)")]
     pub fn journal(&self) -> Option<&JournalView> {
         self.journal.as_ref()
+    }
+
+    /// The rhythm of the feed in view, once it has arrived.
+    #[allow(
+        dead_code,
+        reason = "read by the tests and the Antiope pages (phase 9)"
+    )]
+    pub fn rhythm(&self) -> Option<&RhythmInfo> {
+        self.rhythm.as_ref()
     }
 
     /// The garden page shown instead of the entries and reader columns, if any.
@@ -411,6 +439,7 @@ impl ReaderState {
             commands.push(Command::LoadGarden);
         }
         self.focus = Column::Entries;
+        commands.extend(self.sync_rhythm());
         commands
     }
 
@@ -433,7 +462,9 @@ impl ReaderState {
     /// Entry points for other screens (Antiope page jumps, phase 9).
     #[allow(dead_code, reason = "used by Antiope page jumps (phase 9)")]
     pub fn go_to(&mut self, source: Source) -> Vec<Command> {
-        self.switch_source(source)
+        let mut commands = self.switch_source(source);
+        commands.extend(self.sync_rhythm());
+        commands
     }
 
     #[allow(dead_code, reason = "used by Antiope page jumps (phase 9)")]
@@ -557,6 +588,11 @@ impl ReaderState {
                 Overlay::Rhythm { choice, .. } => Some((choice, RHYTHM_CHOICES.len())),
                 _ => None,
             },
+            rhythm_current: match self.overlay {
+                Overlay::Rhythm { feed_id, .. } => Some(self.rhythm_choice(feed_id)),
+                _ => None,
+            },
+            rhythm_line: self.rhythm_line(),
         }
     }
 
@@ -567,6 +603,12 @@ impl ReaderState {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        let mut commands = self.handle_key(key);
+        commands.extend(self.sync_rhythm());
+        commands
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> Vec<Command> {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return vec![Command::Quit];
         }
@@ -675,6 +717,7 @@ impl ReaderState {
                 return Some(Vec::new());
             }
             KeyCode::Char('q') if at_list => return Some(vec![Command::Quit]),
+            KeyCode::Char('c') if at_list => return Some(self.garden_rhythm_menu()),
             _ => {}
         }
         // The rows are not here yet: nothing else to press.
@@ -688,6 +731,16 @@ impl ReaderState {
     }
 
     pub fn on_event(&mut self, event: Event) -> Vec<Command> {
+        // Another process may have changed the rhythm: ask again on every data change.
+        if matches!(event, Event::DataChanged) {
+            self.rhythm_feed = None;
+        }
+        let mut commands = self.handle_event(event);
+        commands.extend(self.sync_rhythm());
+        commands
+    }
+
+    fn handle_event(&mut self, event: Event) -> Vec<Command> {
         match event {
             Event::Sources(snapshot) => {
                 self.sidebar = sidebar::rows(&snapshot);
@@ -715,6 +768,10 @@ impl ReaderState {
                 if let Some(garden) = self.garden.as_mut() {
                     garden.message = message;
                 }
+                Vec::new()
+            }
+            Event::Cadence(info) => {
+                self.cadence_arrived(info);
                 Vec::new()
             }
             Event::Entries {
@@ -1312,17 +1369,127 @@ impl ReaderState {
         }
     }
 
-    /// `c`: the rhythm menu for the feed in view (a feed source, else the entry's feed).
+    /// `c` on a reading page: the rhythm menu for the feed in view (a feed source, else the
+    /// entry's feed).
     fn rhythm_menu(&mut self) -> Vec<Command> {
         let feed = match self.source {
             Source::Feed(id) => Some(id),
             _ => self.index().map(|i| self.entries[i].feed_id),
         };
         match feed {
-            Some(feed_id) => self.overlay = Overlay::Rhythm { feed_id, choice: 0 },
-            None => self.message = Some(NO_FEED.into()),
+            Some(feed_id) => self.open_rhythm_menu(feed_id),
+            None => {
+                self.message = Some(NO_FEED.into());
+                Vec::new()
+            }
         }
-        Vec::new()
+    }
+
+    /// `c` on a garden page: the selected row's feed, unless it is buried (a buried feed has no
+    /// rhythm to set).
+    fn garden_rhythm_menu(&mut self) -> Vec<Command> {
+        let Some(garden) = self.garden.as_mut() else {
+            return Vec::new();
+        };
+        let Some((feed_id, buried)) = garden.selected_row().map(|r| (r.feed_id, r.buried)) else {
+            return Vec::new();
+        };
+        if buried {
+            garden.message = Some(format!("Feed #{feed_id} is buried."));
+            return Vec::new();
+        }
+        self.open_rhythm_menu(feed_id)
+    }
+
+    /// The menu opens on the feed's current setting: its forced group, else `Auto`. A feed whose
+    /// rhythm is not known yet (a list's entry, not the feed in view) is asked for, and the menu
+    /// moves onto the answer if it has not been touched.
+    fn open_rhythm_menu(&mut self, feed_id: FeedId) -> Vec<Command> {
+        self.overlay = Overlay::Rhythm {
+            feed_id,
+            choice: self.rhythm_choice(feed_id),
+        };
+        // The feed in view is kept fresh (every data change asks again); any other is asked.
+        match self.rhythm.as_ref() {
+            Some(info) if info.feed_id == feed_id && self.feed_in_view() == Some(feed_id) => {
+                Vec::new()
+            }
+            _ => vec![Command::LoadCadence(feed_id)],
+        }
+    }
+
+    /// The menu item that is the feed's current setting.
+    fn rhythm_choice(&self, feed_id: FeedId) -> usize {
+        self.rhythm
+            .as_ref()
+            .filter(|info| info.feed_id == feed_id && info.is_override)
+            .and_then(|info| {
+                RHYTHM_CHOICES
+                    .iter()
+                    .position(|choice| *choice == Some(info.effective))
+            })
+            .unwrap_or(0)
+    }
+
+    /// The feed whose rhythm the page shows: the selected garden row (never a buried one) or the
+    /// feed source.
+    fn feed_in_view(&self) -> Option<FeedId> {
+        if self.garden_view.is_some() {
+            return self
+                .garden
+                .as_ref()
+                .and_then(GardenState::selected_row)
+                .filter(|row| !row.buried)
+                .map(|row| row.feed_id);
+        }
+        match self.source {
+            Source::Feed(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Asks for the rhythm of the feed in view when it is not the one last asked for; drops a
+    /// rhythm that belongs to another feed.
+    fn sync_rhythm(&mut self) -> Option<Command> {
+        let want = self.feed_in_view();
+        if want == self.rhythm_feed {
+            return None;
+        }
+        self.rhythm_feed = want;
+        if self.rhythm.as_ref().map(|info| info.feed_id) != want {
+            self.rhythm = None;
+        }
+        want.map(Command::LoadCadence)
+    }
+
+    /// An answer is kept when it is for the feed in view or the one the menu is open on; a menu
+    /// still on its first item moves onto the feed's current setting.
+    fn cadence_arrived(&mut self, info: RhythmInfo) {
+        let menu_feed = match self.overlay {
+            Overlay::Rhythm { feed_id, .. } => Some(feed_id),
+            _ => None,
+        };
+        if Some(info.feed_id) != self.feed_in_view() && Some(info.feed_id) != menu_feed {
+            return;
+        }
+        let feed_id = info.feed_id;
+        self.rhythm = Some(info);
+        if let Overlay::Rhythm { choice: 0, .. } = self.overlay
+            && menu_feed == Some(feed_id)
+        {
+            self.overlay = Overlay::Rhythm {
+                feed_id,
+                choice: self.rhythm_choice(feed_id),
+            };
+        }
+    }
+
+    /// The rhythm line of the feed in view, worded as the app's; the time is the state's clock.
+    fn rhythm_line(&self) -> Option<String> {
+        let want = self.feed_in_view()?;
+        let info = self.rhythm.as_ref().filter(|info| info.feed_id == want)?;
+        let now = self.local?.with_timezone(&Utc);
+        Some(rhythm::rhythm_line(info, now))
     }
 
     fn on_rhythm_key(&mut self, code: KeyCode) -> Vec<Command> {
@@ -2075,6 +2242,24 @@ mod tests {
         char_key(&mut state, 'c');
         assert!(key(&mut state, KeyCode::Esc).is_empty());
         assert_eq!(state.overlay, Overlay::None);
+        // A forced rhythm: the menu asks for it and moves onto it, not left on Auto.
+        assert_eq!(char_key(&mut state, 'c'), [Command::LoadCadence(7)]);
+        state.on_event(Event::Cadence(RhythmInfo {
+            feed_id: 7,
+            effective: CadenceGroup::Monthly,
+            computed: CadenceGroup::Daily,
+            is_override: true,
+            median_days: None,
+            last_entry_at: None,
+        }));
+        assert_eq!(
+            state.overlay,
+            Overlay::Rhythm {
+                feed_id: 7,
+                choice: 3
+            }
+        );
+        key(&mut state, KeyCode::Esc);
         let mut empty = ReaderState::new(TerminalSettings::default(), 140, 40);
         char_key(&mut empty, 'c');
         assert_eq!(empty.message.as_deref(), Some("No feed selected."));
@@ -3224,5 +3409,214 @@ mod garden_tests {
             !r.on_event(Event::DataChanged)
                 .contains(&Command::LoadGarden)
         );
+    }
+}
+
+#[cfg(test)]
+mod rhythm_tests {
+    use super::*;
+    use crate::tui::state::{sample_rows, sample_rows_with_buried};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn fresh() -> ReaderState {
+        ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            140,
+            40,
+        )
+    }
+
+    fn on_needs_triage() -> ReaderState {
+        let mut s = fresh();
+        s.open_garden(GardenView::NeedsTriage);
+        s.on_event(Event::GardenRows(sample_rows()));
+        s
+    }
+
+    fn info(feed_id: FeedId, effective: CadenceGroup, is_override: bool) -> RhythmInfo {
+        RhythmInfo {
+            feed_id,
+            effective,
+            computed: CadenceGroup::Weekly,
+            is_override,
+            median_days: Some(1.5),
+            last_entry_at: None,
+        }
+    }
+
+    fn selected_feed(s: &ReaderState) -> FeedId {
+        s.garden().unwrap().selected_row().unwrap().feed_id
+    }
+
+    #[test]
+    fn moving_in_the_garden_loads_the_selected_feed_s_rhythm() {
+        let mut s = fresh();
+        s.open_garden(GardenView::NeedsTriage);
+        // The rows arrive: the first feed's rhythm is asked for.
+        let commands = s.on_event(Event::GardenRows(sample_rows()));
+        let first = selected_feed(&s);
+        assert!(commands.contains(&Command::LoadCadence(first)));
+        // A fresh load of the same rows asks nothing more.
+        let again = s.on_event(Event::GardenRows(sample_rows()));
+        assert!(!again.iter().any(|c| matches!(c, Command::LoadCadence(_))));
+        let commands = s.on_key(key(KeyCode::Down));
+        let second = selected_feed(&s);
+        assert_ne!(first, second);
+        assert!(commands.contains(&Command::LoadCadence(second)));
+    }
+
+    #[test]
+    fn a_rhythm_of_another_feed_is_dropped_and_not_drawn() {
+        let mut s = on_needs_triage();
+        let first = selected_feed(&s);
+        s.on_event(Event::Cadence(info(first, CadenceGroup::Weekly, false)));
+        assert!(s.rhythm().is_some());
+        s.on_key(key(KeyCode::Down));
+        assert!(s.rhythm().is_none());
+        // A late answer for the feed left behind is ignored.
+        s.on_event(Event::Cadence(info(first, CadenceGroup::Weekly, false)));
+        assert!(s.rhythm().is_none());
+    }
+
+    #[test]
+    fn c_opens_the_menu_and_enter_sets_the_rhythm() {
+        let mut s = on_needs_triage();
+        let feed = selected_feed(&s);
+        s.on_event(Event::Cadence(info(feed, CadenceGroup::Weekly, false)));
+        assert!(s.on_key(key(KeyCode::Char('c'))).is_empty());
+        assert_eq!(
+            s.overlay,
+            Overlay::Rhythm {
+                feed_id: feed,
+                choice: 0
+            }
+        );
+        // The menu has the keys now: down then Enter forces Daily.
+        s.on_key(key(KeyCode::Down));
+        assert_eq!(
+            s.on_key(key(KeyCode::Enter)),
+            vec![Command::SetCadence(feed, Some(CadenceGroup::Daily))]
+        );
+        assert_eq!(s.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn the_menu_opens_on_the_feed_s_current_setting() {
+        let mut s = on_needs_triage();
+        let feed = selected_feed(&s);
+        s.on_event(Event::Cadence(info(feed, CadenceGroup::Rare, true)));
+        s.on_key(key(KeyCode::Char('c')));
+        let rare = RHYTHM_CHOICES
+            .iter()
+            .position(|c| *c == Some(CadenceGroup::Rare))
+            .unwrap();
+        assert_eq!(
+            s.overlay,
+            Overlay::Rhythm {
+                feed_id: feed,
+                choice: rare
+            }
+        );
+        assert_eq!(s.view().rhythm_current, Some(rare));
+        // Enter without moving sets what is already set: harmless.
+        assert_eq!(
+            s.on_key(key(KeyCode::Enter)),
+            vec![Command::SetCadence(feed, Some(CadenceGroup::Rare))]
+        );
+        // Not overridden (the computed group shows, but the setting is Auto): opens on Auto.
+        s.on_event(Event::Cadence(info(feed, CadenceGroup::Rare, false)));
+        s.on_key(key(KeyCode::Char('c')));
+        assert_eq!(
+            s.overlay,
+            Overlay::Rhythm {
+                feed_id: feed,
+                choice: 0
+            }
+        );
+        assert_eq!(s.view().rhythm_current, Some(0));
+    }
+
+    #[test]
+    fn a_menu_opened_before_the_answer_moves_onto_it() {
+        let mut s = on_needs_triage();
+        let feed = selected_feed(&s);
+        // The rhythm has not arrived: Auto for now.
+        s.on_key(key(KeyCode::Char('c')));
+        assert_eq!(
+            s.overlay,
+            Overlay::Rhythm {
+                feed_id: feed,
+                choice: 0
+            }
+        );
+        s.on_event(Event::Cadence(info(feed, CadenceGroup::Monthly, true)));
+        let monthly = RHYTHM_CHOICES
+            .iter()
+            .position(|c| *c == Some(CadenceGroup::Monthly))
+            .unwrap();
+        assert_eq!(
+            s.overlay,
+            Overlay::Rhythm {
+                feed_id: feed,
+                choice: monthly
+            }
+        );
+    }
+
+    #[test]
+    fn c_on_a_buried_feed_says_so() {
+        let mut s = fresh();
+        s.open_garden(GardenView::Cemetery);
+        let commands = s.on_event(Event::GardenRows(sample_rows_with_buried()));
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, Command::LoadCadence(_))),
+            "a buried feed has no rhythm to load"
+        );
+        assert!(s.on_key(key(KeyCode::Char('c'))).is_empty());
+        assert_eq!(s.overlay, Overlay::None);
+        assert_eq!(
+            s.garden().unwrap().message.as_deref(),
+            Some("Feed #3 is buried.")
+        );
+    }
+
+    #[test]
+    fn c_on_a_feed_source_loads_and_opens_the_menu_too() {
+        let mut s = fresh();
+        let commands = s.go_to(Source::Feed(12));
+        assert!(commands.contains(&Command::LoadCadence(12)));
+        s.on_event(Event::Cadence(info(12, CadenceGroup::Rare, false)));
+        let tick = "2026-10-16T18:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        s.on_event(Event::Tick {
+            now: tick,
+            local: tick.fixed_offset(),
+        });
+        assert_eq!(
+            s.view().rhythm_line.as_deref(),
+            Some("Rhythm: Rare · median 1.5 d")
+        );
+        s.on_key(key(KeyCode::Char('c')));
+        assert!(matches!(s.overlay, Overlay::Rhythm { feed_id: 12, .. }));
+        // Leaving the feed drops the line.
+        s.on_key(key(KeyCode::Esc));
+        s.go_to(Source::Unread);
+        assert!(s.rhythm().is_none());
+        assert!(s.view().rhythm_line.is_none());
+    }
+
+    #[test]
+    fn a_data_change_asks_for_the_rhythm_again() {
+        let mut s = fresh();
+        s.go_to(Source::Feed(12));
+        let commands = s.on_event(Event::DataChanged);
+        assert!(commands.contains(&Command::LoadCadence(12)));
     }
 }

@@ -6,6 +6,7 @@ pub mod jobs;
 pub mod journal;
 pub mod layout;
 pub mod native;
+pub mod rhythm;
 pub mod settings;
 pub mod sidebar;
 pub mod state;
@@ -21,12 +22,14 @@ use anyhow::Context;
 use chrono::{DateTime, FixedOffset, Local, TimeZone, Utc};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyEventKind};
+use ressac_core::model::FeedId;
 use ressac_core::service::{EditionOptions, NullSink, RefreshOptions, Ressac};
 use ressac_core::store::{EntryPage, ListCursor, ListFilter, PAGE_SIZE, Source, Store};
 
 use jobs::{Msg, ProgressSink};
 use journal::BUILDING;
 use native::{EXTRACT_PROGRESS_LABEL, FETCH_PROGRESS_LABEL};
+use rhythm::RhythmInfo;
 use settings::TerminalSettings;
 use state::{Command, Event, JobOutcome, ReaderState};
 
@@ -245,10 +248,17 @@ impl<'a> Executor<'a> {
                 .mark_all_read(source, today, clock.now)
                 .map(|_| vec![Event::DataChanged])
                 .map_err(Into::into),
+            Command::LoadCadence(feed) => cadence_events(store, feed),
+            // The new line at once, then `DataChanged`: this connection's own write does not move
+            // `data_version`, and the sources' rhythm counts and a rhythm list must follow.
             Command::SetCadence(feed, group) => app
                 .set_cadence(feed, group)
-                .map(|_| vec![Event::DataChanged])
-                .map_err(Into::into),
+                .map_err(anyhow::Error::from)
+                .and_then(|_| cadence_events(store, feed))
+                .map(|mut events| {
+                    events.push(Event::DataChanged);
+                    events
+                }),
             Command::OpenUrl(url) => open::that(&url).map(|()| Vec::new()).map_err(Into::into),
             Command::Extract(id) => {
                 let _ = self.tx.send(Msg::Event(Event::Progress {
@@ -347,6 +357,18 @@ impl<'a> Executor<'a> {
         );
         Ok(Vec::new())
     }
+}
+
+/// The rhythm line's data for one feed (`v_cadence` holds the active, diagnosed feeds only: no
+/// event for the others).
+fn cadence_events(store: &Store, feed: FeedId) -> anyhow::Result<Vec<Event>> {
+    Ok(store
+        .cadence_details()?
+        .iter()
+        .find(|detail| detail.feed_id == feed)
+        .map(|detail| Event::Cadence(RhythmInfo::from(detail)))
+        .into_iter()
+        .collect())
 }
 
 /// The garden's fresh rows, then (after a garden command) its message, and the sources: Needs
@@ -888,6 +910,45 @@ mod tests {
             "The database is busy (is Ressac.app writing?)"
         );
         assert_eq!(busy_or(&anyhow::anyhow!("boom")), "boom");
+    }
+
+    #[test]
+    fn set_cadence_answers_with_the_new_line_then_a_data_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        app.import_opml(
+            include_str!("../../../../../tests/fixtures/vienna-like.opml"),
+            false,
+        )
+        .unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        app.diagnose_all(test_clock().now).unwrap();
+        let feed = app.store().feeds().unwrap()[0].id;
+        let events = exec.run(
+            Command::SetCadence(feed, Some(ressac_core::model::CadenceGroup::Daily)),
+            test_clock(),
+        );
+        assert!(
+            matches!(events.as_slice(),
+                [Event::Cadence(info), Event::DataChanged]
+                    if info.feed_id == feed && info.is_override
+                        && info.effective == ressac_core::model::CadenceGroup::Daily),
+            "{events:?}"
+        );
+        // Auto again; LoadCadence answers on its own with the same shape.
+        let events = exec.run(Command::SetCadence(feed, None), test_clock());
+        assert!(
+            matches!(events.first(), Some(Event::Cadence(i)) if !i.is_override),
+            "{events:?}"
+        );
+        let events = exec.run(Command::LoadCadence(feed), test_clock());
+        assert!(matches!(events.as_slice(), [Event::Cadence(i)] if i.feed_id == feed));
+        // A feed outside `v_cadence` has no line.
+        assert!(
+            exec.run(Command::LoadCadence(9_999), test_clock())
+                .is_empty()
+        );
     }
 
     #[test]

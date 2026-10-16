@@ -32,6 +32,7 @@ pub const LOADING: &str = "Loading…";
 pub const LOADING_IMAGE: &str = "[loading image…]";
 const HELP_HINT: &str = "? help";
 const EDITING_HINT: &str = "Enter apply  Esc cancel";
+const RHYTHM_HINT: &str = "↑↓ choose  ↵ set  esc close";
 
 /// Rows of the article header: the title; feed, author and date; the entry's state.
 const HEADER_ROWS: u16 = 3;
@@ -92,13 +93,22 @@ pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -
             (Some(entries), Some(reader)) => Some(entries.union(reader)),
             (entries, reader) => entries.or(reader),
         };
-        if let Some(area) = area {
+        if let Some(mut area) = area {
+            // The rhythm line, dimmed, above the garden screen: one row taken off the top.
+            if let Some(line) = view.rhythm_line.as_deref() {
+                let (row, rest) = split_rhythm_row(area, line);
+                frame.render_widget(rhythm_paragraph(line), row);
+                area = rest;
+            }
             match state.garden() {
                 Some(garden) => {
                     crate::tui::ui::render_in(frame, area, garden, Some(GARDEN_BACK_HINT))
                 }
                 None => frame.render_widget(Paragraph::new(Span::styled(LOADING, DIM)), area),
             }
+        }
+        if view.rhythm.is_some() {
+            frame.render_widget(Paragraph::new(Span::styled(RHYTHM_HINT, DIM)), rects.bottom);
         }
         ReaderMetrics::default()
     } else {
@@ -120,7 +130,7 @@ pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -
         render_help(frame, area);
     }
     if let Some((choice, _)) = view.rhythm {
-        render_rhythm(frame, area, choice);
+        render_rhythm(frame, area, choice, view.rhythm_current);
     }
     metrics
 }
@@ -162,6 +172,9 @@ fn render_top_line(frame: &mut Frame, view: &ReaderView<'_>, area: Rect) {
 fn bottom_line(view: &ReaderView<'_>, width: u16) -> Paragraph<'static> {
     if view.editing {
         return Paragraph::new(Span::styled(EDITING_HINT, DIM));
+    }
+    if view.rhythm.is_some() {
+        return Paragraph::new(Span::styled(RHYTHM_HINT, DIM));
     }
     let retry = view.journal_mode && journal::offers_retry(view.journal_phase);
     let hints: Vec<&str> = match view.focus {
@@ -235,10 +248,40 @@ fn render_entries(frame: &mut Frame, view: &ReaderView<'_>, area: Rect, focused:
         .map(|row| entry_item(row, view.now_local))
         .collect();
     let mut list_state = ListState::default().with_selected(view.entry_cursor);
-    let list = List::new(items)
-        .block(frame_block(&view.source_title, focused))
-        .highlight_style(SELECTED);
-    frame.render_stateful_widget(list, area, &mut list_state);
+    let block = frame_block(&view.source_title, focused);
+    // A feed source: its rhythm line under the header, inside the frame.
+    let Some(line) = view.rhythm_line.as_deref() else {
+        let list = List::new(items).block(block).highlight_style(SELECTED);
+        frame.render_stateful_widget(list, area, &mut list_state);
+        return;
+    };
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let (row, rest) = split_rhythm_row(inner, line);
+    frame.render_widget(rhythm_paragraph(line), row);
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(SELECTED),
+        rest,
+        &mut list_state,
+    );
+}
+
+/// The rhythm line: dimmed, folded to its rows (the wording is ours, the numbers are computed).
+fn rhythm_paragraph(line: &str) -> Paragraph<'static> {
+    Paragraph::new(Span::styled(line.to_owned(), DIM)).wrap(Wrap { trim: true })
+}
+
+/// The rows the rhythm line takes off the top of `area` (it folds in a narrow column), and the
+/// rest.
+fn split_rhythm_row(area: Rect, line: &str) -> (Rect, Rect) {
+    let rows = line
+        .chars()
+        .count()
+        .div_ceil(usize::from(area.width).max(1))
+        .max(1);
+    let rows = u16::try_from(rows).unwrap_or(u16::MAX).min(area.height / 2);
+    let [row, rest] = Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(area);
+    (row, rest)
 }
 
 /// The Journal column (spec §6): the edition's header, then its sections, entries and overflow
@@ -548,12 +591,18 @@ fn render_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(frame_block("Keys", true)), rect);
 }
 
-fn render_rhythm(frame: &mut Frame, area: Rect, choice: usize) {
+/// The override menu: the cursor in reverse video, the feed's current setting marked with `•`.
+fn render_rhythm(frame: &mut Frame, area: Rect, choice: usize, current: Option<usize>) {
     let rect = centered(area, 24, RHYTHM_CHOICES.len() as u16 + 2);
     frame.render_widget(Clear, rect);
     let items: Vec<ListItem> = RHYTHM_CHOICES
         .iter()
-        .map(|group| ListItem::new(group.map_or_else(|| "Auto".to_string(), group_label)))
+        .enumerate()
+        .map(|(i, group)| {
+            let mark = if Some(i) == current { "•" } else { " " };
+            let name = group.map_or_else(|| "Auto".to_string(), group_label);
+            ListItem::new(format!("{mark} {name}"))
+        })
         .collect();
     let mut list_state = ListState::default().with_selected(Some(choice));
     let list = List::new(items)
@@ -1255,6 +1304,65 @@ mod tests {
         s.open_garden(view);
         s.on_event(Event::GardenRows(rows));
         s
+    }
+
+    fn cadence(feed_id: i64, effective: CadenceGroup, is_override: bool) -> Event {
+        Event::Cadence(crate::tui::reader::rhythm::RhythmInfo {
+            feed_id,
+            effective,
+            computed: CadenceGroup::Rare,
+            is_override,
+            median_days: Some(1.5),
+            last_entry_at: Some(Utc.with_ymd_and_hms(2026, 10, 16, 5, 0, 0).unwrap()),
+        })
+    }
+
+    fn at_nine(s: &mut ReaderState) {
+        s.on_event(Event::Tick {
+            now: Utc.with_ymd_and_hms(2026, 10, 16, 7, 0, 0).unwrap(),
+            local: FixedOffset::east_opt(7200)
+                .unwrap()
+                .with_ymd_and_hms(2026, 10, 16, 9, 0, 0)
+                .unwrap(),
+        });
+    }
+
+    #[test]
+    fn garden_rhythm_line_and_menu() {
+        let mut s = garden_state(
+            140,
+            30,
+            GardenView::NeedsTriage,
+            crate::tui::state::sample_rows(),
+        );
+        at_nine(&mut s);
+        let feed = s.garden().unwrap().selected_row().unwrap().feed_id;
+        assert!(
+            !draw(&s, 140, 30).contains("Rhythm:"),
+            "nothing before the info arrives"
+        );
+        s.on_event(cadence(feed, CadenceGroup::Weekly, true));
+        let line = draw(&s, 140, 30);
+        assert!(
+            line.contains("Rhythm: Weekly · median 1.5 d · last entry 2 h ago (set by you)"),
+            "{line}"
+        );
+        s.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let menu = draw(&s, 140, 30);
+        assert!(menu.contains("• Weekly") && menu.contains("↑↓ choose  ↵ set  esc close"));
+        insta::assert_snapshot!(menu);
+    }
+
+    #[test]
+    fn a_feed_source_shows_its_rhythm_under_the_header() {
+        let mut s = state(140, 30, rows());
+        s.go_to(Source::Feed(3));
+        s.on_event(cadence(3, CadenceGroup::Daily, false));
+        let out = draw(&s, 140, 30);
+        // The 40-cell column folds the line onto a second row.
+        assert!(out.contains("Rhythm: Daily · median 1.5 d · last"), "{out}");
+        assert!(out.contains("entry 2 h ago"), "{out}");
+        assert!(!out.contains("(set by you)"));
     }
 
     #[test]
