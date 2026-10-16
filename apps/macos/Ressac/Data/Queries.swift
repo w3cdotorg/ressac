@@ -184,6 +184,50 @@ struct Queries {
         .removeDuplicates()
     }
 
+    /// The latest edition (spec §8, Journal screen), nil before the first one. Its header comes
+    /// from `edition` itself: an empty edition has no row in `v_edition_today`.
+    static func edition() -> LiveQuery<Edition?> {
+        ValueObservation.tracking { db -> Edition? in
+            guard let info = try EditionInfo.fetchOne(db, sql: """
+                SELECT id, built_at, window_start, window_end, unreachable FROM edition ORDER BY id DESC LIMIT 1
+                """)
+            else { return nil }
+            let items = try EditionItem.fetchAll(db, sql: """
+                SELECT entry_id, section, rank, feed_id, feed_title, title, published_at,
+                       read_at IS NOT NULL AS is_read, starred_at IS NOT NULL AS is_starred
+                FROM v_edition_today ORDER BY rank
+                """)
+            let overflow = try EditionOverflowItem.fetchAll(db, sql: """
+                SELECT section, feed_id, feed_title, page, hidden_count FROM v_edition_overflow
+                ORDER BY CASE section WHEN 'front' THEN 0 WHEN 'week' THEN 1 ELSE 2 END, page IS NULL, page, feed_id
+                """)
+            return Edition(info: info, items: items, overflow: overflow)
+        }
+        .removeDuplicates()
+    }
+
+    /// Every active, diagnosed feed's rhythm, by title (spec §8, Rhythm section and inspector).
+    static func cadenceRows() -> LiveQuery<[CadenceRow]> {
+        ValueObservation.tracking { db in
+            try CadenceRow.fetchAll(db, sql: """
+                SELECT feed_id, effective_group AS effective, computed_group AS computed, is_override,
+                       median_interval_days, entries_per_month, last_entry_at, unread
+                FROM v_cadence ORDER BY title COLLATE NOCASE, feed_id
+                """)
+        }
+        .removeDuplicates()
+    }
+
+    /// True while no edition was built at or after `dayStart` (see `EditionClock.dayStart`).
+    /// The core repeats this check inside its write transaction.
+    static func isEditionDue(dayStart: Date) -> @Sendable (Database) throws -> Bool {
+        let start = Timestamp.string(from: dayStart)
+        return { db in
+            try Bool.fetchOne(db, sql: "SELECT NOT EXISTS (SELECT 1 FROM edition WHERE built_at >= ?)",
+                              arguments: [start]) ?? true
+        }
+    }
+
     /// The core's `Status::ALL` order (urgency), unknown statuses last.
     static let urgencyOrder = """
         CASE status WHEN 'Duplicate' THEN 0 WHEN 'Hijacked' THEN 1 WHEN 'Moved' THEN 2 WHEN 'Dead' THEN 3 \

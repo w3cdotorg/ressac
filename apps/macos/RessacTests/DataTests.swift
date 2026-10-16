@@ -502,3 +502,184 @@ struct TimeoutError: Error {}
         #expect(try readAt(test, id) == nil)
     }
 }
+
+// MARK: - Rhythm and edition (schema v4)
+
+extension TestDatabase {
+    /// A diagnosis row with a rhythm group, as `save_diagnoses` writes it.
+    func health(feed: Int64, group: CadenceGroup, median: Double? = nil, lastEntry: String? = nil) throws {
+        try execute("""
+            INSERT INTO feed_health (feed_id, status, reason, computed_at, cadence_group,
+                                     median_interval_days, entries_per_month, last_entry_at)
+            VALUES (?, 'Alive', 'Fine.', '2026-10-16T02:00:00.000Z', ?, ?, 0, ?)
+            """, [feed, group.rawValue, median, lastEntry])
+    }
+
+    /// An edition and its rows as `write_edition` stores them: `rank` follows the order of
+    /// `entries`, `window_end` is `builtAt`.
+    @discardableResult
+    func edition(
+        builtAt: String, windowStart: String = "2026-10-15T02:00:00.000Z", unreachable: Int = 0,
+        entries: [(Int64, EditionSection)] = [], overflow: [(feed: Int64, section: EditionSection, hidden: Int)] = []
+    ) throws -> Int64 {
+        try raw.write { db in
+            try db.execute(
+                sql: "INSERT INTO edition (built_at, window_start, window_end, unreachable) VALUES (?, ?, ?, ?)",
+                arguments: [builtAt, windowStart, builtAt, unreachable])
+            let id = db.lastInsertedRowID
+            for (index, (entry, section)) in entries.enumerated() {
+                try db.execute(
+                    sql: "INSERT INTO edition_entry (edition_id, entry_id, section, rank) VALUES (?, ?, ?, ?)",
+                    arguments: [id, entry, section.rawValue, index + 1])
+            }
+            for item in overflow {
+                try db.execute(
+                    sql: "INSERT INTO edition_overflow (edition_id, feed_id, section, hidden_count) VALUES (?, ?, ?, ?)",
+                    arguments: [id, item.feed, item.section.rawValue, item.hidden])
+            }
+            return id
+        }
+    }
+}
+
+@Suite struct EditionQueryTests {
+    @Test func rhythm_groups_and_sections_have_their_titles_and_pages() {
+        #expect(CadenceGroup.allCases.map(\.rawValue) == ["daily", "weekly", "monthly", "rare", "silent"])
+        #expect(CadenceGroup.allCases.map(\.title) == ["Daily", "Weekly", "Monthly", "Rare", "Silent"])
+        #expect(CadenceGroup.allCases.map(\.page) == [105, 106, 107, 108, 109])
+        #expect(EditionSection.allCases.map(\.rawValue) == ["front", "week", "wire"])
+        #expect(EditionSection.allCases.map(\.title) == ["Front Page", "This Week", "The Wire"])
+        #expect(EditionSection.allCases.map(\.antiopeTitle) == ["FRONT PAGE", "THIS WEEK", "THE WIRE"])
+    }
+
+    @Test func cadence_rows_carry_the_effective_and_the_computed_group() async throws {
+        let test = try TestDatabase()
+        try test.health(feed: 1, group: .daily, median: 0.4, lastEntry: "2026-10-16T06:00:00.000Z")
+        try test.health(feed: 2, group: .weekly)
+        try test.execute("UPDATE feed SET cadence_override = 'rare' WHERE id = 2")
+        try test.entry(feed: 2)
+        try test.entry(feed: 2, read: true)
+        let rows = try await value(of: Queries.cadenceRows(), in: test.open())
+        // Only diagnosed feeds have a rhythm: `v_cadence` joins `feed_health`.
+        #expect(Set(rows.map(\.feedId)) == [1, 2])
+        let one = try #require(rows.first { $0.feedId == 1 })
+        #expect(one.effective == .daily && one.computed == .daily && !one.isOverride)
+        #expect(one.medianIntervalDays == 0.4)
+        #expect(one.lastEntryAt == Timestamp.date(from: "2026-10-16T06:00:00.000Z"))
+        #expect(one.entriesPerMonth == 0 && one.unread == 0)
+        let two = try #require(rows.first { $0.feedId == 2 })
+        #expect(two.effective == .rare && two.computed == .weekly && two.isOverride)
+        #expect(two.medianIntervalDays == nil && two.lastEntryAt == nil)
+        #expect(two.unread == 1)
+    }
+
+    /// Review Focus #3: burying a feed takes it out of the rhythm lists at once.
+    @Test func cadence_rows_drop_a_feed_as_soon_as_it_is_buried() async throws {
+        let test = try TestDatabase()
+        try test.health(feed: 1, group: .daily)
+        try test.health(feed: 2, group: .weekly)
+        let db = try test.open()
+        #expect(try await value(of: Queries.cadenceRows(), in: db).map(\.feedId).sorted() == [1, 2])
+        try test.execute("UPDATE feed SET state = 'buried' WHERE id = 2")
+        try await db.notifyExternalChanges()
+        let rows = try await value(of: Queries.cadenceRows(), in: db) { $0.count == 1 }
+        #expect(rows.map(\.feedId) == [1])
+    }
+
+    @Test func no_edition_reads_as_nil() async throws {
+        let test = try TestDatabase()
+        #expect(try await value(of: Queries.edition(), in: test.open()) == nil)
+    }
+
+    @Test func the_latest_edition_reads_in_rank_order_with_its_overflow() async throws {
+        let test = try TestDatabase()
+        let a = try test.entry(feed: 1, title: "A", published: "2026-10-15T20:00:00.000Z")
+        let b = try test.entry(feed: 3, title: "B", read: true)
+        let c = try test.entry(feed: 8, title: "C", starred: true)
+        let old = try test.entry(feed: 9, title: "Old")
+        try test.edition(builtAt: "2026-10-15T06:00:00.000Z", entries: [(old, .wire)])
+        // Ranks run against the entry ids, so only ORDER BY rank gives c, a, b.
+        try test.edition(
+            builtAt: "2026-10-16T06:12:00.000Z", windowStart: "2026-10-15T06:00:00.000Z", unreachable: 3,
+            entries: [(c, .front), (a, .week), (b, .wire)],
+            overflow: [(feed: 8, section: .wire, hidden: 12), (feed: 2, section: .front, hidden: 1),
+                       (feed: 3, section: .wire, hidden: 4)])
+        let edition = try #require(try await value(of: Queries.edition(), in: test.open()))
+        #expect(edition.info.unreachable == 3)
+        #expect(edition.info.builtAt == Timestamp.date(from: "2026-10-16T06:12:00.000Z"))
+        #expect(edition.info.windowStart == Timestamp.date(from: "2026-10-15T06:00:00.000Z"))
+        #expect(edition.info.windowEnd == edition.info.builtAt)
+        #expect(edition.items.map(\.entryId) == [c, a, b])
+        #expect(edition.items.map(\.rank) == [1, 2, 3])
+        #expect(edition.items.map(\.section) == [.front, .week, .wire])
+        #expect(edition.items.map(\.title) == ["C", "A", "B"])
+        #expect(edition.items.map(\.feedId) == [8, 1, 3])
+        #expect(edition.items[0].isStarred && !edition.items[0].isRead)
+        #expect(edition.items[2].isRead)
+        #expect(edition.items[1].publishedAt == Timestamp.date(from: "2026-10-15T20:00:00.000Z"))
+        #expect(!edition.items[1].feedTitle.isEmpty)
+        // Overflow: front before wire, then by page (feed 2 → 203, 3 → 204, 8 → 401).
+        #expect(edition.overflow.map(\.feedId) == [2, 3, 8])
+        #expect(edition.overflow.map(\.section) == [.front, .wire, .wire])
+        #expect(edition.overflow.map(\.page) == [203, 204, 401])
+        #expect(edition.overflow.map(\.hiddenCount) == [1, 4, 12])
+        #expect(edition.readCount == 1 && !edition.isFinished)
+    }
+
+    @Test func an_edition_is_finished_when_every_entry_is_read_and_never_when_empty() async throws {
+        let test = try TestDatabase()
+        let a = try test.entry(feed: 1)
+        let b = try test.entry(feed: 2)
+        try test.edition(builtAt: "2026-10-16T06:00:00.000Z", entries: [(a, .front), (b, .wire)])
+        let db = try test.open()
+        #expect(try await value(of: Queries.edition(), in: db)?.isFinished == false)
+        try test.execute("UPDATE entry SET read_at = '2026-10-16T07:00:00.000Z'")
+        try await db.notifyExternalChanges()
+        let read = try await value(of: Queries.edition(), in: db) { $0?.isFinished == true }
+        #expect(read?.readCount == 2)
+        try test.edition(builtAt: "2026-10-17T06:00:00.000Z")
+        try await db.notifyExternalChanges()
+        let empty = try #require(try await value(of: Queries.edition(), in: db) { $0?.items.isEmpty == true })
+        #expect(empty.overflow.isEmpty && empty.readCount == 0 && !empty.isFinished)
+    }
+
+    @Test func an_edition_is_due_until_one_is_built_after_the_day_start() async throws {
+        let test = try TestDatabase()
+        let db = try test.open()
+        let dayStart = try #require(Timestamp.date(from: "2026-10-16T02:00:00.000Z"))
+        #expect(try await db.reader.read(Queries.isEditionDue(dayStart: dayStart)) == true)
+        try test.edition(builtAt: "2026-10-16T01:59:59.999Z")
+        #expect(try await db.reader.read(Queries.isEditionDue(dayStart: dayStart)) == true)
+        try test.edition(builtAt: "2026-10-16T02:00:00.000Z")
+        #expect(try await db.reader.read(Queries.isEditionDue(dayStart: dayStart)) == false)
+        let tomorrow = try #require(Timestamp.date(from: "2026-10-17T02:00:00.000Z"))
+        #expect(try await db.reader.read(Queries.isEditionDue(dayStart: tomorrow)) == true)
+    }
+}
+
+/// `EditionClock.dayStart` mirrors the core's `edition::day_start` (Review Focus #1 of the
+/// plan index pins the Rust side; these pin the same instants on the Swift side).
+@Suite struct EditionClockTests {
+    let paris: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Paris")!
+        return calendar
+    }()
+
+    @Test func the_day_starts_at_four_local_time_across_both_dst_changes() throws {
+        // (now, expected day start), all in UTC.
+        let cases: [(String, String)] = [
+            ("2026-10-16T01:30:00Z", "2026-10-15T02:00:00Z"),  // 03:30 CEST: still yesterday
+            ("2026-10-16T02:00:00Z", "2026-10-16T02:00:00Z"),  // 04:00 CEST exactly
+            ("2026-10-16T08:00:00Z", "2026-10-16T02:00:00Z"),  // 10:00 CEST
+            ("2026-10-25T02:30:00Z", "2026-10-24T02:00:00Z"),  // 03:30 CET, after 03:00 CEST → 02:00 CET
+            ("2026-10-25T03:30:00Z", "2026-10-25T03:00:00Z"),  // 04:30 CET
+            ("2026-03-29T01:30:00Z", "2026-03-28T03:00:00Z"),  // 03:30 CEST, after 02:00 CET → 03:00 CEST
+            ("2026-03-29T02:30:00Z", "2026-03-29T02:00:00Z"),  // 04:30 CEST
+        ]
+        for (now, expected) in cases {
+            let start = EditionClock.dayStart(for: try #require(Timestamp.date(from: now)), calendar: paris)
+            #expect(start == Timestamp.date(from: expected), "\(now)")
+        }
+    }
+}
