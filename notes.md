@@ -173,6 +173,46 @@ Comptes à la fin : `ressac` 35 tests unitaires et 19 tests de CLI, cœur 260 (e
 
 Durcissement proposé, non fait : épingler les actions GitHub par SHA.
 
+## Rythme et journal du matin (sous-projet 3)
+
+### Recette manuelle (16/10/2026)
+
+Base : la vraie base, migrée de la v3 à la v4 par l'appli à son premier lancement, sauvegarde `ressac.sqlite.bak-v3` à côté. Appli : build Release à la place de l'ancien `apps/macos/build/Ressac.app` (gardé à part jusqu'à la fin de la recette) ; trois builds se sont succédé pendant la recette (04fbb43, puis 1eb214e, puis f1b1456 pour la recette finale, voir plus bas). Recette faite par Clément ; Claude n'a envoyé aucune frappe ni aucun clic, il a seulement lu des copies de la base avec un petit `recette.sh` jetable et tenu le journal. L'essai hors ligne (item 6) a tourné sur des copies dont l'édition du jour avait été retirée. Migration essayée d'abord sur une copie (0,149 s), puis une édition d'essai fabriquée sur une seconde copie (72 entrées).
+
+- Point de départ : schéma 3 puis 4, 156 flux actifs (30 enterrés), groupes 57 Daily, 28 Weekly, 17 Monthly, 4 Rare, 50 Silent (mêmes comptes que la mesure du spec), 1024 entrées non lues. Première édition sur la vraie base : 73 entrées (une : 0, semaine : 19, fil : 54), 624 laissées dans leurs flux, 0 flux injoignable ; l'édition du jour est numérotée 1, construite à 16:23.
+
+| # | Vérification (spec §10) | Résultat | Observations |
+|---|---|---|---|
+| 1 | Migration v4, d'abord sur une copie | OK | 0,149 s sur la copie ; sauvegarde `bak-v3` (version 3) présente ; numéros 104 à 109 libres, aucune page déplacée ; les six contrôles d'intégrité à 1 |
+| 2 | Première ouverture du jour : progression puis Journal | OK | « rapide » selon Clément ; une seule édition, fenêtre de 24 h ; la pastille de progression coupait son texte (voir A) |
+| 3 | Lecture jusqu'à « That's the edition. », une ligne de débordement | KO puis OK | sur le Journal, `j`/`k` et les flèches étaient inopérants et rien n'était sélectionné tant qu'on ne cliquait pas dans un article (voir B) ; refait sur le build 1eb214e : clavier, sélection bleue et « +N more » OK |
+| 4 | Forçage du rythme dans l'inspecteur, puis Auto | OK | Anthropic Research forcé Daily puis rendu à Auto |
+| 5 | Deuxième lancement le même jour | OK | toujours une seule édition |
+| 6 | Hors ligne puis Retry (copie) | KO puis OK | première copie mal préparée (voir C) ; refait sur le build 1eb214e : copie hors ligne, Offline puis Retry toujours hors ligne et 0 édition ; copie en ligne, édition 1 construite (67 entrées, 0 injoignable) |
+| 7 | Antiope : 104, sous-pages, FIN DE L'EDITION, 105 à 109, SOMMAIRE | OK | P104, sous-pages, `FIN DE L'EDITION`, P105 à P109 et SOMMAIRE |
+
+Verdict final : 7 vérifications sur 7 OK sur le build f1b1456. Les deux KO (3 et 6) et la remarque sur la pastille ont été traités avec Clément :
+
+- **A, pastille de progression** (e8bb52f, f1b1456) : le texte « Building this morning's edition… 152/156 » était rogné à gauche. Décision de Clément : le raccourcir pendant la fabrication si la pastille est trop étroite. `ViewThatFits` choisit le texte compact « Edition… n/N » (le texte complet, mesuré à 249,7 pt à 13 pt, reste dans l'infobulle). Le texte restait rogné, aussi pour « Fetching feeds » : défaut antérieur à la branche, le contenu touchait les bords arrondis de la capsule. Correctif : une marge intérieure. Vérifié par Clément sur le build f1b1456.
+- **B, clavier du Journal** (1eb214e) : en passant sur le Journal, la table de la liste est remplacée et le focus tombe sur la fenêtre, ce qui explique les flèches mais pas `j`/`k` ; la cause exacte n'a pas été reproduite hors de l'appli. Correctif : la liste du Journal prend le clavier quand elle apparaît (comme le jardin) et les lignes « +N more » ne sont plus focalisables. Vérifié par Clément.
+- **C, essai hors ligne** : voir la trouvaille sur la préparation de la copie ci-dessous. Ce n'était pas un défaut de l'appli.
+
+### Trouvailles
+
+- **Taille de l'édition** : 73 entrées le premier jour (estimation de la spec : 40 à 45), dont 54 pour le fil, un article pour chacun des 54 flux Daily : le nombre de flux Daily actifs fixe la taille de cette section. L'édition couvre plus qu'un jour : la copie d'essai datait du 14/10, donc deux jours d'articles neufs sont tombés dans la première fenêtre de 24 h (garde de 7 jours). Plafonds gardés à 3 et 1, rien d'ajusté sur cette première édition ; la section « une » est vide (2 non lus seulement dans Monthly et Rare avant le rafraîchissement). Le plus gros débordement : Actualitté 79, The Globe and Mail 58, Libération 49, 624 entrées cachées au total.
+- **Groupes de rythme sur la vraie base** : 57 Daily, 28 Weekly, 17 Monthly, 4 Rare, 50 Silent sur 156 flux actifs. Rien d'étrange dans le classement (les quatre Rare : Manuscript Road Trip, SUBNORMALITY!, Long-Forgotten, The Politics of Systems). Le forçage d'un flux (Anthropic Research) puis son retour à Auto fonctionnent.
+- **Durée de la première fabrication** : 23,2 s sur la copie d'essai avec le réseau (rafraîchissement compris) ; sur la vraie base, « rapide » selon Clément, non chronométrée.
+- **`entries_per_month` corrigé** : la nouvelle règle (entrées des 365 derniers jours divisées par les mois qu'elles couvrent) remplace la division par 12 ; non rejouée au cas par cas pendant la recette, le cas visé par le spec est The Globe and Mail (8,3 avant).
+- **Écarts assumés par rapport à la spec** : lignes de débordement ouvertes au clic seulement en Antiope (pas de `↩`), titres de flux en capitales accentuées (`ACTUALITTÉ`).
+- **Un nouvel essai ne réutilise pas un identifiant d'édition** : sans AUTOINCREMENT, une reconstruction peut reprendre l'id 1 ; l'appli suit l'édition la plus récente et compare aussi `builtAt`, `--rebuild` reste un outil d'essai.
+- **Retry hors ligne force le rafraîchissement** : `build_edition` rafraîchit avec `force = true`, sinon un Retry dans les 30 minutes d'une fabrication hors ligne ne trouvait aucun flux échu, ne voyait pas la panne réseau et une édition vide consommait la journée (spec §9 : hors ligne, pas d'édition et fenêtre inchangée). Coût : les flux relevés depuis moins de 30 minutes sont redemandés (GET conditionnel, surtout des 304).
+- **Caractères de contrôle neutralisés dans la CLI** : les titres de flux et d'articles imprimés en texte (`edition show`, résumé de `edition build`, `feed cadence`, `page list`, barre de progression) passent par un `printable` qui remplace les caractères de contrôle ; le JSON, échappé par serde, n'est pas concerné. Les C0 sont déjà écartés par le XML, mais pas les C1 (U+009B, CSI) ni les JSON Feed.
+- **Flux enterré après la fabrication** : le cœur et la CLI gardent l'édition figée, mais l'appli ne montre que les flux actifs (`v_edition_today` et `v_edition_overflow` filtrées dans `Queries.edition()`, pastille de non-lus calculée sur `v_entry`), pour rester d'accord avec la liste et avec ce que le lecteur peut ouvrir. Une entrée non lue d'un flux enterré en cours de journée disparaît donc du Journal.
+- **Préparer la copie de l'essai hors ligne** : supprimer les éditions d'une copie avec `PRAGMA foreign_keys=ON`, sinon `edition_entry` garde 73 lignes orphelines et le Retry ne peut pas écrire (conflit de clé primaire sur l'id 1 réutilisé) : première tentative de l'item 6, artefact de préparation.
+- **Simuler la panne réseau** : donner à chaque flux actif un hôte distinct en `.invalid` (`http://feedN.invalid/rss`) ; la CLI répond « The network is unreachable… » en 2 s, code 2. Avec un seul hôte sur un port fermé, la copie a mis 2 min 36 à échouer à cause de la pause par hôte.
+- **`sqlite3 -readonly` et les copies WAL** : comme en sous-projet 4, l'ouverture en lecture seule d'une copie `.backup` sans `-shm` ni `-wal` échoue ; le drapeau est retiré pour les copies et gardé pour la lecture de la vraie base. Dans le script, une apostrophe dans le message d'un `${VAR:?…}` casse l'analyse de zsh.
+- **Mineurs reportés** : voir `TODO.md`, section « Rythme et journal (sous-projet 3) ». Le détail des relectures est dans le registre local `.superpowers/`, hors dépôt.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
