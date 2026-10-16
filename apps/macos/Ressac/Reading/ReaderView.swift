@@ -60,6 +60,9 @@ struct ReaderView: View {
     /// "412 3/20" in Antiope (spec §6); nil in Native, so the native page never changes with it.
     private func subpage(for entry: EntryRow, theme: ReaderTheme) -> SubpageLabel? {
         guard theme.appearance == .antiope, let directory = antiope?.directory else { return nil }
+        if state.selection == .journal {
+            return SubpageLabel.ofEdition(entryId: entry.entryId, in: state.journal.edition)
+        }
         return SubpageLabel.of(entryId: entry.entryId, in: state.entries, total: state.entryTotal, page: directory.page(forFeed:))
     }
 
@@ -155,6 +158,13 @@ struct SubpageLabel: Equatable, Sendable {
     static func of(entryId: Int64, in entries: [EntryRow], total: Int? = nil, page: (Int64) -> Int?) -> SubpageLabel? {
         guard let position = entries.firstIndex(where: { $0.entryId == entryId }) else { return nil }
         return SubpageLabel(page: page(entries[position].feedId), index: position + 1, count: total ?? entries.count)
+    }
+
+    /// "104 3/43": on P104 an entry is a sub-page of the Journal by its rank in the edition, out of
+    /// the edition's size (spec §8, Antiope). Nil when the entry is not in it.
+    static func ofEdition(entryId: Int64, in edition: Edition?) -> SubpageLabel? {
+        guard let edition, let item = edition.items.first(where: { $0.entryId == entryId }) else { return nil }
+        return SubpageLabel(page: ReservedPage.journal.rawValue, index: item.rank, count: edition.items.count)
     }
 }
 

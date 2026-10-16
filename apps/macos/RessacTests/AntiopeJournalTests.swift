@@ -259,3 +259,13 @@ private func trimmed(_ text: String) -> String {
         #expect(RunRequest.buildEdition().kind == .long)
     }
 }
+
+@Suite struct EditionSubpageTests {
+    @Test func anEditionEntryIsASubPageOf104ByItsRank() {
+        let edition = sampleEdition()
+        #expect(SubpageLabel.ofEdition(entryId: 3, in: edition)?.text == "104 3/4")
+        #expect(SubpageLabel.ofEdition(entryId: 1, in: edition)?.text == "104 1/4")
+        #expect(SubpageLabel.ofEdition(entryId: 99, in: edition) == nil)  // not in the edition
+        #expect(SubpageLabel.ofEdition(entryId: 1, in: nil) == nil)
+    }
+}
