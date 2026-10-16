@@ -67,26 +67,39 @@ pub fn today_start<Tz: TimeZone>(now: DateTime<Tz>) -> DateTime<Utc> {
         .unwrap_or_else(|| now.with_timezone(&Utc))
 }
 
-/// The two clocks a command needs: `now` for writes, `local` for "Today".
+/// The clock a command needs: `now` for writes and the zone for "Today" and the edition's day.
+/// Production passes `chrono::Local` itself, so that a day with a clock change keeps its true
+/// midnight and 04:00 (a `FixedOffset` captured at `now` would shift them by an hour); tests
+/// inject a `FixedOffset` or a test zone.
 #[derive(Debug, Clone, Copy)]
-pub struct Clock {
+pub struct Clock<Tz: TimeZone = Local> {
     pub now: DateTime<Utc>,
-    pub local: DateTime<FixedOffset>,
+    pub zone: Tz,
 }
 
 impl Clock {
     fn system() -> Self {
-        let local = Local::now().fixed_offset();
         Self {
-            now: local.with_timezone(&Utc),
-            local,
+            now: Utc::now(),
+            zone: Local,
         }
     }
+}
 
-    fn tick(self) -> Event {
+impl<Tz: TimeZone> Clock<Tz> {
+    /// Now in the clock's zone, as the state wants it.
+    fn local(&self) -> DateTime<FixedOffset> {
+        self.now.with_timezone(&self.zone).fixed_offset()
+    }
+
+    fn today(&self) -> DateTime<Utc> {
+        today_start(self.now.with_timezone(&self.zone))
+    }
+
+    fn tick(&self) -> Event {
         Event::Tick {
             now: self.now,
-            local: self.local,
+            local: self.local(),
         }
     }
 }
@@ -185,7 +198,11 @@ impl<'a> Executor<'a> {
     }
 
     /// Called when a long job reports `JobDone`: the next queued one starts.
-    pub fn long_job_done(&mut self, clock: Clock) -> Vec<Event> {
+    pub fn long_job_done<Tz>(&mut self, clock: Clock<Tz>) -> Vec<Event>
+    where
+        Tz: TimeZone + Send + 'static,
+        Tz::Offset: Send,
+    {
         self.long_running = false;
         match self.queue.pop_front() {
             Some(next) => self.run(next, clock),
@@ -200,11 +217,15 @@ impl<'a> Executor<'a> {
     /// Runs one command; quick ones answer with events at once, jobs answer later on the channel.
     /// A `LoadEntries` or `Search` is always answered: with its `Event::Entries` (the `request`
     /// echoed), or on failure with `JobDone(Failed)`, which also frees the state's next-page latch.
-    pub fn run(&mut self, command: Command, clock: Clock) -> Vec<Event> {
+    pub fn run<Tz>(&mut self, command: Command, clock: Clock<Tz>) -> Vec<Event>
+    where
+        Tz: TimeZone + Send + 'static,
+        Tz::Offset: Send,
+    {
         // Copy the `&'a Ressac` first: a store borrowed through `&self` would block `self.refresh`.
         let app = self.app;
         let store = app.store();
-        let today = today_start(clock.local);
+        let today = clock.today();
         let result: anyhow::Result<Vec<Event>> = match command {
             Command::LoadSources => store
                 .sources(today)
@@ -309,7 +330,7 @@ impl<'a> Executor<'a> {
                 self.edition_running = true;
                 // The edition's day and zone are the injected clock's, not the machine's.
                 let now = clock.now;
-                let zone = clock.local.timezone();
+                let zone = clock.zone;
                 jobs::spawn(
                     self.db.clone(),
                     self.tx.clone(),
@@ -509,7 +530,7 @@ fn event_loop(
     let mut poll = Poll::new(Instant::now(), app.store().data_version()?);
     let mut last_tick = Instant::now();
     let clock = Clock::system();
-    let mut pending: VecDeque<Command> = state.start(clock.now, clock.local).into();
+    let mut pending: VecDeque<Command> = state.start(clock.now, clock.local()).into();
     loop {
         // Execute everything the state asked for; quick answers go straight back to it.
         while let Some(command) = pending.pop_front() {
@@ -606,13 +627,13 @@ mod tests {
         FixedOffset::east_opt(2 * 3600).unwrap()
     }
 
-    fn test_clock() -> Clock {
+    fn test_clock() -> Clock<FixedOffset> {
         let local = paris_summer()
             .with_ymd_and_hms(2026, 10, 16, 9, 0, 0)
             .unwrap();
         Clock {
             now: local.with_timezone(&Utc),
-            local,
+            zone: paris_summer(),
         }
     }
 
@@ -659,6 +680,113 @@ mod tests {
             today_start(evening),
             Utc.with_ymd_and_hms(2026, 10, 15, 22, 0, 0).unwrap()
         );
+    }
+
+    /// Europe/Paris for 2026 only (CEST from 2026-03-29 01:00 UTC to 2026-10-25 01:00 UTC): a
+    /// zone with the clock changes in it, which a `FixedOffset` cannot have.
+    #[derive(Debug, Clone, Copy)]
+    struct Paris;
+
+    impl Paris {
+        fn offset_at_utc(utc: &chrono::NaiveDateTime) -> FixedOffset {
+            let day = |m, d| {
+                chrono::NaiveDate::from_ymd_opt(2026, m, d)
+                    .unwrap()
+                    .and_hms_opt(1, 0, 0)
+                    .unwrap()
+            };
+            let summer = *utc >= day(3, 29) && *utc < day(10, 25);
+            FixedOffset::east_opt(if summer { 7200 } else { 3600 }).unwrap()
+        }
+    }
+
+    impl TimeZone for Paris {
+        type Offset = FixedOffset;
+
+        fn from_offset(_: &FixedOffset) -> Self {
+            Paris
+        }
+
+        fn offset_from_local_date(
+            &self,
+            local: &chrono::NaiveDate,
+        ) -> chrono::offset::MappedLocalTime<FixedOffset> {
+            self.offset_from_local_datetime(&local.and_hms_opt(12, 0, 0).unwrap())
+        }
+
+        fn offset_from_local_datetime(
+            &self,
+            local: &chrono::NaiveDateTime,
+        ) -> chrono::offset::MappedLocalTime<FixedOffset> {
+            use chrono::offset::MappedLocalTime as M;
+            let fits: Vec<FixedOffset> = [7200, 3600]
+                .into_iter()
+                .map(|s| FixedOffset::east_opt(s).unwrap())
+                .filter(|o| Paris::offset_at_utc(&(*local - *o)) == *o)
+                .collect();
+            match fits.as_slice() {
+                [] => M::None,
+                [o] => M::Single(*o),
+                [a, b, ..] => M::Ambiguous(*a, *b),
+            }
+        }
+
+        fn offset_from_utc_date(&self, utc: &chrono::NaiveDate) -> FixedOffset {
+            Paris::offset_at_utc(&utc.and_hms_opt(12, 0, 0).unwrap())
+        }
+
+        fn offset_from_utc_datetime(&self, utc: &chrono::NaiveDateTime) -> FixedOffset {
+            Paris::offset_at_utc(utc)
+        }
+    }
+
+    #[test]
+    fn today_keeps_its_true_midnight_on_a_day_with_a_clock_change() {
+        // 25 October 2026: summer time ends at 03:00 local. Midnight was still at +02:00
+        // (22:00 UTC on the 24th); a fixed offset captured at noon (+01:00) would say 23:00.
+        let noon = Utc.with_ymd_and_hms(2026, 10, 25, 11, 0, 0).unwrap();
+        let clock = Clock {
+            now: noon,
+            zone: Paris,
+        };
+        assert_eq!(
+            clock.today(),
+            Utc.with_ymd_and_hms(2026, 10, 24, 22, 0, 0).unwrap()
+        );
+        let fixed = Clock {
+            now: noon,
+            zone: FixedOffset::east_opt(3600).unwrap(),
+        };
+        assert_ne!(fixed.today(), clock.today());
+        assert_eq!(
+            clock.local().offset().local_minus_utc(),
+            3600,
+            "the state still gets a plain local time"
+        );
+    }
+
+    #[test]
+    fn the_edition_job_follows_the_zone_across_a_clock_change() {
+        // 06:00 UTC on the 25th is 07:00 CET: the 25th's edition day started at 04:00 CET after
+        // the change, and 04:00 on the 24th was at +02:00 (02:00 UTC). A build at 02:30 UTC on
+        // the 25th (03:30 CET, still the 24th's day) is not due after one at 12:00 UTC the 24th.
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        let (tx, rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        let first = Clock {
+            now: Utc.with_ymd_and_hms(2026, 10, 24, 12, 0, 0).unwrap(),
+            zone: Paris,
+        };
+        exec.run(Command::BuildEdition, first);
+        assert_eq!(until_long_job_done(&rx).1, JobOutcome::EditionBuilt);
+        exec.long_job_done(first);
+        let night = Clock {
+            now: Utc.with_ymd_and_hms(2026, 10, 25, 2, 30, 0).unwrap(),
+            zone: Paris,
+        };
+        exec.run(Command::BuildEdition, night);
+        assert_eq!(until_long_job_done(&rx).1, JobOutcome::EditionNotDue);
     }
 
     #[test]
@@ -782,7 +910,7 @@ mod tests {
         // The same morning, by the injected clock's 04:00 rule: not due, and no progress at all.
         let later = Clock {
             now: test_clock().now + chrono::Duration::hours(3),
-            local: test_clock().local + chrono::Duration::hours(3),
+            zone: paris_summer(),
         };
         exec.run(Command::BuildEdition, later);
         let (events, outcome) = until_long_job_done(&rx);
@@ -808,7 +936,7 @@ mod tests {
             Command::BuildEdition,
             Clock {
                 now: night.with_timezone(&Utc),
-                local: night,
+                zone: paris_summer(),
             },
         );
         assert_eq!(until_long_job_done(&rx).1, JobOutcome::EditionNotDue);
@@ -820,7 +948,7 @@ mod tests {
             Command::BuildEdition,
             Clock {
                 now: morning.with_timezone(&Utc),
-                local: morning,
+                zone: paris_summer(),
             },
         );
         assert_eq!(until_long_job_done(&rx).1, JobOutcome::EditionBuilt);
