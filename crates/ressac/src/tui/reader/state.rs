@@ -2,6 +2,8 @@
 //! events come in, `Command`s go out to the event loop (phase 5b), which runs them and answers
 //! with `Event`s; the same pattern as the garden's `GardenState`.
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, FixedOffset, Utc};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -48,15 +50,23 @@ pub const RHYTHM_CHOICES: [Option<CadenceGroup>; 6] = [
 )]
 pub enum Command {
     LoadSources,
+    /// A page of a list. `after: None` is a fresh list (it replaces the rows), `Some` the next
+    /// page (it is appended). The runner echoes `request` in the `Event::Entries` it answers
+    /// with; the state ignores answers older than its current request.
     LoadEntries {
         source: Source,
         filter: ListFilter,
         after: Option<ListCursor>,
+        request: u64,
     },
     LoadJournal,
+    /// A search in `source`. The runner applies `filter` (only the unread hits under
+    /// `ListFilter::Unread`) and echoes `request` in its `Event::Entries`.
     Search {
         source: Source,
         text: String,
+        filter: ListFilter,
+        request: u64,
     },
     LoadEntry(i64),
     SetRead(i64, bool),
@@ -82,10 +92,13 @@ pub enum Command {
 #[cfg_attr(test, allow(dead_code, reason = "the image URLs are read by phase 6"))]
 pub enum Event {
     Sources(SourcesSnapshot),
+    /// The answer to a `Command::LoadEntries` or `Command::Search`: `request` is echoed from the
+    /// command, so a late answer to a list the reader has left is recognised and dropped.
     Entries {
         source: Source,
         page: EntryPage,
         appended: bool,
+        request: u64,
     },
     Journal(Option<JournalView>),
     /// Boxed: far larger than the other variants (`clippy::large_enum_variant`).
@@ -174,6 +187,16 @@ pub struct ReaderState {
     pub local: Option<DateTime<FixedOffset>>,
     /// Space reached the end of the loaded rows: carry on once the next page arrives.
     pending_advance: bool,
+    /// The generation of the list being shown: bumped by every fresh list load (source, filter,
+    /// search, reload), echoed by the runner; older answers are ignored.
+    pub request: u64,
+    /// A next-page request is out: no second one until it lands or the list changes.
+    loading_more: bool,
+    /// The row open in the reader and its position when a reload was asked: put back if the
+    /// reloaded list no longer holds it (read under an unread filter), so the reader stays put.
+    pinned: Option<(usize, EntryRow)>,
+    /// The entry whose full-text extraction is running.
+    extracting: Option<i64>,
 }
 
 impl ReaderState {
@@ -208,6 +231,10 @@ impl ReaderState {
             now: None,
             local: None,
             pending_advance: false,
+            request: 0,
+            loading_more: false,
+            pinned: None,
+            extracting: None,
         }
     }
 
@@ -260,7 +287,7 @@ impl ReaderState {
             return vec![Command::Quit];
         }
         if self.search_editing {
-            return self.on_search_key(key.code);
+            return self.on_search_key(key);
         }
         match self.overlay {
             Overlay::Help => {
@@ -316,7 +343,6 @@ impl ReaderState {
                     ListFilter::All => ListFilter::Unread,
                     ListFilter::Unread => ListFilter::All,
                 };
-                self.next = None;
                 vec![self.reload()]
             }
             KeyCode::Char('/') => {
@@ -347,7 +373,8 @@ impl ReaderState {
                 source,
                 page,
                 appended,
-            } => self.entries_loaded(source, page, appended),
+                request,
+            } => self.entries_loaded(source, page, appended, request),
             Event::Journal(view) => {
                 self.journal = view;
                 Vec::new()
@@ -375,19 +402,52 @@ impl ReaderState {
         }
     }
 
-    /// The current list again: the search when one is active, else the source.
-    fn reload(&self) -> Command {
+    /// A fresh load of the current list (the search when one is active, else the source) under
+    /// a new request: whatever was in flight (a next page, an older list) is now stale.
+    fn reload(&mut self) -> Command {
+        self.request += 1;
+        self.next = None;
+        self.pending_advance = false;
+        self.loading_more = false;
+        self.pinned = None;
         match &self.search {
             Some(text) if !text.is_empty() && !self.search_editing => Command::Search {
                 source: self.source,
                 text: text.clone(),
+                filter: self.filter,
+                request: self.request,
             },
             _ => Command::LoadEntries {
                 source: self.source,
                 filter: self.filter,
                 after: None,
+                request: self.request,
             },
         }
+    }
+
+    /// The same list again after a change of the data: the open row is remembered so that a
+    /// reload which no longer holds it (read under an unread filter) leaves the reader alone.
+    fn reload_in_place(&mut self) -> Command {
+        let pinned = self.index().map(|i| (i, self.entries[i].clone()));
+        let command = self.reload();
+        self.pinned = pinned;
+        command
+    }
+
+    /// The next page of the list, once: `None` while one is already out or there is none.
+    fn load_more(&mut self) -> Option<Command> {
+        if self.loading_more {
+            return None;
+        }
+        let after = self.next.clone()?;
+        self.loading_more = true;
+        Some(Command::LoadEntries {
+            source: self.source,
+            filter: self.filter,
+            after: Some(after),
+            request: self.request,
+        })
     }
 
     fn index(&self) -> Option<usize> {
@@ -424,13 +484,10 @@ impl ReaderState {
         }
         let target = self.index().map_or(0, |i| i.saturating_add_signed(delta));
         if target >= self.entries.len() {
-            return match &self.next {
-                Some(cursor) if delta > 0 => vec![Command::LoadEntries {
-                    source: self.source,
-                    filter: self.filter,
-                    after: Some(cursor.clone()),
-                }],
-                _ => Vec::new(),
+            return if delta > 0 {
+                self.load_more().into_iter().collect()
+            } else {
+                Vec::new()
             };
         }
         if Some(target) == self.index() {
@@ -479,13 +536,9 @@ impl ReaderState {
             }
             return self.select(from + offset, true);
         }
-        if let Some(cursor) = self.next.clone() {
+        if self.next.is_some() {
             self.pending_advance = true;
-            return vec![Command::LoadEntries {
-                source: self.source,
-                filter: self.filter,
-                after: Some(cursor),
-            }];
+            return self.load_more().into_iter().collect();
         }
         let end = if self.source == Source::Journal {
             END_OF_EDITION
@@ -577,7 +630,6 @@ impl ReaderState {
         self.article = None;
         self.scroll = 0;
         self.search = None;
-        self.pending_advance = false;
         let mut commands = Vec::new();
         if source == Source::Journal {
             commands.push(Command::LoadJournal);
@@ -632,6 +684,10 @@ impl ReaderState {
             self.render_article();
             return Vec::new();
         }
+        if self.extracting == Some(id) {
+            return Vec::new();
+        }
+        self.extracting = Some(id);
         self.message = Some(FETCHING_FULL.into());
         vec![Command::Extract(id)]
     }
@@ -697,8 +753,15 @@ impl ReaderState {
         }
     }
 
-    fn on_search_key(&mut self, code: KeyCode) -> Vec<Command> {
-        match code {
+    fn on_search_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        match key.code {
+            KeyCode::Char(_)
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                Vec::new()
+            }
             KeyCode::Char(c) => {
                 self.search.get_or_insert_with(String::new).push(c);
                 Vec::new()
@@ -766,14 +829,31 @@ impl ReaderState {
         self.class != LayoutClass::One || self.focus == Column::Reader
     }
 
-    fn entries_loaded(&mut self, source: Source, page: EntryPage, appended: bool) -> Vec<Command> {
-        if source != self.source {
+    fn entries_loaded(
+        &mut self,
+        source: Source,
+        page: EntryPage,
+        appended: bool,
+        request: u64,
+    ) -> Vec<Command> {
+        if source != self.source || request < self.request {
             return Vec::new();
         }
         if appended {
-            self.entries.extend(page.rows);
+            self.loading_more = false;
+            let known: HashSet<i64> = self.entries.iter().map(|row| row.entry_id).collect();
+            self.entries.extend(
+                page.rows
+                    .into_iter()
+                    .filter(|row| !known.contains(&row.entry_id)),
+            );
         } else {
             self.entries = page.rows;
+            if let Some((at, row)) = self.pinned.take()
+                && !self.entries.iter().any(|r| r.entry_id == row.entry_id)
+            {
+                self.entries.insert(at.min(self.entries.len()), row);
+            }
         }
         self.total = page.total;
         self.unread = page.unread;
@@ -813,17 +893,21 @@ impl ReaderState {
     fn job_done(&mut self, outcome: JobOutcome) -> Vec<Command> {
         self.progress = None;
         match outcome {
-            JobOutcome::Refreshed => vec![Command::LoadSources, self.reload()],
+            JobOutcome::Refreshed => vec![Command::LoadSources, self.reload_in_place()],
             JobOutcome::EditionBuilt | JobOutcome::EditionNotDue => self.data_changed(),
             JobOutcome::Offline => {
                 self.message = Some(OFFLINE.into());
                 Vec::new()
             }
             JobOutcome::Failed(sentence) => {
+                self.extracting = None;
                 self.message = Some(sentence);
                 Vec::new()
             }
             JobOutcome::Extracted { entry_id, error } => {
+                if self.extracting == Some(entry_id) {
+                    self.extracting = None;
+                }
                 if self.selected != Some(entry_id) {
                     return Vec::new();
                 }
@@ -842,7 +926,7 @@ impl ReaderState {
         if self.source == Source::Journal {
             commands.push(Command::LoadJournal);
         }
-        commands.push(self.reload());
+        commands.push(self.reload_in_place());
         commands
     }
 
@@ -944,11 +1028,17 @@ mod tests {
             .join("\n")
     }
 
-    fn entries(source: Source, rows: Vec<EntryRow>, next: Option<ListCursor>) -> Event {
+    fn entries(
+        state: &ReaderState,
+        source: Source,
+        rows: Vec<EntryRow>,
+        next: Option<ListCursor>,
+    ) -> Event {
         Event::Entries {
             source,
             page: page(rows, next),
             appended: false,
+            request: state.request,
         }
     }
 
@@ -978,7 +1068,7 @@ mod tests {
             row(3, 8, false),
             row(4, 8, true),
         ];
-        state.on_event(entries(Source::Journal, rows, None));
+        state.on_event(entries(&state, Source::Journal, rows, None));
         state
     }
 
@@ -998,7 +1088,8 @@ mod tests {
                 Command::LoadEntries {
                     source: Source::Journal,
                     filter: ListFilter::All,
-                    after: None
+                    after: None,
+                    request: 1
                 },
             ]
         );
@@ -1007,7 +1098,12 @@ mod tests {
     #[test]
     fn the_first_entry_is_shown_without_being_marked_read() {
         let mut state = ReaderState::new(TerminalSettings::default(), 140, 40);
-        let commands = state.on_event(entries(Source::Journal, vec![row(1, 7, false)], None));
+        let commands = state.on_event(entries(
+            &state,
+            Source::Journal,
+            vec![row(1, 7, false)],
+            None,
+        ));
         assert_eq!(commands, [Command::LoadEntry(1)]);
         assert_eq!(state.selected_entry(), Some(1));
         assert!(!state.entries[0].is_read);
@@ -1017,7 +1113,12 @@ mod tests {
     fn one_column_waits_for_enter_before_showing_an_entry() {
         let mut state = ReaderState::new(TerminalSettings::default(), 70, 40);
         assert_eq!(state.class(), LayoutClass::One);
-        let commands = state.on_event(entries(Source::Journal, vec![row(1, 7, false)], None));
+        let commands = state.on_event(entries(
+            &state,
+            Source::Journal,
+            vec![row(1, 7, false)],
+            None,
+        ));
         assert!(commands.is_empty());
         assert_eq!(state.selected_entry(), None);
     }
@@ -1025,7 +1126,12 @@ mod tests {
     #[test]
     fn entries_of_another_source_are_ignored() {
         let mut state = reader();
-        state.on_event(entries(Source::Unread, vec![row(9, 7, false)], None));
+        state.on_event(entries(
+            &state,
+            Source::Unread,
+            vec![row(9, 7, false)],
+            None,
+        ));
         assert_eq!(state.entries.len(), 4);
     }
 
@@ -1056,9 +1162,10 @@ mod tests {
         }
         assert!(char_key(&mut state, 'j').is_empty());
         let mut state = ReaderState::new(TerminalSettings::default(), 140, 40);
-        state.on_event(entries(Source::Unread, vec![], None));
+        state.on_event(entries(&state, Source::Unread, vec![], None));
         state.source = Source::Unread;
         state.on_event(entries(
+            &state,
             Source::Unread,
             vec![row(1, 7, false)],
             Some(cursor()),
@@ -1069,6 +1176,7 @@ mod tests {
                 source: Source::Unread,
                 filter: ListFilter::All,
                 after: Some(cursor()),
+                request: 0,
             }]
         );
     }
@@ -1097,6 +1205,7 @@ mod tests {
         let mut state = ReaderState::new(TerminalSettings::default(), 140, 40);
         state.source = Source::Unread;
         state.on_event(entries(
+            &state,
             Source::Unread,
             vec![row(1, 7, true)],
             Some(cursor()),
@@ -1107,12 +1216,14 @@ mod tests {
                 source: Source::Unread,
                 filter: ListFilter::All,
                 after: Some(cursor()),
+                request: 0,
             }]
         );
         let more = Event::Entries {
             source: Source::Unread,
             page: page(vec![row(5, 7, false)], None),
             appended: true,
+            request: state.request,
         };
         assert_eq!(
             state.on_event(more),
@@ -1124,7 +1235,12 @@ mod tests {
     fn space_at_the_end_of_a_list_says_so() {
         let mut state = ReaderState::new(TerminalSettings::default(), 140, 40);
         state.source = Source::Starred;
-        state.on_event(entries(Source::Starred, vec![row(1, 7, true)], None));
+        state.on_event(entries(
+            &state,
+            Source::Starred,
+            vec![row(1, 7, true)],
+            None,
+        ));
         assert!(char_key(&mut state, ' ').is_empty());
         assert_eq!(
             state.message.as_deref(),
@@ -1142,7 +1258,8 @@ mod tests {
             [Command::LoadEntries {
                 source: Source::Unread,
                 filter: ListFilter::All,
-                after: None
+                after: None,
+                request: 2
             }]
         );
         assert_eq!(state.source(), Source::Unread);
@@ -1155,7 +1272,8 @@ mod tests {
             [Command::LoadEntries {
                 source: Source::Folder(1),
                 filter: ListFilter::All,
-                after: None
+                after: None,
+                request: 5
             }]
         );
         assert_eq!(state.sidebar_index, 5);
@@ -1169,7 +1287,8 @@ mod tests {
                 Command::LoadEntries {
                     source: Source::Journal,
                     filter: ListFilter::All,
-                    after: None
+                    after: None,
+                    request: 9
                 },
             ]
         );
@@ -1211,7 +1330,12 @@ mod tests {
     fn one_column_mode_walks_in_with_enter_and_out_with_esc() {
         let mut state = ReaderState::new(TerminalSettings::default(), 70, 40);
         state.on_event(Event::Sources(sample_snapshot()));
-        state.on_event(entries(Source::Journal, vec![row(1, 7, false)], None));
+        state.on_event(entries(
+            &state,
+            Source::Journal,
+            vec![row(1, 7, false)],
+            None,
+        ));
         assert_eq!(
             key(&mut state, KeyCode::Enter),
             [Command::LoadEntry(1), Command::SetRead(1, true)]
@@ -1241,7 +1365,8 @@ mod tests {
             [Command::LoadEntries {
                 source: Source::Journal,
                 filter: ListFilter::Unread,
-                after: None
+                after: None,
+                request: 2
             }]
         );
     }
@@ -1259,7 +1384,9 @@ mod tests {
             key(&mut state, KeyCode::Enter),
             [Command::Search {
                 source: Source::Journal,
-                text: "rus".into()
+                text: "rus".into(),
+                filter: ListFilter::All,
+                request: 2
             }]
         );
         assert_eq!(
@@ -1267,7 +1394,8 @@ mod tests {
             [Command::LoadEntries {
                 source: Source::Journal,
                 filter: ListFilter::All,
-                after: None
+                after: None,
+                request: 3
             }]
         );
         assert_eq!(state.search, None);
@@ -1385,14 +1513,15 @@ mod tests {
                 Command::LoadEntries {
                     source: Source::Journal,
                     filter: ListFilter::All,
-                    after: None
+                    after: None,
+                    request: 2
                 },
             ]
         );
         let reloaded = vec![row(3, 8, false), row(2, 7, true), row(1, 7, true)];
         assert!(
             state
-                .on_event(entries(Source::Journal, reloaded, None))
+                .on_event(entries(&state, Source::Journal, reloaded, None))
                 .is_empty()
         );
         assert_eq!(state.selected_entry(), Some(2));
@@ -1474,22 +1603,25 @@ mod tests {
     #[test]
     fn an_edition_outcome_reloads_the_journal() {
         let mut state = reader();
-        let reload = [
-            Command::LoadSources,
-            Command::LoadJournal,
-            Command::LoadEntries {
-                source: Source::Journal,
-                filter: ListFilter::All,
-                after: None,
-            },
-        ];
+        let reload = |request| {
+            [
+                Command::LoadSources,
+                Command::LoadJournal,
+                Command::LoadEntries {
+                    source: Source::Journal,
+                    filter: ListFilter::All,
+                    after: None,
+                    request,
+                },
+            ]
+        };
         assert_eq!(
             state.on_event(Event::JobDone(JobOutcome::EditionBuilt)),
-            reload
+            reload(2)
         );
         assert_eq!(
             state.on_event(Event::JobDone(JobOutcome::EditionNotDue)),
-            reload
+            reload(3)
         );
         assert_eq!(state.message, None);
     }
@@ -1502,12 +1634,14 @@ mod tests {
             [Command::LoadEntries {
                 source: Source::Starred,
                 filter: ListFilter::All,
-                after: None
+                after: None,
+                request: 2
             }]
         );
         assert_eq!(state.source(), Source::Starred);
         assert!(state.go_to(Source::Starred).is_empty());
         state.on_event(entries(
+            &state,
             Source::Starred,
             vec![row(5, 7, true), row(6, 7, false)],
             None,
@@ -1562,6 +1696,178 @@ mod tests {
         assert_eq!(state.focus(), Column::Sources);
     }
 
+    /// Review Focus 2 under an unread filter: reading a row makes the next reload drop it from
+    /// the list, the reader keeps showing it.
+    #[test]
+    fn a_reload_under_the_unread_filter_keeps_the_open_article() {
+        let mut state = reader();
+        char_key(&mut state, 'u');
+        assert_eq!(state.filter, ListFilter::Unread);
+        let unread = vec![row(1, 7, false), row(3, 8, false)];
+        state.on_event(entries(&state, Source::Journal, unread, None));
+        char_key(&mut state, 'j');
+        assert_eq!(state.selected_entry(), Some(3));
+        state.on_event(Event::Entry(detail(3, 3)));
+        assert!(state.on_event(Event::DataChanged).len() >= 2);
+        // The app (or this reader) read entry 3: the reloaded unread list no longer has it.
+        let reloaded = vec![row(1, 7, false)];
+        assert!(
+            state
+                .on_event(entries(&state, Source::Journal, reloaded, None))
+                .is_empty()
+        );
+        assert_eq!(state.selected_entry(), Some(3));
+        assert!(state.article.is_some());
+        assert_eq!(state.detail.as_ref().map(|d| d.row.entry_id), Some(3));
+        let ids: Vec<i64> = state.entries.iter().map(|r| r.entry_id).collect();
+        assert_eq!(ids, [1, 3]);
+        // Navigation carries on from the kept row; once away, the next reload drops it.
+        assert_eq!(
+            char_key(&mut state, 'k'),
+            [Command::LoadEntry(1), Command::SetRead(1, true)]
+        );
+        state.on_event(Event::DataChanged);
+        state.on_event(entries(
+            &state,
+            Source::Journal,
+            vec![row(1, 7, false)],
+            None,
+        ));
+        assert_eq!(state.entries.len(), 1);
+    }
+
+    #[test]
+    fn the_next_page_is_asked_once_and_never_duplicated() {
+        let mut state = ReaderState::new(TerminalSettings::default(), 140, 40);
+        state.source = Source::Unread;
+        state.on_event(entries(
+            &state,
+            Source::Unread,
+            vec![row(1, 7, false)],
+            Some(cursor()),
+        ));
+        let ask = Command::LoadEntries {
+            source: Source::Unread,
+            filter: ListFilter::All,
+            after: Some(cursor()),
+            request: state.request,
+        };
+        assert_eq!(char_key(&mut state, 'j'), std::slice::from_ref(&ask));
+        assert!(char_key(&mut state, 'j').is_empty());
+        assert!(char_key(&mut state, ' ').is_empty());
+        let landed = |state: &ReaderState| Event::Entries {
+            source: Source::Unread,
+            page: page(vec![row(1, 7, false), row(2, 7, false)], Some(cursor())),
+            appended: true,
+            request: state.request,
+        };
+        // Space was waiting for the page: it carries on to the new unread row.
+        assert_eq!(
+            state.on_event(landed(&state)),
+            [Command::LoadEntry(2), Command::SetRead(2, true)]
+        );
+        let ids: Vec<i64> = state.entries.iter().map(|r| r.entry_id).collect();
+        assert_eq!(ids, [1, 2]);
+        // The same page twice appends nothing; the flag is free again.
+        assert!(state.on_event(landed(&state)).is_empty());
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(char_key(&mut state, 'j'), [ask]);
+    }
+
+    #[test]
+    fn a_late_page_for_an_older_request_is_ignored() {
+        let mut state = reader();
+        key(&mut state, KeyCode::Left);
+        let commands = key(&mut state, KeyCode::Down);
+        let Some(Command::LoadEntries { request, .. }) = commands.first() else {
+            panic!("expected a list load, got {commands:?}");
+        };
+        let request = *request;
+        let stale = Event::Entries {
+            source: Source::Unread,
+            page: page(vec![row(9, 7, false)], None),
+            appended: false,
+            request: request - 1,
+        };
+        assert!(state.on_event(stale).is_empty());
+        assert!(state.entries.is_empty());
+        let fresh = Event::Entries {
+            source: Source::Unread,
+            page: page(vec![row(8, 7, false)], None),
+            appended: false,
+            request,
+        };
+        state.on_event(fresh);
+        assert_eq!(state.entries[0].entry_id, 8);
+        // A reload (data changed) supersedes a page request still in flight.
+        let before = state.request;
+        state.on_event(Event::DataChanged);
+        assert!(state.request > before);
+    }
+
+    #[test]
+    fn a_pending_advance_does_not_survive_a_new_list() {
+        let mut state = ReaderState::new(TerminalSettings::default(), 140, 40);
+        state.source = Source::Unread;
+        state.on_event(entries(
+            &state,
+            Source::Unread,
+            vec![row(1, 7, true)],
+            Some(cursor()),
+        ));
+        char_key(&mut state, ' ');
+        char_key(&mut state, 'u');
+        let commands = state.on_event(entries(
+            &state,
+            Source::Unread,
+            vec![row(5, 7, false)],
+            None,
+        ));
+        assert_eq!(commands, [Command::LoadEntry(5)]);
+    }
+
+    #[test]
+    fn the_search_ignores_chords() {
+        let mut state = reader();
+        char_key(&mut state, '/');
+        state.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        state.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::ALT));
+        state.on_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+        char_key(&mut state, 'u');
+        assert_eq!(state.search.as_deref(), Some("Ru"));
+    }
+
+    #[test]
+    fn f_does_not_extract_twice() {
+        let mut state = reader();
+        state.on_event(Event::Entry(detail(1, 3)));
+        assert_eq!(char_key(&mut state, 'f'), [Command::Extract(1)]);
+        assert!(char_key(&mut state, 'f').is_empty());
+        state.on_event(Event::JobDone(JobOutcome::Extracted {
+            entry_id: 1,
+            error: Some("No article found.".into()),
+        }));
+        assert_eq!(char_key(&mut state, 'f'), [Command::Extract(1)]);
+    }
+
+    #[test]
+    fn u_applies_the_filter_to_the_search() {
+        let mut state = reader();
+        char_key(&mut state, '/');
+        char_key(&mut state, 'r');
+        key(&mut state, KeyCode::Enter);
+        let commands = char_key(&mut state, 'u');
+        assert_eq!(
+            commands,
+            [Command::Search {
+                source: Source::Journal,
+                text: "r".into(),
+                filter: ListFilter::Unread,
+                request: state.request,
+            }]
+        );
+    }
+
     #[test]
     fn job_outcomes() {
         let mut state = reader();
@@ -1578,7 +1884,8 @@ mod tests {
                 Command::LoadEntries {
                     source: Source::Journal,
                     filter: ListFilter::All,
-                    after: None
+                    after: None,
+                    request: 2
                 },
             ]
         );
