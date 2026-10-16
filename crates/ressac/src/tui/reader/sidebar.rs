@@ -1,9 +1,10 @@
 //! The sources column as a flat list of rows (spec §4, Sources; §6): the smart lists, the
-//! folder tree in the app's display order, then the rhythm groups. Pure. The garden's pages
-//! join in phase 8.
+//! folder tree in the app's display order, the rhythm groups, then the garden's pages. Pure.
 
 use ressac_core::model::{CadenceGroup, FeedId, FolderId};
 use ressac_core::store::{Source, SourceNode, SourceNodeKind, SourcesSnapshot};
+
+use super::state::GardenView;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SidebarRow {
@@ -32,18 +33,36 @@ pub enum SidebarRow {
         group: CadenceGroup,
         unread: usize,
     },
+    /// A garden page (Needs triage, All feeds, Cemetery); `count` is shown like an unread count.
+    Garden {
+        view: GardenView,
+        count: usize,
+    },
 }
 
 impl SidebarRow {
-    /// The list this row opens; `None` for a heading.
+    /// The reading list this row opens; `None` for a heading and for a garden page.
     pub fn source(&self) -> Option<Source> {
         match self {
-            SidebarRow::Heading(_) => None,
+            SidebarRow::Heading(_) | SidebarRow::Garden { .. } => None,
             SidebarRow::Smart { source, .. } => Some(*source),
             SidebarRow::Folder { id, .. } => Some(Source::Folder(*id)),
             SidebarRow::Feed { id, .. } => Some(Source::Feed(*id)),
             SidebarRow::Rhythm { group, .. } => Some(Source::Cadence(*group)),
         }
+    }
+
+    /// The garden page this row opens, if it is one.
+    pub fn garden_view(&self) -> Option<GardenView> {
+        match self {
+            SidebarRow::Garden { view, .. } => Some(*view),
+            _ => None,
+        }
+    }
+
+    /// A heading is the only row the cursor skips.
+    fn selectable(&self) -> bool {
+        !matches!(self, SidebarRow::Heading(_))
     }
 }
 
@@ -80,6 +99,15 @@ pub fn rows(snapshot: &SourcesSnapshot) -> Vec<SidebarRow> {
         group,
         unread: counts.cadence.get(&group).copied().unwrap_or(0),
     }));
+    rows.push(SidebarRow::Heading("Garden"));
+    rows.extend(GardenView::ALL.iter().map(|&view| SidebarRow::Garden {
+        view,
+        count: if view == GardenView::NeedsTriage {
+            counts.needs_triage
+        } else {
+            0
+        },
+    }));
     rows
 }
 
@@ -109,6 +137,10 @@ pub fn index_of(rows: &[SidebarRow], source: Source) -> Option<usize> {
     rows.iter().position(|row| row.source() == Some(source))
 }
 
+pub fn index_of_garden(rows: &[SidebarRow], view: GardenView) -> Option<usize> {
+    rows.iter().position(|row| row.garden_view() == Some(view))
+}
+
 /// The next selectable row `delta` steps away, skipping headings; `from` at either end.
 pub fn step(rows: &[SidebarRow], from: usize, delta: isize) -> usize {
     let mut at = from;
@@ -118,7 +150,7 @@ pub fn step(rows: &[SidebarRow], from: usize, delta: isize) -> usize {
             .filter(|&next| next < rows.len())
         {
             None => return from,
-            Some(next) if rows[next].source().is_some() => return next,
+            Some(next) if rows[next].selectable() => return next,
             Some(next) => at = next,
         }
     }
@@ -166,7 +198,7 @@ mod tests {
     #[test]
     fn smart_lists_then_the_tree_then_the_rhythm_groups() {
         let rows = rows(&sample_snapshot());
-        assert_eq!(rows.len(), 13);
+        assert_eq!(rows.len(), 17);
         assert_eq!(
             rows[0],
             SidebarRow::Smart {
@@ -219,6 +251,21 @@ mod tests {
                 unread: 0
             }
         );
+        assert_eq!(rows[13], SidebarRow::Heading("Garden"));
+        assert_eq!(
+            rows[14],
+            SidebarRow::Garden {
+                view: GardenView::NeedsTriage,
+                count: 4
+            }
+        );
+        assert_eq!(
+            rows[16],
+            SidebarRow::Garden {
+                view: GardenView::Cemetery,
+                count: 0
+            }
+        );
     }
 
     #[test]
@@ -237,7 +284,9 @@ mod tests {
         assert_eq!(step(&rows, 5, -1), 3);
         assert_eq!(step(&rows, 6, 1), 8);
         assert_eq!(step(&rows, 0, -1), 0);
-        assert_eq!(step(&rows, 12, 1), 12);
+        assert_eq!(step(&rows, 12, 1), 14);
+        assert_eq!(step(&rows, 16, 1), 16);
+        assert_eq!(step(&rows, 14, -1), 12);
     }
 
     #[test]
@@ -249,5 +298,7 @@ mod tests {
             Some(11)
         );
         assert_eq!(index_of(&rows, Source::Feed(99)), None);
+        assert_eq!(index_of_garden(&rows, GardenView::AllFeeds), Some(15));
+        assert_eq!(rows[15].source(), None);
     }
 }

@@ -1,0 +1,34 @@
+---
+source: crates/ressac/src/tui/reader/native.rs
+expression: out
+---
+"Needs triage                                                                                                                                "
+"┌ Sources ───────────────┐Ressac · Garden   6 feeds  🦠 1 🚚 1 🪦 1 🦴 1 🌙 1 🌿 1   triage: 0 / 4                                          " Hidden by multi-width symbols: [(54, " "), (59, " "), (64, " "), (69, " "), (74, " "), (79, " ")]
+"│Journal 2               │┌ To triage (4) ───────────────────────────────┐┌ Bibliobsession 2.0 ────────────────────────────────────────────┐"
+"│Unread 3                ││▶🦠 Bibliobsession 2.0         Biblis vie ⚠   ││🦠 Hijacked · score 0.86   Biblis                               │" Hidden by multi-width symbols: [(29, " "), (76, " ")]
+"│Today 3                 ││ 🚚 Slashdot                   Infos  301     ││The site now seems to serve unrelated or spam content.          │" Hidden by multi-width symbols: [(29, " ")]
+"│Starred 1               ││ 🪦 Re/code                    Infos  410     ││                                                                │" Hidden by multi-width symbols: [(29, " ")]
+"│Feeds                   ││ 🦴 Heading East               Blogs  2011    ││Feed  https://feed1.example.org/rss                             │" Hidden by multi-width symbols: [(29, " ")]
+"│Infos 3                 ││                                              ││Site  https://feed1.example.org/                                │"
+"│  Courrier international││                                              ││                                                                │"
+"│Rhythm                  ││                                              ││Evidence                                                        │"
+"│Daily                   ││                                              ││ • Description is in vie (0.97) while the feed is in fra.       │"
+"│Weekly                  ││                                              ││ • Spam vocabulary: "xóc đĩa", "trúng lớn".                     │"
+"│Monthly                 ││                                              ││ • The feed address now returns an HTML page.                   │"
+"│Rare                    ││                                              ││                                                                │"
+"│Silent                  ││                                              ││Last entries                                                    │"
+"│Garden                  ││                                              ││ 2019-04-02  Bibliothèques et communs numériques                │"
+"│Needs triage 1          ││                                              ││ 2019-02-11  Le grand débat en bibliothèque ?                   │"
+"│All feeds               ││                                              ││                                                                │"
+"│Cemetery                ││                                              ││Wayback                                                         │"
+"│                        ││                                              ││http://web.archive.org/web/20210612000000/https://bibliobsession│"
+"│                        ││                                              ││.net/  [w]                                                      │"
+"│                        ││                                              ││Proposed  bury → cemetery                                       │"
+"│                        ││                                              ││                                                                │"
+"│                        ││                                              ││                                                                │"
+"│                        ││                                              ││                                                                │"
+"│                        ││                                              ││                                                                │"
+"│                        │└──────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘"
+"│                        │k keep  r repair  b bury  ↵ details  o site  w wayback  u undo  f filter  R safe repairs (2)  ? help  q quit      "
+"└────────────────────────┘                                                                                                                  "
+"                                                                                                                                            "

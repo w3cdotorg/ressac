@@ -7,12 +7,14 @@ use std::collections::HashSet;
 use chrono::{DateTime, FixedOffset, Utc};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
+use ressac_core::garden::GardenRow;
 use ressac_core::model::{CadenceGroup, FeedId};
 use ressac_core::store::{
     EntryDetail, EntryPage, EntryRow, JournalView, ListCursor, ListFilter, Source, SourcesSnapshot,
 };
 
 use crate::output::printable;
+use crate::tui::state::{self as garden_state, GardenState};
 
 use super::html::{RenderedArticle, is_web_url, render_html};
 use super::journal::{self, END_LINE, JournalLine, JournalPhase, OFFLINE};
@@ -75,9 +77,11 @@ pub enum Command {
     Refresh(Option<Source>),
     OpenUrl(String),
     SetCadence(FeedId, Option<CadenceGroup>),
-    /// A garden command from the garden screen (phase 8).
-    #[allow(dead_code, reason = "phase 8 runs the garden screen's commands")]
-    Garden(crate::tui::state::Command),
+    /// The garden's rows (a garden page is showing or about to).
+    LoadGarden,
+    /// A garden command from a garden page; the runner answers with the fresh rows, the message
+    /// to show and the sources.
+    Garden(garden_state::Command),
     /// Persist `state.settings` with `TerminalSettings::save`. The caller ignores the
     /// `io::Result` (spec §5: writing never blocks or fails reading): an unwritable file only
     /// means the choice is forgotten at the next start.
@@ -98,6 +102,9 @@ pub enum Event {
         request: u64,
     },
     Journal(Option<JournalView>),
+    GardenRows(Vec<GardenRow>),
+    /// The line a garden command leaves on the garden page (`None` clears it).
+    GardenMessage(Option<String>),
     /// Boxed: far larger than the other variants (`clippy::large_enum_variant`).
     Entry(Box<EntryDetail>),
     #[allow(dead_code, reason = "phase 6 answers the image commands")]
@@ -145,6 +152,40 @@ pub enum JobOutcome {
     },
 }
 
+/// The reader's garden destinations (spec §4): Needs triage, All feeds, Cemetery. Not core
+/// `Source`s: the core has no garden variant, the reader shows the garden screen instead of an
+/// entries list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GardenView {
+    NeedsTriage,
+    AllFeeds,
+    Cemetery,
+}
+
+impl GardenView {
+    pub const ALL: [GardenView; 3] = [
+        GardenView::NeedsTriage,
+        GardenView::AllFeeds,
+        GardenView::Cemetery,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            GardenView::NeedsTriage => "Needs triage",
+            GardenView::AllFeeds => "All feeds",
+            GardenView::Cemetery => "Cemetery",
+        }
+    }
+
+    fn filter(self) -> garden_state::Filter {
+        match self {
+            GardenView::NeedsTriage => garden_state::Filter::Queue,
+            GardenView::AllFeeds => garden_state::Filter::All,
+            GardenView::Cemetery => garden_state::Filter::Cemetery,
+        }
+    }
+}
+
 /// A modal layer over the columns; it takes the next key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
@@ -175,6 +216,10 @@ pub struct ReaderState {
     pub unread: usize,
     pub next: Option<ListCursor>,
     pub journal: Option<JournalView>,
+    /// The garden page shown instead of the entries and reader columns, if any; `source` keeps
+    /// the last reading source meanwhile. `garden` is built when the rows arrive.
+    garden_view: Option<GardenView>,
+    garden: Option<GardenState>,
     journal_phase: JournalPhase,
     /// True from `BuildEdition` until the edition job's outcome: no second build meanwhile.
     edition_job: bool,
@@ -236,6 +281,8 @@ pub struct ReaderView<'a> {
     #[allow(dead_code, reason = "read by the Antiope look (phase 9)")]
     pub source: Source,
     pub source_title: String,
+    /// A garden page is showing instead of the entries and reader columns.
+    pub garden: bool,
     pub source_lines: Vec<SourceLine>,
     pub filter: ListFilter,
     pub search: Option<&'a str>,
@@ -296,6 +343,8 @@ impl ReaderState {
             unread: 0,
             next: None,
             journal: None,
+            garden_view: None,
+            garden: None,
             journal_phase: JournalPhase::Idle,
             edition_job: false,
             last_day: None,
@@ -343,6 +392,44 @@ impl ReaderState {
         self.journal.as_ref()
     }
 
+    /// The garden page shown instead of the entries and reader columns, if any.
+    pub fn garden_view(&self) -> Option<GardenView> {
+        self.garden_view
+    }
+
+    /// The garden screen of that page, once its rows have arrived.
+    pub fn garden(&self) -> Option<&GardenState> {
+        self.garden.as_ref()
+    }
+
+    /// Choosing a garden page in the sources column: the garden takes the entries and reader
+    /// columns and the focus moves to it.
+    pub fn open_garden(&mut self, view: GardenView) -> Vec<Command> {
+        let mut commands = self.show_garden(view);
+        if commands.is_empty() {
+            // Already showing it: fresh rows all the same.
+            commands.push(Command::LoadGarden);
+        }
+        self.focus = Column::Entries;
+        commands
+    }
+
+    /// The garden page in the columns, the focus left where it is (arrowing down the sources
+    /// column shows each page as it passes, like a reading source).
+    fn show_garden(&mut self, view: GardenView) -> Vec<Command> {
+        if let Some(index) = sidebar::index_of_garden(&self.sidebar, view) {
+            self.sidebar_index = index;
+        }
+        self.search = None;
+        self.search_editing = false;
+        if self.garden_view == Some(view) {
+            return Vec::new();
+        }
+        self.garden_view = Some(view);
+        self.garden = None;
+        vec![Command::LoadGarden]
+    }
+
     /// Entry points for other screens (Antiope page jumps, phase 9).
     #[allow(dead_code, reason = "used by Antiope page jumps (phase 9)")]
     pub fn go_to(&mut self, source: Source) -> Vec<Command> {
@@ -357,7 +444,10 @@ impl ReaderState {
         }
     }
 
-    #[allow(dead_code, reason = "used by the garden screen (phase 8)")]
+    #[allow(
+        dead_code,
+        reason = "read by the tests and the Antiope pages (phase 9)"
+    )]
     pub fn set_focus(&mut self, column: Column) {
         self.focus = column;
     }
@@ -366,12 +456,18 @@ impl ReaderState {
         self.settings.look
     }
 
-    #[allow(dead_code, reason = "used by the garden screen (phase 8)")]
+    #[allow(
+        dead_code,
+        reason = "read by the tests and the Antiope pages (phase 9)"
+    )]
     pub fn focus(&self) -> Column {
         self.focus
     }
 
-    #[allow(dead_code, reason = "used by the garden screen (phase 8)")]
+    #[allow(
+        dead_code,
+        reason = "read by the tests and the Antiope pages (phase 9)"
+    )]
     pub fn source(&self) -> Source {
         self.source
     }
@@ -397,9 +493,15 @@ impl ReaderState {
         let source_title = self
             .sidebar
             .iter()
-            .find(|row| row.source() == Some(self.source))
+            .find(|row| match self.garden_view {
+                Some(view) => row.garden_view() == Some(view),
+                None => row.source() == Some(self.source),
+            })
             .map(|row| source_line(row, false).label)
             .unwrap_or_else(|| {
+                if let Some(view) = self.garden_view {
+                    return view.title().to_string();
+                }
                 match self.source {
                     Source::Journal => "Journal",
                     Source::Unread => "Unread",
@@ -426,6 +528,7 @@ impl ReaderState {
             now_local: self.local.unwrap_or(DateTime::UNIX_EPOCH.fixed_offset()),
             source: self.source,
             source_title,
+            garden: self.garden_view.is_some(),
             source_lines,
             filter: self.filter,
             search: self.search.as_deref(),
@@ -478,6 +581,12 @@ impl ReaderState {
             Overlay::LinkPrompt => return self.on_link_key(key.code),
             Overlay::Rhythm { .. } => return self.on_rhythm_key(key.code),
             Overlay::None => {}
+        }
+        if self.garden_view.is_some()
+            && self.focus != Column::Sources
+            && let Some(commands) = self.on_garden_key(key)
+        {
+            return commands;
         }
         self.message = None;
         match key.code {
@@ -550,14 +659,62 @@ impl ReaderState {
         }
     }
 
+    /// The garden's keys win while a garden page has the focus (spec §5); `None` lets the
+    /// reader's own key through (`t`, the look). The page's `←`, `h`, Tab and Esc go back to the
+    /// sources column, `q` quits; the garden's detail, help and confirmation take their own Esc.
+    fn on_garden_key(&mut self, key: KeyEvent) -> Option<Vec<Command>> {
+        use garden_state::{Command as G, Mode};
+        let at_list = self
+            .garden
+            .as_ref()
+            .is_none_or(|garden| garden.mode == Mode::Queue);
+        match key.code {
+            KeyCode::Char('t') => return None,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Tab if at_list => {
+                self.focus = Column::Sources;
+                return Some(Vec::new());
+            }
+            KeyCode::Char('q') if at_list => return Some(vec![Command::Quit]),
+            _ => {}
+        }
+        // The rows are not here yet: nothing else to press.
+        Some(
+            match self.garden.as_mut().map(|garden| garden.on_key(key)) {
+                None | Some(G::None) => Vec::new(),
+                Some(G::Quit) => vec![Command::Quit],
+                Some(command) => vec![Command::Garden(command)],
+            },
+        )
+    }
+
     pub fn on_event(&mut self, event: Event) -> Vec<Command> {
         match event {
             Event::Sources(snapshot) => {
                 self.sidebar = sidebar::rows(&snapshot);
                 let fallback = self.sidebar_index.min(self.sidebar.len().saturating_sub(1));
-                self.sidebar_index =
-                    sidebar::index_of(&self.sidebar, self.source).unwrap_or(fallback);
+                self.sidebar_index = match self.garden_view {
+                    Some(view) => sidebar::index_of_garden(&self.sidebar, view),
+                    None => sidebar::index_of(&self.sidebar, self.source),
+                }
+                .unwrap_or(fallback);
                 self.sources = Some(snapshot);
+                Vec::new()
+            }
+            Event::GardenRows(rows) => {
+                match (self.garden.as_mut(), self.garden_view) {
+                    (Some(garden), _) => garden.reload(rows),
+                    (None, Some(view)) => {
+                        self.garden = Some(GardenState::with_filter(rows, false, view.filter()));
+                    }
+                    // Late rows of a page the reader has left.
+                    (None, None) => {}
+                }
+                Vec::new()
+            }
+            Event::GardenMessage(message) => {
+                if let Some(garden) = self.garden.as_mut() {
+                    garden.message = message;
+                }
                 Vec::new()
             }
             Event::Entries {
@@ -951,13 +1108,13 @@ impl ReaderState {
 
     fn open_sidebar_row(&mut self) -> Vec<Command> {
         self.focus = Column::Entries;
-        match self
-            .sidebar
-            .get(self.sidebar_index)
-            .and_then(SidebarRow::source)
-        {
-            Some(source) => self.switch_source(source),
-            None => Vec::new(),
+        let Some(row) = self.sidebar.get(self.sidebar_index) else {
+            return Vec::new();
+        };
+        match (row.garden_view(), row.source()) {
+            (Some(view), _) => self.open_garden(view),
+            (None, Some(source)) => self.switch_source(source),
+            (None, None) => Vec::new(),
         }
     }
 
@@ -966,9 +1123,11 @@ impl ReaderState {
             return Vec::new();
         }
         self.sidebar_index = sidebar::step(&self.sidebar, self.sidebar_index, delta);
-        match self.sidebar[self.sidebar_index].source() {
-            Some(source) => self.switch_source(source),
-            None => Vec::new(),
+        let row = &self.sidebar[self.sidebar_index];
+        match (row.garden_view(), row.source()) {
+            (Some(view), _) => self.show_garden(view),
+            (None, Some(source)) => self.switch_source(source),
+            (None, None) => Vec::new(),
         }
     }
 
@@ -976,7 +1135,11 @@ impl ReaderState {
         if let Some(index) = sidebar::index_of(&self.sidebar, source) {
             self.sidebar_index = index;
         }
-        if source == self.source {
+        // Leaving a garden page for the reading source it interrupted: the list is reloaded, it
+        // may have changed meanwhile (a buried feed's entries).
+        let from_garden = self.garden_view.take().is_some();
+        self.garden = None;
+        if source == self.source && !from_garden {
             return Vec::new();
         }
         self.source = source;
@@ -1304,6 +1467,9 @@ impl ReaderState {
     /// Another process (or this one) changed the database: reload, keeping the selection.
     fn data_changed(&mut self) -> Vec<Command> {
         let mut commands = vec![Command::LoadSources];
+        if self.garden_view.is_some() {
+            commands.push(Command::LoadGarden);
+        }
         if self.source == Source::Journal {
             commands.push(Command::LoadJournal);
         }
@@ -1362,6 +1528,7 @@ fn source_line(row: &SidebarRow, selected: bool) -> SourceLine {
             ..
         } => line(title, *unread, *depth),
         SidebarRow::Rhythm { group, unread } => line(&group_label(*group), *unread, 0),
+        SidebarRow::Garden { view, count } => line(view.title(), *count, 0),
     }
 }
 
@@ -2849,5 +3016,213 @@ mod tests {
             state.go_to(Source::Journal);
             assert_eq!(state.view().journal_cursor, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod garden_tests {
+    use super::*;
+    use crate::tui::reader::sidebar::sample_snapshot;
+    use crate::tui::state::{Mode, sample_rows, sample_rows_with_buried};
+    use ressac_core::model::Decision;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn fresh() -> ReaderState {
+        ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            140,
+            40,
+        )
+    }
+
+    fn on_needs_triage() -> ReaderState {
+        let mut s = fresh();
+        let commands = s.open_garden(GardenView::NeedsTriage);
+        assert!(commands.contains(&Command::LoadGarden));
+        s.on_event(Event::GardenRows(sample_rows()));
+        s
+    }
+
+    #[test]
+    fn a_garden_destination_shows_its_filter() {
+        let s = on_needs_triage();
+        assert_eq!(s.garden_view(), Some(GardenView::NeedsTriage));
+        assert_eq!(s.garden().unwrap().filter, garden_state::Filter::Queue);
+        for (view, filter) in [
+            (GardenView::AllFeeds, garden_state::Filter::All),
+            (GardenView::Cemetery, garden_state::Filter::Cemetery),
+        ] {
+            let mut s = fresh();
+            s.open_garden(view);
+            s.on_event(Event::GardenRows(sample_rows_with_buried()));
+            assert_eq!(s.garden().unwrap().filter, filter);
+            assert_eq!(s.view().source_title, view.title());
+        }
+    }
+
+    #[test]
+    fn the_garden_s_keys_win_on_a_garden_page() {
+        let mut s = on_needs_triage();
+        // k keeps (not "previous entry"), u undoes (not the unread filter).
+        let keep = s.on_key(key(KeyCode::Char('k')));
+        assert!(matches!(
+            keep.as_slice(),
+            [Command::Garden(garden_state::Command::Decide(
+                _,
+                Decision::Keep
+            ))]
+        ));
+        assert_eq!(
+            s.on_key(key(KeyCode::Char('u'))),
+            vec![Command::Garden(garden_state::Command::Undo)]
+        );
+        assert_eq!(
+            s.filter,
+            ListFilter::All,
+            "the reader's filter is untouched"
+        );
+        let before = s.garden().unwrap().selected;
+        s.on_key(key(KeyCode::Down));
+        assert_eq!(s.garden().unwrap().selected, before + 1);
+    }
+
+    #[test]
+    fn q_quits_the_reader_and_esc_goes_back_to_the_sources() {
+        let mut s = on_needs_triage();
+        assert_eq!(s.on_key(key(KeyCode::Esc)), Vec::<Command>::new());
+        assert_eq!(s.focus(), Column::Sources);
+        let mut s = on_needs_triage();
+        assert_eq!(s.on_key(key(KeyCode::Char('q'))), vec![Command::Quit]);
+    }
+
+    #[test]
+    fn esc_closes_the_garden_s_detail_first() {
+        let mut s = on_needs_triage();
+        s.on_key(key(KeyCode::Enter));
+        assert_eq!(s.garden().unwrap().mode, Mode::Detail);
+        s.on_key(key(KeyCode::Esc));
+        assert_eq!(s.garden().unwrap().mode, Mode::Queue);
+        assert_ne!(s.focus(), Column::Sources);
+        // In the detail, q still quits and Left does not leave the page.
+        s.on_key(key(KeyCode::Enter));
+        s.on_key(key(KeyCode::Left));
+        assert_ne!(s.focus(), Column::Sources);
+    }
+
+    #[test]
+    fn rows_reload_after_a_decision_keep_the_position() {
+        let mut s = on_needs_triage();
+        s.on_key(key(KeyCode::Down));
+        let selected = s.garden().unwrap().selected;
+        s.on_event(Event::GardenRows(sample_rows()));
+        assert_eq!(s.garden().unwrap().selected, selected);
+        s.on_event(Event::GardenMessage(Some("Restored Re/code.".into())));
+        assert_eq!(
+            s.garden().unwrap().message.as_deref(),
+            Some("Restored Re/code.")
+        );
+        s.on_event(Event::GardenMessage(None));
+        assert_eq!(s.garden().unwrap().message, None);
+    }
+
+    #[test]
+    fn t_and_left_still_belong_to_the_reader() {
+        let mut s = on_needs_triage();
+        assert!(
+            s.on_key(key(KeyCode::Char('t')))
+                .contains(&Command::SaveSettings)
+        );
+        assert_eq!(s.look(), Look::Antiope);
+        s.on_key(key(KeyCode::Left));
+        assert_eq!(s.focus(), Column::Sources);
+    }
+
+    #[test]
+    fn until_the_rows_arrive_only_the_way_out_works() {
+        let mut s = fresh();
+        s.open_garden(GardenView::Cemetery);
+        assert!(s.garden().is_none());
+        assert!(s.on_key(key(KeyCode::Char('j'))).is_empty());
+        assert!(s.on_key(key(KeyCode::Char('m'))).is_empty());
+        assert_eq!(s.on_key(key(KeyCode::Char('q'))), vec![Command::Quit]);
+        s.on_key(key(KeyCode::Esc));
+        assert_eq!(s.focus(), Column::Sources);
+    }
+
+    #[test]
+    fn the_sources_column_walks_into_the_garden_pages() {
+        let mut s = fresh();
+        s.on_event(Event::Sources(sample_snapshot()));
+        s.on_key(key(KeyCode::Left));
+        // Arrowing onto a garden page shows it, the focus stays on the sources column.
+        for _ in 0..10 {
+            s.on_key(key(KeyCode::Down));
+        }
+        assert_eq!(s.sidebar_index, 12);
+        assert_eq!(s.on_key(key(KeyCode::Down)), vec![Command::LoadGarden]);
+        assert_eq!(s.sidebar_index, 14);
+        assert_eq!(s.garden_view(), Some(GardenView::NeedsTriage));
+        assert_eq!(s.focus(), Column::Sources);
+        s.on_event(Event::GardenRows(sample_rows()));
+        // The sources reload (a decision changed the counts) keeps the cursor on the page.
+        s.on_event(Event::Sources(sample_snapshot()));
+        assert_eq!(s.sidebar_index, 14);
+        s.on_key(key(KeyCode::Down));
+        assert_eq!(s.garden_view(), Some(GardenView::AllFeeds));
+        assert!(s.garden().is_none(), "the next page waits for its own rows");
+        // Enter moves into it.
+        s.on_key(key(KeyCode::Enter));
+        assert_eq!(s.focus(), Column::Entries);
+    }
+
+    #[test]
+    fn choosing_a_reading_source_leaves_the_garden() {
+        let mut s = on_needs_triage();
+        s.on_event(Event::Sources(sample_snapshot()));
+        s.on_key(key(KeyCode::Left));
+        let commands = s.on_key(key(KeyCode::Up));
+        assert_eq!(s.garden_view(), None);
+        assert!(s.garden().is_none());
+        assert!(!commands.is_empty());
+        assert!(matches!(
+            s.on_event(Event::GardenRows(sample_rows())).as_slice(),
+            []
+        ));
+        assert!(s.garden().is_none(), "late rows of a left page are dropped");
+    }
+
+    #[test]
+    fn coming_back_to_the_interrupted_source_reloads_its_list() {
+        let mut s = fresh();
+        s.on_event(Event::Sources(sample_snapshot()));
+        let before = s.source();
+        s.open_garden(GardenView::Cemetery);
+        let commands = s.go_to(before);
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::LoadEntries { .. }))
+        );
+        assert_eq!(s.garden_view(), None);
+    }
+
+    #[test]
+    fn a_data_change_reloads_the_garden_too() {
+        let mut s = on_needs_triage();
+        assert!(
+            s.on_event(Event::DataChanged)
+                .contains(&Command::LoadGarden)
+        );
+        let mut r = fresh();
+        assert!(
+            !r.on_event(Event::DataChanged)
+                .contains(&Command::LoadGarden)
+        );
     }
 }

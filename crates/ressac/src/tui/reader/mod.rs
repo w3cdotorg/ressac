@@ -296,9 +296,16 @@ impl<'a> Executor<'a> {
                 );
                 Ok(Vec::new())
             }
-            // The loop handles `FetchImage` itself (the image store owns those threads);
-            // phase 8 runs the garden's commands: nothing to do yet.
-            Command::FetchImage(_) | Command::Garden(_) => Ok(Vec::new()),
+            Command::LoadGarden => garden_events(store, today, None),
+            Command::Garden(command) => {
+                let message = match crate::tui::apply_garden_command(app, command) {
+                    Ok(message) => message,
+                    Err(e) => Some(busy_or(&e)),
+                };
+                garden_events(store, today, Some(message))
+            }
+            // The loop handles `FetchImage` itself (the image store owns those threads).
+            Command::FetchImage(_) => Ok(Vec::new()),
             // Both are handled by the loop itself (it owns the settings path and the exit).
             Command::SaveSettings | Command::Quit => Ok(Vec::new()),
         };
@@ -332,6 +339,21 @@ impl<'a> Executor<'a> {
         );
         Ok(Vec::new())
     }
+}
+
+/// The garden's fresh rows, then (after a garden command) its message, and the sources: Needs
+/// triage's count and the rhythm groups change with a decision.
+fn garden_events(
+    store: &Store,
+    today: DateTime<Utc>,
+    message: Option<Option<String>>,
+) -> anyhow::Result<Vec<Event>> {
+    let mut events = vec![Event::GardenRows(ressac_core::garden::load_rows(store)?)];
+    if let Some(message) = message {
+        events.push(Event::GardenMessage(message));
+        events.push(Event::Sources(store.sources(today)?));
+    }
+    Ok(events)
 }
 
 /// A search page; under `Unread` only the unread hits, topped up from the following pages so
@@ -884,5 +906,61 @@ mod tests {
         assert_eq!((page.total, page.unread), (3, 3));
         assert_eq!(page.next, None);
         assert_eq!(asked, [2]);
+    }
+
+    #[test]
+    fn garden_commands_reload_the_rows_and_report_the_message() {
+        use ressac_core::model::Decision;
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        app.import_opml(
+            include_str!("../../../../../tests/fixtures/vienna-like.opml"),
+            false,
+        )
+        .unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        let events = exec.run(Command::LoadGarden, test_clock());
+        let [Event::GardenRows(rows)] = events.as_slice() else {
+            panic!("{events:?}")
+        };
+        let feed = rows[0].feed_id;
+        let events = exec.run(
+            Command::Garden(crate::tui::state::Command::Decide(feed, Decision::Bury)),
+            test_clock(),
+        );
+        assert!(events.iter().any(
+            |e| matches!(e, Event::GardenRows(r) if r.iter().any(|row| row.feed_id == feed && row.buried))
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::GardenMessage(None)))
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Sources(_))),
+            "the counts change after a bury"
+        );
+    }
+
+    #[test]
+    fn a_failed_garden_command_is_a_message_not_a_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        let (tx, _rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        let events = exec.run(
+            Command::Garden(crate::tui::state::Command::Decide(
+                9_999,
+                ressac_core::model::Decision::Bury,
+            )),
+            test_clock(),
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::GardenMessage(Some(_)))),
+            "{events:?}"
+        );
     }
 }

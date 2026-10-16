@@ -25,6 +25,7 @@ use crate::output::printable;
 pub const FETCH_PROGRESS_LABEL: &str = "Fetching feeds";
 pub const EXTRACT_PROGRESS_LABEL: &str = "Fetching the full article";
 pub const TOO_SMALL: &str = "Window too small";
+pub const LOADING: &str = "Loading…";
 pub const LOADING_IMAGE: &str = "[loading image…]";
 const HELP_HINT: &str = "? help";
 const EDITING_HINT: &str = "Enter apply  Esc cancel";
@@ -81,13 +82,29 @@ pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -
     }
     let rects = columns(area, view.layout, view.focus, view.look);
     render_top_line(frame, &view, rects.top);
-    frame.render_widget(bottom_line(&view, rects.bottom.width), rects.bottom);
-    if let Some(rect) = rects.entries {
-        render_entries(frame, &view, rect, view.focus == Column::Entries);
-    }
-    let metrics = match rects.reader {
-        Some(rect) => render_reader(frame, &view, images, rect, view.focus == Column::Reader),
-        None => ReaderMetrics::default(),
+    let metrics = if state.garden_view().is_some() {
+        // A garden page takes the entries and reader columns, with its own footer for the bottom
+        // line: the keys it shows are the ones that work there (spec §5).
+        let area = match (rects.entries, rects.reader) {
+            (Some(entries), Some(reader)) => Some(entries.union(reader)),
+            (entries, reader) => entries.or(reader),
+        };
+        if let Some(area) = area {
+            match state.garden() {
+                Some(garden) => crate::tui::ui::render_in(frame, area, garden),
+                None => frame.render_widget(Paragraph::new(Span::styled(LOADING, DIM)), area),
+            }
+        }
+        ReaderMetrics::default()
+    } else {
+        frame.render_widget(bottom_line(&view, rects.bottom.width), rects.bottom);
+        if let Some(rect) = rects.entries {
+            render_entries(frame, &view, rect, view.focus == Column::Entries);
+        }
+        match rects.reader {
+            Some(rect) => render_reader(frame, &view, images, rect, view.focus == Column::Reader),
+            None => ReaderMetrics::default(),
+        }
     };
     // Last: in the two-column class the sources slide over the entries.
     if let Some(rect) = rects.sources {
@@ -104,14 +121,19 @@ pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -
 }
 
 fn render_top_line(frame: &mut Frame, view: &ReaderView<'_>, area: Rect) {
-    let filter = match view.filter {
-        ListFilter::All => "all",
-        ListFilter::Unread => "unread only",
+    let left = if view.garden {
+        view.source_title.clone()
+    } else {
+        let filter = match view.filter {
+            ListFilter::All => "all",
+            ListFilter::Unread => "unread only",
+        };
+        let mut left = format!("{} · {} unread · {filter}", view.source_title, view.unread);
+        if let Some(text) = view.search {
+            left.push_str(&format!(" · /{}", printable(text)));
+        }
+        left
     };
-    let mut left = format!("{} · {} unread · {filter}", view.source_title, view.unread);
-    if let Some(text) = view.search {
-        left.push_str(&format!(" · /{}", printable(text)));
-    }
     let right = match (view.progress, view.message) {
         (Some((label, done, total)), _) => progress_text(label, done, total, area.width / 2),
         (None, Some(message)) => printable(message).into_owned(),
@@ -540,6 +562,7 @@ mod tests {
     use super::*;
     use crate::tui::reader::layout::Look;
     use crate::tui::reader::settings::TerminalSettings;
+    use crate::tui::reader::state::GardenView;
     use crate::tui::reader::state::{Event, JobOutcome};
     use chrono::{FixedOffset, TimeZone, Utc};
     use image::{DynamicImage, Rgb, RgbImage};
@@ -548,6 +571,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui_image::picker::Picker;
     use ressac_core::edition::Section;
+    use ressac_core::garden::GardenRow;
     use ressac_core::model::CadenceGroup;
     use ressac_core::store::{
         EditionOverflowRow, EditionRecord, EntryPage, JournalItem, JournalView, Source,
@@ -1206,5 +1230,106 @@ mod tests {
         let out = draw(&journal_state(false, 0), 140, 30);
         assert!(!out.contains('\u{1b}') && !out.contains('\u{7}') && !out.contains('\u{9b}'));
         assert!(out.contains("Bourse\u{FFFD}]0;x\u{FFFD} du jour"), "{out}");
+    }
+
+    fn garden_state(
+        width: u16,
+        height: u16,
+        view: GardenView,
+        rows: Vec<GardenRow>,
+    ) -> ReaderState {
+        let mut s = ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            width,
+            height,
+        );
+        s.on_event(Event::Sources(snapshot()));
+        s.open_garden(view);
+        s.on_event(Event::GardenRows(rows));
+        s
+    }
+
+    #[test]
+    fn garden_destination_wide() {
+        let s = garden_state(
+            140,
+            30,
+            GardenView::NeedsTriage,
+            crate::tui::state::sample_rows(),
+        );
+        let out = draw(&s, 140, 30);
+        assert!(out.contains("Bibliobsession 2.0"));
+        assert!(
+            out.contains("k keep"),
+            "the bottom line shows the garden's keys"
+        );
+        assert!(out.contains("Needs triage"), "the top line names the page");
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn garden_destination_narrow_is_one_column() {
+        let s = garden_state(
+            70,
+            24,
+            GardenView::Cemetery,
+            crate::tui::state::sample_rows_with_buried(),
+        );
+        insta::assert_snapshot!(draw(&s, 70, 24));
+    }
+
+    #[test]
+    fn a_garden_page_waits_for_its_rows() {
+        let mut s = ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            100,
+            24,
+        );
+        s.open_garden(GardenView::AllFeeds);
+        let out = draw(&s, 100, 24);
+        assert!(out.contains(LOADING));
+        assert!(out.contains("All feeds"));
+    }
+
+    #[test]
+    fn the_garden_s_message_shows_in_its_footer() {
+        let mut s = garden_state(
+            140,
+            30,
+            GardenView::AllFeeds,
+            crate::tui::state::sample_rows(),
+        );
+        s.on_event(Event::GardenMessage(Some("Restored Re/code.".into())));
+        let out = draw(&s, 140, 30);
+        assert!(out.contains("Restored Re/code."));
+        assert!(!out.contains("k keep"));
+    }
+
+    #[test]
+    fn the_sources_column_lists_the_garden_pages_and_highlights_the_open_one() {
+        let s = garden_state(
+            140,
+            30,
+            GardenView::Cemetery,
+            crate::tui::state::sample_rows_with_buried(),
+        );
+        let out = draw(&s, 140, 30);
+        for title in ["Garden", "Needs triage", "All feeds", "Cemetery"] {
+            assert!(out.contains(title), "{title}");
+        }
+        assert_eq!(
+            s.view()
+                .source_lines
+                .iter()
+                .find(|l| l.selected)
+                .map(|l| l.label.as_str()),
+            Some("Cemetery")
+        );
     }
 }

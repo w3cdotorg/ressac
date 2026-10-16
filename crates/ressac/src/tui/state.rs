@@ -23,10 +23,8 @@ pub enum Filter {
     Status(Status),
     Folder(String),
     /// Every active feed (the reader's "All feeds").
-    #[allow(dead_code)] // built by the reader's garden destinations (phase 8b)
     All,
     /// The buried feeds (the reader's "Cemetery").
-    #[allow(dead_code)] // built by the reader's garden destinations (phase 8b)
     Cemetery,
 }
 
@@ -76,30 +74,30 @@ pub struct GardenState {
 
 impl GardenState {
     pub fn new(rows: Vec<GardenRow>, ascii: bool) -> Self {
+        Self::with_filter(rows, ascii, Filter::Queue)
+    }
+
+    /// A garden opened on another filter than the queue (the reader's garden destinations).
+    /// The "run `ressac check` first" hint belongs to the queue only: it explains why there is
+    /// nothing to triage, which is no news on the lists of every feed or of the buried ones.
+    pub fn with_filter(rows: Vec<GardenRow>, ascii: bool, filter: Filter) -> Self {
         let mut state = GardenState {
             rows,
             visible: Vec::new(),
             selected: 0,
             mode: Mode::Queue,
-            filter: Filter::Queue,
+            filter,
             message: None,
             ascii,
         };
         state.refilter();
         let mut active = state.rows.iter().filter(|r| !r.buried).peekable();
-        if active.peek().is_some() && active.all(|r| r.status() == Status::Unchecked) {
+        if state.filter == Filter::Queue
+            && active.peek().is_some()
+            && active.all(|r| r.status() == Status::Unchecked)
+        {
             state.message = Some(CHECK_FIRST.into());
         }
-        state
-    }
-
-    /// A garden opened on another filter than the queue (the reader's garden destinations).
-    #[allow(dead_code)] // called by the reader's garden destinations (phase 8b)
-    pub fn with_filter(rows: Vec<GardenRow>, ascii: bool, filter: Filter) -> Self {
-        let mut state = GardenState::new(rows, ascii);
-        state.filter = filter;
-        state.selected = 0;
-        state.refilter();
         state
     }
 
@@ -523,6 +521,27 @@ mod tests {
             Some("Run \"ressac check\" first to diagnose your feeds.")
         );
         assert_eq!(state().message, None);
+    }
+
+    #[test]
+    fn the_check_first_hint_belongs_to_the_queue_only() {
+        let unchecked = || {
+            let mut rows = sample_rows_with_buried();
+            for r in &mut rows {
+                r.diagnosis = None;
+            }
+            rows
+        };
+        for filter in [
+            Filter::All,
+            Filter::Cemetery,
+            Filter::Folder("Biblis".into()),
+        ] {
+            let s = GardenState::with_filter(unchecked(), false, filter.clone());
+            assert_eq!(s.message, None, "{filter:?}");
+        }
+        let queue = GardenState::with_filter(unchecked(), false, Filter::Queue);
+        assert_eq!(queue.message.as_deref(), Some(CHECK_FIRST));
     }
 
     #[test]
