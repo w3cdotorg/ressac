@@ -613,6 +613,12 @@ fn page_list_prints_reserved_pages_then_every_folder_and_feed() {
          101 reserved - Unread\n\
          102 reserved - Today\n\
          103 reserved - Starred\n\
+         104 reserved - Journal\n\
+         105 reserved - Daily\n\
+         106 reserved - Weekly\n\
+         107 reserved - Monthly\n\
+         108 reserved - Rare\n\
+         109 reserved - Silent\n\
          800 reserved - Needs triage\n\
          801 reserved - All feeds\n\
          802 reserved - Cemetery\n\
@@ -640,13 +646,13 @@ fn page_list_prints_reserved_pages_then_every_folder_and_feed() {
     let json = ressac(home.path(), &["--json", "page", "list"]);
     assert!(json.status.success(), "{json:?}");
     let lines = json_lines(&json);
-    assert_eq!(lines.len(), 26);
+    assert_eq!(lines.len(), 32);
     assert_eq!(
         lines[0],
         json!({"event": "page", "page": 100, "kind": "reserved", "id": null, "title": "Index", "parent_page": null})
     );
     assert_eq!(
-        lines[11],
+        lines[17],
         json!({"event": "page", "page": 203, "kind": "feed", "id": 2, "title": "Orange Drenka", "parent_page": 202})
     );
     assert!(lines.iter().all(|l| l["event"] == "page"));
@@ -703,7 +709,7 @@ fn page_set_refusals_exit_2_and_write_nothing() {
         ),
         (
             &["page", "set", "feed", "2", "109"],
-            "Page 109 is not between 110 and 799.\n",
+            "Page 109 is reserved.\n",
         ),
         (
             &["page", "set", "feed", "2", "201"],

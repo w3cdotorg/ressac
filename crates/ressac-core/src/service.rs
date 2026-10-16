@@ -1136,7 +1136,7 @@ mod tests {
             app.pages()
                 .unwrap()
                 .into_iter()
-                .skip(8)
+                .skip(pages::RESERVED_PAGES.len())
                 .map(|r| (r.page, r.kind, r.id))
                 .collect()
         };

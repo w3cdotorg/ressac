@@ -9,17 +9,25 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 
-/// Pages fixed in code and never stored: Index, Unread, Today, Starred, the three garden
-/// pages and the Guide.
-pub const RESERVED_PAGES: [u16; 8] = [100, 101, 102, 103, 800, 801, 802, 899];
+/// Pages fixed in code and never stored: Index, Unread, Today, Starred, the Journal and the
+/// five rhythm groups, the three garden pages and the Guide.
+pub const RESERVED_PAGES: [u16; 14] = [
+    100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 800, 801, 802, 899,
+];
 /// The pages a folder or a feed may hold.
 pub const ASSIGNABLE: RangeInclusive<u16> = 110..=799;
 /// Titles of `RESERVED_PAGES`, in the same order.
-const RESERVED_TITLES: [&str; 8] = [
+const RESERVED_TITLES: [&str; 14] = [
     "Index",
     "Unread",
     "Today",
     "Starred",
+    "Journal",
+    "Daily",
+    "Weekly",
+    "Monthly",
+    "Rare",
+    "Silent",
     "Needs triage",
     "All feeds",
     "Cemetery",
@@ -636,7 +644,7 @@ mod tests {
         s.record_decision(10, Decision::Bury, Status::Dead, None, now())
             .unwrap();
         let rows = list(s.conn()).unwrap();
-        let reserved: Vec<(u16, &str)> = rows[..8]
+        let reserved: Vec<(u16, &str)> = rows[..14]
             .iter()
             .map(|r| (r.page, r.title.as_str()))
             .collect();
@@ -647,6 +655,12 @@ mod tests {
                 (101, "Unread"),
                 (102, "Today"),
                 (103, "Starred"),
+                (104, "Journal"),
+                (105, "Daily"),
+                (106, "Weekly"),
+                (107, "Monthly"),
+                (108, "Rare"),
+                (109, "Silent"),
                 (800, "Needs triage"),
                 (801, "All feeds"),
                 (802, "Cemetery"),
@@ -654,11 +668,11 @@ mod tests {
             ]
         );
         assert!(
-            rows[..8]
+            rows[..14]
                 .iter()
                 .all(|r| r.kind == PageKind::Reserved && r.id.is_none())
         );
-        let stored: Vec<(u16, PageKind, Option<i64>, Option<u16>)> = rows[8..]
+        let stored: Vec<(u16, PageKind, Option<i64>, Option<u16>)> = rows[14..]
             .iter()
             .map(|r| (r.page, r.kind, r.id, r.parent_page))
             .collect();
@@ -673,7 +687,7 @@ mod tests {
             "the buried feed 10 stays listed"
         );
         assert_eq!(
-            serde_json::to_value(&rows[10]).unwrap(),
+            serde_json::to_value(&rows[16]).unwrap(),
             json!({"page": 201, "kind": "feed", "id": 10, "title": "Feed 10", "parent_page": 200})
         );
         assert_eq!(
@@ -728,7 +742,7 @@ mod tests {
     #[test]
     fn set_refuses_pages_outside_110_to_799() {
         let s = numbered();
-        for page in [0, 99, 104, 109, 900, u16::MAX] {
+        for page in [0, 99, 900, u16::MAX] {
             let err = set(s.conn(), PageKind::Feed, 10, page).unwrap_err();
             assert!(
                 matches!(err, Error::PageOutOfRange(p) if p == page),
@@ -784,5 +798,30 @@ mod tests {
             set(s.conn(), PageKind::Reserved, 1, 300),
             Err(Error::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn journal_and_rhythm_pages_are_reserved_not_out_of_range() {
+        let s = numbered();
+        for page in 104..=109 {
+            assert_eq!(
+                set(s.conn(), PageKind::Feed, 10, page)
+                    .unwrap_err()
+                    .to_string(),
+                format!("Page {page} is reserved.")
+            );
+        }
+        assert_eq!(
+            set(s.conn(), PageKind::Feed, 10, 103)
+                .unwrap_err()
+                .to_string(),
+            "Page 103 is reserved."
+        );
+        set(s.conn(), PageKind::Feed, 10, 110).unwrap();
+        assert_eq!(
+            feed_page(&s, 10),
+            Some(110),
+            "110 stays the first assignable page"
+        );
     }
 }
