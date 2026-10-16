@@ -1522,6 +1522,7 @@ fn reader_column(
         ReaderMetrics {
             total_rows: total,
             viewport_rows: area.height,
+            scroll: None,
         }
     };
     match page {
@@ -1569,7 +1570,7 @@ fn reader_column(
                 Variant::Teletext
             };
             let width16 = area.width;
-            let total_rows = draw_body(
+            let drawn = draw_body(
                 frame,
                 body,
                 article,
@@ -1595,8 +1596,9 @@ fn reader_column(
                 },
             );
             ReaderMetrics {
-                total_rows,
+                total_rows: drawn.total,
                 viewport_rows: body.height,
+                scroll: Some(drawn.scroll),
             }
         }
         _ if view.entry_cursor.is_some() => {
@@ -1608,6 +1610,7 @@ fn reader_column(
             ReaderMetrics {
                 total_rows: 0,
                 viewport_rows: area.height,
+                scroll: None,
             }
         }
         _ => whole(frame, sommaire_lines(dir, width), true),

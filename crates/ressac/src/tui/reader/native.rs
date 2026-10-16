@@ -41,6 +41,9 @@ pub struct ReaderMetrics {
     pub total_rows: usize,
     /// Rows visible under the header.
     pub viewport_rows: u16,
+    /// The article's first visible row as drawn: the requested scroll, moved off the inside of a
+    /// picture (a picture is never cut). `None` when no article body was drawn.
+    pub scroll: Option<usize>,
 }
 
 /// The progress line, shortened when the space is short: the edition's label becomes
@@ -434,6 +437,7 @@ fn render_reader(
         return ReaderMetrics {
             total_rows: 0,
             viewport_rows: inner.height,
+            scroll: None,
         };
     };
     let width = inner.width.min(MAX_TEXT_WIDTH);
@@ -453,7 +457,7 @@ fn render_reader(
         },
     );
     // `render_html` already ends the article with its numbered links list.
-    let total_rows = draw_body(
+    let body = draw_body(
         frame,
         Rect { width, ..body_area },
         article,
@@ -470,8 +474,9 @@ fn render_reader(
         },
     );
     ReaderMetrics {
-        total_rows,
+        total_rows: body.total,
         viewport_rows: body_area.height,
+        scroll: Some(body.scroll),
     }
 }
 
@@ -984,6 +989,44 @@ mod tests {
         let mut images = ImageStore::new(Picker::halfblocks());
         draw_with(&s, &mut images, 140, 30);
         assert!(images.take_wanted().is_empty(), "lazy loading");
+    }
+
+    #[test]
+    fn a_scroll_inside_a_picture_is_moved_to_its_top_so_no_band_shows() {
+        let before = "<p>Ligne de remplissage.</p>".repeat(20);
+        let after = "<p>Suite de l'article.</p>".repeat(40);
+        let html = format!("{before}<img src=\"{PHOTO}\" alt=\"Le port\">{after}");
+        let mut s = state(140, 30, rows());
+        let open = s.entries[0].clone();
+        s.on_event(Event::Entry(Box::new(EntryDetail {
+            content_html: Some(html),
+            ..detail_for(open, None)
+        })));
+        let mut images = ImageStore::new(Picker::halfblocks());
+        images.ingest(PHOTO, photo());
+        let draw_at = |s: &ReaderState, images: &mut ImageStore| {
+            let mut terminal = terminal(140, 30);
+            let mut metrics = None;
+            terminal
+                .draw(|f| metrics = Some(render(f, s, images)))
+                .unwrap();
+            (metrics.unwrap(), terminal.backend().to_string())
+        };
+        let top = s.article.as_ref().unwrap().images[0].line;
+        s.scroll = top;
+        let (aligned, _) = draw_at(&s, &mut images);
+        let rows = aligned.total_rows + 1 - s.article.as_ref().unwrap().lines.len();
+        assert!(rows >= 3, "the picture takes {rows} rows");
+        assert_eq!(aligned.scroll, Some(top));
+        for inside in top + 1..top + rows {
+            s.scroll = inside;
+            let (m, out) = draw_at(&s, &mut images);
+            assert_eq!(m.scroll, Some(top), "scroll {inside} is inside the picture");
+            assert!(out.contains('▀') || out.contains('▄'), "{out}");
+        }
+        // The last page: no room to go back, the picture ends the move forward instead.
+        let max = aligned.total_rows - usize::from(aligned.viewport_rows);
+        assert!(max > top + rows, "the picture is not on the last page");
     }
 
     #[test]

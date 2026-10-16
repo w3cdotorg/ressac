@@ -574,6 +574,9 @@ fn event_loop(
             })?;
             if let Some(m) = metrics {
                 state.set_reader_metrics(m.total_rows, m.viewport_rows);
+                if let Some(scroll) = m.scroll {
+                    state.set_drawn_scroll(scroll);
+                }
             }
         }
         // Images the renderer asked for start (four at a time); the ones that ended come back.

@@ -40,8 +40,39 @@ pub struct BodyLook<'a> {
     pub after_image: &'a dyn Fn(&mut Frame, Rect),
 }
 
+/// What `draw_body` measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyDrawn {
+    /// The article's height in rows.
+    pub total: usize,
+    /// The first row drawn: the requested scroll, unless it fell inside a picture.
+    pub scroll: usize,
+}
+
+/// A scroll inside a picture shows none of it (a picture cannot be cut) and leaves a blank band:
+/// it moves to the picture's first row, or past its last one on the last page, where going back
+/// would hide the article's end.
+fn off_the_pictures(
+    scroll: usize,
+    blocks: &[(usize, usize)],
+    total: usize,
+    viewport: usize,
+) -> usize {
+    let Some(&(top, rows)) = blocks
+        .iter()
+        .find(|&&(top, rows)| rows > 1 && scroll > top && scroll < top + rows)
+    else {
+        return scroll;
+    };
+    if scroll >= total.saturating_sub(viewport) {
+        top + rows
+    } else {
+        top
+    }
+}
+
 /// Draws `article` in `area` from line `scroll`, fetching what is near the viewport. Returns the
-/// article's height in rows.
+/// article's height in rows and the scroll actually drawn.
 pub fn draw_body(
     frame: &mut Frame,
     area: Rect,
@@ -50,11 +81,13 @@ pub fn draw_body(
     scroll: usize,
     images: &mut ImageStore,
     look: &BodyLook<'_>,
-) -> usize {
+) -> BodyDrawn {
     let viewport = usize::from(area.height);
     let max_image_rows = (area.height / 2).max(1);
     let show_images = show_images && images.enabled();
     let at_line: HashMap<usize, &ImageRef> = article.images.iter().map(|i| (i.line, i)).collect();
+    // First the blocks and their rows, then the drawing from the scroll they allow.
+    let mut blocks: Vec<(Piece<'_>, usize, usize)> = Vec::with_capacity(article.lines.len());
     let mut top = 0usize;
     for (index, line) in article.lines.iter().enumerate() {
         let (piece, rows) = match at_line.get(&index) {
@@ -75,6 +108,12 @@ pub fn draw_body(
             },
             _ => (Piece::Text(line), 1),
         };
+        blocks.push((piece, top, rows));
+        top += rows;
+    }
+    let spans: Vec<(usize, usize)> = blocks.iter().map(|&(_, top, rows)| (top, rows)).collect();
+    let scroll = off_the_pictures(scroll, &spans, top, viewport);
+    for (piece, top, rows) in blocks {
         // A picture cannot be cut: only blocks wholly inside the viewport are drawn.
         if top >= scroll && top + rows <= scroll + viewport {
             let place = Rect {
@@ -106,7 +145,6 @@ pub fn draw_body(
                 }
             }
         }
-        top += rows;
     }
-    top
+    BodyDrawn { total: top, scroll }
 }

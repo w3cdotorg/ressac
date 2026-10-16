@@ -598,6 +598,12 @@ impl ReaderState {
         self.metrics = Some((total_rows, viewport_rows));
     }
 
+    /// The scroll the draw really used: a scroll that fell inside a picture (a late image grew
+    /// above the viewport, a resize) was moved off it, and Space carries on from there.
+    pub fn set_drawn_scroll(&mut self, scroll: usize) {
+        self.scroll = scroll;
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Command> {
         let before = (self.source, self.garden_view, self.selected);
         let page = self.antiope.reader_page();
