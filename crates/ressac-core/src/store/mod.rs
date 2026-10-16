@@ -23,7 +23,7 @@ pub use fetch::{AttemptRecord, BACKLOG_DAYS, EntryRecord, FETCH_LOG_KEEP, FRESH_
 pub use health::TriageFacts;
 pub use library::{
     EntryPage, EntryRow, JournalItem, JournalView, ListCursor, ListFilter, PAGE_SIZE, Source,
-    SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot,
+    SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot, fts_query,
 };
 pub use reading::{FulltextRow, plain_text};
 
@@ -188,9 +188,9 @@ impl Store {
         )?)
     }
 
-    /// Entry ids whose search row matches an FTS5 query, in id order.
-    #[cfg(test)]
-    pub(crate) fn search_ids(&self, query: &str) -> Result<Vec<i64>> {
+    /// Entry ids whose search row matches an FTS5 query, in id order (buried feeds included:
+    /// the raw index). The reader searches through `search_entries`.
+    pub fn search_ids(&self, query: &str) -> Result<Vec<i64>> {
         let mut stmt = self
             .conn()
             .prepare("SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?1 ORDER BY rowid")?;

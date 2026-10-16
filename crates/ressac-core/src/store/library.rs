@@ -246,6 +246,16 @@ fn section_at(r: &Row<'_>, col: usize) -> rusqlite::Result<Section> {
     })
 }
 
+/// Every word of `text`, quoted for FTS5 (`"a" "b"` matches rows with both); `None` without
+/// words. The app's `Queries.ftsQuery`.
+pub fn fts_query(text: &str) -> Option<String> {
+    let tokens: Vec<String> = text
+        .split_whitespace()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect();
+    (!tokens.is_empty()).then(|| tokens.join(" "))
+}
+
 impl Store {
     /// The reader's sources column (spec §4, Sources). `today_start` is local midnight in UTC,
     /// computed by the caller from its zone.
@@ -432,6 +442,27 @@ impl Store {
             items,
             overflow,
         }))
+    }
+
+    /// Full-text search within `source` (spec §4): every word must appear; the read state is
+    /// ignored, as in the app; the Journal keeps its rank order.
+    pub fn search_entries(
+        &self,
+        source: Source,
+        text: &str,
+        after: Option<&ListCursor>,
+        today_start: DateTime<Utc>,
+    ) -> Result<EntryPage> {
+        let Some(query) = fts_query(text) else {
+            return Ok(EntryPage::default());
+        };
+        let (filter, args) = predicate(source, today_start);
+        let list = format!(
+            "entry_id IN (SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?) AND ({filter})"
+        );
+        let mut all = vec![Value::Text(query)];
+        all.extend(args);
+        self.page_of(&list, all, after, source == Source::Journal)
     }
 }
 
@@ -853,6 +884,56 @@ mod tests {
                 .unwrap()
                 .rows
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn search_matches_every_word_inside_the_source() {
+        let s = library();
+        let found = |src, text: &str| ids(&s.search_entries(src, text, None, today()).unwrap());
+        assert_eq!(
+            found(Source::Unread, "tides"),
+            [1],
+            "entry 5 matches but its feed is buried"
+        );
+        assert_eq!(found(Source::Feed(1), "tides march"), [1]);
+        assert_eq!(
+            found(Source::Feed(1), "tides weekly"),
+            Vec::<i64>::new(),
+            "every word must match"
+        );
+        assert_eq!(
+            found(Source::Starred, "news"),
+            [2],
+            "search ignores the read state"
+        );
+        assert_eq!(found(Source::Feed(2), "tides"), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn blank_or_quoted_searches_are_safe() {
+        let s = library();
+        assert_eq!(
+            s.search_entries(Source::Unread, "   ", None, today())
+                .unwrap(),
+            EntryPage::default()
+        );
+        assert!(
+            s.search_entries(Source::Unread, "a\"b OR", None, today())
+                .is_ok()
+        );
+        assert_eq!(fts_query("tides  of"), Some("\"tides\" \"of\"".to_string()));
+        assert_eq!(fts_query("a\"b"), Some("\"a\"\"b\"".to_string()));
+        assert_eq!(fts_query(" "), None);
+    }
+
+    #[test]
+    fn search_ids_is_public_for_the_terminal() {
+        let s = library();
+        assert_eq!(
+            s.search_ids("\"tides\"").unwrap(),
+            [1, 5],
+            "the raw FTS index, buried feeds included"
         );
     }
 }
