@@ -666,6 +666,9 @@ impl ReaderState {
     /// SUITE past P104's last entry: the entry is read, as `j` and Space do between entries,
     /// and `FIN DE L'EDITION` shows.
     fn land_on_end(&mut self) -> Vec<Command> {
+        if !self.entries_visible() {
+            return Vec::new();
+        }
         self.antiope.show(ReaderPage::EndOfEdition);
         match self.selected_entry() {
             Some(id) => self.select_entry(id),
@@ -736,9 +739,42 @@ impl ReaderState {
         true
     }
 
+    /// `t`: the other look. Each look starts from the entry: no page number half typed, no
+    /// special page, mosaics.
+    fn toggle_look(&mut self) -> Vec<Command> {
+        self.settings.look = match self.settings.look {
+            Look::Native => Look::Antiope,
+            Look::Antiope => Look::Native,
+        };
+        self.antiope = AntiopeNav::default();
+        self.page_scroll = 0;
+        self.antiope_real_images = false;
+        self.render_article();
+        vec![Command::SaveSettings]
+    }
+
+    /// The entries list, or the reader showing its selected entry, is on screen: only then may
+    /// a key read, mark or open an entry. Not behind a garden page, not while the sources fill
+    /// the one-column window, not under a Journal placeholder (Building, Offline, Failed).
+    fn entries_visible(&self) -> bool {
+        let area = Rect::new(0, 0, self.width, self.height);
+        let rects = columns(area, self.class, self.focus, self.look());
+        self.garden_view.is_none()
+            && (rects.entries.is_some() || rects.reader.is_some())
+            && !(self.journal_mode() && self.journal_phase != JournalPhase::Idle)
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Command> {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return vec![Command::Quit];
+        }
+        // A window too small to draw anything: nothing is on screen to act on.
+        if self.class == LayoutClass::TooSmall {
+            return match key.code {
+                KeyCode::Char('q') => vec![Command::Quit],
+                KeyCode::Char('t') => self.toggle_look(),
+                _ => Vec::new(),
+            };
         }
         if self.search_editing {
             return self.on_search_key(key);
@@ -764,6 +800,24 @@ impl ReaderState {
             return commands;
         }
         self.message = None;
+        // In the sources column `j` and `k` walk the sources like the arrows (vim habit).
+        let key = match (self.focus, key.code) {
+            (Column::Sources, KeyCode::Char('j')) => KeyEvent::new(KeyCode::Down, key.modifiers),
+            (Column::Sources, KeyCode::Char('k')) => KeyEvent::new(KeyCode::Up, key.modifiers),
+            _ => key,
+        };
+        // What acts on the selected entry or on the list waits until one is drawn.
+        if !self.entries_visible()
+            && matches!(
+                key.code,
+                KeyCode::Char('j' | 'k' | ' ' | 'm' | 's' | 'A' | 'u' | 'f' | 'o')
+                    | KeyCode::Down
+                    | KeyCode::Up
+            )
+            && !(self.focus == Column::Sources && matches!(key.code, KeyCode::Down | KeyCode::Up))
+        {
+            return Vec::new();
+        }
         match key.code {
             KeyCode::Char('q') => vec![Command::Quit],
             // Antiope's `?` is the GUIDE page (`on_antiope_key`); this is Native's help.
@@ -771,19 +825,7 @@ impl ReaderState {
                 self.overlay = Overlay::Help;
                 Vec::new()
             }
-            KeyCode::Char('t') => {
-                self.settings.look = match self.settings.look {
-                    Look::Native => Look::Antiope,
-                    Look::Antiope => Look::Native,
-                };
-                // Each look starts from the entry: no page number half typed, no special page,
-                // mosaics.
-                self.antiope = AntiopeNav::default();
-                self.page_scroll = 0;
-                self.antiope_real_images = false;
-                self.render_article();
-                vec![Command::SaveSettings]
-            }
+            KeyCode::Char('t') => self.toggle_look(),
             KeyCode::Char('i') if self.look() == Look::Antiope => self.toggle_real_images(),
             KeyCode::Char('i') => {
                 self.settings.images = !self.settings.images;
@@ -1285,7 +1327,9 @@ impl ReaderState {
         match self.focus {
             Column::Sources => self.open_sidebar_row(),
             // An overflow row has no article: Enter opens its feed, the other keys wait.
-            Column::Entries if self.journal_overflow.is_some() => Vec::new(),
+            Column::Entries if self.journal_overflow.is_some() || !self.entries_visible() => {
+                Vec::new()
+            }
             Column::Entries => {
                 self.focus = Column::Reader;
                 if self.selected.is_none() && !self.entries.is_empty() {
@@ -2996,6 +3040,78 @@ mod tests {
         assert_eq!(state.detail.as_ref().map(|d| d.row.entry_id), Some(2));
     }
 
+    /// Commands that read, mark or open an entry: none may come out of a key that acts on a
+    /// list nobody can see.
+    fn touches_entries(commands: &[Command]) -> bool {
+        commands.iter().any(|c| {
+            matches!(
+                c,
+                Command::SetRead(..)
+                    | Command::SetStarred(..)
+                    | Command::MarkAllRead(_)
+                    | Command::LoadEntry(_)
+            )
+        })
+    }
+
+    /// Every key that acts on the selected entry or the list.
+    const ENTRY_KEYS: [char; 9] = ['j', 'k', ' ', 'm', 's', 'A', 'u', 'f', 'o'];
+
+    #[test]
+    fn keys_do_not_act_on_the_list_behind_a_garden_page() {
+        let mut state = reader();
+        state.open_garden(GardenView::NeedsTriage);
+        state.set_focus(Column::Sources);
+        for c in ENTRY_KEYS {
+            let commands = char_key(&mut state, c);
+            assert!(!touches_entries(&commands), "{c}: {commands:?}");
+        }
+        assert!(state.entries.iter().filter(|r| r.is_read).count() == 2);
+    }
+
+    #[test]
+    fn keys_do_not_act_on_the_list_when_one_column_shows_the_sources() {
+        let mut state = reader();
+        state.on_event(Event::Resize {
+            width: 70,
+            height: 40,
+        });
+        state.set_focus(Column::Sources);
+        for c in ENTRY_KEYS {
+            let commands = char_key(&mut state, c);
+            assert!(!touches_entries(&commands), "{c}: {commands:?}");
+        }
+    }
+
+    #[test]
+    fn j_and_k_move_between_sources_in_the_sources_column() {
+        let mut state = reader();
+        state.set_focus(Column::Sources);
+        let start = state.sidebar_index;
+        char_key(&mut state, 'j');
+        assert_eq!(state.sidebar_index, start + 1);
+        char_key(&mut state, 'k');
+        assert_eq!(state.sidebar_index, start);
+    }
+
+    #[test]
+    fn a_too_small_window_keeps_only_q_ctrl_c_and_t() {
+        let mut state = reader();
+        state.on_event(Event::Resize {
+            width: 30,
+            height: 8,
+        });
+        for c in ENTRY_KEYS {
+            assert_eq!(char_key(&mut state, c), Vec::new(), "{c}");
+        }
+        assert_eq!(key(&mut state, KeyCode::Down), Vec::new());
+        assert_eq!(key(&mut state, KeyCode::Enter), Vec::new());
+        assert_eq!(state.look(), Look::Native);
+        assert_eq!(char_key(&mut state, 't'), vec![Command::SaveSettings]);
+        assert_eq!(state.look(), Look::Antiope);
+        assert_eq!(char_key(&mut state, 'q'), vec![Command::Quit]);
+    }
+
     mod journal_tests {
         use super::*;
         use crate::tui::reader::journal::{BUILDING, JournalLine, JournalPhase};
@@ -3065,6 +3181,34 @@ mod tests {
             state.on_event(Event::Journal(Some(view)));
             state.on_event(entries(&state, Source::Journal, rows, None));
             state
+        }
+
+        #[test]
+        fn a_placeholder_over_an_older_edition_blocks_the_reading_keys() {
+            for phase in [
+                Event::Progress {
+                    label: BUILDING.into(),
+                    done: 3,
+                    total: 9,
+                },
+                Event::JobDone(JobOutcome::EditionOffline),
+            ] {
+                let mut state = loaded(false);
+                state.on_event(phase);
+                assert!(!matches!(state.journal_phase(), JournalPhase::Idle));
+                for c in ENTRY_KEYS {
+                    let commands = char_key(&mut state, c);
+                    assert!(!touches_entries(&commands), "{c}: {commands:?}");
+                }
+                assert!(
+                    state
+                        .journal()
+                        .unwrap()
+                        .items
+                        .iter()
+                        .all(|i| !i.row.is_read)
+                );
+            }
         }
 
         fn loads_entries_of(commands: &[Command], wanted: Source) -> bool {
