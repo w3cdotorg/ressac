@@ -46,10 +46,18 @@ struct MainView: View {
             ToolbarItem {
                 if let progress = state.runs.progress {
                     let text = JournalLayout.progressText(progress)
-                    ProgressView(value: progress.fraction) { Text(text).monospacedDigit() }
-                        .progressViewStyle(.linear)
-                        .frame(width: progress.label == RunCoordinator.editionProgressLabel ? 260 : 140)
-                        .help(text)
+                    // The full text when it fits the pill, else the short one (acceptance, item 2).
+                    ProgressView(value: progress.fraction) {
+                        ViewThatFits(in: .horizontal) {
+                            Text(text)
+                            Text(JournalLayout.compactProgressText(progress))
+                        }
+                        .lineLimit(1)
+                        .monospacedDigit()
+                    }
+                    .progressViewStyle(.linear)
+                    .frame(width: progress.label == RunCoordinator.editionProgressLabel ? 260 : 140)
+                    .help(text)
                 } else {
                     Button("Refresh", systemImage: "arrow.clockwise") { state.refreshCurrent() }
                         .disabled(!state.canRefresh)

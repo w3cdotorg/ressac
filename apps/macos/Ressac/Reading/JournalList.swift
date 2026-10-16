@@ -85,6 +85,13 @@ struct JournalSection: Identifiable, Equatable {
         return "\(progress.label) \(progress.done)/\(progress.total)"
     }
 
+    /// `progressText` for a toolbar too narrow for it: an edition build becomes "Edition… 152/156"
+    /// (the full text stays in the tooltip); other runs keep their short label.
+    static func compactProgressText(_ progress: RunProgress) -> String {
+        guard progress.label == RunCoordinator.editionProgressLabel else { return progress.label }
+        return progress.total > 0 ? "Edition… \(progress.done)/\(progress.total)" : "Edition…"
+    }
+
     /// "+12 more in Actualitté".
     static func overflowLabel(_ item: EditionOverflowItem) -> String {
         "+\(item.hiddenCount) more in \(item.feedTitle)"

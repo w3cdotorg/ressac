@@ -242,4 +242,12 @@ private func overflowItem(_ section: EditionSection, feed: Int64, _ hidden: Int,
         #expect(JournalLayout.progressText(RunProgress(done: 0, total: 0, label: label)) == label)
         #expect(JournalLayout.progressText(RunProgress(done: 3, total: 10, label: "Fetching feeds")) == "Fetching feeds")
     }
+
+    /// The pill is 260 pt wide: when the full text does not fit, the build shows the short one.
+    @Test func a_narrow_toolbar_shortens_the_edition_progress() {
+        let label = RunCoordinator.editionProgressLabel
+        #expect(JournalLayout.compactProgressText(RunProgress(done: 152, total: 156, label: label)) == "Edition… 152/156")
+        #expect(JournalLayout.compactProgressText(RunProgress(done: 0, total: 0, label: label)) == "Edition…")
+        #expect(JournalLayout.compactProgressText(RunProgress(done: 3, total: 10, label: "Fetching feeds")) == "Fetching feeds")
+    }
 }
