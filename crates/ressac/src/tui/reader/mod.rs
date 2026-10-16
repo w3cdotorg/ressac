@@ -90,10 +90,19 @@ impl Poll {
         self.last_key = now;
     }
 
+    /// Whether a check is worth its query: idle for two seconds, and two since the last check.
+    pub fn due(&self, now: Instant) -> bool {
+        now.duration_since(self.last_key) >= IDLE_POLL
+            && now.duration_since(self.last_check) >= IDLE_POLL
+    }
+
+    /// A version that could not be read: try again at the next due time.
+    pub fn failed(&mut self, now: Instant) {
+        self.last_check = now;
+    }
+
     pub fn check(&mut self, now: Instant, version: i64) -> Option<Event> {
-        if now.duration_since(self.last_key) < IDLE_POLL
-            || now.duration_since(self.last_check) < IDLE_POLL
-        {
+        if !self.due(now) {
             return None;
         }
         self.last_check = now;
@@ -231,6 +240,7 @@ impl<'a> Executor<'a> {
                     self.db.clone(),
                     self.tx.clone(),
                     self.stop.clone(),
+                    false,
                     move |app, _tx, _stop| async move {
                         jobs::extract_outcome(id, app.extract_entry(id, &NullSink).await)
                     },
@@ -238,7 +248,10 @@ impl<'a> Executor<'a> {
                 Ok(Vec::new())
             }
             Command::Refresh(_) | Command::BuildEdition if self.long_running => {
-                self.queue.push_back(command);
+                // The same request twice while one runs is one request.
+                if !self.queue.contains(&command) {
+                    self.queue.push_back(command);
+                }
                 Ok(Vec::new())
             }
             Command::Refresh(source) => self.refresh(source),
@@ -249,6 +262,7 @@ impl<'a> Executor<'a> {
                     self.db.clone(),
                     self.tx.clone(),
                     self.stop.clone(),
+                    true,
                     move |app, tx, stop| async move {
                         let sink = ProgressSink::new(EDITION_PROGRESS_LABEL, tx);
                         jobs::edition_outcome(
@@ -278,6 +292,7 @@ impl<'a> Executor<'a> {
             self.db.clone(),
             self.tx.clone(),
             self.stop.clone(),
+            true,
             move |app, tx, stop| async move {
                 let sink = ProgressSink::new(FETCH_PROGRESS_LABEL, tx);
                 match app
@@ -286,7 +301,7 @@ impl<'a> Executor<'a> {
                 {
                     Ok(summary) if summary.network_unreachable => JobOutcome::Offline,
                     Ok(_) => JobOutcome::Refreshed,
-                    Err(e) => JobOutcome::Failed(e.to_string()),
+                    Err(e) => JobOutcome::Failed(jobs::sentence(e.to_string())),
                 }
             },
         );
@@ -332,41 +347,50 @@ fn unread_hits(
     Ok(page)
 }
 
-/// A busy database (Ressac.app writing for longer than the busy timeout) gets the spec's sentence.
 fn busy_or(e: &anyhow::Error) -> String {
-    let text = format!("{e:#}");
-    if text.contains("database is locked") || text.contains("database table is locked") {
-        "The database is busy (is Ressac.app writing?)".into()
-    } else {
-        text
-    }
+    jobs::sentence(format!("{e:#}"))
 }
 
 /// Opens the reader on `app` (already opened by `commands::read`) until `q`.
 pub fn run(app: &Ressac, db: &Path, settings_path: &Path) -> anyhow::Result<()> {
     let settings = TerminalSettings::load(settings_path);
-    // `try_init` installs ratatui's panic hook, which restores the terminal before the message.
-    let mut terminal =
-        ratatui::try_init().context("cannot start the reader (is this a terminal?)")?;
-    let size = terminal.size()?;
-    let mut state = ReaderState::new(settings, size.width, size.height);
-    let result = event_loop(&mut terminal, app, db, settings_path, &mut state);
+    let original: Arc<PanicHook> = Arc::new(std::panic::take_hook());
+    forward_panics_to(&original);
+    let mut terminal = match ratatui::try_init() {
+        Ok(terminal) => terminal,
+        Err(e) => {
+            forward_panics_to(&original);
+            return Err(e).context("cannot start the reader (is this a terminal?)");
+        }
+    };
+    // `try_init` wrapped our forwarder in a hook that restores the terminal on whichever
+    // thread panics. A job thread must not tear the screen down under the loop: only a panic
+    // of this thread restores it; the others are logged (a message on the screen would garble it).
+    let restoring: Arc<PanicHook> = Arc::new(std::panic::take_hook());
+    let loop_thread = std::thread::current().id();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == loop_thread {
+            restoring(info);
+        } else {
+            tracing::error!("a background thread panicked: {info}");
+        }
+    }));
+    // Everything fallible after the init sits in here: `restore` always runs.
+    let result = (|| {
+        let size = terminal.size()?;
+        let mut state = ReaderState::new(settings, size.width, size.height);
+        event_loop(&mut terminal, app, db, settings_path, &mut state)
+    })();
     ratatui::restore();
+    forward_panics_to(&original);
     result
 }
 
-/// A job's last message: the long ones free the queue.
-fn ends_a_long_job(event: &Event) -> bool {
-    matches!(
-        event,
-        Event::JobDone(
-            JobOutcome::Refreshed
-                | JobOutcome::Offline
-                | JobOutcome::EditionBuilt
-                | JobOutcome::EditionNotDue
-                | JobOutcome::Failed(_)
-        )
-    )
+type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static;
+
+fn forward_panics_to(hook: &Arc<PanicHook>) {
+    let hook = Arc::clone(hook);
+    std::panic::set_hook(Box::new(move |info| hook(info)));
 }
 
 fn event_loop(
@@ -408,12 +432,14 @@ fn event_loop(
             state.set_reader_metrics(m.total_rows, m.viewport_rows);
         }
         // Messages from the jobs.
-        while let Ok(Msg::Event(event)) = rx.try_recv() {
-            let long_done = ends_a_long_job(&event);
-            pending.extend(state.on_event(event));
-            if long_done {
-                for e in exec.long_job_done(Clock::system()) {
-                    pending.extend(state.on_event(e));
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                Msg::Event(event) => pending.extend(state.on_event(event)),
+                Msg::LongJobDone(outcome) => {
+                    pending.extend(state.on_event(Event::JobDone(outcome)));
+                    for e in exec.long_job_done(Clock::system()) {
+                        pending.extend(state.on_event(e));
+                    }
                 }
             }
         }
@@ -435,8 +461,21 @@ fn event_loop(
             last_tick = Instant::now();
             pending.extend(state.on_event(Clock::system().tick()));
         }
-        if let Some(event) = poll.check(Instant::now(), app.store().data_version()?) {
-            pending.extend(state.on_event(event));
+        let now = Instant::now();
+        if poll.due(now) {
+            match app.store().data_version() {
+                Ok(version) => pending.extend(
+                    poll.check(now, version)
+                        .map(|e| state.on_event(e))
+                        .into_iter()
+                        .flatten(),
+                ),
+                Err(e) => {
+                    // Transient (a busy database): the reader goes on and asks again.
+                    tracing::warn!("cannot read data_version: {e}");
+                    poll.failed(now);
+                }
+            }
         }
     }
 }
@@ -567,8 +606,32 @@ mod tests {
         let mut exec = Executor::new(&app, db, tx);
         exec.run(Command::Refresh(None), test_clock());
         exec.run(Command::BuildEdition, test_clock());
-        assert_eq!(exec.queued(), 1, "the edition waits for the refresh");
+        exec.run(Command::BuildEdition, test_clock());
+        exec.run(Command::Refresh(None), test_clock());
+        assert_eq!(
+            exec.queued(),
+            2,
+            "the edition and a refresh wait, once each"
+        );
+        exec.run(Command::Refresh(None), test_clock());
+        assert_eq!(exec.queued(), 2);
         assert!(exec.long_job_running());
+    }
+
+    #[test]
+    fn a_finished_long_job_starts_the_next_and_otherwise_frees_the_slot() {
+        // `LongJobDone` (also sent after a panic, see jobs tests) is what calls `long_job_done`.
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        let (tx, _rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        exec.run(Command::Refresh(None), test_clock());
+        exec.run(Command::BuildEdition, test_clock());
+        exec.long_job_done(test_clock());
+        assert_eq!(exec.queued(), 0);
+        assert!(exec.long_job_running(), "the edition started");
+        exec.long_job_done(test_clock());
+        assert!(!exec.long_job_running());
     }
 
     #[test]
