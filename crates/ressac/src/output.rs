@@ -130,7 +130,8 @@ impl EventSink for Sink {
                 | Event::Extracted { .. }
                 | Event::Decided { .. }
                 | Event::Undone { .. }
-                | Event::Page(_) => {}
+                | Event::Page(_)
+                | Event::Edition { .. } => {}
             },
         }
     }
