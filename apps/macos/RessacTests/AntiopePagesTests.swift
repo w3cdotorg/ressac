@@ -7,10 +7,10 @@ import Testing
 
 @MainActor @Suite struct SommairePageTests {
     @Test func pagesRunDownTheLeftColumnThenTheRight() {
-        let rows = PageDirectory(snapshot: pagedSnapshot()).rows  // 8 reserved pages, 7 numbered
+        let rows = PageDirectory(snapshot: pagedSnapshot()).rows  // 14 reserved pages, 7 numbered
         let pairs = SommairePage.pairs(rows)
-        #expect(pairs.map(\.left.number) == [100, 101, 102, 103, 800, 801, 802, 899])
-        #expect(pairs.map { $0.right?.number } == [200, 201, 400, 401, 402, 403, 110, nil])
+        #expect(pairs.map(\.left.number) == [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 800])
+        #expect(pairs.map { $0.right?.number } == [801, 802, 899, 200, 201, 400, 401, 402, 403, 110, nil])
         #expect(SommairePage.pairs([]).isEmpty)
         #expect(SommairePage.pairs(Array(rows.prefix(2))).map { $0.right?.number } == [101])
     }
@@ -29,15 +29,22 @@ import Testing
     }
 
     @Test func reservedPagesAreInColour() throws {
-        let directory = PageDirectory(snapshot: pagedSnapshot())
-        let unread = SommairePage.line(for: directory.rows[1], width: 20, in: directory)
-        #expect(unread.spans[1].foreground == .yellow)
-        let triage = SommairePage.line(for: directory.rows[4], width: 20, in: directory)
+        var snapshot = pagedSnapshot()
+        snapshot.journalUnread = 43
+        let directory = PageDirectory(snapshot: snapshot)
+        func line(_ number: Int) throws -> CellLine {
+            SommairePage.line(for: try #require(directory.rows.first { $0.number == number }), width: 20, in: directory)
+        }
+        #expect(try line(101).spans[1].foreground == .yellow)
+        let journal = try line(104)
+        #expect(journal.spans[1].foreground == .yellow && text(of: journal.spans[2]) == " 43")
+        for rhythm in 105...109 {
+            #expect(try line(rhythm).spans[1].foreground == .yellow)
+        }
+        let triage = try line(800)
         #expect(triage.spans[1].foreground == .magenta && triage.spans[2].foreground == .red)
-        let blogs = try #require(directory.rows.first { $0.number == 200 })
-        #expect(SommairePage.line(for: blogs, width: 20, in: directory).spans[1].foreground == .green)
-        let xkcd = try #require(directory.rows.first { $0.number == 201 })
-        #expect(SommairePage.line(for: xkcd, width: 20, in: directory).spans[1].foreground == .white)
+        #expect(try line(200).spans[1].foreground == .green)
+        #expect(try line(201).spans[1].foreground == .white)
     }
 
     @Test func theTitleIsCentredAndTheWaveIsUnbroken() {

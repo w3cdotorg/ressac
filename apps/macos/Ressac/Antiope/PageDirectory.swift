@@ -1,8 +1,10 @@
 import Foundation
 
-/// Page numbers fixed in code (spec §4, Reserved pages): never stored, refused by `ressac page set`.
+/// Page numbers fixed in code (spec §4, Reserved pages; sub-project 3 adds 104 to 109): never
+/// stored, refused by `ressac page set`.
 enum ReservedPage: Int, CaseIterable, Sendable {
     case index = 100, unread = 101, today = 102, starred = 103
+    case journal = 104, daily = 105, weekly = 106, monthly = 107, rare = 108, silent = 109
     case needsTriage = 800, allFeeds = 801, cemetery = 802, guide = 899
 
     /// The core's titles (`pages::list`), so that the app and `ressac page list` agree.
@@ -12,10 +14,28 @@ enum ReservedPage: Int, CaseIterable, Sendable {
         case .unread: "Unread"
         case .today: "Today"
         case .starred: "Starred"
+        case .journal: "Journal"
+        case .daily: "Daily"
+        case .weekly: "Weekly"
+        case .monthly: "Monthly"
+        case .rare: "Rare"
+        case .silent: "Silent"
         case .needsTriage: "Needs triage"
         case .allFeeds: "All feeds"
         case .cemetery: "Cemetery"
         case .guide: "Guide"
+        }
+    }
+
+    /// The rhythm group a page 105 to 109 lists; nil for the other pages.
+    var cadenceGroup: CadenceGroup? {
+        switch self {
+        case .daily: .daily
+        case .weekly: .weekly
+        case .monthly: .monthly
+        case .rare: .rare
+        case .silent: .silent
+        case .index, .unread, .today, .starred, .journal, .needsTriage, .allFeeds, .cemetery, .guide: nil
         }
     }
 
@@ -25,6 +45,12 @@ enum ReservedPage: Int, CaseIterable, Sendable {
         case .unread: .source(.unread)
         case .today: .source(.today)
         case .starred: .source(.starred)
+        case .journal: .source(.journal)
+        case .daily: .source(.cadence(.daily))
+        case .weekly: .source(.cadence(.weekly))
+        case .monthly: .source(.cadence(.monthly))
+        case .rare: .source(.cadence(.rare))
+        case .silent: .source(.cadence(.silent))
         case .needsTriage: .source(.garden(.needsTriage))
         case .allFeeds: .source(.garden(.all))
         case .cemetery: .source(.garden(.cemetery))
@@ -32,12 +58,16 @@ enum ReservedPage: Int, CaseIterable, Sendable {
         }
     }
 
-    /// The count shown beside the page: entries for the smart lists, feeds to triage for P800.
+    /// The count shown beside the page: unread entries for the smart lists, the edition and the
+    /// rhythm groups, feeds to triage for P800.
     func count(in snapshot: SidebarSnapshot) -> Int {
         switch self {
         case .unread: snapshot.unread
         case .today: snapshot.today
         case .starred: snapshot.starred
+        case .journal: snapshot.journalUnread
+        case .daily, .weekly, .monthly, .rare, .silent:
+            cadenceGroup.map { snapshot.cadenceUnread[$0, default: 0] } ?? 0
         case .needsTriage: snapshot.needsTriage
         case .index, .allFeeds, .cemetery, .guide: 0
         }
@@ -47,7 +77,7 @@ enum ReservedPage: Int, CaseIterable, Sendable {
     var isGarden: Bool {
         switch self {
         case .needsTriage, .allFeeds, .cemetery: true
-        case .index, .unread, .today, .starred, .guide: false
+        case .index, .unread, .today, .starred, .journal, .daily, .weekly, .monthly, .rare, .silent, .guide: false
         }
     }
 }

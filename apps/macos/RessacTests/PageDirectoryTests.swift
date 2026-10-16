@@ -35,17 +35,21 @@ func pagedSnapshot() -> SidebarSnapshot {
 
 @Suite struct PageDirectoryTests {
     @Test func reservedPagesComeFirstWithTheirCounts() {
-        let rows = PageDirectory(snapshot: pagedSnapshot()).rows
-        #expect(rows.prefix(8).map(\.number) == [100, 101, 102, 103, 800, 801, 802, 899])
-        #expect(rows.prefix(8).map(\.title) == [
-            "Index", "Unread", "Today", "Starred", "Needs triage", "All feeds", "Cemetery", "Guide",
+        var snapshot = pagedSnapshot()
+        snapshot.journalUnread = 43
+        snapshot.cadenceUnread = [.daily: 34, .weekly: 7, .monthly: 2]
+        let rows = PageDirectory(snapshot: snapshot).rows
+        #expect(rows.prefix(14).map(\.number) == [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 800, 801, 802, 899])
+        #expect(rows.prefix(14).map(\.title) == [
+            "Index", "Unread", "Today", "Starred", "Journal", "Daily", "Weekly", "Monthly", "Rare", "Silent",
+            "Needs triage", "All feeds", "Cemetery", "Guide",
         ])
-        #expect(rows.prefix(8).map(\.unread) == [0, 10, 1, 4, 7, 0, 0, 0])
-        #expect(rows.prefix(8).allSatisfy { $0.isReserved && $0.depth == 0 })
+        #expect(rows.prefix(14).map(\.unread) == [0, 10, 1, 4, 43, 34, 7, 2, 0, 0, 7, 0, 0, 0])
+        #expect(rows.prefix(14).allSatisfy { $0.isReserved && $0.depth == 0 })
     }
 
     @Test func foldersAndFeedsFollowInDisplayOrderWithTheirDepth() {
-        let rows = PageDirectory(snapshot: pagedSnapshot()).rows.dropFirst(8)
+        let rows = PageDirectory(snapshot: pagedSnapshot()).rows.dropFirst(14)
         #expect(rows.map(\.number) == [200, 201, 400, 401, 402, 403, 110])
         #expect(rows.map(\.title) == [
             "Blogs", "xkcd.com", "Infos", "Daring Fireball", "Science", "Center for Humane Technology", "Loose feed",
@@ -55,6 +59,21 @@ func pagedSnapshot() -> SidebarSnapshot {
         #expect(rows.allSatisfy { !$0.isReserved })
     }
 
+    /// The app and `ressac page list` agree (core `RESERVED_PAGES`, schema v4), and each rhythm
+    /// page is its group's (`CadenceGroup.page`, phase 4a).
+    @Test func reservedPagesMatchTheCoreAndTheRhythmGroups() {
+        #expect(ReservedPage.allCases.map(\.rawValue) == [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 800, 801, 802, 899])
+        for group in CadenceGroup.allCases {
+            let page = ReservedPage(rawValue: group.page)
+            #expect(page?.cadenceGroup == group)
+            #expect(page?.title == group.title)
+            #expect(page?.destination == .source(.cadence(group)))
+            #expect(page?.isGarden == false)
+        }
+        #expect(ReservedPage.journal.cadenceGroup == nil && ReservedPage.unread.cadenceGroup == nil)
+        #expect(ReservedPage.journal.destination == .source(.journal) && !ReservedPage.journal.isGarden)
+    }
+
     @Test func numbersLeadToTheirDestinations() {
         let directory = PageDirectory(snapshot: pagedSnapshot())
         #expect(directory.destination(for: 100) == .index)
@@ -62,6 +81,12 @@ func pagedSnapshot() -> SidebarSnapshot {
         #expect(directory.destination(for: 101) == .source(.unread))
         #expect(directory.destination(for: 102) == .source(.today))
         #expect(directory.destination(for: 103) == .source(.starred))
+        #expect(directory.destination(for: 104) == .source(.journal))
+        #expect(directory.destination(for: 105) == .source(.cadence(.daily)))
+        #expect(directory.destination(for: 106) == .source(.cadence(.weekly)))
+        #expect(directory.destination(for: 107) == .source(.cadence(.monthly)))
+        #expect(directory.destination(for: 108) == .source(.cadence(.rare)))
+        #expect(directory.destination(for: 109) == .source(.cadence(.silent)))
         #expect(directory.destination(for: 800) == .source(.garden(.needsTriage)))
         #expect(directory.destination(for: 801) == .source(.garden(.all)))
         #expect(directory.destination(for: 802) == .source(.garden(.cemetery)))
@@ -76,6 +101,8 @@ func pagedSnapshot() -> SidebarSnapshot {
     @Test func sourcesAndFeedsFindTheirNumbers() {
         let directory = PageDirectory(snapshot: pagedSnapshot())
         #expect(directory.number(for: .unread) == 101)
+        #expect(directory.number(for: .journal) == 104)
+        #expect(directory.number(for: .cadence(.rare)) == 108)
         #expect(directory.number(for: .garden(.cemetery)) == 802)
         #expect(directory.number(for: .folder(4)) == 400)
         #expect(directory.number(for: .feed(10)) == 403)
@@ -93,6 +120,10 @@ func pagedSnapshot() -> SidebarSnapshot {
         #expect(directory.destination(for: 101) == .source(.unread))
         #expect(directory.rows.filter { $0.number == 101 }.count == 1)
         #expect(directory.number(for: .feed(13)) == nil)
+        snapshot.feeds[2].page = 104  // a corrupt database again: P104 stays the Journal
+        let again = PageDirectory(snapshot: snapshot)
+        #expect(again.destination(for: 104) == .source(.journal))
+        #expect(again.number(for: .feed(10)) == nil)
     }
 }
 
@@ -143,5 +174,19 @@ func pagedSnapshot() -> SidebarSnapshot {
         _ = entry.type(4)
         #expect(entry.display == "04_")
         #expect(entry.type(2) == .complete(42))  // no page has it: the caller shows NOT FOUND
+    }
+}
+
+@MainActor @Suite struct ReservedRhythmPageTests {
+    @Test func typingTheNewPagesSelectsTheirSources() throws {
+        let (state, _, _) = try makeState()
+        let antiope = AntiopeState(app: state)
+        for (digits, source) in [("104", Source.journal), ("105", .cadence(.daily)), ("109", .cadence(.silent))] {
+            for digit in digits.compactMap(\.wholeNumberValue) {
+                #expect(antiope.handle(.pageDigit(digit)))
+            }
+            #expect(state.selection == source && antiope.readerPage == .article)
+            #expect(antiope.currentPage == Int(digits))
+        }
     }
 }
