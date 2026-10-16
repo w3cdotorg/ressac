@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, MappedLocalTime, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{CadenceGroup, FeedId};
@@ -160,6 +160,32 @@ pub fn compose(candidates: &[Candidate], caps: Caps) -> Composition {
         }
     }
     out
+}
+
+/// `DAY_STARTS_AT_HOUR` local of the day `now` belongs to (the day before when `now` is earlier
+/// than that hour), in UTC. A repeated hour takes its first occurrence; a skipped one takes the
+/// first local hour after it that exists.
+pub fn day_start<Tz: TimeZone>(now: DateTime<Tz>) -> DateTime<Utc> {
+    let tz = now.timezone();
+    let local = now.naive_local();
+    let date = if local.hour() < DAY_STARTS_AT_HOUR {
+        local.date().pred_opt().unwrap_or(local.date())
+    } else {
+        local.date()
+    };
+    let start = date
+        .and_hms_opt(DAY_STARTS_AT_HOUR, 0, 0)
+        .expect("DAY_STARTS_AT_HOUR is a valid hour");
+    (0..=3)
+        .find_map(
+            |h| match tz.from_local_datetime(&(start + Duration::hours(h))) {
+                MappedLocalTime::Single(t) | MappedLocalTime::Ambiguous(t, _) => {
+                    Some(t.with_timezone(&Utc))
+                }
+                MappedLocalTime::None => None,
+            },
+        )
+        .unwrap_or_else(|| Utc.from_utc_datetime(&start))
 }
 
 #[cfg(test)]
@@ -412,5 +438,166 @@ mod tests {
         );
         assert_eq!(c, Composition::default());
         assert_eq!(compose(&[], Caps::default()), Composition::default());
+    }
+
+    use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
+
+    /// Europe/Paris for 2026 only: CEST (+2) from 2026-03-29 01:00 UTC to 2026-10-25 01:00 UTC,
+    /// CET (+1) otherwise. Enough to pin both clock changes without a time-zone crate.
+    #[derive(Debug, Clone, Copy)]
+    struct Paris;
+
+    impl Paris {
+        fn offset_at_utc(utc: &NaiveDateTime) -> FixedOffset {
+            let summer_from = NaiveDate::from_ymd_opt(2026, 3, 29)
+                .unwrap()
+                .and_hms_opt(1, 0, 0)
+                .unwrap();
+            let summer_until = NaiveDate::from_ymd_opt(2026, 10, 25)
+                .unwrap()
+                .and_hms_opt(1, 0, 0)
+                .unwrap();
+            let hours = if *utc >= summer_from && *utc < summer_until {
+                2
+            } else {
+                1
+            };
+            FixedOffset::east_opt(hours * 3600).unwrap()
+        }
+    }
+
+    impl TimeZone for Paris {
+        type Offset = FixedOffset;
+
+        fn from_offset(_: &FixedOffset) -> Self {
+            Paris
+        }
+
+        fn offset_from_local_date(&self, local: &NaiveDate) -> MappedLocalTime<FixedOffset> {
+            self.offset_from_local_datetime(&local.and_hms_opt(12, 0, 0).unwrap())
+        }
+
+        /// Both offsets are tried; the ones that read back are the answers. Two answers is the
+        /// repeated hour (summer time first, it is the earlier instant); none is the skipped hour.
+        fn offset_from_local_datetime(
+            &self,
+            local: &NaiveDateTime,
+        ) -> MappedLocalTime<FixedOffset> {
+            let fits: Vec<FixedOffset> = [2, 1]
+                .into_iter()
+                .map(|h| FixedOffset::east_opt(h * 3600).unwrap())
+                .filter(|o| Paris::offset_at_utc(&(*local - *o)) == *o)
+                .collect();
+            match fits.as_slice() {
+                [] => MappedLocalTime::None,
+                [o] => MappedLocalTime::Single(*o),
+                [a, b, ..] => MappedLocalTime::Ambiguous(*a, *b),
+            }
+        }
+
+        fn offset_from_utc_date(&self, utc: &NaiveDate) -> FixedOffset {
+            Paris::offset_at_utc(&utc.and_hms_opt(12, 0, 0).unwrap())
+        }
+
+        fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> FixedOffset {
+            Paris::offset_at_utc(utc)
+        }
+    }
+
+    fn paris(utc: &str) -> DateTime<Paris> {
+        at(utc).with_timezone(&Paris)
+    }
+
+    #[test]
+    fn the_paris_test_zone_follows_the_2026_changes() {
+        assert_eq!(
+            paris("2026-10-16T08:00:00Z").offset().local_minus_utc(),
+            7200
+        );
+        assert_eq!(
+            paris("2026-12-01T08:00:00Z").offset().local_minus_utc(),
+            3600
+        );
+        let repeated = NaiveDate::from_ymd_opt(2026, 10, 25)
+            .unwrap()
+            .and_hms_opt(2, 30, 0)
+            .unwrap();
+        assert!(matches!(
+            Paris.from_local_datetime(&repeated),
+            MappedLocalTime::Ambiguous(..)
+        ));
+        let skipped = NaiveDate::from_ymd_opt(2026, 3, 29)
+            .unwrap()
+            .and_hms_opt(2, 30, 0)
+            .unwrap();
+        assert!(matches!(
+            Paris.from_local_datetime(&skipped),
+            MappedLocalTime::None
+        ));
+    }
+
+    #[test]
+    fn a_day_starts_at_four_in_utc() {
+        assert_eq!(
+            day_start(at("2026-10-16T03:59:59Z")),
+            at("2026-10-15T04:00:00Z")
+        );
+        assert_eq!(
+            day_start(at("2026-10-16T04:00:00Z")),
+            at("2026-10-16T04:00:00Z")
+        );
+        assert_eq!(
+            day_start(at("2026-10-16T23:30:00Z")),
+            at("2026-10-16T04:00:00Z")
+        );
+    }
+
+    #[test]
+    fn a_day_starts_at_four_local_on_an_ordinary_paris_day() {
+        // 06:00 CEST → today 04:00 CEST = 02:00 UTC.
+        assert_eq!(
+            day_start(paris("2026-10-16T04:00:00Z")),
+            at("2026-10-16T02:00:00Z")
+        );
+        // 01:30 CEST, after midnight but before four → yesterday's 04:00 CEST.
+        assert_eq!(
+            day_start(paris("2026-10-15T23:30:00Z")),
+            at("2026-10-15T02:00:00Z")
+        );
+    }
+
+    /// Review Focus 1: the night of 2026-10-25, clocks go back from 03:00 CEST to 02:00 CET.
+    #[test]
+    fn the_autumn_change_keeps_four_local_on_both_sides() {
+        // 02:30 CEST (the first 02:30) → still the 24th.
+        assert_eq!(
+            day_start(paris("2026-10-25T00:30:00Z")),
+            at("2026-10-24T02:00:00Z")
+        );
+        // 03:30 CET, after the change → still the 24th: an edition built now counts for the day before.
+        assert_eq!(
+            day_start(paris("2026-10-25T02:30:00Z")),
+            at("2026-10-24T02:00:00Z")
+        );
+        // 04:30 CET → the 25th, whose 04:00 is CET = 03:00 UTC.
+        assert_eq!(
+            day_start(paris("2026-10-25T03:30:00Z")),
+            at("2026-10-25T03:00:00Z")
+        );
+    }
+
+    /// Review Focus 1: the night of 2026-03-29, clocks go forward from 02:00 CET to 03:00 CEST.
+    #[test]
+    fn the_spring_change_keeps_four_local_on_both_sides() {
+        // 03:30 CEST → the 28th, whose 04:00 was CET = 03:00 UTC.
+        assert_eq!(
+            day_start(paris("2026-03-29T01:30:00Z")),
+            at("2026-03-28T03:00:00Z")
+        );
+        // 04:30 CEST → the 29th, 04:00 CEST = 02:00 UTC.
+        assert_eq!(
+            day_start(paris("2026-03-29T02:30:00Z")),
+            at("2026-03-29T02:00:00Z")
+        );
     }
 }
