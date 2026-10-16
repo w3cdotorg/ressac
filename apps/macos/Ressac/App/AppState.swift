@@ -116,6 +116,8 @@ enum PendingPanel: Equatable, Sendable {
     let database: AppDatabase
     let writes: Writes
     let runs: RunCoordinator
+    /// Today's edition: the due check, the build run and the latest edition (spec §8).
+    let journal: JournalModel
 
     @ObservationIgnored var autoReadDelay: Duration = .seconds(1)
     /// Rows a list loads at a time. A list starts with one page and grows by one per `loadMoreEntries`.
@@ -161,6 +163,7 @@ enum PendingPanel: Equatable, Sendable {
         self.database = database
         self.writes = Writes(db: database)
         self.runs = runs
+        self.journal = JournalModel(database: database, coordinator: runs)
         runs.onDatabaseChange = { [database] in
             Task { try? await database.notifyExternalChanges() }
         }
@@ -179,7 +182,8 @@ enum PendingPanel: Equatable, Sendable {
 
     /// Starts what the running app needs from the system: refreshing on activation and polling
     /// for terminal writes (`ExternalChangeMonitor`), the midnight restart of the date-based
-    /// queries, and tracking which window has the keyboard. Not started in unit tests.
+    /// queries, the morning edition (at launch, on activation and at 04:00), and tracking which
+    /// window has the keyboard. Not started in unit tests.
     func startSystemObservers() {
         guard externalChanges == nil else { return }
         let monitor = ExternalChangeMonitor(database: database)
@@ -199,12 +203,27 @@ enum PendingPanel: Equatable, Sendable {
                 MainActor.assumeIsolated { self?.windowDidChangeKey(window, isKey: false) }
             },
         ]
+        // In the unit-test host, launched windows run stubs that do not know `edition build`, and a
+        // build would take the long-run slot the tests' own refreshes expect (as
+        // `AppearanceSwitchTests` does). `JournalModelTests` drive the model directly.
+        guard !Launcher.isRunningTests else { return }
+        systemObservers.append(
+            center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.applicationDidBecomeActive() }
+            })
+        journal.scheduleRollover()
+        Task { await journal.checkAndBuild() }
     }
 
     /// Midnight passed: "Today" counts and lists were built around the previous day's start.
     func dayDidChange() {
         startSidebarObservation()
         listDidChange()
+    }
+
+    /// The app came to the front: the edition may have become due while it was in the background.
+    func applicationDidBecomeActive() {
+        Task { await journal.checkAndBuild() }
     }
 
     /// Single-letter shortcuts belong to the reading window: while a panel or another window has
