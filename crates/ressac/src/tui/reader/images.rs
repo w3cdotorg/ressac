@@ -4,8 +4,10 @@
 use std::collections::VecDeque;
 use std::io::{Cursor, Write};
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use image::{DynamicImage, ImageReader, Limits, Rgb, RgbImage};
 use ratatui::layout::Size;
@@ -28,11 +30,63 @@ pub const TELETEXT: [[u8; 3]; 8] = [
 pub const MAX_DECODED_SIDE: u32 = 4096;
 pub const CACHE_SIZE: usize = 32;
 pub const MAX_IN_FLIGHT: usize = 4;
-/// Images are scaled down to this width before the protocol encodes them (memory).
-const MAX_KEPT_WIDTH: u32 = 1600;
-/// Antiope's half-blocks need few pixels: the teletext copy is a thumbnail.
-const TELETEXT_WIDTH: u32 = 320;
-const MAX_ALLOC: u64 = 256 * 1024 * 1024;
+/// Images are scaled down to fit this square before anything keeps them: memory is bounded by
+/// pixels, not only by the cache's count (the reader never draws more than half its height).
+pub const MAX_KEPT_SIDE: u32 = 1600;
+/// Antiope's half-blocks need few pixels: the teletext copy starts from a thumbnail.
+const TELETEXT_SIDE: u32 = 320;
+/// Failed images remembered (and refused ones waiting to be retried); oldest forgotten first.
+const MAX_FAILED: usize = 256;
+/// A transient failure (busy database, timeout, offline) is asked again after this long.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
+const MAX_ALLOC: u64 = 128 * 1024 * 1024;
+
+/// Scales down to fit `side` × `side`, keeping the aspect; never up.
+fn fit_within(image: DynamicImage, side: u32) -> DynamicImage {
+    if image.width() > side || image.height() > side {
+        image.thumbnail(side, side)
+    } else {
+        image
+    }
+}
+
+/// An image ready for the store, built in the fetch thread: the picture within the size cap
+/// and a small copy the teletext variant is derived from, when that variant is first asked for.
+pub struct Prepared {
+    kept: DynamicImage,
+    small: DynamicImage,
+}
+
+pub fn prepare(image: DynamicImage) -> Prepared {
+    let kept = fit_within(image, MAX_KEPT_SIDE);
+    let small = fit_within(kept.clone(), TELETEXT_SIDE);
+    Prepared { kept, small }
+}
+
+/// Why a fetch ended without an image.
+struct Failure {
+    /// Permanent: asking again gives the same answer (not an image, too large, refused address,
+    /// undecodable, HTTP 4xx). Otherwise it is worth another try later.
+    permanent: bool,
+    why: String,
+}
+
+/// `fetch_image`'s refusals are sentences (phase 2); the ones that cannot change are permanent.
+fn is_permanent(error: &ressac_core::Error) -> bool {
+    let ressac_core::Error::ImageRefused(why) = error else {
+        return false; // the database, the runtime: nothing about the image itself
+    };
+    match why.as_str() {
+        "not a web address"
+        | "local or private address"
+        | "larger than 10 MB"
+        | "not an image"
+        | "response too large" => true,
+        other => {
+            other.strip_prefix("HTTP 4").is_some() && !matches!(other, "HTTP 408" | "HTTP 429")
+        }
+    }
+}
 
 /// Decodes with hard limits: the header's size is checked before any pixel buffer exists.
 pub fn decode_limited(bytes: &[u8]) -> Result<DynamicImage, String> {
@@ -114,15 +168,31 @@ enum Slot {
     Loading,
     Ready {
         native: Box<StatefulProtocol>,
-        teletext: Box<StatefulProtocol>,
+        /// The source of the teletext copy; the copy itself is built on first use.
+        small: DynamicImage,
+        teletext: Option<Box<StatefulProtocol>>,
     },
     Failed,
+    /// A transient failure: shown as failed until `until`, then asked again.
+    Retry {
+        until: Instant,
+    },
 }
 
-/// What a fetch thread sends back.
+impl Slot {
+    fn is_ready(&self) -> bool {
+        matches!(self, Slot::Ready { .. })
+    }
+
+    fn is_failed(&self) -> bool {
+        matches!(self, Slot::Failed | Slot::Retry { .. })
+    }
+}
+
+/// What a fetch worker sends back.
 struct Fetched {
     url: String,
-    result: Result<DynamicImage, String>,
+    result: Result<Prepared, Failure>,
 }
 
 pub struct ImageStore {
@@ -130,11 +200,16 @@ pub struct ImageStore {
     enabled: bool,
     picker: Picker,
     teletext: Picker,
-    /// Least recently used first; only `Ready` slots count towards `CACHE_SIZE`.
+    /// Least recently used first; only `Ready` slots count towards `CACHE_SIZE`, and the failed
+    /// ones towards `MAX_FAILED`.
     slots: Vec<(String, Slot)>,
     wanted: Vec<String>,
     queue: VecDeque<String>,
     in_flight: usize,
+    retry_after: Duration,
+    /// The workers, started with the first fetch: each opens one connection and one runtime
+    /// and keeps them for every image it fetches.
+    jobs: Option<Sender<String>>,
     tx: Sender<Fetched>,
     rx: Receiver<Fetched>,
 }
@@ -150,6 +225,8 @@ impl ImageStore {
             wanted: Vec::new(),
             queue: VecDeque::new(),
             in_flight: 0,
+            retry_after: RETRY_AFTER,
+            jobs: None,
             tx,
             rx,
         }
@@ -183,21 +260,31 @@ impl ImageStore {
         self.slots.iter().position(|(u, _)| u == url)
     }
 
+    /// Replaces whatever the slot of `url` was and makes it the most recent.
+    fn set_slot(&mut self, url: &str, slot: Slot) {
+        if let Some(i) = self.position(url) {
+            self.slots.remove(i);
+        }
+        self.slots.push((url.to_owned(), slot));
+        self.evict();
+    }
+
     pub fn state_of(&self, url: &str) -> ImageState {
         match self.position(url).map(|i| &self.slots[i].1) {
             None => ImageState::Absent,
             Some(Slot::Loading) => ImageState::Loading,
             Some(Slot::Ready { .. }) => ImageState::Ready,
             Some(Slot::Failed) => ImageState::Failed,
+            Some(Slot::Retry { until }) if Instant::now() >= *until => ImageState::Absent,
+            Some(Slot::Retry { .. }) => ImageState::Failed,
         }
     }
 
-    /// The renderer's request for an image near the viewport; absent images only, once.
+    /// The renderer's request for an image near the viewport, every frame: absent images only.
     pub fn want(&mut self, url: &str) {
         if self.enabled
             && self.state_of(url) == ImageState::Absent
             && !self.wanted.iter().any(|w| w == url)
-            && !self.queue.iter().any(|q| q == url)
         {
             self.wanted.push(url.to_owned());
         }
@@ -208,9 +295,7 @@ impl ImageStore {
     }
 
     pub fn mark_loading(&mut self, url: &str) {
-        if self.position(url).is_none() {
-            self.slots.push((url.to_owned(), Slot::Loading));
-        }
+        self.set_slot(url, Slot::Loading);
     }
 
     #[cfg(test)]
@@ -223,10 +308,11 @@ impl ImageStore {
         self.queue.len()
     }
 
-    /// Starts the wanted fetches, at most `MAX_IN_FLIGHT` at a time; the rest wait in a queue.
+    /// Starts what the last frame wanted, at most `MAX_IN_FLIGHT` at a time. The queue is
+    /// replaced by this frame's list, so images of an article the reader left do not delay the
+    /// ones on screen.
     pub fn start_wanted(&mut self, db: &Path) {
-        let wanted = self.take_wanted();
-        self.queue.extend(wanted);
+        self.queue = self.take_wanted().into();
         self.start_queued(db);
     }
 
@@ -239,22 +325,49 @@ impl ImageStore {
         }
     }
 
-    /// One fetch in its own thread and connection (`Ressac::fetch_image`), decoded there. Not a
-    /// long job: it never touches the loop's job queue.
+    /// One fetch on a worker (its own connection, decoded and resized there). Not a long job:
+    /// it never touches the loop's job queue. When `MAX_IN_FLIGHT` are running it waits.
     pub fn fetch(&mut self, db: &Path, url: String) {
         if !self.enabled || self.state_of(&url) != ImageState::Absent {
             return;
         }
-        self.mark_loading(&url);
-        self.in_flight += 1;
-        let tx = self.tx.clone();
-        let db: PathBuf = db.to_path_buf();
-        std::thread::spawn(move || {
-            // A decoder panic on a hostile file must still free the slot.
-            let result = std::panic::catch_unwind(AssertUnwindSafe(|| fetch_and_decode(&db, &url)))
-                .unwrap_or_else(|_| Err("the image could not be decoded".into()));
-            let _ = tx.send(Fetched { url, result });
-        });
+        if self.in_flight >= MAX_IN_FLIGHT {
+            if !self.queue.contains(&url) {
+                self.queue.push_back(url);
+            }
+            return;
+        }
+        let sent = self
+            .workers(db)
+            .is_some_and(|jobs| jobs.send(url.clone()).is_ok());
+        if sent {
+            self.mark_loading(&url);
+            self.in_flight += 1;
+        } else {
+            // No thread could be started: soft, and asked again later.
+            tracing::warn!("image {url}: no fetch worker");
+            self.retry_later(&url);
+        }
+    }
+
+    /// The job channel, starting the workers on first use. `None` when no thread could start.
+    fn workers(&mut self, db: &Path) -> Option<&Sender<String>> {
+        if self.jobs.is_none() {
+            let (jobs, queue) = mpsc::channel::<String>();
+            let queue = Arc::new(Mutex::new(queue));
+            let mut started = 0;
+            for _ in 0..MAX_IN_FLIGHT {
+                let (queue, tx, db) = (Arc::clone(&queue), self.tx.clone(), db.to_path_buf());
+                let spawned = std::thread::Builder::new()
+                    .name("ressac-image".into())
+                    .spawn(move || worker(&db, &queue, &tx));
+                started += usize::from(spawned.is_ok());
+            }
+            if started > 0 {
+                self.jobs = Some(jobs);
+            }
+        }
+        self.jobs.as_ref()
     }
 
     /// The fetches that ended since the last call, as state events; the queue moves on.
@@ -263,13 +376,17 @@ impl ImageStore {
         while let Ok(Fetched { url, result }) = self.rx.try_recv() {
             self.in_flight = self.in_flight.saturating_sub(1);
             match result {
-                Ok(image) => {
-                    self.ingest(&url, image);
+                Ok(prepared) => {
+                    self.keep(&url, prepared);
                     events.push(Event::ImageReady { url });
                 }
-                Err(e) => {
-                    tracing::debug!("image {url}: {e}");
-                    self.fail(&url);
+                Err(Failure { permanent, why }) => {
+                    tracing::debug!("image {url}: {why} (permanent: {permanent})");
+                    if permanent {
+                        self.fail(&url);
+                    } else {
+                        self.retry_later(&url);
+                    }
                     events.push(Event::ImageFailed { url });
                 }
             }
@@ -278,56 +395,71 @@ impl ImageStore {
         events
     }
 
+    /// Keeps an image decoded elsewhere (the workers send `Prepared` ones): tests.
+    #[cfg(test)]
     pub fn ingest(&mut self, url: &str, image: DynamicImage) {
-        let kept = if image.width() > MAX_KEPT_WIDTH {
-            image.thumbnail(MAX_KEPT_WIDTH, MAX_KEPT_WIDTH * 4)
-        } else {
-            image
-        };
-        let small = kept.thumbnail(TELETEXT_WIDTH, TELETEXT_WIDTH * 4);
-        let teletext = self.teletext.new_resize_protocol(quantise_teletext(&small));
-        let native = self.picker.new_resize_protocol(kept);
-        if let Some(i) = self.position(url) {
-            self.slots.remove(i);
-        }
-        self.slots.push((
-            url.to_owned(),
+        self.keep(url, prepare(image));
+    }
+
+    fn keep(&mut self, url: &str, Prepared { kept, small }: Prepared) {
+        let native = Box::new(self.picker.new_resize_protocol(kept));
+        self.set_slot(
+            url,
             Slot::Ready {
-                native: Box::new(native),
-                teletext: Box::new(teletext),
+                native,
+                small,
+                teletext: None,
             },
-        ));
-        self.evict();
+        );
     }
 
     pub fn fail(&mut self, url: &str) {
-        if let Some(i) = self.position(url) {
-            self.slots.remove(i);
-        }
-        self.slots.push((url.to_owned(), Slot::Failed));
+        self.set_slot(url, Slot::Failed);
+    }
+
+    /// A failure that may pass: the image is asked again after `retry_after`.
+    fn retry_later(&mut self, url: &str) {
+        let until = Instant::now() + self.retry_after;
+        self.set_slot(url, Slot::Retry { until });
     }
 
     fn evict(&mut self) {
-        let ready = |s: &(String, Slot)| matches!(s.1, Slot::Ready { .. });
-        while self.slots.iter().filter(|s| ready(s)).count() > CACHE_SIZE {
-            let oldest = self
-                .slots
-                .iter()
-                .position(ready)
-                .expect("over the cap, so one is ready");
-            self.slots.remove(oldest);
+        for (limit, kind) in [
+            (CACHE_SIZE, Slot::is_ready as fn(&Slot) -> bool),
+            (MAX_FAILED, Slot::is_failed),
+        ] {
+            while self.slots.iter().filter(|(_, s)| kind(s)).count() > limit {
+                let oldest = self
+                    .slots
+                    .iter()
+                    .position(|(_, s)| kind(s))
+                    .expect("over the cap, so one matches");
+                self.slots.remove(oldest);
+            }
         }
     }
 
-    /// The protocol to draw; touching it makes the image the most recently used.
+    /// The protocol to draw; touching it makes the image the most recently used. The teletext
+    /// copy is quantised the first time it is asked for.
     pub fn protocol(&mut self, url: &str, variant: Variant) -> Option<&mut StatefulProtocol> {
         let i = self.position(url)?;
         let slot = self.slots.remove(i);
         self.slots.push(slot);
-        match &mut self.slots.last_mut().expect("just pushed").1 {
-            Slot::Ready { native, teletext } => Some(match variant {
+        let Self {
+            slots,
+            teletext: picker,
+            ..
+        } = self;
+        match &mut slots.last_mut().expect("just pushed").1 {
+            Slot::Ready {
+                native,
+                small,
+                teletext,
+            } => Some(match variant {
                 Variant::Native => native,
-                Variant::Teletext => teletext,
+                Variant::Teletext => teletext.get_or_insert_with(|| {
+                    Box::new(picker.new_resize_protocol(quantise_teletext(small)))
+                }),
             }),
             _ => None,
         }
@@ -339,32 +471,84 @@ impl ImageStore {
         let Some(i) = self.position(url) else {
             return 1;
         };
-        match &self.slots[i].1 {
-            Slot::Ready { native, teletext } => {
-                let proto = match variant {
-                    Variant::Native => native,
-                    Variant::Teletext => teletext,
-                };
-                proto
-                    .size_for(Resize::Fit(None), Size::new(width, max_rows.max(1)))
-                    .height
-                    .clamp(1, max_rows.max(1))
+        let available = Size::new(width, max_rows.max(1));
+        let size = match (&self.slots[i].1, variant) {
+            (Slot::Ready { native, .. }, Variant::Native) => {
+                native.size_for(Resize::Fit(None), available)
             }
-            _ => 1,
+            (
+                Slot::Ready {
+                    teletext: Some(teletext),
+                    ..
+                },
+                Variant::Teletext,
+            ) => teletext.size_for(Resize::Fit(None), available),
+            (Slot::Ready { small, .. }, Variant::Teletext) => {
+                Resize::Fit(None).size_for(small, self.teletext.font_size(), available)
+            }
+            _ => return 1,
+        };
+        size.height.clamp(1, max_rows.max(1))
+    }
+}
+
+/// A fetch worker: one connection and one runtime for all its images.
+fn worker(db: &Path, jobs: &Mutex<Receiver<String>>, results: &Sender<Fetched>) {
+    let mut session: Option<(ressac_core::service::Ressac, tokio::runtime::Runtime)> = None;
+    loop {
+        let url = {
+            let jobs = jobs.lock().unwrap_or_else(PoisonError::into_inner);
+            match jobs.recv() {
+                Ok(url) => url,
+                Err(_) => return, // the store is gone
+            }
+        };
+        // A decoder panic on a hostile file must still answer, and restart the session.
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            fetch_and_decode(db, &mut session, &url)
+        }))
+        .unwrap_or_else(|_| {
+            session = None;
+            Err(Failure {
+                permanent: true,
+                why: "the image could not be decoded".into(),
+            })
+        });
+        if results.send(Fetched { url, result }).is_err() {
+            return;
         }
     }
 }
 
-fn fetch_and_decode(db: &Path, url: &str) -> Result<DynamicImage, String> {
-    let app = crate::commands::open(db).map_err(|e| format!("{e:#}"))?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
+fn fetch_and_decode(
+    db: &Path,
+    session: &mut Option<(ressac_core::service::Ressac, tokio::runtime::Runtime)>,
+    url: &str,
+) -> Result<Prepared, Failure> {
+    let transient = |why: String| Failure {
+        permanent: false,
+        why,
+    };
+    if session.is_none() {
+        let app = crate::commands::open(db).map_err(|e| transient(format!("{e:#}")))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| transient(e.to_string()))?;
+        *session = Some((app, runtime));
+    }
+    let (app, runtime) = session.as_ref().expect("just opened");
     let bytes = runtime
         .block_on(app.fetch_image(url))
-        .map_err(|e| e.to_string())?;
-    decode_limited(&bytes)
+        .map_err(|e| Failure {
+            permanent: is_permanent(&e),
+            why: e.to_string(),
+        })?;
+    let image = decode_limited(&bytes).map_err(|why| Failure {
+        permanent: true,
+        why,
+    })?;
+    Ok(prepare(image))
 }
 
 #[cfg(test)]
@@ -557,5 +741,168 @@ mod tests {
         s.fetch(&db, "https://example.com/a.jpg".into());
         assert!(s.take_wanted().is_empty() && s.in_flight() == 0);
         assert_eq!(s.state_of("https://example.com/a.jpg"), ImageState::Absent);
+    }
+
+    fn dummy_db() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("r.sqlite");
+        ressac_core::service::Ressac::open(&db).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn a_tall_image_is_kept_within_the_size_cap() {
+        let tall = DynamicImage::ImageRgb8(RgbImage::new(1600, 4000));
+        let p = prepare(tall);
+        assert!(p.kept.width() <= MAX_KEPT_SIDE && p.kept.height() <= MAX_KEPT_SIDE);
+        assert_eq!(p.kept.height(), 1600, "scaled to fit, aspect kept");
+        assert!(p.small.width() <= 320 && p.small.height() <= 320);
+        let small = DynamicImage::new_rgb8(40, 30);
+        assert_eq!(
+            (prepare(small).kept.width(), 40),
+            (40, 40),
+            "never scaled up"
+        );
+    }
+
+    #[test]
+    fn the_teletext_copy_is_built_only_when_asked_for() {
+        let mut s = store();
+        s.ingest("https://example.com/a.jpg", photo());
+        let url = "https://example.com/a.jpg";
+        let i = s.position(url).unwrap();
+        assert!(matches!(&s.slots[i].1, Slot::Ready { teletext: None, .. }));
+        assert!(s.rows_for(url, Variant::Teletext, 40, 10) >= 1);
+        assert!(
+            matches!(&s.slots[i].1, Slot::Ready { teletext: None, .. }),
+            "sizing builds nothing"
+        );
+        s.protocol(url, Variant::Native);
+        assert!(matches!(
+            &s.slots[s.position(url).unwrap()].1,
+            Slot::Ready { teletext: None, .. }
+        ));
+        s.protocol(url, Variant::Teletext);
+        assert!(matches!(
+            &s.slots[s.position(url).unwrap()].1,
+            Slot::Ready {
+                teletext: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn only_permanent_refusals_are_final() {
+        use ressac_core::Error;
+        let refused = |why: &str| is_permanent(&Error::ImageRefused(why.into()));
+        for why in [
+            "not a web address",
+            "local or private address",
+            "larger than 10 MB",
+            "not an image",
+            "HTTP 404",
+            "HTTP 410",
+        ] {
+            assert!(refused(why), "{why}");
+        }
+        for why in [
+            "timed out",
+            "Dns",
+            "Connect",
+            "HTTP 503",
+            "HTTP 429",
+            "HTTP 408",
+        ] {
+            assert!(!refused(why), "{why}");
+        }
+        assert!(!is_permanent(&Error::EditionNotDue), "not about the image");
+    }
+
+    fn ended(s: &mut ImageStore, url: &str, permanent: bool) {
+        s.mark_loading(url);
+        s.in_flight = 1;
+        s.tx.send(Fetched {
+            url: url.into(),
+            result: Err(Failure {
+                permanent,
+                why: "x".into(),
+            }),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_transient_failure_is_asked_again_and_a_permanent_one_is_not() {
+        let (_dir, db) = dummy_db();
+        let (a, b) = ("https://example.com/a.png", "https://example.com/b.png");
+        let mut s = store();
+        s.retry_after = Duration::ZERO;
+        ended(&mut s, a, false);
+        ended(&mut s, b, true);
+        let events = s.drain(&db);
+        assert_eq!(events.len(), 2);
+        assert_eq!(s.state_of(a), ImageState::Absent, "retry due");
+        assert_eq!(s.state_of(b), ImageState::Failed);
+        s.want(a);
+        s.want(b);
+        assert_eq!(s.take_wanted(), vec![a.to_string()]);
+
+        let mut waiting = store();
+        ended(&mut waiting, a, false);
+        waiting.drain(&db);
+        assert_eq!(
+            waiting.state_of(a),
+            ImageState::Failed,
+            "alt text while it waits"
+        );
+        waiting.want(a);
+        assert!(waiting.take_wanted().is_empty(), "not before the delay");
+    }
+
+    #[test]
+    fn failed_images_are_capped() {
+        let mut s = store();
+        for i in 0..300 {
+            s.fail(&format!("https://example.com/{i}.png"));
+        }
+        assert_eq!(s.state_of("https://example.com/0.png"), ImageState::Absent);
+        assert_eq!(
+            s.state_of("https://example.com/299.png"),
+            ImageState::Failed
+        );
+        assert_eq!(s.slots.len(), MAX_FAILED);
+    }
+
+    #[test]
+    fn the_queue_follows_the_current_frame() {
+        let (_dir, db) = dummy_db();
+        let mut s = store();
+        for i in 0..6 {
+            s.want(&format!("http://127.0.0.1:9/old{i}.png"));
+        }
+        s.start_wanted(&db);
+        assert_eq!((s.in_flight(), s.queued()), (MAX_IN_FLIGHT, 2));
+        s.want("http://127.0.0.1:9/new.png");
+        s.start_wanted(&db);
+        assert_eq!(
+            s.queued(),
+            1,
+            "the old queue is replaced by the new frame's list"
+        );
+        assert_eq!(
+            s.queue.front().map(String::as_str),
+            Some("http://127.0.0.1:9/new.png")
+        );
+    }
+
+    #[test]
+    fn fetch_waits_when_the_workers_are_all_busy() {
+        let (_dir, db) = dummy_db();
+        let mut s = store();
+        for i in 0..5 {
+            s.fetch(&db, format!("http://127.0.0.1:9/{i}.png"));
+        }
+        assert_eq!((s.in_flight(), s.queued()), (MAX_IN_FLIGHT, 1));
     }
 }

@@ -12,7 +12,7 @@ use ressac_core::service::{EditionOutcome, Event as CoreEvent, EventSink, Extrac
 
 use super::state::{Event, JobOutcome};
 
-/// What a job sends back to the loop. Images (phase 6) add their own variant.
+/// What a job sends back to the loop. Images do not use it: the image store has its own channel.
 pub enum Msg {
     Event(Event),
     /// The last word of a long job (refresh, edition): the loop frees the long-job slot.
