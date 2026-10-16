@@ -12,6 +12,7 @@ mod edition;
 mod feeds;
 mod fetch;
 mod health;
+mod library;
 pub mod pages;
 mod reading;
 
@@ -20,6 +21,10 @@ pub use edition::{EditionEntryRow, EditionOverflowRow, EditionParams, EditionRec
 pub use feeds::{CadenceRow, FeedRow, FolderRow, ImportReport};
 pub use fetch::{AttemptRecord, BACKLOG_DAYS, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
 pub use health::TriageFacts;
+pub use library::{
+    EntryPage, EntryRow, JournalItem, JournalView, ListCursor, ListFilter, PAGE_SIZE, Source,
+    SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot,
+};
 pub use reading::{FulltextRow, plain_text};
 
 /// Highest schema version this binary knows.
