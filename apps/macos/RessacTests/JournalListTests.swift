@@ -61,6 +61,42 @@ private func overflowItem(_ section: EditionSection, feed: Int64, _ hidden: Int,
         #expect(sections.map(\.section) == [.front, .week, .wire])
     }
 
+    @Test func a_feed_buried_after_the_build_leaves_every_journal_surface() async throws {
+        let (state, test, _) = try makeJournalState()
+        let buried = try test.entry(feed: 1, title: "From the buried feed")
+        let first = try test.entry(feed: 2)
+        let second = try test.entry(feed: 8)
+        try seedEdition(test, items: [(buried, "front", 1), (first, "wire", 2), (second, "wire", 3)])
+        try test.execute("UPDATE feed SET state = 'buried' WHERE id = 1")
+        state.selection = .journal
+        try await state.database.notifyExternalChanges()
+
+        let snapshot = try await value(of: Queries.sidebar(), in: state.database) { $0.journalUnread == 2 }
+        #expect(snapshot.journalUnread == 2)
+        #expect(await eventually { state.journal.edition?.items.count == 2 })
+        let edition = try #require(state.journal.edition)
+        #expect(edition.items.map(\.entryId) == [first, second])
+        #expect(edition.readCount == 0 && !edition.isFinished)
+        #expect(state.entries.map(\.entryId) == [first, second])
+        let page = JournalPage.lines(edition: edition, phase: .idle, selected: nil, cells: 40)
+        #expect(!page.contains { $0.cells.accessibilityText.contains("buried feed") || $0.text.contains("buried feed") })
+
+        await state.markAllRead()?.value
+        #expect(await eventually { state.journal.edition?.isFinished == true })
+        let finished = JournalPage.lines(edition: state.journal.edition, phase: .idle, selected: nil, cells: 40)
+        #expect(finished.contains { $0.role == .end })
+    }
+
+    @Test func an_edition_whose_every_feed_was_buried_reads_as_empty() async throws {
+        let (state, test, _) = try makeJournalState()
+        let only = try test.entry(feed: 1)
+        try seedEdition(test, items: [(only, "wire", 1)])
+        try test.execute("UPDATE feed SET state = 'buried' WHERE id = 1")
+        try await state.database.notifyExternalChanges()
+        let edition = try await value(of: Queries.edition(), in: state.database) { $0 != nil }
+        #expect(edition?.items.isEmpty == true && edition?.isFinished == false)
+    }
+
     @Test func mark_all_read_in_the_journal_leaves_the_overflow_unread() async throws {
         let (state, test, _) = try makeJournalState()
         let first = try test.entry(feed: 1)

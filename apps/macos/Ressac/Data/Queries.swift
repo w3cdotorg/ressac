@@ -108,9 +108,11 @@ struct Queries {
                 starred: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v_entry WHERE is_starred") ?? 0,
                 needsTriage: try Int.fetchOne(
                     db, sql: "SELECT COUNT(*) FROM v_garden_row WHERE needs_triage AND state = 'active'") ?? 0,
+                // Through `v_entry`, like the Journal list: a feed buried since the build drops out.
                 journalUnread: try Int.fetchOne(db, sql: """
-                    SELECT COUNT(*) FROM edition_entry ee JOIN entry e ON e.id = ee.entry_id
-                    WHERE ee.edition_id = (SELECT MAX(id) FROM edition) AND e.read_at IS NULL
+                    SELECT COUNT(*) FROM v_entry
+                    WHERE NOT is_read AND entry_id IN (
+                        SELECT entry_id FROM edition_entry WHERE edition_id = (SELECT MAX(id) FROM edition))
                     """) ?? 0,
                 cadenceUnread: try Dictionary(
                     Row.fetchAll(db, sql: """
@@ -217,7 +219,9 @@ struct Queries {
     }
 
     /// The latest edition (spec §8, Journal screen), nil before the first one. Its header comes
-    /// from `edition` itself: an empty edition has no row in `v_edition_today`.
+    /// from `edition` itself: an empty edition has no row in `v_edition_today`. Entries and overflow
+    /// rows of a feed buried since the build are left out, as the Journal list leaves them out, so
+    /// that every surface counts the same entries (an edition emptied that way reads as empty).
     static func edition() -> LiveQuery<Edition?> {
         ValueObservation.tracking { db -> Edition? in
             guard let info = try EditionInfo.fetchOne(db, sql: """
@@ -227,10 +231,12 @@ struct Queries {
             let items = try EditionItem.fetchAll(db, sql: """
                 SELECT entry_id, section, rank, feed_id, feed_title, title, published_at,
                        read_at IS NOT NULL AS is_read, starred_at IS NOT NULL AS is_starred
-                FROM v_edition_today ORDER BY rank
+                FROM v_edition_today
+                WHERE feed_id IN (SELECT id FROM feed WHERE state = 'active') ORDER BY rank
                 """)
             let overflow = try EditionOverflowItem.fetchAll(db, sql: """
                 SELECT section, feed_id, feed_title, page, hidden_count FROM v_edition_overflow
+                WHERE feed_id IN (SELECT id FROM feed WHERE state = 'active')
                 ORDER BY CASE section WHEN 'front' THEN 0 WHEN 'week' THEN 1 ELSE 2 END, page IS NULL, page, feed_id
                 """)
             return Edition(info: info, items: items, overflow: overflow)
