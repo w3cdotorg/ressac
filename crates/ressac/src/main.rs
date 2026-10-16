@@ -68,7 +68,10 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         stop,
     };
     let mut out = std::io::stdout().lock();
-    match cli.command {
+    let Some(command) = cli.command else {
+        return commands::read(&g);
+    };
+    match command {
         Command::Import { file, dry_run } => commands::import(&g, &file, dry_run, &mut out),
         Command::Fetch {
             force,

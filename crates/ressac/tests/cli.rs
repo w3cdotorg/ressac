@@ -1202,3 +1202,59 @@ fn read_without_a_terminal_says_so() {
         stderr(&out)
     );
 }
+
+#[test]
+fn bare_ressac_gives_the_first_run_hint_like_read() {
+    let home = tempfile::tempdir().unwrap();
+    let out = ressac(home.path(), &[]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        stderr(&out),
+        "No feeds yet: run \"ressac import <file.opml>\" first.\n"
+    );
+    assert!(out.stdout.is_empty());
+    assert!(
+        !home.path().join("db.sqlite").exists(),
+        "nothing is created"
+    );
+}
+
+#[test]
+fn bare_ressac_without_a_terminal_fails_cleanly() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let out = ressac(home.path(), &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("is this a terminal?"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn the_reader_has_no_json_form() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [&["--json"][..], &["--json", "read"]] {
+        let out = ressac(home.path(), args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(
+            stderr(&out).contains("no --json output"),
+            "{}",
+            stderr(&out)
+        );
+        assert!(out.stdout.is_empty());
+    }
+}
+
+#[test]
+fn help_lists_read_and_says_bare_ressac_opens_it() {
+    let home = tempfile::tempdir().unwrap();
+    let out = ressac(home.path(), &["--help"]);
+    let help = stdout(&out);
+    assert!(help.contains("  read "), "{help}");
+    assert!(
+        help.contains("the default when no command is given"),
+        "{help}"
+    );
+}

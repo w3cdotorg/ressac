@@ -66,8 +66,14 @@ pub(crate) fn open(db: &Path) -> anyhow::Result<Ressac> {
     Ok(app)
 }
 
-/// `ressac read`: the terminal reader on the database, until `q`.
+/// `ressac` and `ressac read`: the terminal reader on the database, until `q`. It is
+/// interactive and has no machine-readable form, so `--json` is a usage error.
 pub fn read(g: &Globals) -> anyhow::Result<ExitCode> {
+    if g.json {
+        return Err(usage(
+            "The reader is interactive and has no --json output; use a command, e.g. \"ressac fetch --json\".",
+        ));
+    }
     let Some(app) = open_with_feeds(&g.db)? else {
         return Ok(ExitCode::SUCCESS);
     };
