@@ -56,7 +56,7 @@ struct SidebarNode: Identifiable, Equatable, Sendable {
     }
 }
 
-/// Import and export panels, presented by the window (phase 11).
+/// Import and export panels, presented by the window.
 enum PendingPanel: Equatable, Sendable {
     case importOPML, exportOPML
 }
@@ -86,7 +86,7 @@ enum PendingPanel: Equatable, Sendable {
     /// extraction, so that the page keeps its "Full article unavailable" notice until the
     /// selection changes; `isShowingFullText` says whether the article is on screen.
     var readerShowsFullText = false
-    /// The feed selected in the Garden table (phase 12); garden commands act on it.
+    /// The feed selected in the Garden table; garden commands act on it.
     var selectedFeedId: Int64?
     var pendingPanel: PendingPanel?
 
@@ -124,7 +124,7 @@ enum PendingPanel: Equatable, Sendable {
     static let loadMoreMargin = 20
     @ObservationIgnored var now: @MainActor () -> Date = { Date() }
     @ObservationIgnored var openURL: @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
-    /// Set by the reader (phase 10): scrolls one page of the given entry and returns false at
+    /// Set by the reader: scrolls one page of the given entry and returns false at
     /// its bottom. True, with nothing done, while that entry's page is still loading.
     @ObservationIgnored var readerPageDown: (@MainActor (Int64) async -> Bool)?
 
@@ -451,7 +451,7 @@ enum PendingPanel: Equatable, Sendable {
         if let link = selectedEntry?.link { openURL(link) }
     }
 
-    func scheduleAutoRead(entryId: Int64) {
+    private func scheduleAutoRead(entryId: Int64) {
         autoReadTask?.cancel()
         autoReadTask = Task { [weak self, autoReadDelay] in
             try? await Task.sleep(for: autoReadDelay)
@@ -462,10 +462,9 @@ enum PendingPanel: Equatable, Sendable {
         }
     }
 
-    /// The reader's Full article toggle (spec §7, Reader).
+    /// The reader's Full article toggle (spec §7, Reader). On: back to the feed's text. Off with a
+    /// stored article: show it. Otherwise fetch it, which after a failure is a retry.
     @discardableResult
-    /// On: back to the feed's text. Off with a stored article: show it. Otherwise fetch it,
-    /// which after a failure is a retry.
     func requestFullText() -> Task<Void, Never>? {
         guard let entry = selectedEntry, entry.link != nil else { return nil }
         if isShowingFullText {
@@ -538,7 +537,7 @@ enum PendingPanel: Equatable, Sendable {
         selectedFeedId = feedId
     }
 
-    // MARK: Garden (UI in phase 12)
+    // MARK: Garden
 
     @discardableResult
     func gardenDecide(_ decision: GardenDecision) -> Task<RunOutcome, Never>? {
@@ -791,7 +790,7 @@ enum PendingPanel: Equatable, Sendable {
                 return
             case .missing, .needsMigration:
                 // A missing file is created by `migrate` too: the first-run screen then
-                // deals with "no feeds" only (phase 11).
+                // deals with "no feeds" only.
                 phase = .migrating
                 guard await runs.submit(.migrate()), try AppDatabase.check(at: url) == .ok else {
                     phase = .failed(runs.banner?.message ?? "The database could not be migrated.")
