@@ -2434,6 +2434,7 @@ dependencies = [
  "ratatui",
  "ressac-core",
  "scraper",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
