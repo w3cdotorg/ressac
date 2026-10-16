@@ -1,5 +1,6 @@
 //! `ressac garden`: the full-screen triage UI.
 
+pub mod reader;
 pub mod state;
 pub mod ui;
 

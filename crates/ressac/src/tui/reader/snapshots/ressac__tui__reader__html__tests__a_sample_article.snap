@@ -1,0 +1,24 @@
+---
+source: crates/ressac/src/tui/reader/html.rs
+expression: "text(&article).join(\"\\n\")"
+---
+Morning notes
+
+The tide came in at six, see the table[1].
+
+│ Flux et reflux, the sea keeps its own calendar.
+
+• Bring a coat
+• Check the wind[2]
+
+[image: The harbour]
+
+high  06:12
+low   12:30
+
+Day │ Coef
+Fri │ 95
+
+Links
+[1] https://example.org/tides
+[2] https://e.test/wind
