@@ -246,6 +246,13 @@ fn section_at(r: &Row<'_>, col: usize) -> rusqlite::Result<Section> {
     })
 }
 
+fn group_at(r: &Row<'_>, col: usize) -> rusqlite::Result<CadenceGroup> {
+    let text: String = r.get(col)?;
+    CadenceGroup::parse(&text).ok_or_else(|| {
+        rusqlite::Error::InvalidColumnType(col, "cadence group".into(), rusqlite::types::Type::Text)
+    })
+}
+
 /// Every word of `text`, quoted for FTS5 (`"a" "b"` matches rows with both); `None` without
 /// words. The app's `Queries.ftsQuery`.
 pub fn fts_query(text: &str) -> Option<String> {
@@ -254,6 +261,33 @@ pub fn fts_query(text: &str) -> Option<String> {
         .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
         .collect();
     (!tokens.is_empty()).then(|| tokens.join(" "))
+}
+
+/// One entry for the reader (spec §4, Entry content): its row, every body the reader may
+/// show, the stored extraction and the feed's full-text preference.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryDetail {
+    pub row: EntryRow,
+    pub summary_html: Option<String>,
+    pub content_html: Option<String>,
+    pub fulltext_html: Option<String>,
+    /// The stored failure sentence of the last extraction.
+    pub fulltext_error: Option<String>,
+    pub prefer_full_text: bool,
+}
+
+/// One active, diagnosed feed's rhythm, as `v_cadence` gives it: what the rhythm line and
+/// the override menu need.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CadenceDetail {
+    pub feed_id: FeedId,
+    pub effective_group: CadenceGroup,
+    pub computed_group: CadenceGroup,
+    pub is_override: bool,
+    pub median_interval_days: Option<f64>,
+    pub entries_per_month: f64,
+    pub last_entry_at: Option<DateTime<Utc>>,
+    pub unread: usize,
 }
 
 impl Store {
@@ -410,7 +444,7 @@ impl Store {
                 "SELECT v.entry_id, v.feed_id, v.feed_title, v.title, v.author, v.url, v.published_at, \
                  v.is_read, v.is_starred, v.has_fulltext, ee.section, ee.rank \
                  FROM edition_entry ee JOIN v_entry v ON v.entry_id = ee.entry_id \
-                 WHERE ee.edition_id = ?1 ORDER BY ee.rank",
+                 WHERE ee.edition_id = ?1 ORDER BY ee.rank, ee.entry_id",
             )?
             .query_map([edition.id], |r| {
                 Ok(JournalItem {
@@ -463,6 +497,119 @@ impl Store {
         let mut all = vec![Value::Text(query)];
         all.extend(args);
         self.page_of(&list, all, after, source == Source::Journal)
+    }
+
+    /// The entry for the reader, `None` when it is unknown or its feed is buried (`v_entry`).
+    pub fn entry_detail(&self, entry_id: i64) -> Result<Option<EntryDetail>> {
+        use rusqlite::OptionalExtension;
+        let found = self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {ROW_COLUMNS}, summary_html, content_html FROM v_entry WHERE entry_id = ?1"
+                ),
+                [entry_id],
+                |r| {
+                    Ok((
+                        entry_row(r)?.0,
+                        r.get::<_, Option<String>>(10)?,
+                        r.get::<_, Option<String>>(11)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((row, summary_html, content_html)) = found else {
+            return Ok(None);
+        };
+        let fulltext = self.fulltext(entry_id)?;
+        let prefer_full_text = self.prefer_full_text(row.feed_id)?;
+        Ok(Some(EntryDetail {
+            row,
+            summary_html,
+            content_html,
+            fulltext_html: fulltext.as_ref().and_then(|f| f.html.clone()),
+            fulltext_error: fulltext.and_then(|f| f.error),
+            prefer_full_text,
+        }))
+    }
+
+    /// Every active, diagnosed feed's rhythm (`v_cadence`), by feed id.
+    pub fn cadence_details(&self) -> Result<Vec<CadenceDetail>> {
+        let rows = self
+            .conn()
+            .prepare(
+                "SELECT feed_id, effective_group, computed_group, is_override, median_interval_days, \
+                 entries_per_month, last_entry_at, unread FROM v_cadence ORDER BY feed_id",
+            )?
+            .query_map([], |r| {
+                let last: Option<String> = r.get(6)?;
+                Ok(CadenceDetail {
+                    feed_id: r.get(0)?,
+                    effective_group: group_at(r, 1)?,
+                    computed_group: group_at(r, 2)?,
+                    is_override: r.get(3)?,
+                    median_interval_days: r.get(4)?,
+                    entries_per_month: r.get(5)?,
+                    last_entry_at: last
+                        .map(|t| parse_ts(&t).ok_or_else(|| bad_timestamp(6)))
+                        .transpose()?,
+                    unread: r.get::<_, i64>(7)? as usize,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Marks one entry read (keeping its first read time) or unread. An unknown entry is a
+    /// no-op, as in the app.
+    pub fn set_read(&self, entry_id: i64, read: bool, now: DateTime<Utc>) -> Result<()> {
+        if read {
+            self.conn().execute(
+                "UPDATE entry SET read_at = ?2 WHERE id = ?1 AND read_at IS NULL",
+                rusqlite::params![entry_id, ts(now)],
+            )?;
+        } else {
+            self.conn()
+                .execute("UPDATE entry SET read_at = NULL WHERE id = ?1", [entry_id])?;
+        }
+        Ok(())
+    }
+
+    pub fn set_starred(&self, entry_id: i64, starred: bool, now: DateTime<Utc>) -> Result<()> {
+        self.conn().execute(
+            "UPDATE entry SET starred_at = ?2 WHERE id = ?1",
+            rusqlite::params![entry_id, starred.then(|| ts(now))],
+        )?;
+        Ok(())
+    }
+
+    /// Marks every unread entry of `source` read and returns how many changed. The Journal
+    /// marks its own entries only: overflow entries are not in the edition.
+    pub fn mark_all_read(
+        &self,
+        source: Source,
+        today_start: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        let (filter, args) = predicate(source, today_start);
+        let mut all = vec![Value::Text(ts(now))];
+        all.extend(args);
+        let changed = self.conn().execute(
+            &format!(
+                "UPDATE entry SET read_at = ? WHERE read_at IS NULL \
+                 AND id IN (SELECT entry_id FROM v_entry WHERE {filter})"
+            ),
+            params_from_iter(all.iter()),
+        )?;
+        Ok(changed)
+    }
+
+    /// SQLite's `PRAGMA data_version` of this connection: it changes when another connection
+    /// (Ressac.app, another `ressac`) commits, so the reader knows when to reload.
+    pub fn data_version(&self) -> Result<i64> {
+        Ok(self
+            .conn()
+            .query_row("PRAGMA data_version", [], |r| r.get(0))?)
     }
 }
 
@@ -935,5 +1082,180 @@ mod tests {
             [1, 5],
             "the raw FTS index, buried feeds included"
         );
+    }
+
+    fn add_fulltext(s: &Store, entry: i64, html: Option<&str>, error: Option<&str>) {
+        s.conn()
+            .execute(
+                "INSERT INTO entry_fulltext (entry_id, fetched_at, html, error) \
+                 VALUES (?1, '2026-10-16T07:00:00.000Z', ?2, ?3)",
+                params![entry, html, error],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn entry_detail_carries_every_body_and_the_feed_preference() {
+        let s = library();
+        s.conn()
+            .execute("UPDATE entry SET content_html = '<p>Full feed body</p>', author = 'Ann', url = 'https://f1.example.org/a' WHERE id = 1", [])
+            .unwrap();
+        add_fulltext(&s, 1, Some("<article>Extracted</article>"), None);
+        s.set_prefer_full_text(1, true).unwrap();
+        let d = s.entry_detail(1).unwrap().expect("active entry");
+        assert_eq!(d.row.entry_id, 1);
+        assert!(d.row.has_fulltext);
+        assert_eq!(d.row.author.as_deref(), Some("Ann"));
+        assert_eq!(d.summary_html.as_deref(), Some("<p>Tides of March</p>"));
+        assert_eq!(d.content_html.as_deref(), Some("<p>Full feed body</p>"));
+        assert_eq!(
+            d.fulltext_html.as_deref(),
+            Some("<article>Extracted</article>")
+        );
+        assert_eq!(d.fulltext_error, None);
+        assert!(d.prefer_full_text);
+    }
+
+    #[test]
+    fn a_failed_extraction_and_unknown_or_buried_entries() {
+        let s = library();
+        add_fulltext(&s, 3, None, Some("HTTP 404."));
+        let d = s.entry_detail(3).unwrap().unwrap();
+        assert_eq!(
+            (d.fulltext_html, d.fulltext_error.as_deref()),
+            (None, Some("HTTP 404."))
+        );
+        assert!(!d.prefer_full_text);
+        assert_eq!(s.entry_detail(5).unwrap(), None, "entry of a buried feed");
+        assert_eq!(s.entry_detail(999).unwrap(), None);
+    }
+
+    #[test]
+    fn cadence_details_feed_the_rhythm_line() {
+        let s = library();
+        s.conn()
+            .execute(
+                "UPDATE feed_health SET median_interval_days = 0.4, last_entry_at = '2026-10-16T06:00:00.000Z', \
+                 entries_per_month = 30.5 WHERE feed_id = 1",
+                [],
+            )
+            .unwrap();
+        s.conn()
+            .execute(
+                "UPDATE feed SET cadence_override = 'monthly' WHERE id = 3",
+                [],
+            )
+            .unwrap();
+        let rows = s.cadence_details().unwrap();
+        let one = rows.iter().find(|r| r.feed_id == 1).unwrap();
+        assert_eq!(one.effective_group, CadenceGroup::Daily);
+        assert!(!one.is_override);
+        assert_eq!(one.median_interval_days, Some(0.4));
+        assert_eq!(one.last_entry_at, Some(at("2026-10-16T06:00:00Z")));
+        assert_eq!(one.unread, 1);
+        let three = rows.iter().find(|r| r.feed_id == 3).unwrap();
+        assert_eq!(
+            (
+                three.effective_group,
+                three.computed_group,
+                three.is_override
+            ),
+            (CadenceGroup::Monthly, CadenceGroup::Rare, true)
+        );
+        assert!(
+            rows.iter().all(|r| r.feed_id != 4),
+            "buried feeds are not in v_cadence"
+        );
+    }
+
+    fn read_at(s: &Store, id: i64) -> Option<String> {
+        s.conn()
+            .query_row("SELECT read_at FROM entry WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn reading_keeps_the_first_read_time_and_unreading_clears_it() {
+        let s = library();
+        s.set_read(1, true, at("2026-10-16T08:00:00Z")).unwrap();
+        s.set_read(1, true, at("2026-10-16T09:00:00Z")).unwrap();
+        assert_eq!(read_at(&s, 1).as_deref(), Some("2026-10-16T08:00:00.000Z"));
+        s.set_read(1, false, at("2026-10-16T10:00:00Z")).unwrap();
+        assert_eq!(read_at(&s, 1), None);
+        s.set_read(999, true, at("2026-10-16T10:00:00Z")).unwrap(); // unknown: a no-op
+    }
+
+    #[test]
+    fn starring_sets_and_clears() {
+        let s = library();
+        s.set_starred(1, true, at("2026-10-16T08:00:00Z")).unwrap();
+        assert!(s.entry_detail(1).unwrap().unwrap().row.is_starred);
+        s.set_starred(1, false, at("2026-10-16T08:00:00Z")).unwrap();
+        assert!(!s.entry_detail(1).unwrap().unwrap().row.is_starred);
+    }
+
+    #[test]
+    fn mark_all_read_covers_its_source_only() {
+        let s = library();
+        let now = at("2026-10-16T08:00:00Z");
+        assert_eq!(s.mark_all_read(Source::Feed(2), today(), now).unwrap(), 1);
+        assert_eq!(
+            s.sources(today()).unwrap().counts.unread,
+            2,
+            "entries 1 and 4 still unread"
+        );
+        assert_eq!(
+            s.mark_all_read(Source::Feed(2), today(), now).unwrap(),
+            0,
+            "nothing left"
+        );
+    }
+
+    #[test]
+    fn mark_all_read_on_the_journal_leaves_the_overflow_unread() {
+        let s = library();
+        add_entry(&s, 6, 1, "Overflowed", "2026-10-16T05:00:00Z", false, false);
+        // Entry 6 is in feed 1's overflow, not in the edition.
+        add_edition(
+            &s,
+            1,
+            &[(4, "front", 1), (1, "wire", 2), (5, "wire", 3)],
+            &[(1, "wire", 1)],
+        );
+        let changed = s
+            .mark_all_read(Source::Journal, today(), at("2026-10-16T08:00:00Z"))
+            .unwrap();
+        assert_eq!(changed, 2, "entries 4 and 1; entry 5's feed is buried");
+        assert_eq!(
+            read_at(&s, 6),
+            None,
+            "the overflow stays unread in its feed"
+        );
+        assert_eq!(read_at(&s, 5), None, "a buried feed's entry is not touched");
+        assert_eq!(s.sources(today()).unwrap().counts.journal, 0);
+    }
+
+    #[test]
+    fn another_connection_s_write_changes_data_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        let reader = Store::open(&path).unwrap();
+        let writer = Store::open(&path).unwrap();
+        add_feed(&writer, 1, None, 0, None, "active", "daily");
+        add_entry(&writer, 1, 1, "Hello", "2026-10-16T06:00:00Z", false, false);
+        let before = reader.data_version().unwrap();
+        assert_eq!(
+            reader.data_version().unwrap(),
+            before,
+            "stable while nobody writes"
+        );
+        writer
+            .set_read(1, true, at("2026-10-16T08:00:00Z"))
+            .unwrap();
+        let after = reader.data_version().unwrap();
+        assert_ne!(after, before, "the app's write is seen by the reader");
+        assert_eq!(reader.sources(today()).unwrap().counts.unread, 0);
     }
 }

@@ -22,8 +22,9 @@ pub use feeds::{CadenceRow, FeedRow, FolderRow, ImportReport};
 pub use fetch::{AttemptRecord, BACKLOG_DAYS, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
 pub use health::TriageFacts;
 pub use library::{
-    EntryPage, EntryRow, JournalItem, JournalView, ListCursor, ListFilter, PAGE_SIZE, Source,
-    SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot, fts_query,
+    CadenceDetail, EntryDetail, EntryPage, EntryRow, JournalItem, JournalView, ListCursor,
+    ListFilter, PAGE_SIZE, Source, SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot,
+    fts_query,
 };
 pub use reading::{FulltextRow, plain_text};
 
