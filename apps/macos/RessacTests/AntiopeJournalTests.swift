@@ -174,3 +174,88 @@ private func trimmed(_ text: String) -> String {
         #expect(JournalPage.lastEntryId(of: edition) == 4 && JournalPage.lastEntryId(of: nil) == nil)
     }
 }
+
+@MainActor @Suite struct JournalNavigationTests {
+    /// An edition of two entries, the first ranked one published *before* the second, so that rank
+    /// order and date order differ; P104 selected.
+    /// `keepAlive` holds the test database and the stub: both delete their directory on deinit.
+    func makeEdition() async throws -> (AntiopeState, AppState, first: Int64, last: Int64, keepAlive: (TestDatabase, Stub)) {
+        let (state, test, stub) = try makeState()
+        let first = try test.entry(feed: 1, title: "Ranked first", published: "2026-10-09T06:00:00.000Z")
+        let last = try test.entry(feed: 8, title: "Ranked last", published: "2026-10-09T09:00:00.000Z")
+        try test.execute("DELETE FROM edition")  // whatever the contract fixture holds
+        try test.execute("""
+            INSERT INTO edition (id, built_at, window_start, window_end, unreachable)
+            VALUES (1, '2026-10-10T07:00:00.000Z', '2026-10-09T07:00:00.000Z', '2026-10-10T07:00:00.000Z', 0)
+            """)
+        try test.execute("INSERT INTO edition_entry (edition_id, entry_id, section, rank) VALUES (1, ?, 'front', 1)", [first])
+        try test.execute("INSERT INTO edition_entry (edition_id, entry_id, section, rank) VALUES (1, ?, 'wire', 2)", [last])
+        try await state.database.notifyExternalChanges()
+        state.autoReadDelay = .seconds(60)
+        state.selection = .journal
+        #expect(await eventually { state.journal.edition?.items.count == 2 && state.entries.count == 2 })
+        // Phase 5b's contract: on P104 the list runs in rank order, not by date.
+        #expect(state.entries.map(\.entryId) == [first, last])
+        return (AntiopeState(app: state), state, first, last, (test, stub))
+    }
+
+    @Test func suiteFromTheLastEntryLandsOnTheEndOfTheEdition() async throws {
+        let (antiope, state, first, last, keepAlive) = try await makeEdition()
+        defer { withExtendedLifetime(keepAlive) {} }
+        state.selectedEntryId = first
+        #expect(await eventually { state.selectedEntry != nil })
+        #expect(!antiope.handle(.nextEntry))  // not the last entry: AppState moves on
+        #expect(state.perform(.nextEntry) && state.selectedEntryId == last)
+        #expect(antiope.handle(.nextEntry))   // the last one: FIN DE L'EDITION
+        #expect(antiope.readerPage == .endOfEdition && antiope.currentPage == 104)
+        #expect(await eventually { state.entries.first { $0.entryId == last }?.isRead == true })  // read on leaving
+        #expect(antiope.handle(.nextEntry) && antiope.handle(.advance))  // nothing after the end
+        #expect(antiope.readerPage == .endOfEdition && state.selectedEntryId == last)
+        #expect(antiope.handle(.previousEntry))  // RETOUR brings the last entry back
+        #expect(antiope.readerPage == .article && state.selectedEntryId == last)
+        // Space at the bottom of the last entry (no reader in the test: nothing left to scroll).
+        #expect(antiope.handle(.advance))
+        #expect(await eventually { antiope.readerPage == .endOfEdition })
+    }
+
+    @Test func elsewhereTheLastEntryStaysAppStates() async throws {
+        let (antiope, state, _, _, keepAlive) = try await makeEdition()
+        defer { withExtendedLifetime(keepAlive) {} }
+        state.selection = .unread
+        #expect(await eventually { state.entries.count == 2 })
+        state.selectedEntryId = state.entries.last?.entryId
+        #expect(!antiope.handle(.nextEntry) && !antiope.handle(.advance))
+        #expect(antiope.readerPage == .article)
+    }
+
+    @Test func aJumpOrAClickLeavesTheEndPage() async throws {
+        let (antiope, state, _, last, keepAlive) = try await makeEdition()
+        defer { withExtendedLifetime(keepAlive) {} }
+        state.selectedEntryId = last
+        #expect(await eventually { state.selectedEntry != nil })
+        #expect(antiope.handle(.nextEntry) && antiope.readerPage == .endOfEdition)
+        antiope.jump(to: 101)
+        #expect(antiope.readerPage == .article && state.selection == .unread)
+    }
+
+    @Test func repetitionRetriesOnlyAnEditionThatCouldNotBeBuilt() {
+        #expect(AntiopeState.retriesJournal(.offline))
+        #expect(AntiopeState.retriesJournal(.failed("Database is locked.")))
+        for phase in [JournalModel.Phase.idle, .due, .building(done: 1, total: 2)] {
+            #expect(!AntiopeState.retriesJournal(phase))
+        }
+    }
+
+    @Test func theMinitelBarShowsTheBuild() {
+        let progress = RunProgress(done: 34, total: 156, label: "")
+        #expect(MinitelBar.status(progress: progress, message: nil, journal: .building(done: 34, total: 156))?.text
+            == "EDITION IN PROGRESS 34/156")
+        #expect(MinitelBar.status(progress: progress, message: nil, journal: .building(done: 34, total: 156))?.colour
+            == .yellow)
+        #expect(MinitelBar.status(progress: progress, message: nil)?.text == "REFRESHING 34/156")
+        #expect(MinitelBar.status(progress: nil, message: "Feed #3 is buried.", journal: .building(done: 1, total: 2))?.text
+            == "Feed #3 is buried.")
+        // The header's page number "searches" during every long run; the build is one (phase 4b).
+        #expect(RunRequest.buildEdition().kind == .long)
+    }
+}
