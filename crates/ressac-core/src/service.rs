@@ -18,7 +18,7 @@ use crate::extract::{Article, ExtractError, extract_article};
 use crate::garden;
 use crate::health::links::{LinkInput, apply_similar_titles, find_duplicates};
 use crate::health::{FeedEvidence, diagnose};
-use crate::model::{Action, Diagnosis, ErrorKind, FeedId, Status, parse_ts, ts};
+use crate::model::{Action, CadenceGroup, Diagnosis, ErrorKind, FeedId, Status, parse_ts, ts};
 use crate::opml::{self, clean_description};
 use crate::parse::{
     CHALLENGE_SNIFF_BYTES, ParsedFeed, is_challenge_page, looks_like_html, parse_feed,
@@ -27,7 +27,7 @@ use crate::source::{
     FeedRef, FetchAttempt, FetchLimits, HostPacer, LocalSource, RawResponse, Source,
 };
 use crate::store::pages::{self, PageKind, PageRow};
-use crate::store::{FeedRow, ImportReport, Store};
+use crate::store::{CadenceRow, FeedRow, ImportReport, Store};
 use crate::url_key::{https_variant, url_key};
 use crate::wayback::Wayback;
 
@@ -591,6 +591,13 @@ impl Ressac {
         pages::set(self.store.conn(), kind, id, page)
     }
 
+    /// Forces a feed's rhythm group, or gives it back to the computed one (`None`); see
+    /// `Store::set_cadence_override` for the refusals. Returns the feed's row afterwards.
+    pub fn set_cadence(&self, feed_id: FeedId, group: Option<CadenceGroup>) -> Result<CadenceRow> {
+        self.store.set_cadence_override(feed_id, group)?;
+        self.store.cadence_row(feed_id)
+    }
+
     /// Status counts and safe repairs over active feeds (decisions are not considered).
     pub fn summary(&self) -> Result<Summary> {
         let diags = self.store.diagnoses()?;
@@ -1145,6 +1152,31 @@ mod tests {
         assert!(matches!(
             app.set_page(PageKind::Feed, 1, 200),
             Err(crate::Error::PageTaken { page: 200 })
+        ));
+    }
+
+    #[test]
+    fn set_cadence_goes_through_the_store_and_returns_the_row() {
+        let app = Ressac::with_parts(
+            Store::open_in_memory().unwrap(),
+            FetchLimits::default(),
+            "http://127.0.0.1:9",
+        )
+        .unwrap();
+        app.import_opml(
+            r#"<opml><body><outline text="A" xmlUrl="https://a.example.org/feed"/></body></opml>"#,
+            false,
+        )
+        .unwrap();
+        let row = app.set_cadence(1, Some(CadenceGroup::Weekly)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&row).unwrap(),
+            serde_json::json!({"feed_id": 1, "effective_group": "weekly", "computed_group": "silent", "is_override": true})
+        );
+        assert!(!app.set_cadence(1, None).unwrap().is_override);
+        assert!(matches!(
+            app.set_cadence(7, None).unwrap_err(),
+            crate::error::Error::UnknownFeed(7)
         ));
     }
 
