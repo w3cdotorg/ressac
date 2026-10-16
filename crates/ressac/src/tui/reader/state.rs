@@ -78,8 +78,6 @@ pub enum Command {
     SetStarred(i64, bool),
     MarkAllRead(Source),
     Extract(i64),
-    #[allow(dead_code, reason = "phase 6 asks for the images")]
-    FetchImage(String),
     BuildEdition,
     Refresh(Option<Source>),
     OpenUrl(String),
@@ -120,11 +118,9 @@ pub enum Event {
     Cadence(RhythmInfo),
     /// Boxed: far larger than the other variants (`clippy::large_enum_variant`).
     Entry(Box<EntryDetail>),
-    #[allow(dead_code, reason = "phase 6 answers the image commands")]
     ImageReady {
         url: String,
     },
-    #[allow(dead_code, reason = "phase 6 answers the image commands")]
     ImageFailed {
         url: String,
     },
@@ -476,7 +472,6 @@ impl ReaderState {
         vec![Command::LoadGarden]
     }
 
-    /// Entry points for other screens (Antiope page jumps, phase 9).
     pub fn go_to(&mut self, source: Source) -> Vec<Command> {
         let mut commands = self.switch_source(source);
         commands.extend(self.sync_rhythm());
@@ -605,10 +600,11 @@ impl ReaderState {
         let mut commands = self.handle_key(key);
         // A key that moves to another list or entry, without choosing a page, brings the entry
         // back over P100, P899 or `FIN DE L'EDITION`.
-        if (self.source, self.garden_view, self.selected) != before
-            && self.antiope.reader_page() == page
-        {
-            self.antiope.show(ReaderPage::Article);
+        if (self.source, self.garden_view, self.selected) != before {
+            if self.antiope.reader_page() == page {
+                self.antiope.show(ReaderPage::Article);
+            }
+            self.page_scroll = 0;
         }
         commands.extend(self.sync_rhythm());
         commands
@@ -632,9 +628,7 @@ impl ReaderState {
             dir: &self.directory,
             now: self.now.unwrap_or(DateTime::UNIX_EPOCH),
             in_text_input: self.search_editing,
-            journal_last: self
-                .journal()
-                .and_then(|view| view.items.iter().map(|item| item.rank).max()),
+            journal_last: self.last_journal_entry().map(|(_, rank)| rank),
             on_journal_entry: self.selected.filter(|_| in_journal).and_then(rank_of),
         };
         match self.antiope.on_key(key, &ctx) {
@@ -682,9 +676,16 @@ impl ReaderState {
     /// `i` in Antiope: the article's images swap between mosaics and the originals, as in the
     /// app, on an open article only.
     fn toggle_real_images(&mut self) -> Vec<Command> {
-        if self.antiope.reader_page() == ReaderPage::Article && self.selected.is_some() {
-            self.antiope_real_images = !self.antiope_real_images;
+        if self.antiope.reader_page() != ReaderPage::Article || self.selected.is_none() {
+            return Vec::new();
         }
+        // Images are off in the settings: `i` turns them on, as mosaics.
+        if !self.settings.images {
+            self.settings.images = true;
+            self.antiope_real_images = false;
+            return vec![Command::SaveSettings];
+        }
+        self.antiope_real_images = !self.antiope_real_images;
         Vec::new()
     }
 
@@ -693,10 +694,16 @@ impl ReaderState {
     /// the page, as in the app. The bound comes from the last draw (the page's rows and the
     /// rows visible).
     fn scroll_page(&mut self, code: KeyCode) -> bool {
-        if !matches!(
+        let chosen = matches!(
             self.antiope.reader_page(),
             ReaderPage::Sommaire | ReaderPage::Guide
-        ) {
+        );
+        // With no entry open the reader shows P100 as well: it scrolls too, but its bottom and
+        // top hand the keys back (`j` then opens the first entry).
+        let fallback = self.antiope.reader_page() == ReaderPage::Article
+            && self.selected.is_none()
+            && self.garden_view.is_none();
+        if !chosen && !fallback {
             return false;
         }
         let arrows = self.focus() != Column::Sources;
@@ -708,6 +715,9 @@ impl ReaderState {
                 if code != KeyCode::Down || arrows =>
             {
                 if self.page_scroll >= max {
+                    if fallback {
+                        return false;
+                    }
                     self.antiope.show(ReaderPage::Article);
                     self.page_scroll = 0;
                 } else {
@@ -716,6 +726,9 @@ impl ReaderState {
                 }
             }
             KeyCode::Char('k') | KeyCode::Up if code != KeyCode::Up || arrows => {
+                if fallback && self.page_scroll == 0 {
+                    return false;
+                }
                 self.page_scroll = self.page_scroll.saturating_sub(1);
             }
             _ => return false,
@@ -1253,15 +1266,19 @@ impl ReaderState {
         Vec::new()
     }
 
+    /// The Journal's last entry by rank (its id and rank), while the Journal is the page in view.
+    fn last_journal_entry(&self) -> Option<(i64, u32)> {
+        if self.source != Source::Journal || self.garden_view.is_some() {
+            return None;
+        }
+        let last = self.journal()?.items.iter().max_by_key(|item| item.rank)?;
+        Some((last.row.entry_id, last.rank))
+    }
+
     /// The Journal's last entry by rank is the one open in the reader.
     fn on_last_journal_entry(&self) -> bool {
-        let (Some(view), Some(id)) = (self.journal.as_ref(), self.selected) else {
-            return false;
-        };
-        let last = view.items.iter().max_by_key(|item| item.rank);
-        self.source == Source::Journal
-            && self.garden_view.is_none()
-            && last.is_some_and(|item| item.row.entry_id == id)
+        self.last_journal_entry()
+            .is_some_and(|(id, _)| self.selected == Some(id))
     }
 
     fn focus_right(&mut self, wrap: bool) -> Vec<Command> {

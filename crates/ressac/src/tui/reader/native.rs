@@ -3,20 +3,17 @@
 //! article's measured height goes back to the loop as `ReaderMetrics`. Dates come from the
 //! state's local clock, never from the machine's.
 
-use std::collections::HashMap;
-
 use chrono::{DateTime, FixedOffset, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui_image::StatefulImage;
-use ratatui_image::protocol::StatefulProtocol;
 use ressac_core::store::{EntryDetail, EntryRow, ListFilter};
 
-use super::html::{ImageRef, MAX_TEXT_WIDTH};
-use super::images::{ImageState, ImageStore, Variant};
+use super::article::{BodyLook, draw_body};
+use super::html::MAX_TEXT_WIDTH;
+use super::images::{ImageStore, Variant};
 use super::journal::{self, JournalLine};
 use super::layout::{Column, LayoutClass, columns};
 use super::state::{RHYTHM_CHOICES, ReaderState, ReaderView, SourceLine, group_label};
@@ -417,17 +414,6 @@ pub(super) fn short_date(at: DateTime<Utc>, now: DateTime<FixedOffset>) -> Strin
     }
 }
 
-/// What one article line becomes on screen.
-enum Piece<'a> {
-    /// The line as `render_html` made it (also `[image: alt text]` for a failed image or with
-    /// images off).
-    Text(&'a Line<'static>),
-    /// An image that is on its way: one placeholder row.
-    Loading,
-    /// A decoded image, drawn in the rows reserved for it.
-    Image { url: &'a str },
-}
-
 fn render_reader(
     frame: &mut Frame,
     view: &ReaderView<'_>,
@@ -466,61 +452,25 @@ fn render_reader(
             ..header_area
         },
     );
-    // `render_html` already ends the article with its numbered links list. Each line is one
-    // block; an image's placeholder line grows into the rows of the picture (at most half the
-    // body), so scrolling is in screen rows.
-    let viewport = usize::from(body_area.height);
-    let max_image_rows = (body_area.height / 2).max(1);
-    let show_images = view.images && images.enabled();
-    let at_line: HashMap<usize, &ImageRef> = article.images.iter().map(|i| (i.line, i)).collect();
-    let scroll = view.reader_scroll;
-    let mut top = 0usize;
-    for (index, line) in article.lines.iter().enumerate() {
-        let (piece, rows) = match at_line.get(&index) {
-            Some(image) if show_images => match images.state_of(&image.url) {
-                ImageState::Ready => {
-                    let rows = images.rows_for(&image.url, Variant::Native, width, max_image_rows);
-                    (Piece::Image { url: &image.url }, usize::from(rows))
-                }
-                ImageState::Failed => (Piece::Text(line), 1),
-                ImageState::Absent | ImageState::Loading => {
-                    // Lazy loading: from one viewport above to two below the visible rows.
-                    if top + viewport >= scroll && top <= scroll + 2 * viewport {
-                        images.want(&image.url);
-                    }
-                    (Piece::Loading, 1)
-                }
-            },
-            _ => (Piece::Text(line), 1),
-        };
-        // A picture cannot be cut: only blocks wholly inside the viewport are drawn.
-        if top >= scroll && top + rows <= scroll + viewport {
-            let place = Rect {
-                x: body_area.x,
-                y: body_area.y + u16::try_from(top - scroll).unwrap_or(u16::MAX),
-                width,
-                height: u16::try_from(rows).unwrap_or(u16::MAX),
-            };
-            match piece {
-                Piece::Text(line) => frame.render_widget(Paragraph::new(line.clone()), place),
-                Piece::Loading => {
-                    frame.render_widget(Paragraph::new(Span::styled(LOADING_IMAGE, DIM)), place);
-                }
-                Piece::Image { url, .. } => {
-                    if let Some(protocol) = images.protocol(url, Variant::Native) {
-                        frame.render_stateful_widget(
-                            StatefulImage::<StatefulProtocol>::default(),
-                            place,
-                            protocol,
-                        );
-                    }
-                }
-            }
-        }
-        top += rows;
-    }
+    // `render_html` already ends the article with its numbered links list.
+    let total_rows = draw_body(
+        frame,
+        Rect { width, ..body_area },
+        article,
+        view.images,
+        view.reader_scroll,
+        images,
+        &BodyLook {
+            variant: Variant::Native,
+            text_width: width,
+            image_width: width,
+            paint_line: &|line| line.clone(),
+            loading: Line::from(Span::styled(LOADING_IMAGE, DIM)),
+            after_image: &|_, _| {},
+        },
+    );
     ReaderMetrics {
-        total_rows: top,
+        total_rows,
         viewport_rows: body_area.height,
     }
 }
@@ -614,6 +564,7 @@ fn render_rhythm(frame: &mut Frame, area: Rect, choice: usize, current: Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::reader::images::ImageState;
     use crate::tui::reader::layout::Look;
     use crate::tui::reader::settings::TerminalSettings;
     use crate::tui::reader::state::GardenView;

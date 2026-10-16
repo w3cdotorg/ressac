@@ -9,16 +9,15 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
-use ratatui_image::StatefulImage;
-use ratatui_image::protocol::StatefulProtocol;
 use ressac_core::edition::Section;
 use ressac_core::garden::GardenRow;
 use ressac_core::model::{Action, Decision, Remark};
 use ressac_core::store::pages::PageKind;
 use ressac_core::store::{EditionOverflowRow, JournalView};
 
-use super::html::{ImageRef, MAX_TEXT_WIDTH, RenderedArticle, is_web_url};
-use super::images::{ImageState, ImageStore, Variant, snap_to_teletext};
+use super::article::{BodyLook, draw_body};
+use super::html::{MAX_TEXT_WIDTH, is_web_url};
+use super::images::{ImageStore, Variant, snap_to_teletext};
 use super::journal::{self, BUILDING, JournalLine, JournalPhase};
 use super::layout::{Column, LayoutClass, Look, columns};
 use super::native::{EXTRACT_PROGRESS_LABEL, LOADING_IMAGE, ReaderMetrics, short_date};
@@ -1498,99 +1497,6 @@ fn subpage(view: &ReaderView<'_>, dir: &PageDirectory) -> Option<String> {
     Some(subpage_label(page, position, total))
 }
 
-/// What one article line becomes on screen.
-enum Piece<'a> {
-    /// The line as `render_html` made it (also `[image: alt text]` for a failed image or with
-    /// images off).
-    Text(&'a Line<'static>),
-    /// An image that is on its way: one placeholder row.
-    Loading,
-    /// A decoded image, drawn in the rows reserved for it.
-    Image { url: &'a str },
-}
-
-/// The article's lines in `area` from `view.reader_scroll`, an image's placeholder line grown
-/// into the rows of its picture (at most half the area), so scrolling is in screen rows. Returns
-/// the article's height in rows.
-fn article_body(
-    frame: &mut Frame,
-    area: Rect,
-    article: &RenderedArticle,
-    view: &ReaderView<'_>,
-    images: &mut ImageStore,
-    variant: Variant,
-) -> usize {
-    let width = usize::from(area.width);
-    let image_width = area.width.min(MAX_TEXT_WIDTH);
-    let viewport = usize::from(area.height);
-    let max_image_rows = (area.height / 2).max(1);
-    let show_images = view.images && images.enabled();
-    let at_line: std::collections::HashMap<usize, &ImageRef> =
-        article.images.iter().map(|i| (i.line, i)).collect();
-    let scroll = view.reader_scroll;
-    let mut top = 0usize;
-    for (index, line) in article.lines.iter().enumerate() {
-        let (piece, rows) = match at_line.get(&index) {
-            Some(image) if show_images => match images.state_of(&image.url) {
-                ImageState::Ready => {
-                    let rows = images.rows_for(&image.url, variant, image_width, max_image_rows);
-                    (Piece::Image { url: &image.url }, usize::from(rows))
-                }
-                ImageState::Failed => (Piece::Text(line), 1),
-                ImageState::Absent | ImageState::Loading => {
-                    // Lazy loading: from one viewport above to two below the visible rows.
-                    if top + viewport >= scroll && top <= scroll + 2 * viewport {
-                        images.want(&image.url);
-                    }
-                    (Piece::Loading, 1)
-                }
-            },
-            _ => (Piece::Text(line), 1),
-        };
-        // A picture cannot be cut: only blocks wholly inside the viewport are drawn.
-        if top >= scroll && top + rows <= scroll + viewport {
-            let place = Rect {
-                x: area.x,
-                y: area.y + u16::try_from(top - scroll).unwrap_or(u16::MAX),
-                width: area.width,
-                height: u16::try_from(rows).unwrap_or(u16::MAX),
-            };
-            match piece {
-                Piece::Text(line) => {
-                    frame.render_widget(Paragraph::new(prose_row(line, width)), place);
-                }
-                Piece::Loading => {
-                    let text = row(vec![span(
-                        &LOADING_IMAGE.to_uppercase(),
-                        width,
-                        Tt::White,
-                        Tt::Black,
-                    )]);
-                    frame.render_widget(Paragraph::new(text), place);
-                }
-                Piece::Image { url } => {
-                    let place = Rect {
-                        width: image_width,
-                        ..place
-                    };
-                    if let Some(protocol) = images.protocol(url, variant) {
-                        frame.render_stateful_widget(
-                            StatefulImage::<StatefulProtocol>::default(),
-                            place,
-                            protocol,
-                        );
-                        if variant == Variant::Teletext {
-                            snap_to_teletext(frame.buffer_mut(), place);
-                        }
-                    }
-                }
-            }
-        }
-        top += rows;
-    }
-    top
-}
-
 /// The reader column: P100, P899, `FIN DE L'EDITION`, a garden page's inspector, or the article
 /// under its sub-page line. With no entry to show it is P100, the page a Minitel starts on.
 fn reader_column(
@@ -1662,7 +1568,32 @@ fn reader_column(
             } else {
                 Variant::Teletext
             };
-            let total_rows = article_body(frame, body, article, view, images, variant);
+            let width16 = area.width;
+            let total_rows = draw_body(
+                frame,
+                body,
+                article,
+                view.images,
+                view.reader_scroll,
+                images,
+                &BodyLook {
+                    variant,
+                    text_width: width16,
+                    image_width: width16.min(MAX_TEXT_WIDTH),
+                    paint_line: &|line| prose_row(line, width),
+                    loading: row(vec![span(
+                        &LOADING_IMAGE.to_uppercase(),
+                        width,
+                        Tt::White,
+                        Tt::Black,
+                    )]),
+                    after_image: &|frame, place| {
+                        if variant == Variant::Teletext {
+                            snap_to_teletext(frame.buffer_mut(), place);
+                        }
+                    },
+                },
+            );
             ReaderMetrics {
                 total_rows,
                 viewport_rows: body.height,
@@ -1679,7 +1610,7 @@ fn reader_column(
                 viewport_rows: area.height,
             }
         }
-        _ => whole(frame, sommaire_lines(dir, width), false),
+        _ => whole(frame, sommaire_lines(dir, width), true),
     }
 }
 
@@ -3120,5 +3051,76 @@ mod tests {
         type_page(&mut state, "400");
         assert_eq!(state.source(), Source::Folder(4));
         assert!(row_text(&draw_terminal(&state, 140, 34), 0).starts_with("P400 RESSAC"));
+    }
+
+    #[test]
+    fn the_p100_fallback_scrolls_and_hands_the_keys_back_at_its_ends() {
+        let mut pages = sample_pages();
+        for n in 0..60u16 {
+            pages.push(ressac_core::store::pages::PageRow {
+                page: 500 + n,
+                kind: PageKind::Feed,
+                id: Some(1000 + i64::from(n)),
+                title: format!("Feed {n}"),
+                parent_page: None,
+            });
+        }
+        // No entry is open: the reader shows P100 on a short pane.
+        let mut state = antiope_state(140, 20);
+        state.on_event(Event::Pages(pages));
+        let mut terminal = Terminal::new(TestBackend::new(140, 20)).unwrap();
+        let mut frame = |state: &mut ReaderState| {
+            let mut m = ReaderMetrics::default();
+            terminal
+                .draw(|f| {
+                    m = render_at(
+                        f,
+                        state,
+                        &mut ImageStore::disabled(),
+                        local(18, 33, 12),
+                        state.now,
+                    );
+                })
+                .unwrap();
+            state.set_reader_metrics(m.total_rows, m.viewport_rows);
+            terminal.backend().to_string()
+        };
+        assert!(!frame(&mut state).contains("Feed 59"));
+        let mut presses = 0;
+        while !frame(&mut state).contains("Feed 59") {
+            assert!(press(&mut state, KeyCode::Char(' ')).is_empty());
+            presses += 1;
+            assert!(presses < 6, "the last line is reachable");
+        }
+        assert!(state.page_scroll > 0);
+        // At the bottom the key is the list's again: it opens the first entry.
+        state.on_event(Event::Entries {
+            source: Source::Journal,
+            page: EntryPage {
+                total: 1,
+                unread: 1,
+                rows: vec![entry(11, "Un", false)],
+                next: None,
+            },
+            appended: false,
+            request: state.request,
+        });
+        state.selected = None;
+        let commands = press(&mut state, KeyCode::Char('j'));
+        assert!(commands.contains(&Command::LoadEntry(11)), "{commands:?}");
+        assert_eq!(state.page_scroll, 0, "a new entry starts the page over");
+    }
+
+    #[test]
+    fn i_with_images_off_turns_them_on_as_mosaics() {
+        let mut state = reading_state(140, 30, rows());
+        assert!(!state.settings.images);
+        assert_eq!(
+            press(&mut state, KeyCode::Char('i')),
+            [Command::SaveSettings]
+        );
+        assert!(state.settings.images && !state.antiope_real_images);
+        assert!(press(&mut state, KeyCode::Char('i')).is_empty());
+        assert!(state.antiope_real_images);
     }
 }

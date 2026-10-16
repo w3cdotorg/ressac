@@ -215,6 +215,15 @@ impl AntiopeNav {
         let plain = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        // Any key that is not part of a page number abandons the digits typed so far.
+        let part_of_a_number = match key.code {
+            KeyCode::Char(c) => plain && (c.is_ascii_digit() || c == 'S' || c == '?'),
+            KeyCode::Backspace | KeyCode::Esc => true,
+            _ => false,
+        };
+        if !part_of_a_number {
+            self.digits.clear();
+        }
         match key.code {
             KeyCode::Char(c) if c.is_ascii_digit() && plain => {
                 self.not_found = None;
@@ -662,6 +671,23 @@ pub(crate) mod tests {
             NavOutcome::BackToLastEntry
         );
         assert_eq!(nav.reader_page(), ReaderPage::Article);
+    }
+
+    #[test]
+    fn a_key_that_is_not_part_of_a_number_abandons_the_digits() {
+        let dir = PageDirectory::new(&sample_pages(), None);
+        let mut nav = AntiopeNav::default();
+        type_digits(&mut nav, &dir, "4");
+        assert_eq!(
+            nav.on_key(key(KeyCode::Char('j')), &ctx(&dir)),
+            NavOutcome::Unhandled
+        );
+        assert_eq!(nav.typing(), None);
+        // The next digits start a fresh number.
+        assert_eq!(
+            type_digits(&mut nav, &dir, "412"),
+            NavOutcome::Jump(PageDestination::Source(Source::Feed(12)))
+        );
     }
 
     #[test]

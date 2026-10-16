@@ -1,6 +1,7 @@
 //! `ressac read`: the reader's event loop. The state decides, this module executes.
 
 pub mod antiope;
+pub mod article;
 pub mod html;
 pub mod images;
 pub mod jobs;
@@ -340,8 +341,6 @@ impl<'a> Executor<'a> {
                 };
                 garden_events(store, today, Some(message))
             }
-            // The loop handles `FetchImage` itself (the image store owns those threads).
-            Command::FetchImage(_) => Ok(Vec::new()),
             // Both are handled by the loop itself (it owns the settings path and the exit).
             Command::SaveSettings | Command::Quit => Ok(Vec::new()),
         };
@@ -523,8 +522,6 @@ fn event_loop(
                     // Never blocks reading: an unwritable file only forgets the choice.
                     let _ = state.settings.save(settings_path);
                 }
-                // Not a long job: its own thread and its own queue, the long-job slot stays free.
-                Command::FetchImage(url) => images.fetch(db, url),
                 other => {
                     for event in exec.run(other, Clock::system()) {
                         // Its own writes do not move `data_version`: their `DataChanged` is here.
