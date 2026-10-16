@@ -48,10 +48,6 @@ impl Section {
     }
 
     /// The inverse of `as_str`, for the `section` columns.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by store::edition in sub-phase 2b")
-    )]
     pub(crate) fn parse(s: &str) -> Option<Section> {
         match s {
             "front" => Some(Section::Front),

@@ -8,6 +8,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::error::{Error, Result};
 
 mod decisions;
+mod edition;
 mod feeds;
 mod fetch;
 mod health;
@@ -15,6 +16,7 @@ pub mod pages;
 mod reading;
 
 pub use decisions::{DecisionRecord, FeedSnapshot};
+pub use edition::{EditionEntryRow, EditionOverflowRow, EditionParams, EditionRecord, EditionView};
 pub use feeds::{CadenceRow, FeedRow, FolderRow, ImportReport};
 pub use fetch::{AttemptRecord, BACKLOG_DAYS, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
 pub use health::TriageFacts;
