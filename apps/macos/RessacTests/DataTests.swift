@@ -6,10 +6,10 @@ import Testing
 
 // MARK: - Test database
 
-/// A private copy of `tests/fixtures/contract.sqlite` reduced to its schema (v3) and the
+/// A private copy of `tests/fixtures/contract.sqlite` reduced to its schema (v4) and the
 /// 7 folders and 11 feeds of `vienna-like.opml`, all active, with the page numbers the core
-/// gave them: entries, full texts, diagnoses, fetch logs and decisions are cleared, so each
-/// test seeds what it asserts on.
+/// gave them: entries, full texts, diagnoses, fetch logs, decisions, editions and rhythm
+/// overrides are cleared, so each test seeds what it asserts on.
 final class TestDatabase: Sendable {
     static let repoRoot = URL(filePath: #filePath)
         .deletingLastPathComponent()  // RessacTests
@@ -30,9 +30,10 @@ final class TestDatabase: Sendable {
         raw = try DatabaseQueue(path: url.path)
         try raw.write { db in
             try db.execute(sql: """
+                DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;
                 DELETE FROM entry_fts; DELETE FROM entry_fulltext; DELETE FROM entry;
                 DELETE FROM feed_health; DELETE FROM fetch_log; DELETE FROM garden_decision;
-                UPDATE feed SET state = 'active', merged_into_id = NULL, prefer_full_text = 0;
+                UPDATE feed SET state = 'active', merged_into_id = NULL, prefer_full_text = 0, cadence_override = NULL;
                 """)
         }
     }
@@ -117,23 +118,29 @@ final class TestDatabase: Sendable {
 
     @Test func newer_database_is_refused() throws {
         let test = try TestDatabase()
-        try test.execute("UPDATE schema_meta SET version = 4")
-        #expect(try AppDatabase.check(at: test.url) == .tooNew(4))
+        try test.execute("UPDATE schema_meta SET version = 5")
+        #expect(try AppDatabase.check(at: test.url) == .tooNew(5))
     }
 
-    /// Review Focus #3: a database the v3 core migrated, opened by an app that knows v2,
-    /// gets "This database was created by a newer Ressac" (`SchemaCheck.tooNew`).
-    @Test func an_older_app_refuses_a_v3_database() throws {
+    /// Review Focus #3 of sub-project 4, carried to v4: a database the v4 core migrated, opened
+    /// by an app that knows v3, gets "This database was created by a newer Ressac".
+    @Test func an_older_app_refuses_a_v4_database() throws {
         let test = try TestDatabase()
-        #expect(AppDatabase.knownSchemaVersion == 3)
-        #expect(try AppDatabase.schemaVersion(at: test.url) == 3)
-        #expect(try AppDatabase.check(at: test.url, known: 2) == .tooNew(3))
-        #expect(try AppDatabase.check(at: test.url, known: 3) == .ok)
-        #expect(try AppDatabase.check(at: test.url, known: 4) == .needsMigration(3))
+        #expect(AppDatabase.knownSchemaVersion == 4)
+        #expect(try AppDatabase.schemaVersion(at: test.url) == 4)
+        #expect(try AppDatabase.check(at: test.url, known: 3) == .tooNew(4))
+        #expect(try AppDatabase.check(at: test.url, known: 4) == .ok)
+        #expect(try AppDatabase.check(at: test.url, known: 5) == .needsMigration(4))
         #expect(try AppDatabase.check(at: test.dir.appending(path: "nope.sqlite"), known: 2) == .missing)
     }
 
-    /// Every database made before this sub-project is at v2: the app runs `ressac migrate` first.
+    /// Every database made before this sub-project is at v3: the app runs `ressac migrate` first.
+    @Test func a_v3_database_requests_migration() throws {
+        let test = try TestDatabase()
+        try test.execute("UPDATE schema_meta SET version = 3")
+        #expect(try AppDatabase.check(at: test.url) == .needsMigration(3))
+    }
+
     @Test func a_v2_database_requests_migration() throws {
         let test = try TestDatabase()
         try test.execute("UPDATE schema_meta SET version = 2")

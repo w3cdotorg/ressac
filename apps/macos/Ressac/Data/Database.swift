@@ -6,8 +6,9 @@ import GRDB
 /// The schema belongs to the Rust core: the app never migrates it itself, it runs
 /// `ressac migrate` when `check(at:)` says so.
 final class AppDatabase: Sendable {
-    /// Schema version this build understands (`schema_meta.version`): v3 adds page numbers.
-    static let knownSchemaVersion = 3
+    /// Schema version this build understands (`schema_meta.version`): v3 adds page numbers,
+    /// v4 the rhythm groups and the morning edition.
+    static let knownSchemaVersion = 4
 
     enum SchemaCheck: Equatable, Sendable {
         case missing
