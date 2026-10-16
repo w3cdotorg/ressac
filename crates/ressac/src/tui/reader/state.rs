@@ -223,6 +223,8 @@ pub struct ReaderState {
     /// The special page Antiope shows in the reader column (100 SOMMAIRE, 899 GUIDE); `None` is
     /// the selected entry. Antiope's page navigation (phase 9b) is what sets it.
     pub antiope_page: Option<u16>,
+    /// First row of the GUIDE shown by the help overlay in Antiope.
+    pub guide_scroll: usize,
     pub sidebar: Vec<SidebarRow>,
     pub sidebar_index: usize,
     pub entries: Vec<EntryRow>,
@@ -363,6 +365,7 @@ impl ReaderState {
             sources: None,
             pages: Vec::new(),
             antiope_page: None,
+            guide_scroll: 0,
             sidebar: Vec::new(),
             sidebar_index: 0,
             entries: Vec::new(),
@@ -624,6 +627,22 @@ impl ReaderState {
         commands
     }
 
+    /// A scroll key of the GUIDE: one row for the arrows and `j`/`k`, a page for Space. The
+    /// bound comes from the last draw's metrics (the GUIDE's rows and the rows visible).
+    fn scroll_guide(&mut self, code: KeyCode) -> bool {
+        let (total, viewport) = self.metrics.unwrap_or((0, 1));
+        let max = total.saturating_sub(usize::from(viewport));
+        let page = usize::from(viewport).saturating_sub(1).max(1);
+        self.guide_scroll = match code {
+            KeyCode::Down | KeyCode::Char('j') => self.guide_scroll + 1,
+            KeyCode::Char(' ') => self.guide_scroll + page,
+            KeyCode::Up | KeyCode::Char('k') => self.guide_scroll.saturating_sub(1),
+            _ => return false,
+        }
+        .min(max);
+        true
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Command> {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return vec![Command::Quit];
@@ -633,7 +652,13 @@ impl ReaderState {
         }
         match self.overlay {
             Overlay::Help => {
+                // Antiope shows the GUIDE (P899), taller than a short pane: these keys scroll it,
+                // any other closes it.
+                if self.look() == Look::Antiope && self.scroll_guide(key.code) {
+                    return Vec::new();
+                }
                 self.overlay = Overlay::None;
+                self.guide_scroll = 0;
                 return Vec::new();
             }
             Overlay::LinkPrompt => return self.on_link_key(key.code),
@@ -651,6 +676,7 @@ impl ReaderState {
             KeyCode::Char('q') => vec![Command::Quit],
             KeyCode::Char('?') => {
                 self.overlay = Overlay::Help;
+                self.guide_scroll = 0;
                 Vec::new()
             }
             KeyCode::Char('t') => {

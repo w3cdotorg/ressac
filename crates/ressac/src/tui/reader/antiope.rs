@@ -202,12 +202,12 @@ impl MinitelHint {
         let (text, colour) = if !search.is_empty() {
             (format!("SEARCH: {search}"), Tt::Cyan)
         } else if is_garden {
-            ("k keep · r repair · b bury · u undo".to_string(), Tt::White)
+            ("K KEEP · R REPAIR · B BURY · U UNDO".to_string(), Tt::White)
         } else {
             let t = match column {
-                Column::Sources => "type a page number · ? guide",
-                Column::Entries => "j next · k previous · m read",
-                Column::Reader => "m read · s star · i images · o links",
+                Column::Sources => "TYPE A PAGE NUMBER · ? GUIDE",
+                Column::Entries => "J NEXT · K PREVIOUS · M READ",
+                Column::Reader => "M READ · S STAR · I IMAGES · O LINKS",
             };
             (t.to_string(), Tt::White)
         };
@@ -266,7 +266,7 @@ pub fn minitel_bar(hint: &MinitelHint, width: usize) -> Line<'static> {
     let hint_cells = Span::raw(hint.text.as_str()).width() + 1;
     if hint.urgent && keys_cells() + hint_cells > width {
         return row(vec![span(
-            &format!(" {}", hint.text),
+            &format!(" {}", words_within(&hint.text, width.saturating_sub(1))),
             width,
             hint.colour,
             Tt::Black,
@@ -284,12 +284,41 @@ pub fn minitel_bar(hint: &MinitelHint, width: usize) -> Line<'static> {
         remaining -= gap;
     }
     spans.push(span(
-        &format!(" {}", hint.text),
+        &format!(" {}", words_within(&hint.text, remaining.saturating_sub(1))),
         remaining,
         hint.colour,
         Tt::Black,
     ));
     row(spans)
+}
+
+/// `text` cut to at most `cells` display cells: whole ` · ` segments when it has any and one
+/// fits, else at a word. One word wider than `cells` is cut where it must.
+pub fn words_within(text: &str, cells: usize) -> String {
+    if Span::raw(text).width() <= cells {
+        return text.to_string();
+    }
+    let mut kept = String::new();
+    for segment in text.split(" · ") {
+        let next = if kept.is_empty() {
+            segment.to_string()
+        } else {
+            format!("{kept} · {segment}")
+        };
+        if Span::raw(next.as_str()).width() > cells {
+            break;
+        }
+        kept = next;
+    }
+    if !kept.is_empty() {
+        return kept;
+    }
+    let cut = fit(text, cells);
+    let whole = text[cut.trim_end().len()..].starts_with(' ');
+    match cut.trim_end().rfind(' ') {
+        Some(i) if !whole => cut[..i].trim_end().to_string(),
+        _ => cut.trim_end().to_string(),
+    }
 }
 
 /// What the Minitel bar says: the rhythm menu's keys, the search prompt, a message, a running job
@@ -303,7 +332,7 @@ fn bar_hint(state: &ReaderState, view: &ReaderView<'_>) -> MinitelHint {
         return MinitelHint::urgent(format!("SEARCH? {text}_"), Tt::Cyan);
     }
     if let Some(message) = view.message {
-        return MinitelHint::urgent(printable(message).into_owned(), Tt::Yellow);
+        return MinitelHint::urgent(printable(message).to_uppercase(), Tt::Yellow);
     }
     let edition = view.progress.is_some_and(|(label, _, _)| label == BUILDING);
     MinitelHint::status(view.progress, edition).unwrap_or_else(|| {
@@ -749,7 +778,9 @@ fn reader_column(
     let height = usize::from(area.height);
     let special = |frame: &mut Frame, lines: Vec<Line<'static>>| {
         // The scroll is the article's: a special page follows it only once it was chosen as a page.
-        let top = if state.antiope_page.is_some() {
+        let top = if view.help {
+            state.guide_scroll.min(lines.len().saturating_sub(height))
+        } else if state.antiope_page.is_some() {
             state.scroll.min(lines.len().saturating_sub(height))
         } else {
             0
@@ -885,6 +916,7 @@ mod tests {
         assert!(!blue_allowed("TEXT"));
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "blue never colours text")]
     fn blue_text_is_refused_in_debug() {
@@ -1271,6 +1303,7 @@ mod tests {
                 for x in 0..140 {
                     let cell = &buffer[(x, y)];
                     assert!(palette.contains(&cell.bg), "bg at {x},{y}: {:?}", cell.bg);
+                    assert!(palette.contains(&cell.fg), "fg at {x},{y}: {:?}", cell.fg);
                     if cell.fg == Tt::Blue.color() {
                         assert!(
                             blue_allowed(cell.symbol()),
@@ -1374,7 +1407,7 @@ mod tests {
         assert!(row_text(&draw_terminal(&state, 140, 30), 29).contains("SEARCH: x"));
         let mut prompt = reading_state(140, 30, rows());
         prompt.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        assert!(row_text(&draw_terminal(&prompt, 140, 30), 29).contains("Open: Enter"));
+        assert!(row_text(&draw_terminal(&prompt, 140, 30), 29).contains("OPEN: ENTER"));
     }
 
     #[test]
@@ -1444,5 +1477,86 @@ mod tests {
             (1..19).any(|y| row_text(&terminal, y).starts_with("412 ")),
             "the selected page stays on screen"
         );
+    }
+
+    #[test]
+    fn the_guide_is_reachable_on_a_short_pane() {
+        let mut state = reading_state(140, 30, rows());
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        let mut frame = |state: &mut ReaderState| {
+            let mut m = ReaderMetrics::default();
+            terminal
+                .draw(|f| m = render_at(f, state, local(18, 33, 12), state.now))
+                .unwrap();
+            state.set_reader_metrics(m.total_rows, m.viewport_rows);
+            terminal.backend().to_string()
+        };
+        state.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let first = frame(&mut state);
+        assert!(
+            first.contains("PAGES") && !first.contains("NATIVE or ANTIOPE"),
+            "{first}"
+        );
+        for _ in 0..4 {
+            state.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+            frame(&mut state);
+        }
+        let last = frame(&mut state);
+        assert!(
+            last.contains("NATIVE or ANTIOPE") && last.contains("quit"),
+            "{last}"
+        );
+        // Up scrolls back; any other key closes and resets.
+        state.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert!(state.guide_scroll > 0);
+        state.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(state.guide_scroll, 0);
+        assert!(!frame(&mut state).contains("NATIVE or ANTIOPE"));
+    }
+
+    #[test]
+    fn a_tick_moves_the_header_clock_through_production_render() {
+        use crate::tui::reader::images::ImageStore;
+        let mut state = reading_state(140, 30, rows());
+        let top = |state: &ReaderState| {
+            let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+            terminal
+                .draw(|f| {
+                    render(f, state, &mut ImageStore::disabled());
+                })
+                .unwrap();
+            row_text(&terminal, 0)
+        };
+        assert!(top(&state).ends_with("FRI 16 OCT 18:33:12"));
+        state.on_event(Event::Tick {
+            now: Utc.with_ymd_and_hms(2026, 10, 16, 16, 33, 13).unwrap(),
+            local: local(18, 33, 13),
+        });
+        assert!(top(&state).ends_with("FRI 16 OCT 18:33:13"));
+    }
+
+    #[test]
+    fn hints_are_capitals_and_cut_at_a_word() {
+        assert_eq!(
+            words_within("J NEXT · K PREVIOUS · M READ", 40),
+            "J NEXT · K PREVIOUS · M READ"
+        );
+        assert_eq!(
+            words_within("J NEXT · K PREVIOUS · M READ", 21),
+            "J NEXT · K PREVIOUS"
+        );
+        assert_eq!(words_within("J NEXT · K PREVIOUS · M READ", 14), "J NEXT");
+        assert_eq!(words_within("ABCDEFGHIJ", 4), "ABCD");
+        let line = minitel_bar(&MinitelHint::keys(Column::Entries, false, ""), 60);
+        assert_eq!(line.width(), 60);
+        assert!(
+            text(&line).trim_end().ends_with("J NEXT"),
+            "{}",
+            text(&line)
+        );
+        for column in [Column::Sources, Column::Entries, Column::Reader] {
+            let h = MinitelHint::keys(column, false, "").text;
+            assert_eq!(h, h.to_uppercase());
+        }
     }
 }
