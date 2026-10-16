@@ -31,10 +31,13 @@ Each (sub-)phase touches **at most 5 files, test files and snapshot files exclud
 | 8 | 5b | `terminal-reading/phase-05-native-loop.md` | `tui/reader/mod.rs`: event loop, jobs, `data_version` polling, `ressac read` |
 | 9 | 6 | `terminal-reading/phase-06-images.md` | `tui/reader/images.rs`: picker after init, cache, half-blocks, teletext quantisation, dependencies |
 | 10 | 7 | `terminal-reading/phase-07-journal.md` | Journal view, edition build at launch and at 04:00, offline/refused/failed states |
-| 11 | 8 | `terminal-reading/phase-08-garden-entry.md` | Garden as a reader screen, `c` rhythm menu, `ressac` with no subcommand |
-| 12 | 9a | `terminal-reading/phase-09-antiope.md` | `tui/reader/antiope.rs`: palette, header clock, Minitel bar, columns, pages, P100/P899 |
-| 13 | 9b | `terminal-reading/phase-09-antiope.md` | Page entry, P104 sub-pages, FIN DE L'EDITION, P105–P109, P800–P802, Antiope images |
-| 14 | 10 | `terminal-reading/phase-10-acceptance-docs.md` | Manual check (spec §10), README, `notes.md`, `TODO.md`, push, PR, merge |
+| 11 | 8a | `terminal-reading/phase-08-garden-entry.md` | Step 0 on `tui/state.rs` and `tui/ui.rs`; garden filters `All`, `Cemetery`; `ui::render_in`; `tui::apply_garden_command` |
+| 12 | 8b | `terminal-reading/phase-08-garden-entry.md` | `GardenView` destinations in the reader, garden keys winning, garden lines in the sources column |
+| 13 | 8c | `terminal-reading/phase-08-garden-entry.md` | `rhythm.rs` (`RhythmInfo` from `CadenceDetail`, `rhythm_text`), `c` binds 4b's rhythm overlay on garden pages |
+| 14 | 8d | `terminal-reading/phase-08-garden-entry.md` | `Cli.command: Option<Command>`, bare `ressac` opens the reader |
+| 15 | 9a | `terminal-reading/phase-09-antiope.md` | `tui/reader/antiope.rs` (palette, header clock, Minitel bar, columns, P100/P899), `tui/reader/pages.rs` (page directory), the page list loaded (`Command::LoadPages`, `Event::Pages`) |
+| 16 | 9b | `terminal-reading/phase-09-antiope.md` | Page entry, P104 sub-pages, FIN DE L'EDITION, P105–P109, P800–P802, Antiope images |
+| 17 | 10 | `terminal-reading/phase-10-acceptance-docs.md` | Manual check (spec §10), README, `notes.md`, `TODO.md`, push, PR, merge |
 
 ## Global Constraints
 
@@ -64,7 +67,7 @@ Each (sub-)phase touches **at most 5 files, test files and snapshot files exclud
 2. **Ressac.app marks entries read while the reader shows the same list:** within one poll (2 s) the reader's list and counts follow, and the selection does not jump. Phase 1b (`data_version` changes after a write from another connection) and phase 5b (state test: `DataChanged` reload keeps the selected entry id).
 3. **The pane is resized from 140 to 70 columns while an article is open, then back:** the reader stays on the same entry and scroll position, the column focus moves sensibly (reader stays the visible column). Phase 4a/4b (layout and state tests).
 4. **An image URL that redirects to a private address, answers HTML, is 50 MB, or decodes to 20 000 × 20 000:** refused or placeholder, no hang, bounded memory. Phase 2 (wiremock) and phase 6 (decode limit).
-5. **The reader is open across 04:00 and the app builds the edition first:** the reader's build is refused by the core's due re-check and it simply reloads the Journal, no error shown. Phase 7 (state test with a `BuildRefusedElsewhere` outcome).
+5. **The reader is open across 04:00 and the app builds the edition first:** the reader's build is refused by the core's due re-check and it simply reloads the Journal, no error shown. Phase 7 (state test: `JobDone(EditionNotDue)` while building → Journal reloaded, phase idle, no message).
 
 ## Interfaces between phases
 
@@ -180,7 +183,8 @@ pub enum Event {
     Progress { label: String, done: usize, total: usize }, JobDone(JobOutcome),
     DataChanged, Tick { now: DateTime<Utc>, local: DateTime<FixedOffset> }, Resize { width: u16, height: u16 },
 }
-pub enum JobOutcome { Refreshed, EditionBuilt, EditionNotDue, EditionBuiltElsewhere, Offline, Failed(String), Extracted { entry_id: i64, error: Option<String> } }
+pub enum JobOutcome { Refreshed, EditionBuilt, EditionNotDue, Offline, Failed(String), Extracted { entry_id: i64, error: Option<String> } }
+// EditionNotDue also covers "built by another process meanwhile": the core cannot tell them apart.
 pub struct ReaderState { /* private */ }
 impl ReaderState {
     pub fn new(settings: TerminalSettings, width: u16, height: u16) -> Self; // opens on Source::Journal
@@ -193,10 +197,26 @@ impl ReaderState {
 
 ### Phases 5–9
 
-- `native.rs`: `pub fn render(frame: &mut Frame, state: &ReaderState, images: &ImageStore)`; `antiope.rs`: same signature; `mod.rs`: `pub fn run(app: &Ressac, settings_path: &Path) -> anyhow::Result<()>` (sync wrapper over a tokio runtime, like the garden's `run`).
-- `images.rs`: `pub struct ImageStore` (picker, cache of 32, states Loading/Ready/Failed per URL), `pub fn quantise_teletext(img: &image::DynamicImage) -> image::DynamicImage`, `pub const TELETEXT: [[u8; 3]; 8]`.
-- CLI: `Cli.command: Option<Command>`; `None` and `Command::Read` open the reader; `Command::Garden { action: None }` keeps opening the garden alone.
-- Rhythm line text: one Rust function `pub fn rhythm_text(row: &CadenceRow-like data, now) -> String` in `state.rs` or a small `rhythm.rs`, matching the app's `GardenModel.rhythmText` wording.
+- `native.rs`: `pub fn render(frame: &mut Frame, state: &ReaderState) -> ReaderMetrics` in 5a, `images: &mut ImageStore` added as third parameter in phase 6; `antiope.rs`: same final signature; `ReaderMetrics { total_rows, viewport_rows }` fed back through `ReaderState::set_reader_metrics`; no render cache (the article is `state.article`). `mod.rs`: `pub fn run(app: &Ressac, db: &Path, settings_path: &Path) -> anyhow::Result<()>`, synchronous; jobs (`jobs.rs`: `spawn`, `Msg`, `ProgressSink`) each run in their own thread with their own `Ressac::open(db)` and current-thread runtime, so `commands::read` calls `run` directly from `main`, like the garden.
+- `images.rs`: `pub struct ImageStore` (picker, cache of 32 keyed by `(url, Variant)`, states Loading/Ready/Failed), `ImageStore::disabled()`, `pub enum Variant { Native, Teletext }`, `pub fn quantise_teletext(img: &image::DynamicImage) -> image::DynamicImage`, `pub const TELETEXT: [[u8; 3]; 8]`.
+- CLI: `Command::Read` and `commands::read` (5b.3); `Cli.command: Option<Command>` with `None` routed to `commands::read` (8d); `Command::Garden { action: None }` keeps opening the garden alone.
+- Rhythm line: `tui/reader/rhythm.rs` (8c): `RhythmInfo` filled from phase 1b's `CadenceDetail`, `rhythm_text(&RhythmInfo, now) -> String`, `rhythm_line`, `ago`; `Command::LoadCadence`, `Event::Cadence(RhythmInfo)`. The override menu is phase 4b's `Overlay::Rhythm` (`RHYTHM_CHOICES`).
+- Journal (7): `tui/reader/journal.rs` (`JournalPhase`, `JournalLine`, `journal_lines`, `journal_header`, `placeholder`, `progress_text`, `offers_retry`, `outcome_of`, `EditionProgress`, constants `BUILDING`, `END_LINE`, `EMPTY_LINE`, `NO_EDITION`, `OFFLINE`); `ReaderState::journal_phase()`, `journal()`; phase 7 replaces the body of 4b's `start(now, local)` (same signature) to append `Command::BuildEdition`.
+- Garden (8): `GardenView { NeedsTriage, AllFeeds, Cemetery }`, `ReaderState::{garden_view, garden, open_garden}`, `Command::LoadGarden`, `Event::{GardenRows, GardenMessage}`, `tui::state::Filter::{All, Cemetery}`, `GardenState::with_filter`, `tui::ui::render_in`, `tui::apply_garden_command`.
+- Antiope (9): `tui/reader/pages.rs` (`PageDirectory`, `PageDestination`, `ReaderPage`, `AntiopeNav`, `NavContext`, `NavOutcome`, `subpage_label`), `ReaderState.pages` + `Command::LoadPages` + `Event::Pages` (9a), `ReaderState.antiope_real_images` (9b).
+
+### Reconciled `ReaderState` API (one rule for every phase)
+
+- **Fields are public** (as `GardenState`): phase 4b declares `settings, width, height, class, focus, source, filter, sources, sidebar, sidebar_index, entries, total, unread, next, journal, selected, detail, article, show_fulltext, scroll, search, search_editing, overlay, message, progress, now, local`. Later phases add their own fields once: 5a the reader metrics, 7 `journal_phase`, `edition_job`, `last_day`, `journal_cursor`, 8 `garden_view`, `garden`, `rhythm`, 9a `pages`, 9b the Antiope navigation and `antiope_real_images`. Nobody redeclares an earlier field.
+- **Methods:** 4b `new`, `start(now, local)`, `on_key`, `on_event`, `look`, `focus`, `source`, `selected_entry`, `class`, `go_to`, `select_entry`, `set_focus`; 5a `view()` (the renderers' borrowed `ReaderView`, its `source_lines` built from `sidebar`) and `set_reader_metrics`; 7 `journal_phase`, `journal`; 8 `garden_view`, `garden`, `open_garden`, `rhythm`.
+- **Time:** dates and clocks shown come from `state.local` (set by `start` and every `Tick`), never `chrono::Local` in rendering or state code.
+- **Other phase-1 names added by the writers:** `CadenceDetail` + `Store::cadence_details()` (over `v_cadence`), `fts_query(&str) -> Option<String>` (public), `EntryPage: Default`; `fetch_image_within` private in `service.rs`; `ImageRefused` reasons are fixed sentences (phase 2).
+
+### Tooling notes
+
+- `cargo-insta` is not installed: create snapshots with `INSTA_UPDATE=always`, review each `.snap` file, commit it; the gate runs with `INSTA_UPDATE=no`.
+- No `rusqlite` dev-dependency in the binary: tests that need a second connection open it with `ressac_core::service::Ressac::open(&db)`.
+- `tui/reader/mod.rs` carries `#![allow(dead_code)]` from phase 3/4 until 5b wires the loop; 5b removes it.
 
 ## After this plan
 
