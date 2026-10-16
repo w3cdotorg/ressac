@@ -8,7 +8,7 @@ use rusqlite::{Row, params};
 use super::Store;
 use super::fetch::bad_timestamp;
 use crate::error::Result;
-use crate::model::{Cadence, Decision, Diagnosis, FeedId, Status, parse_ts, ts};
+use crate::model::{Cadence, CadenceGroup, Decision, Diagnosis, FeedId, Status, parse_ts, ts};
 
 const HEALTH_COLUMNS: &str = "feed_id, status, reason, evidence, remarks, proposed_action, hijack_score, \
      last_entry_at, median_interval_days, entries_per_month";
@@ -45,6 +45,8 @@ fn health_row(r: &Row<'_>) -> rusqlite::Result<(FeedId, Diagnosis)> {
                 last_entry_at: last_entry.as_deref().and_then(parse_ts),
                 median_interval_days: r.get(8)?,
                 entries_per_month: r.get(9)?,
+                // Stored from schema v4 (phase 1b).
+                group: CadenceGroup::default(),
             },
         },
     ))
@@ -241,7 +243,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Action, Cadence, Evidence, Remark, Status};
+    use crate::model::{Action, Cadence, CadenceGroup, Evidence, Remark, Status};
     use crate::opml;
 
     fn now() -> DateTime<Utc> {
@@ -272,6 +274,8 @@ mod tests {
                 last_entry_at: Some(now()),
                 median_interval_days: Some(7.0),
                 entries_per_month: 1.5,
+                // Not stored before schema v4: reads back as the default.
+                group: CadenceGroup::Silent,
             },
         }
     }

@@ -218,11 +218,56 @@ pub struct Evidence {
     pub language: Option<String>,
 }
 
+/// A feed's publication rhythm (spec §4), from the median gap between its recent entries.
+/// `Silent` is the default: no entry at all, or none for a year.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum CadenceGroup {
+    Daily,
+    Weekly,
+    Monthly,
+    Rare,
+    #[default]
+    Silent,
+}
+
+impl CadenceGroup {
+    /// Display order of the sidebar's Rhythm section and of pages 105 to 109.
+    pub const ALL: [CadenceGroup; 5] = [
+        CadenceGroup::Daily,
+        CadenceGroup::Weekly,
+        CadenceGroup::Monthly,
+        CadenceGroup::Rare,
+        CadenceGroup::Silent,
+    ];
+
+    /// The stored and printed name: `feed_health.cadence_group`, `feed.cadence_override`,
+    /// the CLI's arguments and JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CadenceGroup::Daily => "daily",
+            CadenceGroup::Weekly => "weekly",
+            CadenceGroup::Monthly => "monthly",
+            CadenceGroup::Rare => "rare",
+            CadenceGroup::Silent => "silent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|g| g.as_str() == s)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Cadence {
     pub last_entry_at: Option<DateTime<Utc>>,
     pub median_interval_days: Option<f64>,
     pub entries_per_month: f64,
+    /// Computed by `health::classify`; the user's override lives on `feed`, not here.
+    #[serde(default)]
+    pub group: CadenceGroup,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,6 +298,33 @@ mod tests {
             assert_eq!(Status::parse(s.as_str()), Some(s));
         }
         assert_eq!(Status::parse("Zombie"), None);
+    }
+
+    #[test]
+    fn cadence_group_round_trips_through_text_and_json() {
+        for g in CadenceGroup::ALL {
+            assert_eq!(CadenceGroup::parse(g.as_str()), Some(g));
+            assert_eq!(
+                serde_json::to_value(g).unwrap(),
+                serde_json::Value::String(g.as_str().to_string())
+            );
+        }
+        assert_eq!(
+            CadenceGroup::ALL.map(CadenceGroup::as_str),
+            ["daily", "weekly", "monthly", "rare", "silent"]
+        );
+        assert_eq!(CadenceGroup::parse("Daily"), None, "lowercase only");
+        assert_eq!(CadenceGroup::default(), CadenceGroup::Silent);
+    }
+
+    #[test]
+    fn a_cadence_without_a_group_reads_as_silent() {
+        let c: Cadence = serde_json::from_str(
+            r#"{"last_entry_at":null,"median_interval_days":null,"entries_per_month":0.0}"#,
+        )
+        .unwrap();
+        assert_eq!(c.group, CadenceGroup::Silent);
+        assert_eq!(Cadence::default().group, CadenceGroup::Silent);
     }
 
     #[test]
