@@ -45,6 +45,10 @@ pub const PRODUCTION_WAYBACK: &str = "https://archive.org";
 pub const FULLTEXT_PER_FEED_PER_RUN: usize = 20;
 /// The `what` of the `Probing` event announcing the full-article pass of a refresh.
 pub const FULL_ARTICLES: &str = "full articles";
+/// The largest image the terminal reader downloads (the app's mosaic limit, spec §7).
+pub const IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
+/// How long one image may take, redirects and body included (spec §7).
+pub const IMAGE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Default)]
 pub struct RefreshOptions {
@@ -650,6 +654,25 @@ impl Ressac {
         })
     }
 
+    /// Downloads an image for the terminal reader (spec §7, Images) through the article
+    /// client: http(s) only, local and private addresses refused at every hop and after DNS
+    /// resolution, at most `IMAGE_MAX_BYTES` within `IMAGE_TIMEOUT`, and an `image/*` answer.
+    pub async fn fetch_image(&self, url: &str) -> Result<Vec<u8>> {
+        self.fetch_image_within(url, IMAGE_TIMEOUT).await
+    }
+
+    /// `fetch_image` with its time limit as a parameter (tests use a short one).
+    async fn fetch_image_within(&self, url: &str, limit: Duration) -> Result<Vec<u8>> {
+        let web = url::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
+        if !web {
+            return Err(Error::ImageRefused("not a web address".into()));
+        }
+        let raw = tokio::time::timeout(limit, self.articles.fetch_raw(url, None, None))
+            .await
+            .map_err(|_| Error::ImageRefused("timed out".into()))?;
+        image_body(raw)
+    }
+
     /// Stores one extraction outcome and emits `Extracted`. Returns the failure sentence.
     fn save_extraction(
         &self,
@@ -808,6 +831,32 @@ fn is_challenged(raw: &RawResponse) -> bool {
 /// cap and timeout (the whole exchange, redirects included), plus the public-address guard.
 async fn fetch_article(source: &LocalSource, url: &str) -> Extraction {
     article_from(&source.fetch_raw(url, None, None).await)
+}
+
+/// The image in `raw`, or why the reader shows a placeholder instead.
+fn image_body(raw: RawResponse) -> Result<Vec<u8>> {
+    let refuse = |why: &str| -> Result<Vec<u8>> { Err(Error::ImageRefused(why.to_string())) };
+    if raw.refused {
+        return refuse("local or private address");
+    }
+    match &raw.error {
+        Some(ErrorKind::TooLarge) => return refuse("larger than 10 MB"),
+        Some(ErrorKind::Timeout) => return refuse("timed out"),
+        Some(kind) => return refuse(&kind.label()),
+        None => {}
+    }
+    let is_image = raw
+        .content_type
+        .as_deref()
+        .is_some_and(|ct| ct.trim_start().to_ascii_lowercase().starts_with("image/"));
+    if !is_image {
+        return refuse("not an image");
+    }
+    // The source raises its cap for bodies that look like podcast feeds: check again here.
+    if raw.body.len() > IMAGE_MAX_BYTES {
+        return refuse("larger than 10 MB");
+    }
+    Ok(raw.body)
 }
 
 /// Maps a page fetch to an extraction outcome. A 401 asks for credentials, so it reads as a
@@ -1769,5 +1818,55 @@ mod tests {
             app.extract_entry(9_999, &NullSink).await.unwrap(),
             ExtractOutcome::UnknownEntry
         );
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn a_slow_image_times_out_without_hanging() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(vec![0u8; 8], "image/png")
+                    .set_delay(Duration::from_secs(5)),
+            )
+            .mount(&server)
+            .await;
+        let app = Ressac::with_parts(
+            Store::open_in_memory().unwrap(),
+            FetchLimits::default(),
+            "http://127.0.0.1:9",
+        )
+        .unwrap()
+        .allow_private_articles()
+        .unwrap();
+        let started = Instant::now();
+        let err = app
+            .fetch_image_within(
+                &format!("{}/slow.png", server.uri()),
+                Duration::from_millis(300),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::ImageRefused(why) if why == "timed out"),
+            "{err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the limit is the caller's, not the source's 30 s"
+        );
+    }
+
+    #[test]
+    fn the_limits_are_the_spec_s() {
+        assert_eq!(IMAGE_MAX_BYTES, 10 * 1024 * 1024);
+        assert_eq!(IMAGE_TIMEOUT, Duration::from_secs(15));
     }
 }
