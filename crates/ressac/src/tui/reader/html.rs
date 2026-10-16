@@ -3,11 +3,9 @@
 //! wider than `MAX_TEXT_WIDTH`. Every string that comes from a feed goes through
 //! `output::printable`, so nothing in an article reaches the terminal as an escape sequence.
 
-use std::sync::LazyLock;
-
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use scraper::{ElementRef, Html, Node, Selector};
+use scraper::{ElementRef, Html, Node};
 use url::Url;
 
 use crate::output::printable;
@@ -16,9 +14,13 @@ use crate::output::printable;
 pub const MAX_TEXT_WIDTH: u16 = 72;
 /// Narrowest wrap width: a narrower column still gets lines this wide (the renderer clips).
 const MIN_TEXT_WIDTH: usize = 10;
-/// Elements whose content is never shown.
+/// DOM depth beyond which a subtree is appended as flat text instead of being walked (the walk
+/// recurses, hostile feeds nest thousands of elements).
+const MAX_DEPTH: usize = 64;
+/// Elements whose content is never shown (`form` is a transparent container, its controls are not).
 const HIDDEN: &[&str] = &[
-    "script", "style", "template", "noscript", "head", "iframe", "object", "svg", "button", "form",
+    "script", "style", "template", "noscript", "head", "iframe", "object", "svg", "button",
+    "input", "select", "textarea",
 ];
 /// Blocks followed by a blank line.
 const SPACED_BLOCKS: &[&str] = &["p", "figure", "dl", "details"];
@@ -39,9 +41,6 @@ const BLOCKS: &[&str] = &[
     "li",
     "nav",
 ];
-
-static ROWS: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("tr").expect("`tr` is a valid selector"));
 
 /// An image of the article: where its placeholder line is, and what to fetch (phase 6).
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +77,7 @@ pub fn render_html(html: &str, width: u16, base_url: Option<&str>) -> RenderedAr
         space: false,
         bullet: None,
         last_blank: false,
+        depth: 0,
     };
     let fragment = Html::parse_fragment(html);
     let root = Ctx::default();
@@ -108,6 +108,10 @@ struct Ctx {
     prefix: String,
     /// List nesting depth.
     depth: usize,
+    /// Inside a table cell: blocks flow inline so a row stays on one line.
+    inline: bool,
+    /// Inside a list item: paragraphs are not followed by a blank line.
+    tight: bool,
 }
 
 impl Ctx {
@@ -133,10 +137,13 @@ struct Writer {
     /// A list marker for the first line of the next flushed paragraph.
     bullet: Option<String>,
     last_blank: bool,
+    /// DOM depth of the walk in progress.
+    depth: usize,
 }
 
 impl Writer {
     fn children(&mut self, el: ElementRef<'_>, ctx: &Ctx) {
+        self.depth += 1;
         for child in el.children() {
             match child.value() {
                 Node::Text(text) => self.push_text(text, ctx.style),
@@ -148,6 +155,26 @@ impl Writer {
                 _ => {}
             }
         }
+        self.depth -= 1;
+    }
+
+    /// The visible text of a subtree too deep to walk, iteratively.
+    fn flat_text(&mut self, el: ElementRef<'_>, mut each: impl FnMut(&mut Self, &str)) {
+        let mut stack: Vec<_> = el.children().rev().collect();
+        while let Some(node) = stack.pop() {
+            match node.value() {
+                Node::Text(text) => each(self, text),
+                Node::Element(element) if !HIDDEN.contains(&element.name()) => {
+                    stack.extend(node.children().rev());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Whether `prefix` can take `extra` more cells and still leave the minimum text width.
+    fn fits(&self, prefix: &str, extra: usize) -> bool {
+        width_of(prefix) + extra + MIN_TEXT_WIDTH <= self.width
     }
 
     fn element(&mut self, el: ElementRef<'_>, ctx: &Ctx) {
@@ -155,20 +182,24 @@ impl Writer {
         if HIDDEN.contains(&name) {
             return;
         }
+        if self.depth >= MAX_DEPTH {
+            let style = ctx.style;
+            self.flat_text(el, |writer, text| writer.push_text(text, style));
+            return;
+        }
         match name {
             "br" => self.flush(ctx),
-            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" if !ctx.inline => {
                 self.flush(ctx);
                 self.blank();
                 self.children(el, &ctx.styled(Modifier::BOLD | Modifier::UNDERLINED));
                 self.flush(ctx);
                 self.blank();
             }
-            "strong" | "b" => self.children(el, &ctx.styled(Modifier::BOLD)),
-            "em" | "i" | "cite" => self.children(el, &ctx.styled(Modifier::ITALIC)),
-            "u" | "ins" => self.children(el, &ctx.styled(Modifier::UNDERLINED)),
-            "s" | "del" | "strike" => self.children(el, &ctx.styled(Modifier::CROSSED_OUT)),
-            "code" | "kbd" | "samp" | "tt" => self.children(el, &ctx.styled(Modifier::REVERSED)),
+            _ if inline_modifier(name).is_some() => {
+                let modifier = inline_modifier(name).unwrap_or_default();
+                self.children(el, &ctx.styled(modifier));
+            }
             "a" => self.link(el, ctx),
             "img" => self.image(el, ctx),
             "ul" | "menu" => self.list(el, ctx, false),
@@ -176,8 +207,13 @@ impl Writer {
             "blockquote" => {
                 self.flush(ctx);
                 self.blank();
+                let prefix = if self.fits(&ctx.prefix, 2) {
+                    format!("{}│ ", ctx.prefix)
+                } else {
+                    ctx.prefix.clone()
+                };
                 let inner = Ctx {
-                    prefix: format!("{}│ ", ctx.prefix),
+                    prefix,
                     ..ctx.clone()
                 };
                 self.children(el, &inner);
@@ -193,11 +229,16 @@ impl Writer {
                 self.push_line(&ctx.prefix, vec![Span::raw(rule)]);
                 self.blank();
             }
+            _ if ctx.inline && (SPACED_BLOCKS.contains(&name) || BLOCKS.contains(&name)) => {
+                self.children(el, ctx);
+            }
             _ if SPACED_BLOCKS.contains(&name) => {
                 self.flush(ctx);
                 self.children(el, ctx);
                 self.flush(ctx);
-                self.blank();
+                if !ctx.tight {
+                    self.blank();
+                }
             }
             _ if BLOCKS.contains(&name) => {
                 self.flush(ctx);
@@ -240,19 +281,27 @@ impl Writer {
         self.space = space;
     }
 
-    fn link(&mut self, el: ElementRef<'_>, ctx: &Ctx) {
-        self.children(el, &ctx.styled(Modifier::UNDERLINED));
-        let Some(url) = el.value().attr("href").and_then(|href| self.resolve(href)) else {
-            return;
-        };
-        let number = match self.links.iter().position(|known| *known == url) {
+    /// The number of `el`'s link, assigned on first sight; none for fragments and non-web hrefs.
+    fn link_number(&mut self, el: ElementRef<'_>) -> Option<usize> {
+        let href = el.value().attr("href")?;
+        if href.trim_start().starts_with('#') {
+            return None;
+        }
+        let url = self.resolve(href)?;
+        Some(match self.links.iter().position(|known| *known == url) {
             Some(index) => index + 1,
             None => {
                 self.links.push(url);
                 self.links.len()
             }
-        };
-        self.push_marker(format!("[{number}]"));
+        })
+    }
+
+    fn link(&mut self, el: ElementRef<'_>, ctx: &Ctx) {
+        self.children(el, &ctx.styled(Modifier::UNDERLINED));
+        if let Some(number) = self.link_number(el) {
+            self.push_marker(format!("[{number}]"));
+        }
     }
 
     fn image(&mut self, el: ElementRef<'_>, ctx: &Ctx) {
@@ -278,6 +327,10 @@ impl Writer {
 
     fn list(&mut self, el: ElementRef<'_>, ctx: &Ctx, ordered: bool) {
         self.flush(ctx);
+        if let Some(pending) = self.bullet.take() {
+            // The item opens with this list: its own bullet gets a line before the nested one.
+            self.push_line("", vec![Span::raw(pending.trim_end().to_string())]);
+        }
         let first = el
             .value()
             .attr("start")
@@ -293,12 +346,19 @@ impl Writer {
             } else {
                 "• ".to_string()
             };
+            let indent = width_of(&marker);
+            let room = self.fits(&ctx.prefix, indent);
             let inner = Ctx {
-                prefix: format!("{}{}", ctx.prefix, " ".repeat(width_of(&marker))),
+                prefix: if room {
+                    format!("{}{}", ctx.prefix, " ".repeat(indent))
+                } else {
+                    ctx.prefix.clone()
+                },
                 depth: ctx.depth + 1,
+                tight: true,
                 ..ctx.clone()
             };
-            self.bullet = Some(format!("{}{marker}", ctx.prefix));
+            self.bullet = room.then(|| format!("{}{marker}", ctx.prefix));
             self.children(item, &inner);
             self.flush(&inner);
             self.bullet = None;
@@ -311,19 +371,91 @@ impl Writer {
     fn pre(&mut self, el: ElementRef<'_>, ctx: &Ctx) {
         self.flush(ctx);
         self.blank();
-        let raw: String = el.text().collect();
-        let body = raw.strip_suffix('\n').unwrap_or(&raw);
-        for line in body.split('\n') {
-            let line = line.trim_end_matches('\r').replace('\t', "    ");
-            self.push_line(&ctx.prefix, vec![Span::raw(printable(&line).into_owned())]);
+        let mut current = Vec::new();
+        self.pre_children(el, ctx, &mut current);
+        if !current.is_empty() {
+            self.push_line(&ctx.prefix, current);
         }
         self.blank();
+    }
+
+    fn pre_children(&mut self, el: ElementRef<'_>, ctx: &Ctx, current: &mut Vec<Span<'static>>) {
+        self.depth += 1;
+        for child in el.children() {
+            match child.value() {
+                Node::Text(text) => self.pre_text(text, ctx, current),
+                Node::Element(_) => {
+                    if let Some(element) = ElementRef::wrap(child) {
+                        self.pre_element(element, ctx, current);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.depth -= 1;
+    }
+
+    fn pre_element(&mut self, el: ElementRef<'_>, ctx: &Ctx, current: &mut Vec<Span<'static>>) {
+        let name = el.value().name();
+        if HIDDEN.contains(&name) {
+            return;
+        }
+        if self.depth >= MAX_DEPTH {
+            self.flat_text(el, |writer, text| writer.pre_text(text, ctx, current));
+            return;
+        }
+        match name {
+            "br" => self.push_line(&ctx.prefix, std::mem::take(current)),
+            "img" => {
+                if !current.is_empty() {
+                    self.push_line(&ctx.prefix, std::mem::take(current));
+                }
+                self.image(el, ctx);
+            }
+            "a" => {
+                self.pre_children(el, &ctx.styled(Modifier::UNDERLINED), current);
+                if let Some(number) = self.link_number(el) {
+                    current.push(Span::raw(format!("[{number}]")));
+                }
+            }
+            _ => match inline_modifier(name) {
+                Some(modifier) => self.pre_children(el, &ctx.styled(modifier), current),
+                None => self.pre_children(el, ctx, current),
+            },
+        }
+    }
+
+    /// Text of a `pre`: spacing kept, a line ends at each newline.
+    fn pre_text(&mut self, text: &str, ctx: &Ctx, current: &mut Vec<Span<'static>>) {
+        let mut parts = text.split('\n').peekable();
+        while let Some(part) = parts.next() {
+            let part = part.replace('\r', "").replace('\t', "    ");
+            if !part.is_empty() {
+                current.push(Span::styled(printable(&part).into_owned(), ctx.style));
+            }
+            if parts.peek().is_some() {
+                self.push_line(&ctx.prefix, std::mem::take(current));
+            }
+        }
     }
 
     fn table(&mut self, el: ElementRef<'_>, ctx: &Ctx) {
         self.flush(ctx);
         self.blank();
-        for row in el.select(&ROWS) {
+        let rows = el
+            .children()
+            .filter_map(ElementRef::wrap)
+            .flat_map(|child| {
+                let sections = matches!(child.value().name(), "thead" | "tbody" | "tfoot");
+                let direct = (child.value().name() == "tr").then_some(child);
+                direct.into_iter().chain(
+                    child
+                        .children()
+                        .filter_map(ElementRef::wrap)
+                        .filter(move |row| sections && row.value().name() == "tr"),
+                )
+            });
+        for row in rows {
             let cells: Vec<ElementRef<'_>> = row
                 .children()
                 .filter_map(ElementRef::wrap)
@@ -333,16 +465,20 @@ impl Writer {
                 continue;
             }
             let header = cells.iter().all(|cell| cell.value().name() == "th");
-            let style = if header {
-                ctx.style.add_modifier(Modifier::BOLD)
-            } else {
-                ctx.style
+            let cell_ctx = Ctx {
+                style: if header {
+                    ctx.style.add_modifier(Modifier::BOLD)
+                } else {
+                    ctx.style
+                },
+                inline: true,
+                ..ctx.clone()
             };
             for (index, cell) in cells.iter().enumerate() {
                 if index > 0 {
                     self.push_text(" │ ", ctx.style.add_modifier(Modifier::DIM));
                 }
-                self.push_text(&cell.text().collect::<String>(), style);
+                self.children(*cell, &cell_ctx);
             }
             self.flush(ctx);
         }
@@ -426,6 +562,18 @@ impl Writer {
     }
 }
 
+/// The style an inline element adds to its text.
+fn inline_modifier(name: &str) -> Option<Modifier> {
+    Some(match name {
+        "strong" | "b" => Modifier::BOLD,
+        "em" | "i" | "cite" => Modifier::ITALIC,
+        "u" | "ins" => Modifier::UNDERLINED,
+        "s" | "del" | "strike" => Modifier::CROSSED_OUT,
+        "code" | "kbd" | "samp" | "tt" => Modifier::REVERSED,
+        _ => return None,
+    })
+}
+
 /// Whitespace collapsed, then controls neutralised.
 fn collapse(text: &str) -> String {
     printable(&text.split_whitespace().collect::<Vec<_>>().join(" ")).into_owned()
@@ -441,7 +589,20 @@ fn wrap(tokens: &[Token], avail: usize) -> Vec<Vec<Span<'static>>> {
     let mut lines: Vec<Vec<Span<'static>>> = vec![Vec::new()];
     let mut used = 0;
     let mut previous: Option<Style> = None;
-    for token in tokens {
+    for (index, token) in tokens.iter().enumerate() {
+        if index == 0 || token.space {
+            // A word and the markers glued to it move to the next line together.
+            let group: usize = tokens[index..]
+                .iter()
+                .enumerate()
+                .take_while(|(offset, t)| *offset == 0 || !t.space)
+                .map(|(_, t)| width_of(&t.text))
+                .sum();
+            if used > 0 && group <= avail && used + usize::from(token.space) + group > avail {
+                lines.push(Vec::new());
+                used = 0;
+            }
+        }
         for (piece_index, piece) in split_to_fit(&token.text, avail).into_iter().enumerate() {
             let width = width_of(&piece);
             let spaced = used > 0 && piece_index == 0 && token.space;
@@ -770,6 +931,148 @@ mod tests {
         assert!(!is_web_url("javascript:alert(1)"));
         assert!(!is_web_url("mailto:a@e.test"));
         assert!(!is_web_url("/relative"));
+    }
+
+    fn control_free(article: &RenderedArticle) {
+        for span in article.lines.iter().flat_map(|l| l.spans.iter()) {
+            assert!(
+                !span.content.chars().any(char::is_control),
+                "{:?}",
+                span.content
+            );
+        }
+    }
+
+    #[test]
+    fn ten_thousand_nested_divs_do_not_overflow_the_stack() {
+        let html = format!("{}inner{}", "<div>".repeat(10_000), "</div>".repeat(10_000));
+        let article = render_html(&html, 80, None);
+        assert!(text(&article).join("\n").contains("inner"));
+    }
+
+    #[test]
+    fn deep_blockquotes_stay_within_the_width() {
+        let html = format!(
+            "{}deep text{}",
+            "<blockquote>".repeat(3_000),
+            "</blockquote>".repeat(3_000)
+        );
+        let article = render_html(&html, 40, None);
+        assert!(text(&article).join("\n").contains("deep text"));
+        assert!(article.lines.iter().all(|line| line.width() <= 40));
+    }
+
+    #[test]
+    fn deep_lists_stay_within_the_width() {
+        let html = format!(
+            "{}deep text{}",
+            "<ul><li>".repeat(200),
+            "</li></ul>".repeat(200)
+        );
+        let article = render_html(&html, 40, None);
+        assert!(text(&article).join("\n").contains("deep text"));
+        assert!(article.lines.iter().all(|line| line.width() <= 40));
+    }
+
+    #[test]
+    fn table_cells_go_through_the_walker() {
+        let article = render_html(
+            "<table><tr><td>a<script>evil()</script><a href='https://x.test/'>l</a></td>\
+             <td><img src='https://x.test/i.png' alt='pic'></td></tr></table>",
+            80,
+            None,
+        );
+        let joined = text(&article).join("\n");
+        assert!(!joined.contains("evil"), "{joined}");
+        assert!(joined.contains("al[1]"), "{joined}");
+        assert_eq!(article.links, ["https://x.test/"]);
+        assert_eq!(article.images.len(), 1);
+        assert_eq!(text(&article)[article.images[0].line], "[image: pic]");
+    }
+
+    #[test]
+    fn a_nested_table_is_printed_once() {
+        let joined =
+            lines("<table><tr><td>outer<table><tr><td>inner</td></tr></table></td></tr></table>")
+                .join("\n");
+        assert_eq!(joined.matches("inner").count(), 1, "{joined}");
+    }
+
+    #[test]
+    fn block_content_in_a_cell_keeps_the_row_on_one_line() {
+        assert_eq!(
+            lines("<table><tr><td><p>a</p></td><td><div>b</div></td></tr></table>"),
+            ["a │ b"]
+        );
+    }
+
+    #[test]
+    fn preformatted_text_skips_hidden_content_and_numbers_links() {
+        let article = render_html(
+            "<pre>a<script>evil()</script>b <a href='https://x.test/'>l</a>\nc</pre>",
+            80,
+            None,
+        );
+        assert_eq!(
+            text(&article),
+            ["ab l[1]", "c", "", "Links", "[1] https://x.test/"]
+        );
+    }
+
+    #[test]
+    fn control_characters_in_cells_pre_urls_and_fragments_are_neutralised() {
+        let article = render_html(
+            "<table><tr><td>c\u{1b}x</td></tr></table><pre>p\u{9b}q</pre>\
+             <a href=\"https://e.test/p\u{1b}q#f\u{9b}g\">l</a>",
+            80,
+            None,
+        );
+        control_free(&article);
+        assert!(
+            article
+                .links
+                .iter()
+                .all(|l| !l.chars().any(char::is_control))
+        );
+    }
+
+    #[test]
+    fn a_link_marker_stays_with_its_word_when_wrapping() {
+        let article = render_html("<p>aaaaa <a href='https://e.test/'>bbbbb</a></p>", 12, None);
+        assert_eq!(&text(&article)[..2], ["aaaaa", "bbbbb[1]"]);
+    }
+
+    #[test]
+    fn fragment_links_get_no_number() {
+        let article = render_html("<p><a href=\"#top\">up</a></p>", 80, Some(BASE));
+        assert_eq!(text(&article), ["up"]);
+        assert!(article.links.is_empty());
+    }
+
+    #[test]
+    fn paragraphs_in_list_items_do_not_space_the_items() {
+        assert_eq!(
+            lines("<ul><li><p>a</p></li><li><p>b</p></li></ul>"),
+            ["• a", "• b"]
+        );
+    }
+
+    #[test]
+    fn a_nested_list_first_in_an_item_keeps_the_outer_bullet() {
+        assert_eq!(
+            lines("<ul><li><ul><li>in</li></ul></li></ul>"),
+            ["•", "  • in"]
+        );
+    }
+
+    #[test]
+    fn forms_are_transparent_but_controls_are_hidden() {
+        assert_eq!(
+            lines(
+                "<form><p>keep</p><input value=x><select><option>o</option></select><textarea>t</textarea><button>no</button></form>"
+            ),
+            ["keep"]
+        );
     }
 
     #[test]
