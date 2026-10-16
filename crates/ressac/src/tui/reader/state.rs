@@ -15,6 +15,7 @@ use ressac_core::store::{
 use crate::output::printable;
 
 use super::html::{RenderedArticle, is_web_url, render_html};
+use super::journal::{self, END_LINE, JournalLine, JournalPhase, OFFLINE};
 use super::layout::{Column, LayoutClass, Look, columns, layout_class, text_height, text_width};
 use super::settings::TerminalSettings;
 use super::sidebar::{self, SidebarRow};
@@ -22,13 +23,11 @@ use super::sidebar::{self, SidebarRow};
 /// Lines of the reader column taken by the article header (title; feed, author, date; state).
 pub const READER_HEADER_LINES: usize = 3;
 
-pub const END_OF_EDITION: &str = "That's the edition.";
 pub const NO_MORE_UNREAD: &str = "No more unread entries here.";
 pub const NO_ENTRY: &str = "No entry selected.";
 pub const NO_LINK: &str = "This entry has no link.";
 pub const NO_FEED: &str = "No feed selected.";
 pub const FETCHING_FULL: &str = "Fetching the full article…";
-pub const OFFLINE: &str = "Offline: no edition yet";
 pub const OPEN_PROMPT: &str = "Open: Enter for the article, 1-9 for a link, Esc to cancel.";
 
 /// The rhythm menu, in the app's order; `None` is Auto.
@@ -72,7 +71,6 @@ pub enum Command {
     Extract(i64),
     #[allow(dead_code, reason = "phase 6 asks for the images")]
     FetchImage(String),
-    #[allow(dead_code, reason = "phase 7 builds the edition when the reader opens")]
     BuildEdition,
     Refresh(Option<Source>),
     OpenUrl(String),
@@ -132,8 +130,13 @@ pub enum JobOutcome {
     Refreshed,
     EditionBuilt,
     /// Also when another process built today's edition meanwhile: the core's due re-check
-    /// returns NotDue in both cases (phase 7).
+    /// returns NotDue in both cases.
     EditionNotDue,
+    /// The edition job's own offline and failure: the Journal's phase follows these two only,
+    /// never the `Offline` of a refresh or the `Failed` of a quick command (the executor tags the
+    /// long job that ran).
+    EditionOffline,
+    EditionFailed(String),
     Offline,
     Failed(String),
     Extracted {
@@ -172,6 +175,13 @@ pub struct ReaderState {
     pub unread: usize,
     pub next: Option<ListCursor>,
     pub journal: Option<JournalView>,
+    journal_phase: JournalPhase,
+    /// True from `BuildEdition` until the edition job's outcome: no second build meanwhile.
+    edition_job: bool,
+    /// The 04:00 day of the last tick or of `start`; a change is the rollover.
+    last_day: Option<DateTime<Utc>>,
+    /// The Journal's cursor is on this feed's overflow row (no entry is selected then).
+    journal_overflow: Option<FeedId>,
     pub selected: Option<i64>,
     pub detail: Option<EntryDetail>,
     pub article: Option<RenderedArticle>,
@@ -223,7 +233,6 @@ pub struct ReaderView<'a> {
     #[allow(dead_code, reason = "read by the Journal look (phase 7)")]
     pub sources_overlay: bool,
     pub now_local: DateTime<FixedOffset>,
-    #[allow(dead_code, reason = "read by the Journal look (phase 7)")]
     pub source: Source,
     pub source_title: String,
     pub source_lines: Vec<SourceLine>,
@@ -234,8 +243,15 @@ pub struct ReaderView<'a> {
     #[allow(dead_code, reason = "read by the Journal look (phase 7)")]
     pub total: usize,
     pub unread: usize,
-    #[allow(dead_code, reason = "read by the Journal look (phase 7)")]
+    /// The Journal column is showing (the Journal, unfiltered, no search): its rows or, while
+    /// there is no edition to show, its placeholder.
+    pub journal_mode: bool,
     pub journal: Option<&'a JournalView>,
+    pub journal_phase: &'a JournalPhase,
+    /// The Journal's rows (empty unless `journal_mode` and an edition is loaded) and the one
+    /// under the cursor.
+    pub journal_lines: Vec<JournalLine>,
+    pub journal_cursor: Option<usize>,
     pub entry: Option<&'a EntryDetail>,
     pub article: Option<&'a RenderedArticle>,
     pub show_fulltext: bool,
@@ -279,6 +295,10 @@ impl ReaderState {
             unread: 0,
             next: None,
             journal: None,
+            journal_phase: JournalPhase::Idle,
+            edition_job: false,
+            last_day: None,
+            journal_overflow: None,
             selected: None,
             detail: None,
             article: None,
@@ -300,12 +320,26 @@ impl ReaderState {
         }
     }
 
-    /// The first commands: the sources, the Journal and its entries. Stores the clock; phase 7
-    /// extends this body with the edition build (same signature, see the plan index).
+    /// The first commands: the sources, the Journal and its entries, then the edition build (the
+    /// core turns it away at once when today's edition exists, so nothing shows as building).
+    /// Stores the clock.
     pub fn start(&mut self, now: DateTime<Utc>, local: DateTime<FixedOffset>) -> Vec<Command> {
         self.now = Some(now);
         self.local = Some(local);
-        vec![Command::LoadSources, Command::LoadJournal, self.reload()]
+        self.last_day = Some(journal::day_of(local));
+        let mut commands = vec![Command::LoadSources, Command::LoadJournal, self.reload()];
+        commands.extend(self.build_edition());
+        commands
+    }
+
+    #[allow(dead_code, reason = "read by the Antiope Journal page (phase 9)")]
+    pub fn journal_phase(&self) -> &JournalPhase {
+        &self.journal_phase
+    }
+
+    #[allow(dead_code, reason = "read by the Antiope Journal page (phase 9)")]
+    pub fn journal(&self) -> Option<&JournalView> {
+        self.journal.as_ref()
     }
 
     /// Entry points for other screens (Antiope page jumps, phase 9).
@@ -374,6 +408,12 @@ impl ReaderState {
                 }
                 .to_string()
             });
+        let journal_lines = if self.journal_active() {
+            self.journal.as_ref().map(journal::journal_lines).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let journal_cursor = self.journal_cursor_line(&journal_lines);
         ReaderView {
             look: self.look(),
             layout: self.class,
@@ -389,7 +429,11 @@ impl ReaderState {
             entry_cursor: self.index(),
             total: self.total,
             unread: self.unread,
+            journal_mode: self.journal_mode(),
             journal: self.journal.as_ref(),
+            journal_phase: &self.journal_phase,
+            journal_lines,
+            journal_cursor,
             entry: self.detail.as_ref(),
             article: self.article.as_ref(),
             show_fulltext: self.show_fulltext,
@@ -450,10 +494,14 @@ impl ReaderState {
                 self.settings.images = !self.settings.images;
                 vec![Command::SaveSettings]
             }
+            KeyCode::Char('j') if self.journal_active() => self.move_journal(1, false),
+            KeyCode::Char('k') if self.journal_active() => self.move_journal(-1, false),
             KeyCode::Char('j') => self.move_entry(1),
             KeyCode::Char('k') => self.move_entry(-1),
             KeyCode::Down if self.focus == Column::Sources => self.move_source(1),
             KeyCode::Up if self.focus == Column::Sources => self.move_source(-1),
+            KeyCode::Down if self.journal_active() => self.move_journal(1, true),
+            KeyCode::Up if self.journal_active() => self.move_journal(-1, true),
             KeyCode::Down => self.move_entry(1),
             KeyCode::Up => self.move_entry(-1),
             KeyCode::Char(' ') => self.advance(),
@@ -485,6 +533,12 @@ impl ReaderState {
             }
             KeyCode::Char('f') => self.full_text(),
             KeyCode::Char('o') => self.open_prompt(),
+            // The Journal's Retry (spec §6): offline or failed, `r` builds the edition again.
+            KeyCode::Char('r')
+                if self.source == Source::Journal && journal::offers_retry(&self.journal_phase) =>
+            {
+                self.build_edition().into_iter().collect()
+            }
             KeyCode::Char('r') => vec![Command::Refresh(Some(self.source))],
             KeyCode::Char('R') => vec![Command::Refresh(None)],
             KeyCode::Char('c') => self.rhythm_menu(),
@@ -510,7 +564,7 @@ impl ReaderState {
             } => self.entries_loaded(source, page, appended, request),
             Event::Journal(view) => {
                 self.journal = view;
-                Vec::new()
+                self.settle_journal_cursor()
             }
             Event::Entry(detail) => {
                 self.entry_loaded(*detail);
@@ -518,6 +572,9 @@ impl ReaderState {
             }
             Event::ImageReady { .. } | Event::ImageFailed { .. } => Vec::new(),
             Event::Progress { label, done, total } => {
+                if label == journal::BUILDING {
+                    self.journal_phase = JournalPhase::Building { done, total };
+                }
                 self.progress = Some((label, done, total));
                 Vec::new()
             }
@@ -526,7 +583,7 @@ impl ReaderState {
             Event::Tick { now, local } => {
                 self.now = Some(now);
                 self.local = Some(local);
-                Vec::new()
+                self.on_tick_journal(local)
             }
             Event::Resize { width, height } => {
                 self.resize(width, height);
@@ -589,6 +646,157 @@ impl ReaderState {
         self.entries.iter().position(|row| row.entry_id == id)
     }
 
+    /// The Journal column is what the entries column shows: the Journal itself, not filtered nor
+    /// searched (those are plain lists of its entries).
+    fn journal_mode(&self) -> bool {
+        self.source == Source::Journal && self.filter == ListFilter::All && self.search.is_none()
+    }
+
+    /// The Journal column has an edition to walk.
+    fn journal_active(&self) -> bool {
+        self.journal_mode() && self.journal.is_some()
+    }
+
+    /// The line under the Journal's cursor: the overflow row it rests on, else the selected entry.
+    fn journal_cursor_line(&self, lines: &[JournalLine]) -> Option<usize> {
+        let view = self.journal.as_ref()?;
+        if let Some(feed) = self.journal_overflow {
+            return lines.iter().position(
+                |line| matches!(line, JournalLine::Overflow(o) if view.overflow[*o].feed_id == feed),
+            );
+        }
+        let id = self.selected?;
+        lines.iter().position(
+            |line| matches!(line, JournalLine::Entry(i) if view.items[*i].row.entry_id == id),
+        )
+    }
+
+    /// `↓`/`↑` (`over_overflow`) and `j`/`k` along the Journal's lines: headings are crossed; an
+    /// overflow row is stopped on by the arrows, which then select nothing, and passed by `j`/`k`.
+    fn move_journal(&mut self, delta: isize, over_overflow: bool) -> Vec<Command> {
+        enum Target {
+            Entry(i64),
+            Overflow(FeedId),
+        }
+        let Some(view) = self.journal.as_ref() else {
+            return Vec::new();
+        };
+        let lines = journal::journal_lines(view);
+        let step = delta.signum();
+        let mut at = match self.journal_cursor_line(&lines) {
+            Some(line) => line as isize,
+            None if step > 0 => -1,
+            None => lines.len() as isize,
+        };
+        let target = loop {
+            at += step;
+            let Some(line) = usize::try_from(at).ok().and_then(|i| lines.get(i)) else {
+                return Vec::new();
+            };
+            match *line {
+                JournalLine::Heading(_) => {}
+                JournalLine::Overflow(o) if over_overflow => {
+                    break Target::Overflow(view.overflow[o].feed_id);
+                }
+                JournalLine::Overflow(_) => {}
+                JournalLine::Entry(i) => {
+                    let id = view.items[i].row.entry_id;
+                    // An entry the list does not hold (yet) cannot be selected: skip it.
+                    if self.entries.iter().any(|row| row.entry_id == id) {
+                        break Target::Entry(id);
+                    }
+                }
+            }
+        };
+        match target {
+            Target::Entry(id) => match self.entries.iter().position(|row| row.entry_id == id) {
+                Some(index) => self.select(index, true),
+                None => Vec::new(),
+            },
+            Target::Overflow(feed) => {
+                self.rest_on_overflow(feed);
+                Vec::new()
+            }
+        }
+    }
+
+    /// The cursor goes onto a feed's overflow row; the reader has no entry then.
+    fn rest_on_overflow(&mut self, feed: FeedId) {
+        self.journal_overflow = Some(feed);
+        self.selected = None;
+        self.detail = None;
+        self.article = None;
+        self.scroll = 0;
+        self.show_fulltext = false;
+        self.metrics = None;
+    }
+
+    /// A new edition may no longer hold the overflow row the cursor rested on: back onto an entry.
+    fn settle_journal_cursor(&mut self) -> Vec<Command> {
+        let Some(feed) = self.journal_overflow else {
+            return Vec::new();
+        };
+        let still_there = self
+            .journal
+            .as_ref()
+            .is_some_and(|view| view.overflow.iter().any(|m| m.feed_id == feed));
+        if still_there {
+            return Vec::new();
+        }
+        self.journal_overflow = None;
+        if self.selected.is_none() && !self.entries.is_empty() && self.reader_visible() {
+            return self.select(0, false);
+        }
+        Vec::new()
+    }
+
+    /// Where Space looks for the next unread entry from: after the selected entry, or after the
+    /// entry that precedes the overflow row the cursor rests on.
+    fn advance_from(&self) -> usize {
+        let Some(feed) = self.journal_overflow else {
+            return self.index().map_or(0, |i| i + 1);
+        };
+        let Some(view) = self.journal.as_ref() else {
+            return 0;
+        };
+        let lines = journal::journal_lines(view);
+        let Some(at) = lines.iter().position(
+            |line| matches!(line, JournalLine::Overflow(o) if view.overflow[*o].feed_id == feed),
+        ) else {
+            return 0;
+        };
+        lines[..at]
+            .iter()
+            .rev()
+            .find_map(|line| match line {
+                JournalLine::Entry(i) => Some(view.items[*i].row.entry_id),
+                _ => None,
+            })
+            .and_then(|id| self.entries.iter().position(|row| row.entry_id == id))
+            .map_or(0, |i| i + 1)
+    }
+
+    /// An edition build, unless one is already out (or queued behind a refresh).
+    fn build_edition(&mut self) -> Option<Command> {
+        if self.edition_job {
+            return None;
+        }
+        self.edition_job = true;
+        Some(Command::BuildEdition)
+    }
+
+    /// The rollover: the first tick of a new 04:00 day (in the clock's own zone) asks for a build.
+    fn on_tick_journal(&mut self, local: DateTime<FixedOffset>) -> Vec<Command> {
+        let day = journal::day_of(local);
+        let rolled = self.last_day.is_some_and(|last| last != day);
+        self.last_day = Some(day);
+        if rolled {
+            self.build_edition().into_iter().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Selects row `index`; opening it by hand (`mark_read`) marks it read, as the app does.
     fn select(&mut self, index: usize, mark_read: bool) -> Vec<Command> {
         let Some(row) = self.entries.get(index) else {
@@ -596,6 +804,7 @@ impl ReaderState {
         };
         let (id, was_read) = (row.entry_id, row.is_read);
         let mut commands = Vec::new();
+        self.journal_overflow = None;
         if self.selected != Some(id) {
             self.selected = Some(id);
             self.detail = None;
@@ -670,7 +879,7 @@ impl ReaderState {
             self.scroll = (self.scroll + step).min(max);
             return Vec::new();
         }
-        let from = self.index().map_or(0, |i| i + 1).min(self.entries.len());
+        let from = self.advance_from().min(self.entries.len());
         if let Some(offset) = self.entries[from..].iter().position(|row| !row.is_read) {
             if self.class == LayoutClass::One {
                 self.focus = Column::Reader;
@@ -682,7 +891,7 @@ impl ReaderState {
             return self.load_more().into_iter().collect();
         }
         let end = if self.source == Source::Journal {
-            END_OF_EDITION
+            END_LINE
         } else {
             NO_MORE_UNREAD
         };
@@ -693,6 +902,8 @@ impl ReaderState {
     fn focus_right(&mut self, wrap: bool) -> Vec<Command> {
         match self.focus {
             Column::Sources => self.open_sidebar_row(),
+            // An overflow row has no article: Enter opens its feed, the other keys wait.
+            Column::Entries if self.journal_overflow.is_some() => Vec::new(),
             Column::Entries => {
                 self.focus = Column::Reader;
                 if self.selected.is_none() && !self.entries.is_empty() {
@@ -712,7 +923,10 @@ impl ReaderState {
     fn enter(&mut self) -> Vec<Command> {
         match self.focus {
             Column::Sources => self.open_sidebar_row(),
-            Column::Entries => self.focus_right(false),
+            Column::Entries => match self.journal_overflow {
+                Some(feed) => self.switch_source(Source::Feed(feed)),
+                None => self.focus_right(false),
+            },
             Column::Reader => Vec::new(),
         }
     }
@@ -762,6 +976,7 @@ impl ReaderState {
             return Vec::new();
         }
         self.source = source;
+        self.journal_overflow = None;
         self.entries.clear();
         self.total = 0;
         self.unread = 0;
@@ -1008,7 +1223,11 @@ impl ReaderState {
         if std::mem::take(&mut self.pending_advance) {
             return self.advance();
         }
-        if self.selected.is_none() && !self.entries.is_empty() && self.reader_visible() {
+        if self.selected.is_none()
+            && self.journal_overflow.is_none()
+            && !self.entries.is_empty()
+            && self.reader_visible()
+        {
             return self.select(0, false);
         }
         Vec::new()
@@ -1036,7 +1255,21 @@ impl ReaderState {
         self.progress = None;
         match outcome {
             JobOutcome::Refreshed => vec![Command::LoadSources, self.reload_in_place()],
-            JobOutcome::EditionBuilt | JobOutcome::EditionNotDue => self.data_changed(),
+            JobOutcome::EditionBuilt | JobOutcome::EditionNotDue => {
+                self.edition_job = false;
+                self.journal_phase = JournalPhase::Idle;
+                self.data_changed()
+            }
+            JobOutcome::EditionOffline => {
+                self.edition_job = false;
+                self.journal_phase = JournalPhase::Offline;
+                Vec::new()
+            }
+            JobOutcome::EditionFailed(sentence) => {
+                self.edition_job = false;
+                self.journal_phase = JournalPhase::Failed(sentence);
+                Vec::new()
+            }
             JobOutcome::Offline => {
                 self.message = Some(OFFLINE.into());
                 Vec::new()
@@ -1268,6 +1501,7 @@ mod tests {
                     after: None,
                     request: 1
                 },
+                Command::BuildEdition,
             ]
         );
     }
@@ -2216,5 +2450,376 @@ mod tests {
         state.on_event(Event::Entry(detail(2, 3)));
         state.on_event(Event::Entry(detail(1, 5)));
         assert_eq!(state.detail.as_ref().map(|d| d.row.entry_id), Some(2));
+    }
+
+    mod journal_tests {
+        use super::*;
+        use crate::tui::reader::journal::{BUILDING, JournalLine, JournalPhase};
+        use chrono::TimeZone;
+        use ressac_core::edition::Section;
+        use ressac_core::store::{EditionOverflowRow, EditionRecord, JournalItem};
+
+        fn paris() -> FixedOffset {
+            FixedOffset::east_opt(2 * 3600).unwrap()
+        }
+
+        fn local(s: &str) -> DateTime<FixedOffset> {
+            paris().from_local_datetime(&s.parse().unwrap()).unwrap()
+        }
+
+        fn tick(s: &str) -> Event {
+            let l = local(s);
+            Event::Tick {
+                now: l.with_timezone(&Utc),
+                local: l,
+            }
+        }
+
+        fn started(at: &str) -> ReaderState {
+            let mut state = ReaderState::new(TerminalSettings::default(), 140, 40);
+            state.start(local(at).with_timezone(&Utc), local(at));
+            state
+        }
+
+        /// Week: entries 10 and 11 of feed 7 (12 more hidden), entry 12 of feed 8;
+        /// Wire: entry 13 of feed 9. Entries 10 and 13 are read when `first_read`.
+        fn journal(first_read: bool) -> JournalView {
+            let item = |id: i64, feed: i64, section, read| JournalItem {
+                row: row(id, feed, read),
+                section,
+                rank: id as u32,
+            };
+            JournalView {
+                edition: EditionRecord {
+                    id: 1,
+                    built_at: "2026-10-16T06:00:00Z".parse().unwrap(),
+                    window_start: "2026-10-15T06:00:00Z".parse().unwrap(),
+                    window_end: "2026-10-16T06:00:00Z".parse().unwrap(),
+                    unreachable: 0,
+                },
+                items: vec![
+                    item(10, 7, Section::Week, first_read),
+                    item(11, 7, Section::Week, false),
+                    item(12, 8, Section::Week, false),
+                    item(13, 9, Section::Wire, first_read),
+                ],
+                overflow: vec![EditionOverflowRow {
+                    section: Section::Week,
+                    feed_id: 7,
+                    feed_title: "Actualitté".into(),
+                    page: Some(403),
+                    hidden_count: 12,
+                }],
+            }
+        }
+
+        /// Started, with the Journal and its entries loaded; entry 10 selected.
+        fn loaded(first_read: bool) -> ReaderState {
+            let mut state = started("2026-10-16T08:00:00");
+            let view = journal(first_read);
+            let rows = view.items.iter().map(|i| i.row.clone()).collect();
+            state.on_event(Event::Journal(Some(view)));
+            state.on_event(entries(&state, Source::Journal, rows, None));
+            state
+        }
+
+        fn loads_entries_of(commands: &[Command], wanted: Source) -> bool {
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::LoadEntries { source, .. } if *source == wanted))
+        }
+
+        #[test]
+        fn a_session_starts_with_sources_journal_and_a_build() {
+            let mut state = ReaderState::new(TerminalSettings::default(), 140, 40);
+            let at = "2026-10-16T08:00:00";
+            let commands = state.start(local(at).with_timezone(&Utc), local(at));
+            assert_eq!(commands.first(), Some(&Command::LoadSources));
+            assert!(commands.contains(&Command::LoadJournal));
+            assert_eq!(commands.last(), Some(&Command::BuildEdition));
+            assert_eq!(state.source(), Source::Journal);
+            // Not shown as building until the refresh reports: a not-due build returns at once.
+            assert_eq!(state.journal_phase(), &JournalPhase::Idle);
+        }
+
+        #[test]
+        fn progress_shows_the_build_and_no_second_build_starts() {
+            let mut state = started("2026-10-16T08:00:00");
+            state.on_event(Event::Progress {
+                label: BUILDING.into(),
+                done: 3,
+                total: 156,
+            });
+            assert_eq!(
+                state.journal_phase(),
+                &JournalPhase::Building { done: 3, total: 156 }
+            );
+            // The rollover while the first build runs asks for nothing.
+            assert!(!state
+                .on_event(tick("2026-10-17T04:00:01"))
+                .contains(&Command::BuildEdition));
+            // Other jobs' progress is not the Journal's.
+            let mut other = started("2026-10-16T08:00:00");
+            other.on_event(Event::Progress {
+                label: "Fetching feeds".into(),
+                done: 1,
+                total: 2,
+            });
+            assert_eq!(other.journal_phase(), &JournalPhase::Idle);
+        }
+
+        /// Review Focus 5: the reader stays open across 04:00, the app builds first, the reader's
+        /// build is turned away by the core's due re-check, the Journal reloads, no error shows.
+        #[test]
+        fn across_four_the_reader_reloads_quietly_when_the_app_built_first() {
+            let mut state = started("2026-10-16T22:00:00");
+            state.on_event(Event::JobDone(JobOutcome::EditionNotDue));
+            assert!(
+                state.on_event(tick("2026-10-17T03:59:59")).is_empty(),
+                "the 04:00 day has not changed"
+            );
+            let at_four = state.on_event(tick("2026-10-17T04:00:00"));
+            assert_eq!(at_four, [Command::BuildEdition]);
+            // The same morning's later ticks start nothing.
+            assert!(state.on_event(tick("2026-10-17T04:00:01")).is_empty());
+            state.on_event(Event::Progress {
+                label: BUILDING.into(),
+                done: 0,
+                total: 156,
+            });
+            let done = state.on_event(Event::JobDone(JobOutcome::EditionNotDue));
+            assert!(done.contains(&Command::LoadJournal));
+            assert!(done.contains(&Command::LoadSources));
+            assert_eq!(state.journal_phase(), &JournalPhase::Idle);
+            assert_eq!(state.message, None);
+            assert_eq!(state.progress, None);
+        }
+
+        #[test]
+        fn the_rollover_is_the_zone_s_04_00_not_midnight() {
+            let mut state = started("2026-10-16T22:00:00");
+            state.on_event(Event::JobDone(JobOutcome::EditionNotDue));
+            assert!(state.on_event(tick("2026-10-17T00:00:00")).is_empty());
+            assert!(state.on_event(tick("2026-10-17T02:30:00")).is_empty());
+            assert_eq!(
+                state.on_event(tick("2026-10-17T04:00:00")),
+                [Command::BuildEdition]
+            );
+        }
+
+        #[test]
+        fn offline_and_failed_offer_r_as_retry() {
+            let mut state = started("2026-10-16T08:00:00");
+            state.on_event(Event::JobDone(JobOutcome::EditionOffline));
+            assert_eq!(state.journal_phase(), &JournalPhase::Offline);
+            assert_eq!(state.message, None, "the placeholder says it, not the top line");
+            assert_eq!(char_key(&mut state, 'r'), [Command::BuildEdition]);
+            // Asked once: a second `r` while the build is out does nothing.
+            assert!(char_key(&mut state, 'r').is_empty());
+            state.on_event(Event::JobDone(JobOutcome::EditionFailed("disk full".into())));
+            assert_eq!(
+                state.journal_phase(),
+                &JournalPhase::Failed("disk full".into())
+            );
+            assert_eq!(char_key(&mut state, 'r'), [Command::BuildEdition]);
+            state.on_event(Event::JobDone(JobOutcome::EditionBuilt));
+            assert_eq!(state.journal_phase(), &JournalPhase::Idle);
+            // Idle: `r` is the ordinary refresh again.
+            assert_eq!(
+                char_key(&mut state, 'r'),
+                [Command::Refresh(Some(Source::Journal))]
+            );
+        }
+
+        #[test]
+        fn r_elsewhere_is_a_refresh_even_when_the_journal_is_offline() {
+            let mut state = started("2026-10-16T08:00:00");
+            state.on_event(Event::JobDone(JobOutcome::EditionOffline));
+            state.go_to(Source::Unread);
+            assert_eq!(
+                char_key(&mut state, 'r'),
+                [Command::Refresh(Some(Source::Unread))]
+            );
+        }
+
+        /// A quick command's failure (a list that could not load, a write that failed) and a
+        /// refresh's outcome are not the edition's.
+        #[test]
+        fn only_the_edition_job_s_outcome_moves_the_phase() {
+            let mut state = started("2026-10-16T08:00:00");
+            state.on_event(Event::Progress {
+                label: BUILDING.into(),
+                done: 1,
+                total: 4,
+            });
+            state.on_event(Event::JobDone(JobOutcome::Failed("The database is busy.".into())));
+            state.on_event(Event::JobDone(JobOutcome::Offline));
+            assert_eq!(
+                state.journal_phase(),
+                &JournalPhase::Building { done: 1, total: 4 }
+            );
+            // The edition is still out: no second build, then its own failure lands.
+            assert!(char_key(&mut state, 'r').iter().all(|c| *c != Command::BuildEdition));
+            state.on_event(Event::JobDone(JobOutcome::EditionFailed("boom".into())));
+            assert_eq!(state.journal_phase(), &JournalPhase::Failed("boom".into()));
+        }
+
+        #[test]
+        fn a_built_edition_reloads_the_journal_and_the_counts() {
+            let mut state = started("2026-10-16T08:00:00");
+            state.on_event(Event::Progress {
+                label: BUILDING.into(),
+                done: 2,
+                total: 2,
+            });
+            let commands = state.on_event(Event::JobDone(JobOutcome::EditionBuilt));
+            assert!(commands.contains(&Command::LoadJournal));
+            assert!(commands.contains(&Command::LoadSources));
+            assert!(loads_entries_of(&commands, Source::Journal));
+            assert_eq!(state.journal_phase(), &JournalPhase::Idle);
+        }
+
+        #[test]
+        fn the_journal_lines_follow_the_view() {
+            let mut state = loaded(false);
+            let v = state.view();
+            assert_eq!(
+                v.journal_lines,
+                [
+                    JournalLine::Heading(Section::Week),
+                    JournalLine::Entry(0),
+                    JournalLine::Entry(1),
+                    JournalLine::Overflow(0),
+                    JournalLine::Entry(2),
+                    JournalLine::Heading(Section::Wire),
+                    JournalLine::Entry(3),
+                ]
+            );
+            assert_eq!(v.journal_cursor, Some(1));
+            // Another source, a filter or a search: the plain list, no Journal lines.
+            char_key(&mut state, 'u');
+            assert!(state.view().journal_lines.is_empty());
+            char_key(&mut state, 'u');
+            assert!(!state.view().journal_lines.is_empty());
+        }
+
+        #[test]
+        fn down_and_up_walk_the_lines_and_stop_on_overflow_rows() {
+            let mut state = loaded(false);
+            assert_eq!(state.selected_entry(), Some(10));
+            key(&mut state, KeyCode::Down);
+            assert_eq!(state.selected_entry(), Some(11));
+            // The overflow row selects nothing: the reader has no entry.
+            let commands = key(&mut state, KeyCode::Down);
+            assert!(commands.is_empty());
+            assert_eq!(state.selected_entry(), None);
+            assert_eq!(state.view().journal_cursor, Some(3));
+            // Down again: over the next entry; its heading is skipped when crossed.
+            key(&mut state, KeyCode::Down);
+            assert_eq!(state.selected_entry(), Some(12));
+            key(&mut state, KeyCode::Down);
+            assert_eq!(state.selected_entry(), Some(13));
+            assert_eq!(state.view().journal_cursor, Some(6));
+            key(&mut state, KeyCode::Up);
+            key(&mut state, KeyCode::Up);
+            assert_eq!(state.view().journal_cursor, Some(3));
+            key(&mut state, KeyCode::Up);
+            assert_eq!(state.selected_entry(), Some(11));
+        }
+
+        #[test]
+        fn j_and_k_skip_the_overflow_rows() {
+            let mut state = loaded(false);
+            char_key(&mut state, 'j');
+            assert_eq!(state.selected_entry(), Some(11));
+            char_key(&mut state, 'j');
+            assert_eq!(state.selected_entry(), Some(12), "over the overflow row");
+            char_key(&mut state, 'k');
+            assert_eq!(state.selected_entry(), Some(11));
+            // From the overflow row: j goes on after it, k back to the entry before it.
+            key(&mut state, KeyCode::Down);
+            assert_eq!(state.selected_entry(), None);
+            char_key(&mut state, 'k');
+            assert_eq!(state.selected_entry(), Some(11));
+            key(&mut state, KeyCode::Down);
+            char_key(&mut state, 'j');
+            assert_eq!(state.selected_entry(), Some(12));
+            // The ends do not wrap.
+            char_key(&mut state, 'j');
+            assert_eq!(state.selected_entry(), Some(13));
+            assert!(char_key(&mut state, 'j').is_empty());
+            assert_eq!(state.selected_entry(), Some(13));
+        }
+
+        #[test]
+        fn enter_on_an_overflow_row_opens_its_feed() {
+            let mut state = loaded(false);
+            key(&mut state, KeyCode::Down);
+            key(&mut state, KeyCode::Down);
+            let commands = key(&mut state, KeyCode::Enter);
+            assert_eq!(state.source(), Source::Feed(7));
+            assert!(loads_entries_of(&commands, Source::Feed(7)));
+            assert_eq!(state.view().journal_cursor, None);
+        }
+
+        #[test]
+        fn enter_on_an_entry_still_opens_the_reader() {
+            let mut state = loaded(false);
+            key(&mut state, KeyCode::Enter);
+            assert_eq!(state.source(), Source::Journal);
+            assert_eq!(state.focus(), Column::Reader);
+        }
+
+        #[test]
+        fn the_overflow_cursor_survives_a_reload_and_goes_with_its_row() {
+            let mut state = loaded(false);
+            key(&mut state, KeyCode::Down);
+            key(&mut state, KeyCode::Down);
+            let view = journal(false);
+            let rows: Vec<_> = view.items.iter().map(|i| i.row.clone()).collect();
+            state.on_event(Event::Journal(Some(view.clone())));
+            state.on_event(entries(&state, Source::Journal, rows.clone(), None));
+            assert_eq!(state.view().journal_cursor, Some(3), "still on the overflow row");
+            assert_eq!(state.selected_entry(), None, "and nothing selected behind it");
+            // The row is gone from the next edition: the cursor falls back to an entry.
+            let mut next = view;
+            next.overflow.clear();
+            state.on_event(Event::Journal(Some(next)));
+            state.on_event(entries(&state, Source::Journal, rows, None));
+            assert_eq!(state.selected_entry(), Some(10));
+            assert_eq!(state.view().journal_cursor, Some(1));
+        }
+
+        #[test]
+        fn space_after_an_overflow_row_goes_to_the_next_unread_entry() {
+            let mut state = loaded(true);
+            // Entries 10 and 13 are read: from the overflow row, the next unread is 12.
+            key(&mut state, KeyCode::Down);
+            key(&mut state, KeyCode::Down);
+            assert_eq!(state.selected_entry(), None);
+            char_key(&mut state, ' ');
+            assert_eq!(state.selected_entry(), Some(12));
+        }
+
+        #[test]
+        fn the_finished_edition_says_so_on_space() {
+            let mut state = loaded(false);
+            for e in &mut state.entries {
+                e.is_read = true;
+            }
+            state.selected = Some(13);
+            char_key(&mut state, ' ');
+            assert_eq!(state.message.as_deref(), Some("That's the edition."));
+        }
+
+        #[test]
+        fn leaving_the_journal_forgets_the_overflow_cursor() {
+            let mut state = loaded(false);
+            key(&mut state, KeyCode::Down);
+            key(&mut state, KeyCode::Down);
+            state.go_to(Source::Unread);
+            state.go_to(Source::Journal);
+            assert_eq!(state.view().journal_cursor, None);
+        }
     }
 }
