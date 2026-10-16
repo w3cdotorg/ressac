@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use ressac_core::edition::{CAP_WEEK, CAP_WIRE};
-use ressac_core::model::{Decision, FeedId, FolderId};
+use ressac_core::model::{CadenceGroup, Decision, FeedId, FolderId};
 use ressac_core::store::pages::PageKind;
 
 #[derive(Parser)]
@@ -88,6 +88,11 @@ pub enum Command {
         #[command(subcommand)]
         action: EditionCommand,
     },
+    /// Change one feed's settings
+    Feed {
+        #[command(subcommand)]
+        action: FeedCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -141,6 +146,41 @@ pub enum EditionCommand {
     },
     /// Print this morning's edition by section
     Show,
+}
+
+#[derive(Subcommand)]
+pub enum FeedCommand {
+    /// Force a feed's rhythm group, or give it back to the automatic one
+    Cadence {
+        /// The feed's id
+        feed_id: FeedId,
+        #[arg(value_enum)]
+        group: CadenceArg,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CadenceArg {
+    Auto,
+    Daily,
+    Weekly,
+    Monthly,
+    Rare,
+    Silent,
+}
+
+impl CadenceArg {
+    /// `None` for `auto`: the override is cleared.
+    pub fn group(self) -> Option<CadenceGroup> {
+        match self {
+            CadenceArg::Auto => None,
+            CadenceArg::Daily => Some(CadenceGroup::Daily),
+            CadenceArg::Weekly => Some(CadenceGroup::Weekly),
+            CadenceArg::Monthly => Some(CadenceGroup::Monthly),
+            CadenceArg::Rare => Some(CadenceGroup::Rare),
+            CadenceArg::Silent => Some(CadenceGroup::Silent),
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]

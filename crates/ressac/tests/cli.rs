@@ -236,6 +236,8 @@ fn commands_on_an_empty_store_hint_at_import() {
         &["edition", "build"],
         &["--json", "edition", "build"],
         &["edition", "show"],
+        &["feed", "cadence", "1", "daily"],
+        &["--json", "feed", "cadence", "1", "auto"],
     ] {
         let out = ressac(home.path(), args);
         assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
@@ -264,6 +266,10 @@ fn usage_errors_exit_2() {
         &["edition", "frobnicate"],
         &["edition", "build", "--cap-wire", "x"],
         &["edition", "build", "--cap-week", "-1"],
+        &["feed"],
+        &["feed", "cadence", "1"],
+        &["feed", "cadence", "1", "sometimes"],
+        &["feed", "cadence", "x", "daily"],
     ] {
         assert_eq!(ressac(home.path(), args).status.code(), Some(2), "{args:?}");
     }
@@ -1039,4 +1045,139 @@ async fn edition_show_and_page_list_neutralise_terminal_escapes() {
             "{args:?}: {out:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn feed_cadence_forces_a_group_and_the_edition_follows() {
+    let server = MockServer::start().await;
+    let home = edition_home(&server).await;
+    let fetched = ressac_async(home.path(), &["fetch"]).await;
+    assert!(fetched.status.success(), "{fetched:?}");
+
+    let forced = ressac_async(home.path(), &["feed", "cadence", "3", "weekly"]).await;
+    assert!(forced.status.success(), "{forced:?}");
+    assert_eq!(stdout(&forced), "#3 Weekly (set by you)\n");
+
+    let auto = ressac_async(home.path(), &["--json", "feed", "cadence", "3", "auto"]).await;
+    assert!(auto.status.success(), "{auto:?}");
+    assert_eq!(
+        json_lines(&auto),
+        [json!({"event": "cadence", "feed_id": 3, "group": "daily",
+                "computed": "daily", "override": false})]
+    );
+
+    let rare_to_daily =
+        ressac_async(home.path(), &["--json", "feed", "cadence", "1", "daily"]).await;
+    assert_eq!(
+        json_lines(&rare_to_daily),
+        [json!({"event": "cadence", "feed_id": 1, "group": "daily",
+                "computed": "rare", "override": true})]
+    );
+    assert_eq!(
+        stdout(&ressac_async(home.path(), &["feed", "cadence", "2", "auto"]).await),
+        "#2 Weekly (auto)\n"
+    );
+
+    // Rare forced to Daily leaves the front page and joins the wire, capped to one entry.
+    let built = ressac_async(home.path(), &["--json", "edition", "build"]).await;
+    assert!(built.status.success(), "{built:?}");
+    assert_eq!(
+        json_lines(&built).last().unwrap(),
+        &json!({"event": "edition", "id": 1, "entries": 4, "front": 0, "week": 2,
+                "wire": 2, "overflow": 2, "unreachable": 0})
+    );
+    let shown = stdout(&ressac_async(home.path(), &["edition", "show"]).await);
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(
+        lines[..lines.len() - 1],
+        [
+            "This Week",
+            "1 111 Weekly 1d",
+            "2 111 Weekly 6d",
+            "The Wire",
+            "3 110 Rare news",
+            "4 112 Wire 1h",
+            "+2 more in Wire",
+        ]
+    );
+
+    for (args, message) in [
+        (&["feed", "cadence", "99", "daily"][..], "No feed #99.\n"),
+        (
+            &["--json", "feed", "cadence", "99", "auto"],
+            "No feed #99.\n",
+        ),
+    ] {
+        let out = ressac_async(home.path(), args).await;
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert_eq!(stderr(&out), message, "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    let buried = ressac_async(home.path(), &["garden", "decide", "2", "bury"]).await;
+    assert!(buried.status.success(), "{buried:?}");
+    let refused = ressac_async(home.path(), &["feed", "cadence", "2", "daily"]).await;
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    assert_eq!(stderr(&refused), "Feed #2 is buried.\n");
+    assert!(refused.stdout.is_empty());
+}
+
+#[test]
+fn feed_cadence_exits_1_on_a_database_error() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("db.sqlite"), b"this is not a database").unwrap();
+    let out = ressac(home.path(), &["feed", "cadence", "1", "daily"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr(&out).starts_with("error: cannot open database"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn page_commands_know_the_journal_and_rhythm_pages() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let run = |args: &[&str]| ressac(home.path(), args);
+
+    let list = stdout(&run(&["page", "list"]));
+    let reserved: Vec<&str> = list.lines().take(14).collect();
+    assert_eq!(
+        reserved,
+        [
+            "100 reserved - Index",
+            "101 reserved - Unread",
+            "102 reserved - Today",
+            "103 reserved - Starred",
+            "104 reserved - Journal",
+            "105 reserved - Daily",
+            "106 reserved - Weekly",
+            "107 reserved - Monthly",
+            "108 reserved - Rare",
+            "109 reserved - Silent",
+            "800 reserved - Needs triage",
+            "801 reserved - All feeds",
+            "802 reserved - Cemetery",
+            "899 reserved - Guide",
+        ]
+    );
+    let json = json_lines(&run(&["--json", "page", "list"]));
+    assert_eq!(
+        json[4],
+        json!({"event": "page", "page": 104, "kind": "reserved", "id": null,
+               "title": "Journal", "parent_page": null})
+    );
+
+    for page in 104..=109 {
+        for kind in ["feed", "folder"] {
+            let page_arg = page.to_string();
+            let out = run(&["page", "set", kind, "2", &page_arg]);
+            assert_eq!(out.status.code(), Some(2), "{kind} {page}: {out:?}");
+            assert_eq!(stderr(&out), format!("Page {page} is reserved.\n"));
+            assert!(out.stdout.is_empty());
+        }
+    }
+    assert!(
+        stdout(&run(&["page", "list"])).contains("203 feed 2 Orange Drenka\n"),
+        "unchanged"
+    );
 }
