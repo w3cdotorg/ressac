@@ -6,12 +6,12 @@
 
 **Architecture:**
 
-- **Phases 1a–1c (Rust core rhythm).** `CadenceGroup` and its classification from the median interval; the `entries_per_month` fix; schema v4 (`cadence_group`, `cadence_override`, edition tables, contract views, reserved pages 104–109); the per-feed override in the store.
+- **Phases 1a–1d (Rust core rhythm).** `CadenceGroup` and its classification from the median interval; the `entries_per_month` fix; schema v4 (`cadence_group`, `cadence_override`, edition tables, contract views); the per-feed override in the store; the 14 reserved pages (1d).
 - **Phases 2a–2b (Rust edition).** A pure `edition` module composes sections, caps and ranks from candidate rows; `store/edition.rs` selects candidates, checks the 04:00 due rule and writes the edition in one transaction; `Ressac::build_edition` chains refresh and composition.
 - **Phases 3a–3b (CLI).** `ressac edition build|show`, `ressac feed cadence`, the `edition` and `cadence` NDJSON events.
 - **Phases 4a–4b (Swift data and engine).** `knownSchemaVersion = 4`, records and live queries over the v4 views; `RunRequest.buildEdition`, `RunRequest.setCadence`, the `edition` event.
 - **Phases 5a–5c (Swift Native).** Step 0 on `AppState.swift`, `JournalModel` (due check, build on launch, foreground and 04:00 rollover, offline state); sidebar Journal and Rhythm, the Journal list; inspector rhythm line and override menu, Garden › All feeds Rhythm column.
-- **Phases 6a–6b (Swift Antiope).** Reserved pages 104–109 and SOMMAIRE; P104 with sections, overflow rows, sub-pages and `FIN DE L'EDITION`, build progress, Antiope inspector line.
+- **Phases 6a–6c (Swift Antiope).** Reserved pages 104–109 and SOMMAIRE; P104 with sections, overflow rows and `FIN DE L'EDITION`, build progress; sub-pages `104 n/N` and the Antiope inspector line (6c).
 - **Phase 7.** Manual acceptance on the real database, docs, push and PR (not merged).
 
 **Tech Stack:**
@@ -32,21 +32,23 @@ Execute the (sub-)phases **in the order of the table below**, not in file-number
 
 | Order | Phase | File | Deliverable |
 |---|---|---|---|
-| 1 | 1a | `cadence-edition/phase-01-cadence-core.md` | `CadenceGroup`, `classify`, `Cadence.group`, `entries_per_month` over the covered span |
-| 2 | 1b | `cadence-edition/phase-01-cadence-core.md` | `0004_edition.sql`, migration to v4 with the `cadence_group` backfill and the 104–109 move, `save_diagnoses` stores the group, 14 reserved pages, contract fixture and drift test at v4 |
-| 3 | 4a | `cadence-edition/phase-04-swift-data-engine.md` | `knownSchemaVersion = 4`, `CadenceGroup`, `EditionSection`, edition and cadence records, `Queries.edition`, `Queries.cadenceRows`, `Queries.isEditionDue` |
-| 4 | 1c | `cadence-edition/phase-01-cadence-core.md` | `Store::set_cadence_override`, `Error::UnknownFeed`, `Error::FeedBuried`, `Ressac::set_cadence` |
-| 5 | 2a | `cadence-edition/phase-02-edition-core.md` | `edition.rs`: `Section`, `Caps`, `Candidate`, `compose`, `day_start` |
-| 6 | 2b | `cadence-edition/phase-02-edition-core.md` | `store/edition.rs` (latest, due, candidates, write, rebuild), `Ressac::build_edition`, `Ressac::edition_today`, `Event::Edition` |
-| 7 | 3a | `cadence-edition/phase-03-cli.md` | `ressac edition build` and `ressac edition show`, text and `--json`, exit codes |
-| 8 | 3b | `cadence-edition/phase-03-cli.md` | `ressac feed cadence`, `cadence` event, `page list`/`page set` with 104–109 |
-| 9 | 4b | `cadence-edition/phase-04-swift-data-engine.md` | `RunRequest.buildEdition`, `RunRequest.setCadence`, `EngineEvent.edition`, refusal mapping |
-| 10 | 5a | `cadence-edition/phase-05-native.md` | Step 0 on `AppState.swift`; `JournalModel` with due check, launch build, foreground check, 04:00 rollover, offline and refusal states |
-| 11 | 5b | `cadence-edition/phase-05-native.md` | `Source.journal`, `Source.cadence(_)`, sidebar Journal and Rhythm, Journal list with sections, overflow rows, header, end line, `⇧⌘A` and `Space` inside the edition |
-| 12 | 5c | `cadence-edition/phase-05-native.md` | Inspector rhythm line and override menu, Garden › All feeds Rhythm column |
-| 13 | 6a | `cadence-edition/phase-06-antiope.md` | `ReservedPage` 104–109, `PageDestination`s, SOMMAIRE rows with counts |
-| 14 | 6b | `cadence-edition/phase-06-antiope.md` | P104 column (headings, overflow), sub-pages `104 n/N`, `FIN DE L'EDITION`, `EDITION IN PROGRESS n/N`, Antiope inspector rhythm line |
-| 15 | 7 | `cadence-edition/phase-07-acceptance-docs.md` | Migration of the real database, manual check with Clément, README, `notes.md`, `TODO.md`, push and PR (not merged) |
+| 1 | 1a | `cadence-edition/phase-01-cadence-core.md` | `CadenceGroup`, `classify`, `Cadence.group`, `entries_per_month` over the covered span; `health/mod.rs` re-exports |
+| 2 | 1b | `cadence-edition/phase-01-cadence-core.md` | `0004_edition.sql`, migration to v4 with the `cadence_group` backfill and the 104–109 move, `save_diagnoses` stores the group, contract fixture (rhythm rows and one seeded edition) and drift test at v4, CLI `Schema version 4.` |
+| 3 | 4a | `cadence-edition/phase-04-swift-data-engine.md` | `knownSchemaVersion = 4`, `Data/Edition.swift` (`CadenceGroup`, `EditionSection`, edition and cadence records, `EditionClock`), `Queries.edition`, `Queries.cadenceRows`, `Queries.isEditionDue` |
+| 4 | 1c | `cadence-edition/phase-01-cadence-core.md` | `Store::set_cadence_override`, `Store::cadence_row`, `CadenceRow`, `Error::UnknownFeed`, `Error::FeedBuried`, `Error::EditionNotDue`, `Ressac::set_cadence` |
+| 5 | 1d | `cadence-edition/phase-01-cadence-core.md` | `RESERVED_PAGES` 14 pages with their titles; `page list` / `page set` CLI expectations |
+| 6 | 2a | `cadence-edition/phase-02-edition-core.md` | `edition.rs`: `Section`, `Caps`, `Candidate`, `compose`, `day_start` |
+| 7 | 2b | `cadence-edition/phase-02-edition-core.md` | `store/edition.rs` (latest, due, candidates, write, rebuild, `edition_view`), `Ressac::build_edition`, `Ressac::edition_today`, `Event::Edition` (and its arm in `output.rs`) |
+| 8 | 3a | `cadence-edition/phase-03-cli.md` | `ressac edition build` and `ressac edition show`, text and `--json`, exit codes |
+| 9 | 3b | `cadence-edition/phase-03-cli.md` | `ressac feed cadence`, `cadence` JSON line, CLI tests of pages 104–109 |
+| 10 | 4b | `cadence-edition/phase-04-swift-data-engine.md` | `RunRequest.buildEdition`, `RunRequest.setCadence`, `EngineEvent.edition` / `.cadence`, refusal mapping for both, `RunCoordinator` switches |
+| 11 | 5a | `cadence-edition/phase-05-native.md` | Step 0 on `AppState.swift`; `JournalModel` with live edition, due check, launch build, foreground check, 04:00 rollover, offline, failed and "built elsewhere" states; `RunCoordinator.editionProgressLabel` |
+| 12 | 5b | `cadence-edition/phase-05-native.md` | `Source.journal`, `Source.cadence(_)`, sidebar Journal and Rhythm, Journal list in rank order with sections, overflow rows, header, end line, `⇧⌘A` and `Space` inside the edition |
+| 13 | 5c | `cadence-edition/phase-05-native.md` | Inspector rhythm line and override menu, All Feeds rhythm label and `Status \| Rhythm` grouping, `AppState.setCadence` |
+| 14 | 6a | `cadence-edition/phase-06-antiope.md` | `ReservedPage` 104–109, `PageDestination`s, SOMMAIRE rows with counts |
+| 15 | 6b | `cadence-edition/phase-06-antiope.md` | P104 column (headings, overflow rows, end line, progress and offline rows), `FIN DE L'EDITION` page reached by SUITE, RÉPÉTITION retries, `EDITION IN PROGRESS n/N` |
+| 16 | 6c | `cadence-edition/phase-06-antiope.md` | Sub-pages `104 n/N` in the reader, Antiope inspector rhythm line and override rows |
+| 17 | 7 | `cadence-edition/phase-07-acceptance-docs.md` | Migration of the real database, manual check with Clément, README, `notes.md`, `TODO.md`, push and PR (not merged) |
 
 ## Global Constraints
 
@@ -59,7 +61,7 @@ Execute the (sub-)phases **in the order of the table below**, not in file-number
 - **Exact strings:**
   - Native sections `Front Page`, `This Week`, `The Wire`; Antiope `FRONT PAGE` (yellow), `THIS WEEK` (cyan), `THE WIRE` (green).
   - Header `Friday 16 October · 43 entries · 12 read`, suffix ` · 3 feeds unreachable` when `unreachable > 0` (`1 feed unreachable` singular).
-  - Overflow `+12 more in Actualitté` (Native), `+12 MORE IN ACTUALITTE` (Antiope, blue, through the existing Antiope upper-casing and accent folding).
+  - Overflow `+12 more in Actualitté` (Native), `+12 MORE IN ACTUALITTÉ` (Antiope: white on a blue background, since blue never colours text; accents kept in capitals, Bedstead draws them; opened by a click only, the column's rows are not selectable one by one).
   - End `That's the edition.`; empty `Nothing new this morning.`; progress `Building this morning's edition… 34/156` and Antiope `EDITION IN PROGRESS 34/156`; offline `Offline: no edition yet` with a `Retry` button.
   - Inspector `Rhythm: Daily · median 0.4 d · last entry 2 h ago`, suffix ` (set by you)`; menu items `Auto`, `Daily`, `Weekly`, `Monthly`, `Rare`, `Silent`.
   - CLI refusals (exit `2`, stderr): `An edition was already built this morning.`, `The network is unreachable: no edition built.`, `No feed #N.`, `Feed #N is buried.`
@@ -71,10 +73,10 @@ Execute the (sub-)phases **in the order of the table below**, not in file-number
 - **Client-writable columns:** unchanged (`entry.read_at`, `entry.starred_at`, `feed.prefer_full_text`). `feed.cadence_override` and every edition table are written by the core only; the app goes through `ressac feed cadence` and `ressac edition build`.
 - **Reserved pages:** `100` Index, `101` Unread, `102` Today, `103` Starred, `104` Journal, `105` Daily, `106` Weekly, `107` Monthly, `108` Rare, `109` Silent, `800` Needs triage, `801` All feeds, `802` Cemetery, `899` Guide. Assignable range `110...799`, minus the reserved pages.
 - **Verification gates:**
-  - **Rust phases:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+  - **Rust phases:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. The plan's code is not guaranteed to be in rustfmt's exact layout: running `cargo fmt --all` before `--check` is allowed.
   - **Swift phases:** the Rust gate, plus `cd apps/macos && xcodegen generate && xcodebuild -project Ressac.xcodeproj -scheme Ressac -destination 'platform=macOS' test`, zero warnings.
   - There is no `tsc`/`eslint` in this project; the gates above replace them.
-- **Step 0 rule:** before restructuring a file over 300 lines, first remove its dead code, unused imports and debug logs in a separate commit. Concerned here: `AppState.swift` (823), `ArticleTemplate.swift` (695, only if touched), `Queries.swift` (282, grows past 300 in 4a: no Step 0 needed), `service.rs`, `output.rs` (436), `store/mod.rs`. Check line counts when the phase starts.
+- **Step 0 rule:** before restructuring a file over 300 lines, first remove its dead code, unused imports and debug logs in a separate commit. Concerned here: `AppState.swift` (823, Step 0 in 5a), `ArticleTemplate.swift` (695, only if touched), `Queries.swift` (282, grows past 300 in 4a: no Step 0 needed), `service.rs` and `store/mod.rs` (checked in 1b and 2b), `output.rs` (436, one additive match arm in 2b, no restructuring). Check line counts when the phase starts.
 - **Shell setup:** run `export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"` before any command.
 - **Commits:**
   - one per task, on branch `cadence-edition`;
@@ -173,14 +175,18 @@ An edition with no entries has no row in `v_edition_today`; clients read the edi
 ### Phase 1c (override)
 
 ```rust
-// error.rs — new variants
+// error.rs — new variants (EditionNotDue is declared here for Phase 2b, whose five files are taken)
 #[error("No feed #{0}.")]       UnknownFeed(FeedId),
 #[error("Feed #{0} is buried.")] FeedBuried(FeedId),
+#[error("An edition was already built this morning.")] EditionNotDue,
 
 // store/feeds.rs
 impl Store {
     /// `None` clears the override. Refuses an unknown or buried feed.
     pub fn set_cadence_override(&self, feed_id: FeedId, group: Option<CadenceGroup>) -> Result<()>;
+    /// `feed` LEFT JOIN `feed_health` (not `v_cadence`): a feed never diagnosed reads computed `Silent`.
+    /// Refuses an unknown feed; reads a buried one.
+    pub fn cadence_row(&self, feed_id: FeedId) -> Result<CadenceRow>;
 }
 
 // service.rs
@@ -189,13 +195,17 @@ impl Ressac {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct CadenceRow {            // in store/feeds.rs, re-read from v_cadence
+pub struct CadenceRow {            // in store/feeds.rs, re-exported as ressac_core::store::CadenceRow
     pub feed_id: FeedId,
     pub effective_group: CadenceGroup,
     pub computed_group: CadenceGroup,
     pub is_override: bool,
 }
 ```
+
+### Phase 1d (reserved pages)
+
+`store/pages.rs`: `RESERVED_PAGES: [u16; 14]` and `RESERVED_TITLES` as listed under Phase 1b; the `page list` and `page set … 109` CLI tests are updated here (the 1b migration already frees 104–109 with plain SQL).
 
 ### Phase 2a (Rust, `crates/ressac-core/src/edition.rs`, pure)
 
@@ -277,10 +287,12 @@ impl Store {
     /// select candidates, compose, insert edition + edition_entry + edition_overflow.
     /// Not due and not rebuild → Err(Error::EditionNotDue).
     pub fn write_edition(&self, p: &EditionParams) -> Result<(EditionRecord, Composition)>;
+    /// The latest edition through the contract views; None before the first one.
+    pub fn edition_view(&self) -> Result<Option<EditionView>>;
 }
-
-// error.rs — new variant
-#[error("An edition was already built this morning.")] EditionNotDue,
+// store/edition.rs is a private module: EditionRecord, EditionParams, EditionView,
+// EditionEntryRow and EditionOverflowRow are re-exported from ressac_core::store,
+// and the three view types also from ressac_core::service.
 
 // service.rs
 pub struct EditionOptions { pub caps: Caps, pub rebuild: bool }
@@ -305,13 +317,17 @@ impl Ressac {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EditionView { pub edition: EditionRecord, pub entries: Vec<EditionEntryRow>, pub overflow: Vec<EditionOverflowRow> }
-// EditionEntryRow / EditionOverflowRow mirror the columns of v_edition_today / v_edition_overflow.
+pub struct EditionEntryRow { pub entry_id: i64, pub section: Section, pub rank: u32, pub feed_id: FeedId, pub feed_title: String,
+    pub title: Option<String>, pub published_at: DateTime<Utc>, pub read_at: Option<DateTime<Utc>>, pub starred_at: Option<DateTime<Utc>> }
+pub struct EditionOverflowRow { pub section: Section, pub feed_id: FeedId, pub feed_title: String, pub page: Option<u16>, pub hidden_count: u32 }
 
 // Event (service.rs)
 Edition { id: i64, entries: usize, front: usize, week: usize, wire: usize, overflow: u32, unreachable: u32 },
 ```
 
 Rule for `window_start`: the latest edition's `window_end`; with `rebuild`, the deleted edition's `window_start`; with no edition at all, `window_end − FIRST_WINDOW_HOURS`.
+
+`window_end` and `built_at` are `max(Utc::now(), now)` taken after the refresh: the refresh stamps `fetched_at` with the real clock, so a window ending on an injected `now` could leave the build's own entries out. `unreachable` counts every `feed_done` that carries an error during the refresh (HTTP 404 and 410 included). `Event::Edition` joins the no-op arm of the CLI progress display's exhaustive `match` in `crates/ressac/src/output.rs` in this sub-phase (the workspace gate compiles that crate).
 
 ### Phases 3a–3b (CLI)
 
@@ -323,6 +339,10 @@ Rule for `window_start`: the latest edition's `window_end`; with `rebuild`, the 
 | `page list`, `page set` | unchanged shapes | unchanged | `page set … 104`…`109` → `Page N is reserved.` |
 
 Interrupted (`Ctrl-C`) → exit `130` like `fetch`, no edition. Database errors exit `1`.
+
+- The text helpers live in `crates/ressac/src/commands/edition.rs` and `commands/feed.rs` (not `output.rs`), to keep 3a at five files.
+- The `cadence` JSON line is built by the CLI with `json!`; the core has no `Event::Cadence`.
+- `edition show --json` with no edition prints nothing and exits `0`; each `edition_entry` line also repeats the edition's own fields; the page of each overflow and entry comes from `Ressac::pages()` (no `page` column in `v_edition_today`).
 
 ### Phase 4a (Swift data)
 
@@ -369,7 +389,7 @@ enum EditionClock {
 }
 ```
 
-`AppDatabase.knownSchemaVersion = 4`.
+`AppDatabase.knownSchemaVersion = 4`. All the types above live in the new file `apps/macos/Ressac/Data/Edition.swift`; the record types conform to `RessacRecord` and keep their memberwise initialisers (any `init(row:)` goes in an extension). The query functions are added to `struct Queries` itself.
 
 ### Phase 4b (Swift engine)
 
@@ -383,7 +403,7 @@ case edition(id: Int64, entries: Int, overflow: Int, unreachable: Int)   // "edi
 case cadence(feedId: Int64, group: String, isOverride: Bool)            // "cadence"
 ```
 
-`RunFailure` exit `2` from `edition build` is a refusal (`isRefusal` true), its stderr line is the banner text.
+`RunFailure` exit `2` from `edition build` and from `feed cadence` is a refusal (`isRefusal` true): its stderr line is the banner text, without Show Log. `RunCoordinator`'s two exhaustive `switch event` list the two new cases.
 
 ### Phase 5a (Swift, `App/JournalModel.swift`)
 
@@ -397,10 +417,19 @@ final class JournalModel {
     func checkAndBuild() async          // launch, foreground, rollover; no-op while building
     func retry() async
     func scheduleRollover()             // next EditionClock.dayStart after now; replaces the midnight-only path for the Journal
+    func cancelRollover()
+    static func nextRollover(after: Date, calendar: Calendar) -> Date
+    static let builtElsewhere = "An edition was already built this morning."
+    var sleep: @Sendable (Duration) async throws -> Void   // injectable for tests
 }
+// RunCoordinator.editionProgressLabel: String = "Building this morning's edition…" (RunProgress.label of an edition run)
 ```
 
-`AppState` owns one `JournalModel` (`appState.journal`). `RessacApp`/`AppState` call `checkAndBuild()` at launch, on `NSApplication.didBecomeActiveNotification`, and at the rollover. The existing `dayDidChange()` for Today stays as is.
+`AppState` owns one `JournalModel` (`appState.journal`). `RessacApp`/`AppState` call `checkAndBuild()` at launch, on `NSApplication.didBecomeActiveNotification`, and at the rollover (none of the three while `Launcher.isRunningTests`). The existing `dayDidChange()` for Today stays as is.
+
+- `JournalModel.edition` follows the database live through `Queries.edition()`.
+- A failed or killed run gives `.failed(message)`; `.due` means the coordinator turned the run away. Either way the next trigger builds.
+- Exit `2` after a `network_unreachable` event gives `.offline` (banner kept); exit `2` with `builtElsewhere` gives `.idle` and takes the coordinator's banner down (spec §9).
 
 ### Phase 5b (Swift, sidebar and list)
 
@@ -411,11 +440,20 @@ enum Source { …; case journal; case cadence(CadenceGroup) }
 // SidebarSnapshot gains: var journalUnread = 0; var cadenceUnread: [CadenceGroup: Int] = [:]
 ```
 
-The Journal list is its own view (`Reading/JournalList.swift`) fed by `appState.journal.edition`, ordered by `rank`; selecting an item sets the reader's entry as the other lists do. Every exhaustive `switch` over `Source` (grep `case .starred` and `case .today` in `apps/macos/Ressac`) gets the two new cases.
+For `.journal`, the entry list is ordered by the entry's `rank` in the latest edition in SQL and always loads whole (`Queries.floor` and `Queries.nextUnread` return nil for it), so `AppState.entries` holds the edition in rank order and `j`, `k`, Space, `⇧⌘A` work unchanged; `AppState.merge(fresh:previous:retained:floor:rank:)` keeps that order. The Journal view lays these rows out with the sections, overflow rows, header and end line taken from `appState.journal.edition`. Every exhaustive `switch` over `Source` (grep `case .starred` and `case .today` in `apps/macos/Ressac`) gets the two new cases.
 
 ### Phase 5c (Swift, inspector and garden)
 
-The Rhythm column of Garden › All feeds joins `Queries.cadenceRows()` to the garden rows by `feedId` in `GardenModel`; `v_garden_row` does not change. The inspector reads the same `CadenceRow` and runs `RunRequest.setCadence` as a short run.
+Garden › All feeds is a sectioned `List`, not a table: "a sortable Rhythm column" becomes a trailing rhythm label on each row (`Daily`, `Daily*` when set by hand) and a `Status | Rhythm` segmented control (`GardenGrouping`) that regroups the rows by rhythm. Both join `Queries.cadenceRows()` to the garden rows by `feedId`; `v_garden_row` does not change. The inspector reads the same `CadenceRow` and runs `RunRequest.setCadence` as a short run through `AppState.setCadence(feedId:_:)`.
+
+```swift
+extension GardenModel {
+    static func rhythmText(_ cadence: CadenceRow, now: Date) -> String   // "Daily · median 0.4 d · last entry 2 h ago" (+ " (set by you)"); Antiope reuses it
+    static func rhythmLine(_ cadence: CadenceRow, now: Date) -> String   // "Rhythm: " + rhythmText
+    static func rhythmLabel(_ cadence: CadenceRow?) -> String?
+    static func ago(_ date: Date, now: Date) -> String
+}
+```
 
 ### Phase 6 (Swift Antiope)
 
@@ -425,7 +463,7 @@ enum ReservedPage: Int { …; case journal = 104, daily = 105, weekly = 106, mon
 // titles mirror pages::list: "Journal", "Daily", "Weekly", "Monthly", "Rare", "Silent"
 ```
 
-Sub-pages of P104 are numbered by `EditionItem.rank` over `edition.items.count`.
+Sub-pages of P104 are numbered by `EditionItem.rank` over `edition.items.count` (6c). Overflow rows are white on blue and open on a click only; `FIN DE L'EDITION` shows at the end of the column when everything is read and as the reader page that SUITE reaches after the last entry; RÉPÉTITION on P104 retries a failed or offline build; with no edition yet and while building, P104 shows `EDITION IN PROGRESS`.
 
 ## After this plan
 
