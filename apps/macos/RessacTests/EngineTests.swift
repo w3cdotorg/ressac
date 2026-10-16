@@ -24,6 +24,14 @@ import Testing
             (#"{"event":"decided","feed_id":7,"decision":"bury"}"#, .decided(feedId: 7, decision: "bury")),
             (#"{"event":"undone","feed_id":null}"#, .undone(feedId: nil)),
             (#"{"event":"undone","feed_id":7}"#, .undone(feedId: 7)),
+            (#"{"event":"edition","id":12,"entries":43,"front":2,"week":7,"wire":34,"overflow":61,"unreachable":3}"#,
+             .edition(id: 12, entries: 43, overflow: 61, unreachable: 3)),
+            (#"{"event":"edition","id":13,"entries":0,"front":0,"week":0,"wire":0,"overflow":0,"unreachable":0}"#,
+             .edition(id: 13, entries: 0, overflow: 0, unreachable: 0)),
+            (#"{"event":"cadence","feed_id":12,"group":"daily","computed":"weekly","override":true}"#,
+             .cadence(feedId: 12, group: "daily", isOverride: true)),
+            (#"{"event":"cadence","feed_id":12,"group":"weekly","computed":"weekly","override":false}"#,
+             .cadence(feedId: 12, group: "weekly", isOverride: false)),
         ]
         for (line, event) in cases {
             #expect(EngineEvent.decode(line: line) == event, "\(line)")
@@ -36,6 +44,8 @@ import Testing
         #expect(EngineEvent.decode(line: report) == .unknown(report))
         #expect(EngineEvent.decode(line: importReport) == .unknown(importReport))
         #expect(EngineEvent.decode(line: #"{"event":"started"}"#) == .unknown(#"{"event":"started"}"#))
+        // An edition line without its id is not an edition this build can use.
+        #expect(EngineEvent.decode(line: #"{"event":"edition","entries":3}"#) == .unknown(#"{"event":"edition","entries":3}"#))
         for garbage in ["", "not json", "[1,2]", "42", #"{"event":"fini"#, "\u{1b}[2K progress"] {
             #expect(EngineEvent.decode(line: garbage) == nil, "\(garbage)")
         }
@@ -100,6 +110,11 @@ func collect(_ stream: AsyncThrowingStream<EngineEvent, any Error>) async -> ([E
         #expect(RunRequest.applySafe().arguments == ["garden", "apply-safe"])
         #expect(RunRequest.migrate() == RunRequest(arguments: ["migrate"], kind: .short))
         #expect(!RunRequest.extract(entryId: 1).showsFailureBanner && RunRequest.undo().showsFailureBanner)
+        #expect(RunRequest.buildEdition() == RunRequest(arguments: ["edition", "build"], kind: .long))
+        #expect(RunRequest.buildEdition(rebuild: true) == RunRequest(arguments: ["edition", "build", "--rebuild"], kind: .long))
+        #expect(RunRequest.setCadence(feedId: 12, .monthly) == RunRequest(arguments: ["feed", "cadence", "12", "monthly"], kind: .short))
+        #expect(RunRequest.setCadence(feedId: 12, nil) == RunRequest(arguments: ["feed", "cadence", "12", "auto"], kind: .short))
+        #expect(RunRequest.buildEdition().showsFailureBanner && RunRequest.setCadence(feedId: 1, nil).showsFailureBanner)
     }
 }
 

@@ -138,14 +138,14 @@ enum RunOutcome: Equatable, Sendable {
                 message: "The network looks unreachable: \(failed) of \(attempted) feeds could not connect.",
                 showLog: false)
             bannerSetDuringRun = true
-        case .waybackDone, .finished, .decided, .undone, .unknown:
+        case .waybackDone, .finished, .decided, .undone, .edition, .cadence, .unknown:
             break
         }
     }
 
     private func noteChange(after event: EngineEvent) {
         switch event {
-        case .feedDone, .extracted, .decided, .undone, .finished:
+        case .feedDone, .extracted, .decided, .undone, .finished, .edition, .cadence:
             if ContinuousClock.now - lastChangeNotice >= .seconds(1) {
                 lastChangeNotice = .now
                 onDatabaseChange?()

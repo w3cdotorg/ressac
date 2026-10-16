@@ -57,16 +57,30 @@ struct RunRequest: Sendable, Equatable {
         RunRequest(arguments: ["migrate"], kind: .short)
     }
 
+    /// Refresh, then compose today's edition (spec §6). Long: it fetches every due feed.
+    static func buildEdition(rebuild: Bool = false) -> RunRequest {
+        RunRequest(arguments: ["edition", "build"] + (rebuild ? ["--rebuild"] : []), kind: .long)
+    }
+
+    /// Forces a feed's rhythm group, or gives it back to the core with `nil` ("auto").
+    static func setCadence(feedId: Int64, _ group: CadenceGroup?) -> RunRequest {
+        RunRequest(arguments: ["feed", "cadence", String(feedId), group?.rawValue ?? "auto"], kind: .short)
+    }
+
     /// Extraction failures are shown inline in the reader, never as a banner (spec §8).
     var showsFailureBanner: Bool { arguments.first != "extract" }
 
-    /// True when `failure` is the store refusing a garden decision or an undo (exit 2, e.g. an
-    /// address another active feed already uses), which the app cannot foresee. From any other
-    /// call, exit 2 means the app built a wrong command line (spec §8).
+    /// True when `failure` is the store refusing something the app cannot foresee (exit 2): a
+    /// garden decision or an undo (an address another active feed already uses), an edition
+    /// that is not due or cannot be built offline, an override on a feed buried meanwhile.
+    /// From any other call, exit 2 means the app built a wrong command line (spec §8).
     func isRefusal(_ failure: RunFailure) -> Bool {
-        failure.exitCode == 2
-            && (arguments.starts(with: ["garden", "decide"]) || arguments == ["garden", "undo"])
+        failure.exitCode == 2 && Self.refusable.contains { arguments.starts(with: $0) }
     }
+
+    private static let refusable: [[String]] = [
+        ["garden", "decide"], ["garden", "undo"], ["edition", "build"], ["feed", "cadence"],
+    ]
 }
 
 /// A run that did not exit 0. A signal death has `exitCode = -signal`; a binary that
