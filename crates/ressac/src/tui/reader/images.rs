@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use image::{DynamicImage, ImageReader, Limits, Rgb, RgbImage};
-use ratatui::layout::Size;
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Rect, Size};
+use ratatui::style::Color;
 use ratatui_image::Resize;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocol;
@@ -102,7 +104,6 @@ pub fn decode_limited(bytes: &[u8]) -> Result<DynamicImage, String> {
 }
 
 /// Every pixel becomes the nearest of the eight teletext colours; transparency becomes black.
-#[allow(dead_code, reason = "phase 9 draws Antiope's images with it")]
 pub fn quantise_teletext(img: &DynamicImage) -> DynamicImage {
     let rgba = img.to_rgba8();
     let mut out = RgbImage::new(rgba.width(), rgba.height());
@@ -116,6 +117,25 @@ pub fn quantise_teletext(img: &DynamicImage) -> DynamicImage {
         out.put_pixel(x, y, Rgb(px));
     }
     DynamicImage::ImageRgb8(out)
+}
+
+/// Snaps every colour of the cells of `area` to the nearest of the eight teletext colours.
+/// Half-block encoding resizes with a smoothing filter, so a quantised source still leaves
+/// in-between colours at the edges of its regions; Antiope's mosaics run this after drawing.
+pub fn snap_to_teletext(buffer: &mut Buffer, area: Rect) {
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let Some(cell) = buffer.cell_mut((x, y)) else {
+                continue;
+            };
+            for colour in [&mut cell.fg, &mut cell.bg] {
+                if let Color::Rgb(r, g, b) = *colour {
+                    let [r, g, b] = nearest_teletext([r, g, b]);
+                    *colour = Color::Rgb(r, g, b);
+                }
+            }
+        }
+    }
 }
 
 fn nearest_teletext(c: [u8; 3]) -> [u8; 3] {
@@ -152,7 +172,6 @@ pub fn detect_picker() -> Picker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
     Native,
-    #[allow(dead_code, reason = "phase 9 draws Antiope's images with it")]
     Teletext,
 }
 
@@ -233,7 +252,7 @@ impl ImageStore {
     }
 
     /// No picker, no fetch: every image stays `[image: alt text]` (rendering tests).
-    #[allow(dead_code, reason = "phase 9's rendering tests use it")]
+    #[cfg(test)]
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -243,17 +262,6 @@ impl ImageStore {
 
     pub fn enabled(&self) -> bool {
         self.enabled
-    }
-
-    #[allow(
-        dead_code,
-        reason = "phase 9 tells Antiope's `i` whether a real image can be drawn"
-    )]
-    pub fn has_graphics_protocol(&self) -> bool {
-        matches!(
-            self.picker.protocol_type(),
-            ProtocolType::Kitty | ProtocolType::Iterm2 | ProtocolType::Sixel
-        )
     }
 
     fn position(&self, url: &str) -> Option<usize> {
@@ -631,6 +639,32 @@ mod tests {
     }
 
     #[test]
+    fn snapping_leaves_only_teletext_colours_in_the_cells() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buffer[(0, 0)]
+            .set_fg(Color::Rgb(223, 0, 32))
+            .set_bg(Color::Rgb(30, 40, 250));
+        buffer[(1, 0)]
+            .set_fg(Color::Rgb(200, 200, 30))
+            .set_bg(Color::Reset);
+        buffer[(2, 0)].set_fg(Color::Rgb(10, 10, 10));
+        snap_to_teletext(&mut buffer, Rect::new(0, 0, 2, 1));
+        assert_eq!(buffer[(0, 0)].fg, Color::Rgb(255, 0, 0));
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(0, 0, 255));
+        assert_eq!(buffer[(1, 0)].fg, Color::Rgb(255, 255, 0));
+        assert_eq!(
+            buffer[(1, 0)].bg,
+            Color::Reset,
+            "not a colour of an image: left alone"
+        );
+        assert_eq!(
+            buffer[(2, 0)].fg,
+            Color::Rgb(10, 10, 10),
+            "outside the area"
+        );
+    }
+
+    #[test]
     fn transparent_pixels_become_black() {
         let src = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 255, 255, 0]));
         let out = quantise_teletext(&DynamicImage::ImageRgba8(src)).to_rgb8();
@@ -643,11 +677,6 @@ mod tests {
 
     fn photo() -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(400, 300, Rgb([200, 120, 40])))
-    }
-
-    #[test]
-    fn halfblocks_is_not_a_graphics_protocol() {
-        assert!(!store().has_graphics_protocol());
     }
 
     #[test]

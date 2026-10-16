@@ -1,26 +1,32 @@
 //! Antiope in the terminal (spec §8): the eight teletext colours on black, rows exactly as wide
-//! as their column, the page header, the Minitel bar, P100 SOMMAIRE and P899 GUIDE, then (9b)
-//! the pages of the reader. Pure functions over plain data, and `render`.
-//!
-//! The garden pages (P800 to P802) are drawn by the Native look until phase 9b gives them a
-//! teletext page: `render` hands them to `native::render`, so that the garden's keys, which stay
-//! live under `t`, always act on a row that is on screen.
+//! as their column, the page header, the Minitel bar, P100 SOMMAIRE and P899 GUIDE, P104
+//! JOURNAL with its sub-pages and `FIN DE L'EDITION`, the garden pages P800 to P802, and the
+//! article with its images as teletext mosaics. Pure functions over plain data, and `render`.
 
 use chrono::{DateTime, FixedOffset, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
-
-use super::images::ImageStore;
-use super::layout::{Column, LayoutClass, Look, columns};
-use super::native::{self, EXTRACT_PROGRESS_LABEL, ReaderMetrics, short_date};
-use super::pages::{DirRow, PageDirectory, ReaderPage};
-use super::state::{RHYTHM_CHOICES, ReaderState, ReaderView, group_label};
-use crate::output::printable;
-use crate::tui::reader::journal::BUILDING;
+use ratatui_image::StatefulImage;
+use ratatui_image::protocol::StatefulProtocol;
+use ressac_core::edition::Section;
+use ressac_core::garden::GardenRow;
+use ressac_core::model::{Action, Decision, Remark};
 use ressac_core::store::pages::PageKind;
+use ressac_core::store::{EditionOverflowRow, JournalView};
+
+use super::html::{ImageRef, MAX_TEXT_WIDTH, RenderedArticle, is_web_url};
+use super::images::{ImageState, ImageStore, Variant, snap_to_teletext};
+use super::journal::{self, BUILDING, JournalLine, JournalPhase};
+use super::layout::{Column, LayoutClass, Look, columns};
+use super::native::{EXTRACT_PROGRESS_LABEL, LOADING_IMAGE, ReaderMetrics, short_date};
+use super::pages::{DirRow, PageDirectory, ReaderPage, subpage_label};
+use super::state::{GardenView, RHYTHM_CHOICES, ReaderState, ReaderView, group_label};
+use crate::output::printable;
+use crate::tui::state::{Filter, GardenState, Mode};
+use crate::tui::ui::attempt_outcome;
 
 /// The teletext palette (Antiope spec §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,9 +135,7 @@ pub fn title_bar(text: &str, width: usize) -> Line<'static> {
 pub enum HeaderLabel {
     Page(Option<u16>),
     /// The digits typed so far, `4__`.
-    #[allow(dead_code, reason = "phase 9b types a page number")]
     Typing(String),
-    #[allow(dead_code, reason = "phase 9b reports an unknown page")]
     NotFound(u16),
     /// The counter rolling while a job runs.
     Searching(u16),
@@ -321,8 +325,8 @@ pub fn words_within(text: &str, cells: usize) -> String {
     }
 }
 
-/// What the Minitel bar says: the rhythm menu's keys, the search prompt, a message, a running job
-/// (all urgent), else the hints of the focused column.
+/// What the Minitel bar says: the rhythm menu's keys, the search prompt, a message, the garden's
+/// confirmation or message, a running job (all urgent), else the hints of the focused column.
 fn bar_hint(state: &ReaderState, view: &ReaderView<'_>) -> MinitelHint {
     if view.rhythm.is_some() {
         return MinitelHint::urgent("UP DOWN CHOOSE · ENTER SET · ESC CLOSE".into(), Tt::White);
@@ -334,10 +338,38 @@ fn bar_hint(state: &ReaderState, view: &ReaderView<'_>) -> MinitelHint {
     if let Some(message) = view.message {
         return MinitelHint::urgent(printable(message).to_uppercase(), Tt::Yellow);
     }
+    if let Some(hint) = state.garden().and_then(garden_hint) {
+        return hint;
+    }
     let edition = view.progress.is_some_and(|(label, _, _)| label == BUILDING);
     MinitelHint::status(view.progress, edition).unwrap_or_else(|| {
-        MinitelHint::keys(view.focus, false, state.search.as_deref().unwrap_or(""))
+        MinitelHint::keys(
+            view.focus,
+            view.garden,
+            state.search.as_deref().unwrap_or(""),
+        )
     })
+}
+
+/// The garden's own prompts: its confirmation, its help (any key closes it) and its message.
+fn garden_hint(garden: &GardenState) -> Option<MinitelHint> {
+    match garden.mode {
+        Mode::ConfirmRepairs => Some(MinitelHint::urgent(
+            format!(
+                "APPLY {} SAFE REPAIRS? Y APPLY · ANY OTHER KEY CANCELS",
+                garden.safe_repair_count()
+            ),
+            Tt::Yellow,
+        )),
+        Mode::Help => Some(MinitelHint::urgent(
+            "ANY KEY CLOSES THE HELP".into(),
+            Tt::White,
+        )),
+        Mode::Queue | Mode::Detail => garden
+            .message
+            .as_deref()
+            .map(|m| MinitelHint::urgent(printable(m).to_uppercase(), Tt::Yellow)),
+    }
 }
 
 /// `101 Unread … 1083`: the number cyan, the title indented by depth, the count yellow at the
@@ -635,21 +667,666 @@ fn separator(frame: &mut Frame, column: Rect) {
     );
 }
 
-/// Draws the reader in Antiope. The garden pages are drawn by the Native look until 9b.
-pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -> ReaderMetrics {
-    if state.garden_view().is_some() {
-        return native::render(frame, state, images);
+/// Greedy word wrap of `text` into rows of at most `cells` display cells; a word wider than a
+/// row (an address) is cut into full rows. Feed text goes through `printable` first.
+pub fn wrap(text: &str, cells: usize) -> Vec<String> {
+    let width = |t: &str| Span::raw(t).width();
+    let mut rows = Vec::new();
+    if cells == 0 {
+        return rows;
     }
+    let mut current = String::new();
+    for raw in text.split_whitespace() {
+        let word = printable(raw).into_owned();
+        let mut rest = word.as_str();
+        while width(rest) > cells {
+            if !current.is_empty() {
+                rows.push(std::mem::take(&mut current));
+            }
+            let (head, tail) = split_at_width(rest, cells);
+            rows.push(head.to_string());
+            rest = tail;
+        }
+        if current.is_empty() {
+            current = rest.to_string();
+        } else if width(&current) + 1 + width(rest) <= cells {
+            current.push(' ');
+            current.push_str(rest);
+        } else {
+            rows.push(std::mem::replace(&mut current, rest.to_string()));
+        }
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    rows
+}
+
+/// `text` cut after at most `cells` display cells (one character at least, so that a column
+/// narrower than a wide character still advances).
+fn split_at_width(text: &str, cells: usize) -> (&str, &str) {
+    let mut used = 0;
+    for (i, c) in text.char_indices() {
+        let w = Span::raw(c.to_string()).width();
+        if used + w > cells {
+            return text.split_at(if i == 0 { c.len_utf8() } else { i });
+        }
+        used += w;
+    }
+    (text, "")
+}
+
+/// The teletext colours of a span of article text (the Native look's emphasis, without bold or
+/// italics to draw it with): headings green, links cyan, strong yellow, emphasis magenta,
+/// deleted red, code in reverse video, the rest white.
+fn prose_colours(style: Style) -> (Tt, Tt) {
+    let m = style.add_modifier;
+    if m.contains(Modifier::BOLD | Modifier::UNDERLINED) {
+        (Tt::Green, Tt::Black)
+    } else if m.contains(Modifier::REVERSED) {
+        (Tt::Black, Tt::White)
+    } else if m.contains(Modifier::UNDERLINED) {
+        (Tt::Cyan, Tt::Black)
+    } else if m.contains(Modifier::BOLD) {
+        (Tt::Yellow, Tt::Black)
+    } else if m.contains(Modifier::ITALIC) {
+        (Tt::Magenta, Tt::Black)
+    } else if m.contains(Modifier::CROSSED_OUT) {
+        (Tt::Red, Tt::Black)
+    } else {
+        (Tt::White, Tt::Black)
+    }
+}
+
+/// One line of the article as exactly `width` cells: each span keeps its emphasis as a teletext
+/// colour, controls neutralised, cut where the column ends.
+pub fn prose_row(line: &Line<'_>, width: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut remaining = width;
+    for s in &line.spans {
+        if remaining == 0 {
+            break;
+        }
+        let clean = printable(&s.content);
+        let cells = Span::raw(clean.as_ref()).width().min(remaining);
+        let (fg, bg) = prose_colours(line.style.patch(s.style));
+        spans.push(span(&clean, cells, fg, bg));
+        remaining -= cells;
+    }
+    spans.push(span("", remaining, Tt::White, Tt::Black));
+    row(spans)
+}
+
+/// P104's entry column (spec §8, §9): while the edition builds, only its progress; offline or
+/// failed, why there is none; else the header, then each section with its entries in rank order
+/// and each feed's overflow row under its last entry (the rows of `journal::journal_lines`, the
+/// ones the cursor walks), then `FIN DE L'EDITION` once every entry is read. Every row is
+/// exactly `width` cells. The second value is the row of the cursor.
+pub fn journal_rows(
+    journal: Option<&JournalView>,
+    phase: &JournalPhase,
+    lines: &[JournalLine],
+    cursor: Option<usize>,
+    offset: FixedOffset,
+    width: usize,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let message = |rows: Vec<Line<'static>>| {
+        let mut out = vec![blank(width)];
+        out.extend(rows);
+        (out, None)
+    };
+    match phase {
+        JournalPhase::Building { done, total } => {
+            return message(vec![centred(
+                &counted("EDITION IN PROGRESS", *done, *total),
+                width,
+                Tt::Yellow,
+                Tt::Black,
+            )]);
+        }
+        JournalPhase::Offline => {
+            return message(vec![
+                centred("OFFLINE: NO EDITION YET", width, Tt::Black, Tt::Red),
+                centred("RÉPÉTITION: RETRY", width, Tt::Cyan, Tt::Black),
+            ]);
+        }
+        JournalPhase::Failed(reason) => {
+            return message(
+                wrap(&reason.to_uppercase(), width.saturating_sub(2))
+                    .iter()
+                    .map(|text| centred(text, width, Tt::Black, Tt::Red))
+                    .collect(),
+            );
+        }
+        JournalPhase::Idle => {}
+    }
+    let Some(view) = journal else {
+        return message(vec![centred(
+            &counted("EDITION IN PROGRESS", 0, 0),
+            width,
+            Tt::Yellow,
+            Tt::Black,
+        )]);
+    };
+    let read = view.items.iter().filter(|item| item.row.is_read).count();
+    let count = format!(" {read}/{} READ", view.items.len());
+    let count_cells = count.len().min(width);
+    let day = view
+        .edition
+        .built_at
+        .with_timezone(&offset)
+        .format(" %a %d %b")
+        .to_string()
+        .to_uppercase();
+    let mut out = vec![row(vec![
+        span(&day, width - count_cells, Tt::Cyan, Tt::Black),
+        span(&count, count_cells, Tt::Yellow, Tt::Black),
+    ])];
+    match view.edition.unreachable {
+        0 => {}
+        1 => out.push(row(vec![span(
+            " 1 FEED UNREACHABLE",
+            width,
+            Tt::Red,
+            Tt::Black,
+        )])),
+        n => out.push(row(vec![span(
+            &format!(" {n} FEEDS UNREACHABLE"),
+            width,
+            Tt::Red,
+            Tt::Black,
+        )])),
+    }
+    if view.items.is_empty() {
+        out.push(blank(width));
+        out.push(centred(
+            &journal::EMPTY_LINE.to_uppercase(),
+            width,
+            Tt::Cyan,
+            Tt::Black,
+        ));
+        return (out, None);
+    }
+    let mut selected = None;
+    for (index, line) in lines.iter().enumerate() {
+        let is_cursor = cursor == Some(index);
+        if is_cursor && !matches!(line, JournalLine::Heading(_)) {
+            selected = Some(out.len());
+        }
+        match *line {
+            JournalLine::Heading(section) => {
+                out.push(blank(width));
+                let entries = view.items.iter().filter(|i| i.section == section).count();
+                out.push(section_heading(section, entries, width));
+            }
+            JournalLine::Entry(i) => {
+                let r = &view.items[i].row;
+                out.push(entry_line(
+                    r.title.as_deref(),
+                    r.is_read,
+                    r.is_starred,
+                    width,
+                    is_cursor,
+                ));
+            }
+            JournalLine::Overflow(o) => {
+                out.push(overflow_line(&view.overflow[o], width, is_cursor));
+            }
+        }
+    }
+    if journal::is_finished(view) {
+        out.push(blank(width));
+        out.push(end_line(width));
+    }
+    (out, selected)
+}
+
+/// ` FRONT PAGE … 2`: yellow, ` THIS WEEK` cyan, ` THE WIRE` green, on black.
+fn section_heading(section: Section, entries: usize, width: usize) -> Line<'static> {
+    let colour = match section {
+        Section::Front => Tt::Yellow,
+        Section::Week => Tt::Cyan,
+        Section::Wire => Tt::Green,
+    };
+    let number = format!(" {entries}");
+    let number_cells = number.len().min(width);
+    row(vec![
+        span(
+            &format!(" {}", journal::section_title(section).to_uppercase()),
+            width - number_cells,
+            colour,
+            Tt::Black,
+        ),
+        span(&number, number_cells, colour, Tt::Black),
+    ])
+}
+
+/// `  +12 MORE IN ACTUALITTÉ`: white on blue (blue never colours text), two cells in; black on
+/// white under the cursor.
+pub fn overflow_line(more: &EditionOverflowRow, width: usize, selected: bool) -> Line<'static> {
+    let indent = 2.min(width);
+    let (fg, bg, margin) = if selected {
+        (Tt::Black, Tt::White, Tt::White)
+    } else {
+        (Tt::White, Tt::Blue, Tt::Black)
+    };
+    row(vec![
+        span("", indent, Tt::White, margin),
+        span(
+            &format!(
+                "+{} MORE IN {}",
+                more.hidden_count,
+                more.feed_title.to_uppercase()
+            ),
+            width - indent,
+            fg,
+            bg,
+        ),
+    ])
+}
+
+/// `FIN DE L'EDITION` on a full-width yellow bar (the terminal's double height).
+pub fn end_line(width: usize) -> Line<'static> {
+    title_bar("FIN DE L'EDITION", width)
+}
+
+/// A garden status in its teletext colours (spec §8): Fossil's blue never colours text, so its
+/// heading is white on blue.
+fn status_colours(status: &str) -> (Tt, Tt) {
+    let colour = match status {
+        "Dead" => Tt::Red,
+        "Hijacked" => Tt::Magenta,
+        "Moved" => Tt::Cyan,
+        "Ailing" => Tt::Yellow,
+        "Fossil" => Tt::Blue,
+        "Dormant" | "Alive" => Tt::Green,
+        _ => Tt::White,
+    };
+    if colour == Tt::Blue {
+        (Tt::White, Tt::Blue)
+    } else {
+        (colour, Tt::Black)
+    }
+}
+
+/// ` DEAD … 8`: a garden status heading with the number of feeds under it.
+pub fn garden_heading(status: &str, count: usize, width: usize) -> Line<'static> {
+    let (fg, bg) = status_colours(status);
+    let number = format!(" {count}");
+    let number_cells = number.len().min(width);
+    row(vec![
+        span(
+            &format!(" {}", status.to_uppercase()),
+            width - number_cells,
+            fg,
+            bg,
+        ),
+        span(&number, number_cells, fg, bg),
+    ])
+}
+
+/// What a feed's row says at its right edge: the decision once made, else the proposed action.
+fn garden_chip(r: &GardenRow) -> Option<(&'static str, Tt)> {
+    if let Some(record) = r.decision.as_ref().filter(|_| !r.needs_triage()) {
+        return Some((
+            match record.decision {
+                Decision::Keep => "kept",
+                Decision::Repair => "repaired",
+                Decision::Bury => "buried",
+            },
+            Tt::Green,
+        ));
+    }
+    r.action().map(|action| {
+        (
+            match action {
+                Action::UpgradeHttps { .. } => "https",
+                Action::FollowRedirect { .. } => "follow",
+                Action::AdoptDiscovered { .. } => "adopt",
+                Action::MergeInto { .. } => "merge",
+                Action::Bury => "bury",
+            },
+            Tt::Cyan,
+        )
+    })
+}
+
+/// `● Title … bury`: a yellow dot while the feed needs triage, the title, the chip in cyan (green
+/// once decided); black on white when selected.
+pub fn garden_feed_line(r: &GardenRow, selected: bool, width: usize) -> Line<'static> {
+    let chip = garden_chip(r).map_or_else(String::new, |(text, _)| format!(" {text}"));
+    let marker_cells = 2.min(width);
+    let chip_cells = Span::raw(chip.as_str()).width().min(width - marker_cells);
+    let (fg, bg) = if selected {
+        (Tt::Black, Tt::White)
+    } else {
+        (Tt::White, Tt::Black)
+    };
+    let chip_colour = match garden_chip(r) {
+        Some((_, colour)) if !selected => colour,
+        _ => fg,
+    };
+    row(vec![
+        span(
+            if r.needs_triage() { "●" } else { "" },
+            marker_cells,
+            if selected { fg } else { Tt::Yellow },
+            bg,
+        ),
+        span(&r.title, width - marker_cells - chip_cells, fg, bg),
+        span(&chip, chip_cells, chip_colour, bg),
+    ])
+}
+
+/// P800–P802's entry column (spec §8): the title and its count, P800's gauge, then the feeds in
+/// the order the arrows walk them under a coloured heading per status. The second value is the
+/// row of the selected feed.
+pub fn garden_rows(
+    garden: &GardenState,
+    view: GardenView,
+    width: usize,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let queue = garden.filter == Filter::Queue;
+    let title = if garden.filter == view.filter() {
+        view.title().to_uppercase()
+    } else {
+        garden.filter.label().to_uppercase()
+    };
+    let count = if queue {
+        let p = garden.progress();
+        format!(" {} LEFT", p.needing.saturating_sub(p.decided))
+    } else if garden.visible.len() == 1 {
+        " 1 FEED".to_string()
+    } else {
+        format!(" {} FEEDS", garden.visible.len())
+    };
+    let count_cells = count.len().min(width);
+    let mut out = vec![row(vec![
+        span(&title, width - count_cells, Tt::White, Tt::Black),
+        span(&count, count_cells, Tt::Yellow, Tt::Black),
+    ])];
+    if view == GardenView::NeedsTriage {
+        let p = garden.progress();
+        out.push(gauge_line(p.decided, p.needing, width));
+    }
+    if garden.visible.is_empty() {
+        let text = match garden.filter {
+            Filter::Queue => "NOTHING TO TRIAGE",
+            Filter::Cemetery => "THE CEMETERY IS EMPTY",
+            _ => "NO FEEDS",
+        };
+        out.push(blank(width));
+        out.push(centred(text, width, Tt::Cyan, Tt::Black));
+        return (out, None);
+    }
+    let mut selected = None;
+    let mut start = 0;
+    while start < garden.visible.len() {
+        let key = |at: usize| {
+            let r = &garden.rows[garden.visible[at]];
+            if r.buried {
+                "Buried"
+            } else {
+                r.status().as_str()
+            }
+        };
+        let mut end = start + 1;
+        while end < garden.visible.len() && key(end) == key(start) {
+            end += 1;
+        }
+        out.push(garden_heading(key(start), end - start, width));
+        for at in start..end {
+            if at == garden.selected {
+                selected = Some(out.len());
+            }
+            out.push(garden_feed_line(
+                &garden.rows[garden.visible[at]],
+                at == garden.selected,
+                width,
+            ));
+        }
+        start = end;
+    }
+    (out, selected)
+}
+
+/// P800's mosaic gauge: `▐███░░░ 12/80`, feeds triaged over feeds with a problem. Blue is
+/// allowed here: the shade is a mosaic.
+fn gauge_line(done: usize, total: usize, width: usize) -> Line<'static> {
+    let label = format!(" {done}/{total}");
+    let label_cells = label.len().min(width.saturating_sub(1));
+    let bar = width.saturating_sub(1 + label_cells);
+    let filled = (bar * done).checked_div(total).unwrap_or(0).min(bar);
+    row(vec![
+        span("▐", 1.min(width), Tt::Cyan, Tt::Black),
+        span(&"█".repeat(filled), filled, Tt::Green, Tt::Black),
+        span(&"░".repeat(bar - filled), bar - filled, Tt::Blue, Tt::Black),
+        span(&label, label_cells, Tt::Yellow, Tt::Black),
+    ])
+}
+
+/// What a remark says, worded as the app's inspector.
+fn remark_sentence(remark: &Remark) -> String {
+    match remark {
+        Remark::HttpsAvailable => "The https:// address serves the same feed.".into(),
+        Remark::HttpOnly => "Only served over http://.".into(),
+        Remark::SimilarTitle { feed_id } => {
+            format!("A feed in the same folder has a similar title (#{feed_id}).")
+        }
+        Remark::DateFallback => "Most entries carry no date; Ressac used the fetch date.".into(),
+        Remark::Blocked => "The last fetch was blocked (403 or an anti-bot page).".into(),
+    }
+}
+
+/// The garden inspector as a teletext page `width` cells wide (spec §8): the name and the folder
+/// path, the status on its heading row, the reason, the rhythm, then evidence, remarks, links,
+/// redirects and the fetch log. Every row is exactly `width` cells.
+pub fn garden_inspector(
+    row_data: Option<&GardenRow>,
+    rhythm: Option<&str>,
+    offset: FixedOffset,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut page = TextPage {
+        width,
+        lines: Vec::new(),
+    };
+    let Some(r) = row_data else {
+        page.blank();
+        page.lines
+            .push(centred("NO FEED SELECTED", width, Tt::Cyan, Tt::Black));
+        return page.lines;
+    };
+    page.paragraph(&r.title, Tt::White, None);
+    if !r.folder_path.is_empty() {
+        page.paragraph(&r.folder_path, Tt::Cyan, None);
+    }
+    page.blank();
+    let status = if r.buried {
+        "Buried"
+    } else {
+        r.status().as_str()
+    };
+    let (fg, bg) = status_colours(status);
+    page.lines.push(row(vec![span(
+        &format!(" {}", status.to_uppercase()),
+        width,
+        fg,
+        bg,
+    )]));
+    if r.buried {
+        page.paragraph("Buried. Press k to restore it.", Tt::Yellow, None);
+    }
+    if let Some(d) = &r.diagnosis {
+        page.paragraph(&d.reason, Tt::White, None);
+    }
+    if let Some(text) = rhythm.filter(|_| !r.buried) {
+        page.blank();
+        page.labeled("Rhythm", text);
+    }
+    if let Some(d) = r
+        .diagnosis
+        .as_ref()
+        .filter(|d| !d.evidence.bullets.is_empty())
+    {
+        page.blank();
+        page.heading("Evidence", Tt::Green);
+        for bullet in &d.evidence.bullets {
+            page.paragraph(bullet, Tt::White, Some(("- ".into(), Tt::Green)));
+        }
+    }
+    if let Some(d) = r.diagnosis.as_ref().filter(|d| !d.remarks.is_empty()) {
+        page.blank();
+        page.heading("Remarks", Tt::Yellow);
+        for remark in &d.remarks {
+            page.paragraph(
+                &remark_sentence(remark),
+                Tt::White,
+                Some(("- ".into(), Tt::Yellow)),
+            );
+        }
+    }
+    page.blank();
+    page.heading("Links", Tt::Cyan);
+    if let Some(action) = r.action().filter(|_| !r.buried) {
+        page.labeled("Proposed", &action.label());
+    }
+    if let Some(record) = &r.decision {
+        page.labeled(
+            "Decision",
+            match record.decision {
+                Decision::Keep => "Keep",
+                Decision::Repair => "Repair",
+                Decision::Bury => "Bury",
+            },
+        );
+    }
+    page.labeled("Feed", &r.xml_url);
+    for (label, url) in [("Site", &r.html_url), ("Wayback", &r.wayback_url)] {
+        if let Some(url) = url.as_deref().filter(|u| is_web_url(u)) {
+            page.labeled(label, url);
+        }
+    }
+    if let Some(chain) = r
+        .attempts
+        .first()
+        .map(|a| &a.redirect_chain)
+        .filter(|c| !c.is_empty())
+    {
+        page.blank();
+        page.heading("Redirects", Tt::Magenta);
+        for hop in chain {
+            page.paragraph(
+                &hop.url,
+                Tt::White,
+                Some((format!("{} ", hop.status), Tt::Magenta)),
+            );
+        }
+    }
+    page.blank();
+    page.heading("Fetch log", Tt::Green);
+    if r.attempts.is_empty() {
+        page.paragraph("Not fetched yet.", Tt::White, None);
+    }
+    for attempt in &r.attempts {
+        let date = attempt
+            .at
+            .with_timezone(&offset)
+            .format("%d %b %y %H:%M  ")
+            .to_string()
+            .to_uppercase();
+        page.paragraph(&attempt_outcome(attempt), Tt::White, Some((date, Tt::Cyan)));
+    }
+    page.lines
+}
+
+/// Rows of a text page being built, each exactly `width` cells.
+struct TextPage {
+    width: usize,
+    lines: Vec<Line<'static>>,
+}
+
+impl TextPage {
+    fn blank(&mut self) {
+        self.lines.push(blank(self.width));
+    }
+
+    fn heading(&mut self, title: &str, colour: Tt) {
+        self.lines.push(row(vec![span(
+            &title.to_uppercase(),
+            self.width,
+            colour,
+            Tt::Black,
+        )]));
+    }
+
+    /// `text` wrapped on words; `lead` (a label, a date, a dash) starts the first row and the
+    /// following rows are indented by its width.
+    fn paragraph(&mut self, text: &str, colour: Tt, lead: Option<(String, Tt)>) {
+        let indent = lead
+            .as_ref()
+            .map_or(0, |(l, _)| Span::raw(l.as_str()).width())
+            .min(self.width);
+        for (index, piece) in wrap(text, self.width - indent).iter().enumerate() {
+            let mut spans = Vec::new();
+            if let Some((lead, lead_colour)) = &lead {
+                spans.push(span(
+                    if index == 0 { lead } else { "" },
+                    indent,
+                    *lead_colour,
+                    Tt::Black,
+                ));
+            }
+            spans.push(span(piece, self.width - indent, colour, Tt::Black));
+            self.lines.push(row(spans));
+        }
+    }
+
+    fn labeled(&mut self, label: &str, value: &str) {
+        let lead = format!("{:<10}", label.to_uppercase());
+        self.paragraph(value, Tt::White, Some((lead, Tt::Cyan)));
+    }
+}
+
+/// The page in view, for the header and the index column's selection: P100 or P899 in the
+/// reader, the end of the edition (P104), else the garden page or the source's page.
+pub fn page_in_view(state: &ReaderState) -> Option<u16> {
+    match state.antiope.reader_page() {
+        ReaderPage::Sommaire => Some(100),
+        ReaderPage::Guide => Some(899),
+        ReaderPage::EndOfEdition => Some(104),
+        ReaderPage::Article => match state.garden_view() {
+            Some(view) => Some(state.directory.page_of_garden(view)),
+            None => state.directory.page_of(state.source),
+        },
+    }
+}
+
+/// The header's label: the digits being typed first, then `NOT FOUND`, else the page in view.
+pub fn header_label(state: &ReaderState) -> HeaderLabel {
+    if let Some(typed) = state.antiope.typing() {
+        return HeaderLabel::Typing(typed);
+    }
+    let now = state.now.unwrap_or(DateTime::UNIX_EPOCH);
+    match state.antiope.not_found(now) {
+        Some(page) => HeaderLabel::NotFound(page),
+        None => HeaderLabel::Page(page_in_view(state)),
+    }
+}
+
+/// Draws the reader in Antiope.
+pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -> ReaderMetrics {
     let local = state
         .local
         .unwrap_or_else(|| DateTime::UNIX_EPOCH.fixed_offset());
-    render_at(frame, state, local, state.now)
+    render_at(frame, state, images, local, state.now)
 }
 
 /// `render` with the clock given: `local` shows in the header, `now` rolls the counter.
 pub fn render_at(
     frame: &mut Frame,
     state: &ReaderState,
+    images: &mut ImageStore,
     local: DateTime<FixedOffset>,
     now: Option<DateTime<Utc>>,
 ) -> ReaderMetrics {
@@ -675,16 +1352,11 @@ pub fn render_at(
         return ReaderMetrics::default();
     }
     let rects = columns(area, view.layout, view.focus, Look::Antiope);
-    let dir = PageDirectory::new(&state.pages, state.sources.as_ref());
+    let dir = &state.directory;
     // The header: the page in view, or the counter searching while a job runs.
-    let current = if view.help {
-        Some(899)
-    } else {
-        state.antiope_page.or_else(|| dir.page_of(state.source))
-    };
-    let label = match (view.progress, now) {
-        (Some(_), Some(now)) => HeaderLabel::Searching(rolling_page(now)),
-        _ => HeaderLabel::Page(current),
+    let label = match (header_label(state), view.progress, now) {
+        (HeaderLabel::Page(_), Some(_), Some(now)) => HeaderLabel::Searching(rolling_page(now)),
+        (label, _, _) => label,
     };
     paint(
         frame,
@@ -701,23 +1373,19 @@ pub fn render_at(
     );
     // The entries and the reader first: in the two-column class the index slides over them.
     if let Some(r) = rects.entries {
-        paint(
-            frame,
-            r,
-            entry_column(&view, usize::from(r.width), usize::from(r.height)),
-        );
+        let lines = entries_page(state, &view, rects.reader.is_none(), r);
+        paint(frame, r, lines);
         if rects.reader.is_some() {
             separator(frame, r);
         }
     }
     let metrics = match rects.reader {
-        Some(r) => reader_column(frame, r, state, &view, &dir),
+        Some(r) => reader_column(frame, r, state, &view, images),
         None => ReaderMetrics::default(),
     };
     if let Some(r) = rects.sources {
-        let selected = dir
-            .page_of(state.source)
-            .and_then(|page| dir.rows().iter().position(|row| row.page == page));
+        let selected =
+            page_in_view(state).and_then(|page| dir.rows().iter().position(|row| row.page == page));
         let lines: Vec<Line<'static>> = dir
             .rows()
             .iter()
@@ -745,9 +1413,56 @@ pub fn render_at(
     metrics
 }
 
-/// The entry column for any source (9b adds the Journal): `●` yellow when unread, the title,
-/// `*` when starred, black on white when selected.
+/// The entries column: a garden page's feeds (its inspector instead, when the garden's detail is
+/// open and no reader column is on screen), the Journal's edition, or the plain list of a source.
+fn entries_page(
+    state: &ReaderState,
+    view: &ReaderView<'_>,
+    alone: bool,
+    area: Rect,
+) -> Vec<Line<'static>> {
+    let (width, height) = (usize::from(area.width), usize::from(area.height));
+    if let Some(garden_view) = state.garden_view() {
+        let Some(garden) = state.garden() else {
+            return vec![centred("LOADING…", width, Tt::Cyan, Tt::Black)];
+        };
+        if alone && garden.mode == Mode::Detail {
+            return garden_page(view, garden, width);
+        }
+        let (lines, selected) = garden_rows(garden, garden_view, width);
+        return window(&lines, selected, height).to_vec();
+    }
+    entry_column(view, width, height)
+}
+
+/// The garden inspector of the selected feed, with the rhythm line the state holds for it.
+fn garden_page(view: &ReaderView<'_>, garden: &GardenState, width: usize) -> Vec<Line<'static>> {
+    let rhythm = view
+        .rhythm_line
+        .as_deref()
+        .map(|line| line.trim_start_matches("Rhythm: "));
+    garden_inspector(
+        garden.selected_row(),
+        rhythm,
+        *view.now_local.offset(),
+        width,
+    )
+}
+
+/// The entry column of a reading source: the Journal's edition (spec §8) when it is showing, else
+/// `●` yellow when unread, the title, `*` when starred, black on white when selected.
 pub fn entry_column(view: &ReaderView<'_>, width: usize, height: usize) -> Vec<Line<'static>> {
+    if view.journal_mode {
+        let (lines, selected) = journal_rows(
+            view.journal,
+            view.journal_phase,
+            &view.journal_lines,
+            view.journal_cursor,
+            *view.now_local.offset(),
+            width,
+        );
+        return window(&lines, selected, height).to_vec();
+    }
     let lines: Vec<Line<'static>> = view
         .entries
         .iter()
@@ -765,23 +1480,134 @@ pub fn entry_column(view: &ReaderView<'_>, width: usize, height: usize) -> Vec<L
     window(&lines, view.entry_cursor, height).to_vec()
 }
 
-/// The reader column: P100, P899, or the article (9b adds FIN DE L'EDITION and the images). With
-/// no entry to show it is P100, the page a Minitel starts on.
+/// `104 3/43`: the open entry's place in its page, `None` while the source has no page number.
+/// The Journal counts by rank in the edition, every other list by position.
+fn subpage(view: &ReaderView<'_>, dir: &PageDirectory) -> Option<String> {
+    let page = dir.page_of(view.source)?;
+    let id = view.entry?.row.entry_id;
+    let ranked = view.journal.filter(|_| view.journal_mode).and_then(|j| {
+        j.items
+            .iter()
+            .find(|item| item.row.entry_id == id)
+            .map(|item| (item.rank as usize, j.items.len()))
+    });
+    let (position, total) = ranked.or_else(|| {
+        view.entry_cursor
+            .map(|i| (i + 1, view.total.max(view.entries.len())))
+    })?;
+    Some(subpage_label(page, position, total))
+}
+
+/// What one article line becomes on screen.
+enum Piece<'a> {
+    /// The line as `render_html` made it (also `[image: alt text]` for a failed image or with
+    /// images off).
+    Text(&'a Line<'static>),
+    /// An image that is on its way: one placeholder row.
+    Loading,
+    /// A decoded image, drawn in the rows reserved for it.
+    Image { url: &'a str },
+}
+
+/// The article's lines in `area` from `view.reader_scroll`, an image's placeholder line grown
+/// into the rows of its picture (at most half the area), so scrolling is in screen rows. Returns
+/// the article's height in rows.
+fn article_body(
+    frame: &mut Frame,
+    area: Rect,
+    article: &RenderedArticle,
+    view: &ReaderView<'_>,
+    images: &mut ImageStore,
+    variant: Variant,
+) -> usize {
+    let width = usize::from(area.width);
+    let image_width = area.width.min(MAX_TEXT_WIDTH);
+    let viewport = usize::from(area.height);
+    let max_image_rows = (area.height / 2).max(1);
+    let show_images = view.images && images.enabled();
+    let at_line: std::collections::HashMap<usize, &ImageRef> =
+        article.images.iter().map(|i| (i.line, i)).collect();
+    let scroll = view.reader_scroll;
+    let mut top = 0usize;
+    for (index, line) in article.lines.iter().enumerate() {
+        let (piece, rows) = match at_line.get(&index) {
+            Some(image) if show_images => match images.state_of(&image.url) {
+                ImageState::Ready => {
+                    let rows = images.rows_for(&image.url, variant, image_width, max_image_rows);
+                    (Piece::Image { url: &image.url }, usize::from(rows))
+                }
+                ImageState::Failed => (Piece::Text(line), 1),
+                ImageState::Absent | ImageState::Loading => {
+                    // Lazy loading: from one viewport above to two below the visible rows.
+                    if top + viewport >= scroll && top <= scroll + 2 * viewport {
+                        images.want(&image.url);
+                    }
+                    (Piece::Loading, 1)
+                }
+            },
+            _ => (Piece::Text(line), 1),
+        };
+        // A picture cannot be cut: only blocks wholly inside the viewport are drawn.
+        if top >= scroll && top + rows <= scroll + viewport {
+            let place = Rect {
+                x: area.x,
+                y: area.y + u16::try_from(top - scroll).unwrap_or(u16::MAX),
+                width: area.width,
+                height: u16::try_from(rows).unwrap_or(u16::MAX),
+            };
+            match piece {
+                Piece::Text(line) => {
+                    frame.render_widget(Paragraph::new(prose_row(line, width)), place);
+                }
+                Piece::Loading => {
+                    let text = row(vec![span(
+                        &LOADING_IMAGE.to_uppercase(),
+                        width,
+                        Tt::White,
+                        Tt::Black,
+                    )]);
+                    frame.render_widget(Paragraph::new(text), place);
+                }
+                Piece::Image { url } => {
+                    let place = Rect {
+                        width: image_width,
+                        ..place
+                    };
+                    if let Some(protocol) = images.protocol(url, variant) {
+                        frame.render_stateful_widget(
+                            StatefulImage::<StatefulProtocol>::default(),
+                            place,
+                            protocol,
+                        );
+                        if variant == Variant::Teletext {
+                            snap_to_teletext(frame.buffer_mut(), place);
+                        }
+                    }
+                }
+            }
+        }
+        top += rows;
+    }
+    top
+}
+
+/// The reader column: P100, P899, `FIN DE L'EDITION`, a garden page's inspector, or the article
+/// under its sub-page line. With no entry to show it is P100, the page a Minitel starts on.
 fn reader_column(
     frame: &mut Frame,
     area: Rect,
     state: &ReaderState,
     view: &ReaderView<'_>,
-    dir: &PageDirectory,
+    images: &mut ImageStore,
 ) -> ReaderMetrics {
     let width = usize::from(area.width);
     let height = usize::from(area.height);
-    let special = |frame: &mut Frame, lines: Vec<Line<'static>>| {
-        // The scroll is the article's: a special page follows it only once it was chosen as a page.
-        let top = if view.help {
-            state.guide_scroll.min(lines.len().saturating_sub(height))
-        } else if state.antiope_page.is_some() {
-            state.scroll.min(lines.len().saturating_sub(height))
+    let dir = &state.directory;
+    let page = state.antiope.reader_page();
+    // A whole page of rows: scrolled only once it was chosen as a page.
+    let whole = |frame: &mut Frame, lines: Vec<Line<'static>>, scrolls: bool| {
+        let top = if scrolls {
+            state.page_scroll.min(lines.len().saturating_sub(height))
         } else {
             0
         };
@@ -792,44 +1618,68 @@ fn reader_column(
             viewport_rows: area.height,
         }
     };
-    match ReaderPage::of(state.antiope_page, view.help) {
-        ReaderPage::Sommaire => special(frame, sommaire_lines(dir, width)),
-        ReaderPage::Guide => special(frame, guide_lines(width)),
-        ReaderPage::Article => match (view.entry, view.article) {
-            (Some(_), Some(article)) => {
-                let mut lines = article_header(view, width);
-                let header = lines.len();
-                let body = height.saturating_sub(header);
-                lines.extend(
-                    article
-                        .lines
-                        .iter()
-                        .skip(view.reader_scroll)
-                        .take(body)
-                        .map(|l| {
-                            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                            row(vec![span(&text, width, Tt::White, Tt::Black)])
-                        }),
-                );
-                paint(frame, area, lines);
-                ReaderMetrics {
-                    total_rows: article.lines.len(),
-                    viewport_rows: u16::try_from(body).unwrap_or(u16::MAX),
-                }
+    match page {
+        ReaderPage::Sommaire => return whole(frame, sommaire_lines(dir, width), true),
+        ReaderPage::Guide => return whole(frame, guide_lines(width), true),
+        ReaderPage::EndOfEdition => {
+            return whole(frame, vec![blank(width), end_line(width)], false);
+        }
+        ReaderPage::Article => {}
+    }
+    if let Some(garden) = state.garden() {
+        return whole(frame, garden_page(view, garden, width), false);
+    }
+    if state.garden_view().is_some() {
+        return whole(
+            frame,
+            vec![centred("LOADING…", width, Tt::Cyan, Tt::Black)],
+            false,
+        );
+    }
+    match (view.entry, view.article) {
+        (Some(_), Some(article)) => {
+            let mut lines = Vec::new();
+            if let Some(label) = subpage(view, dir) {
+                lines.push(row(vec![span(
+                    &format!(" {label}"),
+                    width,
+                    Tt::Cyan,
+                    Tt::Black,
+                )]));
             }
-            _ if view.entry_cursor.is_some() => {
-                paint(
-                    frame,
-                    area,
-                    vec![row(vec![span("LOADING…", width, Tt::White, Tt::Black)])],
-                );
-                ReaderMetrics {
-                    total_rows: 0,
-                    viewport_rows: area.height,
-                }
+            lines.extend(article_header(view, width));
+            let header = lines.len().min(height);
+            paint(frame, area, lines);
+            let body = Rect {
+                y: area.y + u16::try_from(header).unwrap_or(u16::MAX),
+                height: area
+                    .height
+                    .saturating_sub(u16::try_from(header).unwrap_or(u16::MAX)),
+                ..area
+            };
+            let variant = if state.antiope_real_images {
+                Variant::Native
+            } else {
+                Variant::Teletext
+            };
+            let total_rows = article_body(frame, body, article, view, images, variant);
+            ReaderMetrics {
+                total_rows,
+                viewport_rows: body.height,
             }
-            _ => special(frame, sommaire_lines(dir, width)),
-        },
+        }
+        _ if view.entry_cursor.is_some() => {
+            paint(
+                frame,
+                area,
+                vec![row(vec![span("LOADING…", width, Tt::White, Tt::Black)])],
+            );
+            ReaderMetrics {
+                total_rows: 0,
+                viewport_rows: area.height,
+            }
+        }
+        _ => whole(frame, sommaire_lines(dir, width), false),
     }
 }
 
@@ -845,8 +1695,8 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ressac_core::model::CadenceGroup;
     use ressac_core::store::{
-        EntryDetail, EntryPage, EntryRow, Source, SourceCounts, SourceNode, SourceNodeKind,
-        SourcesSnapshot,
+        EntryDetail, EntryPage, EntryRow, JournalItem, Source, SourceCounts, SourceNode,
+        SourceNodeKind, SourcesSnapshot,
     };
     use std::collections::BTreeMap;
 
@@ -1145,15 +1995,38 @@ mod tests {
         s
     }
 
+    fn press(s: &mut ReaderState, code: KeyCode) -> Vec<Command> {
+        s.on_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn type_page(s: &mut ReaderState, digits: &str) -> Vec<Command> {
+        let mut commands = Vec::new();
+        for c in digits.chars() {
+            commands = press(s, KeyCode::Char(c));
+        }
+        commands
+    }
+
     fn antiope_state_on_page(page: u16) -> ReaderState {
         let mut s = antiope_state(140, 34);
-        s.antiope_page = Some(page);
+        type_page(&mut s, &page.to_string());
         s
     }
 
     /// Feed 12's list with `rows`, the first unread one open in the reader.
     fn reading_state(width: u16, height: u16, rows: Vec<EntryRow>) -> ReaderState {
+        reading_state_with(width, height, rows, ARTICLE, false)
+    }
+
+    fn reading_state_with(
+        width: u16,
+        height: u16,
+        rows: Vec<EntryRow>,
+        html: &str,
+        images: bool,
+    ) -> ReaderState {
         let mut s = antiope_state(width, height);
+        s.settings.images = images;
         s.go_to(Source::Feed(12));
         let unread = rows.iter().filter(|r| !r.is_read).count();
         s.on_event(Event::Entries {
@@ -1174,7 +2047,7 @@ mod tests {
         s.on_event(Event::Entry(Box::new(EntryDetail {
             row: open,
             summary_html: None,
-            content_html: Some(ARTICLE.into()),
+            content_html: Some(html.into()),
             fulltext_html: None,
             fulltext_error: None,
             prefer_full_text: false,
@@ -1194,7 +2067,13 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|f| {
-                render_at(f, state, local(18, 33, 12), state.now);
+                render_at(
+                    f,
+                    state,
+                    &mut ImageStore::disabled(),
+                    local(18, 33, 12),
+                    state.now,
+                );
             })
             .unwrap();
         terminal
@@ -1294,8 +2173,13 @@ mod tests {
     #[test]
     fn blue_never_colours_text_and_every_cell_is_on_the_palette() {
         let mut state = reading_state(140, 30, rows());
-        for page in [None, Some(100), Some(899)] {
-            state.antiope_page = page;
+        for page in [
+            ReaderPage::Article,
+            ReaderPage::Sommaire,
+            ReaderPage::Guide,
+            ReaderPage::EndOfEdition,
+        ] {
+            state.antiope.show(page);
             let terminal = draw_terminal(&state, 140, 30);
             let buffer = terminal.backend().buffer();
             let palette: Vec<Color> = Tt::ALL.iter().map(|c| c.color()).collect();
@@ -1356,12 +2240,21 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
         let mut metrics = None;
         terminal
-            .draw(|f| metrics = Some(render_at(f, &state, local(18, 33, 12), state.now)))
+            .draw(|f| {
+                metrics = Some(render_at(
+                    f,
+                    &state,
+                    &mut ImageStore::disabled(),
+                    local(18, 33, 12),
+                    state.now,
+                ));
+            })
             .unwrap();
         let m = metrics.unwrap();
         assert!(m.total_rows > 0);
-        // The reader is 28 rows tall: three header rows, the rest is the viewport.
-        assert_eq!(m.viewport_rows, 25);
+        // The reader is 28 rows tall: the sub-page line and three header rows, the rest is the
+        // viewport.
+        assert_eq!(m.viewport_rows, 24);
         let out = terminal.backend().to_string();
         assert!(out.contains("Le jardin des flux"), "{out}");
         assert!(out.contains("UNREAD"), "{out}");
@@ -1375,14 +2268,19 @@ mod tests {
     }
 
     #[test]
-    fn the_help_key_shows_the_guide_until_the_next_key() {
+    fn the_help_key_opens_the_guide_page_and_it_stays_until_another_page_is_chosen() {
         let mut state = reading_state(140, 30, rows());
-        state.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        press(&mut state, KeyCode::Char('?'));
         let out = draw(&state, 140, 30);
         assert!(out.contains("SUITE: next page"), "{out}");
         assert!(row_text(&draw_terminal(&state, 140, 30), 0).starts_with("P899 RESSAC"));
-        state.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(state.focus(), Column::Reader);
+        // Any other key leaves it where it is; choosing a page replaces it.
+        press(&mut state, KeyCode::Char('x'));
+        assert!(draw(&state, 140, 30).contains("SUITE: next page"));
+        type_page(&mut state, "412");
         assert!(!draw(&state, 140, 30).contains("SUITE: next page"));
+        assert!(row_text(&draw_terminal(&state, 140, 30), 0).starts_with("P412 RESSAC"));
     }
 
     #[test]
@@ -1418,28 +2316,23 @@ mod tests {
         assert_eq!(terminal.backend().buffer()[(10, 4)].fg, Tt::Red.color());
     }
 
-    /// 9a draws the garden pages in Native (9b gives them a teletext page), so the garden keys,
-    /// which stay live under `t`, never act on an invisible row.
     #[test]
-    fn a_garden_page_is_drawn_by_native_until_9b_and_its_row_is_on_screen() {
-        use crate::tui::reader::images::ImageStore;
+    fn a_garden_page_is_drawn_in_teletext_and_its_selected_feed_is_on_screen() {
         let mut state = antiope_state(140, 30);
-        state.open_garden(GardenView::NeedsTriage);
+        type_page(&mut state, "800");
         state.on_event(Event::GardenRows(crate::tui::state::sample_rows()));
-        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
-        terminal
-            .draw(|f| {
-                render(f, &state, &mut ImageStore::disabled());
-            })
-            .unwrap();
+        let terminal = draw_terminal(&state, 140, 30);
         let out = terminal.backend().to_string();
-        assert!(out.contains("Needs triage"), "{out}");
+        assert!(out.contains("NEEDS TRIAGE"), "{out}");
+        assert!(out.contains("Bibliobsession 2.0"), "{out}");
+        assert!(row_text(&terminal, 0).starts_with("P800 RESSAC"));
+        // The inspector of the selected feed fills the reader column, its status on its own row.
         assert!(
-            out.contains("Bibliobsession 2.0"),
-            "the selected row is visible: {out}"
+            out.contains("HIJACKED") && out.contains("EVIDENCE"),
+            "{out}"
         );
         // And the key that acts on it is the garden's.
-        let commands = state.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        let commands = press(&mut state, KeyCode::Char('k'));
         assert!(
             commands.iter().any(|c| matches!(c, Command::Garden(_))),
             "{commands:?}"
@@ -1479,44 +2372,74 @@ mod tests {
         );
     }
 
+    /// P899 and P100 are pages of the reader: SUITE scrolls them on a short pane, and past their
+    /// bottom it leaves them for the entry, as in the app.
     #[test]
-    fn the_guide_is_reachable_on_a_short_pane() {
+    fn the_guide_and_the_sommaire_scroll_on_a_short_pane() {
         let mut state = reading_state(140, 30, rows());
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
         let mut frame = |state: &mut ReaderState| {
             let mut m = ReaderMetrics::default();
             terminal
-                .draw(|f| m = render_at(f, state, local(18, 33, 12), state.now))
+                .draw(|f| {
+                    m = render_at(
+                        f,
+                        state,
+                        &mut ImageStore::disabled(),
+                        local(18, 33, 12),
+                        state.now,
+                    );
+                })
                 .unwrap();
             state.set_reader_metrics(m.total_rows, m.viewport_rows);
             terminal.backend().to_string()
         };
-        state.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        press(&mut state, KeyCode::Char('?'));
         let first = frame(&mut state);
         assert!(
             first.contains("PAGES") && !first.contains("NATIVE or ANTIOPE"),
             "{first}"
         );
-        for _ in 0..4 {
-            state.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-            frame(&mut state);
+        let mut presses = 0;
+        while !frame(&mut state).contains("quit") {
+            press(&mut state, KeyCode::Char('j'));
+            presses += 1;
+            assert!(presses < 40, "the guide never ends");
         }
-        let last = frame(&mut state);
-        assert!(
-            last.contains("NATIVE or ANTIOPE") && last.contains("quit"),
-            "{last}"
-        );
-        // Up scrolls back; any other key closes and resets.
-        state.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-        assert!(state.guide_scroll > 0);
-        state.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert_eq!(state.guide_scroll, 0);
-        assert!(!frame(&mut state).contains("NATIVE or ANTIOPE"));
+        assert!(frame(&mut state).contains("NATIVE or ANTIOPE"));
+        // `k` scrolls back; SUITE at the bottom brings the entry back.
+        let bottom = state.page_scroll;
+        press(&mut state, KeyCode::Char('k'));
+        assert_eq!(state.page_scroll, bottom - 1);
+        press(&mut state, KeyCode::Char(' '));
+        frame(&mut state);
+        assert_eq!(state.page_scroll, bottom);
+        press(&mut state, KeyCode::Char('j'));
+        let article = frame(&mut state);
+        assert_eq!(state.antiope.reader_page(), ReaderPage::Article);
+        assert_eq!(state.page_scroll, 0);
+        assert!(article.contains("Le jardin des flux"), "{article}");
+        // The Sommaire too: a long page list is reachable through page navigation.
+        let mut pages = sample_pages();
+        for n in 0..60u16 {
+            pages.push(ressac_core::store::pages::PageRow {
+                page: 500 + n,
+                kind: PageKind::Feed,
+                id: Some(1000 + i64::from(n)),
+                title: format!("Feed {n}"),
+                parent_page: None,
+            });
+        }
+        state.on_event(Event::Pages(pages));
+        press(&mut state, KeyCode::Char('S'));
+        let top = frame(&mut state);
+        assert!(!top.contains("Feed 59"), "{top}");
+        press(&mut state, KeyCode::Char(' '));
+        assert!(frame(&mut state).contains("Feed 59"));
     }
 
     #[test]
     fn a_tick_moves_the_header_clock_through_production_render() {
-        use crate::tui::reader::images::ImageStore;
         let mut state = reading_state(140, 30, rows());
         let top = |state: &ReaderState| {
             let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
@@ -1558,5 +2481,644 @@ mod tests {
             let h = MinitelHint::keys(column, false, "").text;
             assert_eq!(h, h.to_uppercase());
         }
+    }
+
+    // P104, the garden pages, the prose and the images.
+
+    const CAFE: &str = "Café ☕ pédago";
+
+    fn item(
+        id: i64,
+        feed: i64,
+        title: &str,
+        section: Section,
+        rank: u32,
+        read: bool,
+    ) -> JournalItem {
+        JournalItem {
+            row: EntryRow {
+                feed_id: feed,
+                is_starred: false,
+                ..entry(id, title, read)
+            },
+            section,
+            rank,
+        }
+    }
+
+    fn journal_view(read: bool) -> JournalView {
+        JournalView {
+            edition: ressac_core::store::EditionRecord {
+                id: 1,
+                built_at: Utc.with_ymd_and_hms(2026, 10, 16, 6, 10, 0).unwrap(),
+                window_start: Utc.with_ymd_and_hms(2026, 10, 15, 6, 10, 0).unwrap(),
+                window_end: Utc.with_ymd_and_hms(2026, 10, 16, 6, 10, 0).unwrap(),
+                unreachable: 2,
+            },
+            items: vec![
+                item(1, 3, "À la une", Section::Front, 1, read),
+                item(2, 7, "Un article de la semaine", Section::Week, 2, read),
+                item(3, 7, "Un autre article", Section::Week, 3, read),
+                item(4, 8, &format!("{CAFE} · édition"), Section::Week, 4, read),
+                item(5, 9, "Le fil", Section::Wire, 5, read),
+            ],
+            overflow: vec![
+                EditionOverflowRow {
+                    section: Section::Week,
+                    feed_id: 7,
+                    feed_title: CAFE.into(),
+                    page: Some(403),
+                    hidden_count: 12,
+                },
+                EditionOverflowRow {
+                    section: Section::Wire,
+                    feed_id: 4,
+                    feed_title: "Actualitté".into(),
+                    page: None,
+                    hidden_count: 2,
+                },
+            ],
+        }
+    }
+
+    /// The Journal's page with `read` entries, the first one open.
+    fn journal_state(width: u16, height: u16, read: bool) -> ReaderState {
+        let mut s = antiope_state(width, height);
+        let j = journal_view(read);
+        let rows: Vec<EntryRow> = j.items.iter().map(|i| i.row.clone()).collect();
+        s.on_event(Event::Journal(Some(j)));
+        s.on_event(Event::Entries {
+            source: Source::Journal,
+            page: EntryPage {
+                total: rows.len(),
+                unread: rows.iter().filter(|r| !r.is_read).count(),
+                rows: rows.clone(),
+                next: None,
+            },
+            appended: false,
+            request: s.request,
+        });
+        s.on_event(Event::Entry(Box::new(EntryDetail {
+            row: rows[0].clone(),
+            summary_html: None,
+            content_html: Some(ARTICLE.into()),
+            fulltext_html: None,
+            fulltext_error: None,
+            prefer_full_text: false,
+        })));
+        s
+    }
+
+    fn journal_text(state: &ReaderState, width: usize) -> Vec<Line<'static>> {
+        let view = state.view();
+        journal_rows(
+            view.journal,
+            view.journal_phase,
+            &view.journal_lines,
+            view.journal_cursor,
+            *view.now_local.offset(),
+            width,
+        )
+        .0
+    }
+
+    #[test]
+    fn p104_has_coloured_sections_and_white_on_blue_overflow() {
+        let state = journal_state(140, 34, false);
+        let lines = journal_text(&state, 28);
+        let find = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| text(l).contains(needle))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{needle} in {:?}",
+                        lines.iter().map(text).collect::<Vec<_>>()
+                    )
+                })
+        };
+        assert_eq!(
+            find("FRONT PAGE").spans[0].style.fg,
+            Some(Tt::Yellow.color())
+        );
+        assert_eq!(find("THIS WEEK").spans[0].style.fg, Some(Tt::Cyan.color()));
+        assert_eq!(find("THE WIRE").spans[0].style.fg, Some(Tt::Green.color()));
+        let more = find("+12 MORE IN CAFÉ ☕ PÉDAGO");
+        assert_eq!(more.spans[1].style.bg, Some(Tt::Blue.color()));
+        assert_eq!(more.spans[1].style.fg, Some(Tt::White.color()));
+        // The overflow row sits under its feed's last entry, the cap-0 one at the section's end.
+        let order: Vec<String> = lines.iter().map(|l| text(l).trim().to_string()).collect();
+        let at = |needle: &str| order.iter().position(|t| t.contains(needle)).unwrap();
+        assert!(at("Un autre article") + 1 == at("+12 MORE"));
+        assert!(at("Le fil") + 1 == at("+2 MORE IN ACTUALITTÉ"));
+        assert!(
+            text(&lines[0]).starts_with(" FRI 16 OCT") && text(&lines[0]).ends_with(" 0/5 READ")
+        );
+        assert_eq!(text(&lines[1]).trim(), "2 FEEDS UNREACHABLE");
+        assert_eq!(lines[1].spans[0].style.fg, Some(Tt::Red.color()));
+        // The count by section, at the right edge.
+        assert!(text(find("THIS WEEK")).trim_end().ends_with(" 3"));
+    }
+
+    /// Review Focus 1 and 5: every row is exactly its column wide, with an emoji in the title.
+    #[test]
+    fn every_antiope_row_is_exactly_its_width_with_cafe_pedago() {
+        let state = journal_state(140, 34, false);
+        let mut garden_rows = crate::tui::state::sample_rows();
+        garden_rows[0].title = CAFE.into();
+        garden_rows[0].folder_path = format!("{CAFE} / Infos");
+        let garden = GardenState::new(garden_rows, false);
+        for width in [1usize, 2, 3, 5, 22, 28, 40, 72] {
+            let mut all: Vec<Line<'static>> = journal_text(&state, width);
+            all.push(entry_line(Some(CAFE), false, true, width, false));
+            all.push(entry_line(Some(CAFE), true, false, width, true));
+            all.push(overflow_line(
+                &journal_view(false).overflow[0],
+                width,
+                false,
+            ));
+            all.push(overflow_line(&journal_view(false).overflow[0], width, true));
+            all.push(end_line(width));
+            all.extend(garden_rows_for(&garden, width));
+            all.extend(garden_inspector(
+                garden.selected_row(),
+                Some("Daily · ☕"),
+                FixedOffset::east_opt(7200).unwrap(),
+                width,
+            ));
+            for (i, line) in all.iter().enumerate() {
+                assert_eq!(line.width(), width, "row {i} at {width}: {:?}", text(line));
+            }
+        }
+    }
+
+    fn garden_rows_for(garden: &GardenState, width: usize) -> Vec<Line<'static>> {
+        garden_rows(garden, GardenView::NeedsTriage, width).0
+    }
+
+    #[test]
+    fn p104_while_building_offline_failed_or_empty() {
+        let mut state = journal_state(140, 34, false);
+        let offset = FixedOffset::east_opt(7200).unwrap();
+        let rows = |journal: Option<&JournalView>, phase: &JournalPhase| {
+            journal_rows(journal, phase, &[], None, offset, 28).0
+        };
+        let building = rows(
+            None,
+            &JournalPhase::Building {
+                done: 34,
+                total: 156,
+            },
+        );
+        assert_eq!(text(&building[0]).trim(), "");
+        assert!(text(&building[1]).contains("EDITION IN PROGRESS 34/156"));
+        let offline = rows(None, &JournalPhase::Offline);
+        assert!(text(&offline[1]).contains("OFFLINE: NO EDITION YET"));
+        assert_eq!(offline[1].spans[1].style.bg, Some(Tt::Red.color()));
+        assert!(text(&offline[2]).contains("RÉPÉTITION: RETRY"));
+        let failed = rows(
+            None,
+            &JournalPhase::Failed("The database is busy (is Ressac.app writing?)".into()),
+        );
+        assert!(failed.len() > 2, "a long reason wraps: {failed:?}");
+        assert!(
+            failed
+                .iter()
+                .skip(1)
+                .all(|l| l.width() == 28 && l.spans[1].style.bg == Some(Tt::Red.color()))
+        );
+        let none = rows(None, &JournalPhase::Idle);
+        assert!(text(&none[1]).contains("EDITION IN PROGRESS"));
+        let mut empty = journal_view(false);
+        empty.items.clear();
+        empty.overflow.clear();
+        let nothing = rows(Some(&empty), &JournalPhase::Idle);
+        assert!(
+            nothing
+                .iter()
+                .any(|l| text(l).contains("NOTHING NEW THIS MORNING."))
+        );
+        // And the page itself while the build runs.
+        state.on_event(Event::Progress {
+            label: BUILDING.into(),
+            done: 3,
+            total: 9,
+        });
+        assert!(draw(&state, 140, 34).contains("EDITION IN PROGRESS 3/9"));
+    }
+
+    #[test]
+    fn fin_de_l_edition_closes_a_read_edition_with_a_yellow_bar() {
+        let state = journal_state(140, 34, true);
+        let lines = journal_text(&state, 28);
+        let last = lines.last().unwrap();
+        assert!(text(last).contains("FIN DE L'EDITION"));
+        assert!(
+            last.spans
+                .iter()
+                .all(|s| s.style.bg == Some(Tt::Yellow.color()))
+        );
+        assert_eq!(last.width(), 28);
+        // An unread edition has no end yet.
+        assert!(
+            !journal_text(&journal_state(140, 34, false), 28)
+                .iter()
+                .any(|l| text(l).contains("FIN DE"))
+        );
+    }
+
+    #[test]
+    fn the_cursor_row_is_black_on_white_and_stays_in_view() {
+        let mut state = journal_state(140, 12, false);
+        for _ in 0..3 {
+            press(&mut state, KeyCode::Char('j'));
+        }
+        let terminal = draw_terminal(&state, 140, 12);
+        let buffer = terminal.backend().buffer();
+        let selected: Vec<u16> = (1..11)
+            .filter(|y| buffer[(23, *y)].bg == Tt::White.color())
+            .collect();
+        assert_eq!(selected.len(), 1, "one selected row in view");
+        let selected_row = row_text(&terminal, selected[0]);
+        assert!(selected_row.contains("pédago · édition"), "{selected_row}");
+    }
+
+    #[test]
+    fn the_sub_page_line_counts_by_rank_in_the_journal_and_by_position_elsewhere() {
+        let state = journal_state(140, 34, false);
+        let terminal = draw_terminal(&state, 140, 34);
+        assert!(
+            row_text(&terminal, 1).contains(" 104 1/5"),
+            "{}",
+            row_text(&terminal, 1)
+        );
+        assert_eq!(terminal.backend().buffer()[(53, 1)].fg, Tt::Cyan.color());
+        let feed = reading_state(140, 30, rows());
+        assert!(draw(&feed, 140, 30).contains(" 412 1/3"));
+        // No page yet (the list of pages has not arrived): no sub-page line, nothing else moves.
+        let mut bare = reading_state(140, 30, rows());
+        bare.on_event(Event::Pages(Vec::new()));
+        assert!(!draw(&bare, 140, 30).contains("1/3"));
+    }
+
+    #[test]
+    fn antiope_journal_at_140_and_70_columns() {
+        let state = journal_state(140, 34, false);
+        insta::assert_snapshot!("antiope_journal_140", draw(&state, 140, 34));
+        let mut narrow = journal_state(70, 34, false);
+        narrow.set_focus(Column::Entries);
+        insta::assert_snapshot!("antiope_journal_70", draw(&narrow, 70, 34));
+    }
+
+    #[test]
+    fn suite_from_the_last_entry_lands_on_the_end_page_and_retour_comes_back() {
+        let mut state = journal_state(140, 34, false);
+        for _ in 0..4 {
+            press(&mut state, KeyCode::Char('j'));
+        }
+        assert_eq!(state.selected_entry(), Some(5));
+        press(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.antiope.reader_page(), ReaderPage::EndOfEdition);
+        assert!(
+            state.entries[4].is_read,
+            "the last entry is read on landing"
+        );
+        let terminal = draw_terminal(&state, 140, 34);
+        assert!(row_text(&terminal, 0).starts_with("P104 RESSAC"));
+        assert!(
+            row_text(&terminal, 2).contains("FIN DE L'EDITION"),
+            "{}",
+            row_text(&terminal, 2)
+        );
+        assert_eq!(terminal.backend().buffer()[(53, 2)].bg, Tt::Yellow.color());
+        insta::assert_snapshot!("antiope_fin_140", terminal.backend().to_string());
+        assert!(press(&mut state, KeyCode::Char('j')).is_empty());
+        press(&mut state, KeyCode::Char('k'));
+        assert_eq!(state.antiope.reader_page(), ReaderPage::Article);
+        assert_eq!(state.selected_entry(), Some(5));
+    }
+
+    #[test]
+    fn garden_headings_use_the_status_colours_and_fossil_is_white_on_blue() {
+        let dead = garden_heading("Dead", 3, 28);
+        assert_eq!(dead.spans[0].style.fg, Some(Tt::Red.color()));
+        assert_eq!(dead.spans[0].style.bg, Some(Tt::Black.color()));
+        let fossil = garden_heading("Fossil", 2, 28);
+        assert_eq!(fossil.spans[0].style.bg, Some(Tt::Blue.color()));
+        assert_eq!(fossil.spans[0].style.fg, Some(Tt::White.color()));
+        assert_eq!(text(&fossil).trim_end(), " FOSSIL                    2");
+    }
+
+    fn garden_state(width: u16, height: u16, page: &str) -> ReaderState {
+        let mut s = antiope_state(width, height);
+        type_page(&mut s, page);
+        s.on_event(Event::GardenRows(crate::tui::state::sample_rows()));
+        s
+    }
+
+    #[test]
+    fn the_garden_pages_list_feeds_under_status_headings_with_the_progress_gauge() {
+        let state = garden_state(140, 34, "800");
+        let terminal = draw_terminal(&state, 140, 34);
+        let column =
+            |y: u16| -> String { row_text(&terminal, y).chars().skip(23).take(28).collect() };
+        let top = column(1);
+        assert!(
+            top.starts_with("NEEDS TRIAGE") && top.trim_end().ends_with("LEFT"),
+            "{top}"
+        );
+        let gauge = column(2);
+        assert!(gauge.starts_with('▐') && gauge.contains('/'), "{gauge}");
+        let out = terminal.backend().to_string();
+        for heading in ["HIJACKED", "DEAD"] {
+            assert!(out.contains(heading), "{heading}: {out}");
+        }
+        // The cursor row is black on white and the feed's chip is on its right.
+        let selected = (3..33)
+            .find(|y| terminal.backend().buffer()[(24, *y)].bg == Tt::White.color())
+            .unwrap();
+        assert!(column(selected).contains("Bibliobsession 2.0"));
+        assert!(column(selected).trim_end().ends_with("bury"));
+        insta::assert_snapshot!("antiope_garden_800_140", terminal.backend().to_string());
+        let all = garden_state(140, 34, "801");
+        let all_terminal = draw_terminal(&all, 140, 34);
+        let all_top: String = row_text(&all_terminal, 1)
+            .chars()
+            .skip(23)
+            .take(28)
+            .collect();
+        assert!(all_top.contains("FEEDS"), "{all_top}");
+        let cemetery = garden_state(140, 34, "802");
+        let out = draw(&cemetery, 140, 34);
+        assert!(
+            out.contains("CEMETERY") && out.contains("THE CEMETERY IS EMPTY"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_garden_keys_work_and_the_bar_asks_before_applying_repairs() {
+        let mut state = garden_state(140, 34, "800");
+        press(&mut state, KeyCode::Down);
+        assert!(state.garden().unwrap().selected > 0);
+        press(&mut state, KeyCode::Char('R'));
+        let bar = row_text(&draw_terminal(&state, 140, 34), 33);
+        assert!(bar.contains("SAFE REPAIRS? Y APPLY"), "{bar}");
+        press(&mut state, KeyCode::Char('n'));
+        press(&mut state, KeyCode::Char('f'));
+        let bar = row_text(&draw_terminal(&state, 140, 34), 33);
+        assert!(bar.contains("FILTER:"), "{bar}");
+        // `?` is the GUIDE, which has the garden's keys, and it leaves the garden.
+        press(&mut state, KeyCode::Char('?'));
+        assert!(state.garden().is_none());
+        assert_eq!(state.antiope.reader_page(), ReaderPage::Guide);
+        assert!(draw(&state, 140, 34).contains("GARDEN"));
+    }
+
+    #[test]
+    fn the_inspector_walks_the_evidence_links_and_fetch_log() {
+        let state = garden_state(140, 60, "800");
+        let out = draw(&state, 140, 60);
+        for needle in [
+            "bibliobsession 2.0",
+            "hijacked",
+            "evidence",
+            "links",
+            "fetch log",
+            "redirects",
+            "301",
+            "feed",
+        ] {
+            assert!(out.to_lowercase().contains(needle), "{needle}: {out}");
+        }
+    }
+
+    #[test]
+    fn the_garden_detail_fills_a_single_column() {
+        let mut state = garden_state(70, 34, "800");
+        state.set_focus(Column::Entries);
+        let list = draw(&state, 70, 34);
+        assert!(!list.contains("EVIDENCE"), "{list}");
+        press(&mut state, KeyCode::Enter);
+        let detail = draw(&state, 70, 34);
+        assert!(detail.contains("EVIDENCE"), "{detail}");
+    }
+
+    #[test]
+    fn article_text_keeps_its_emphasis_as_teletext_colours() {
+        let html = "<h2>Titre</h2><p>un <strong>fort</strong> <em>doux</em> <a href=\"https://x.test/\">lien</a> <code>code</code> <del>vieux</del> simple</p>";
+        let state = reading_state_with(140, 30, rows(), html, false);
+        let terminal = draw_terminal(&state, 140, 30);
+        let buffer = terminal.backend().buffer();
+        let colours = |word: &str| {
+            let y = (0..30)
+                .find(|y| row_text(&terminal, *y).contains(word))
+                .unwrap_or_else(|| panic!("{word}"));
+            let x = row_text(&terminal, y).find(word).unwrap();
+            let x = row_text(&terminal, y)[..x].chars().count() as u16;
+            (buffer[(x, y)].fg, buffer[(x, y)].bg)
+        };
+        let (black, white) = (Tt::Black.color(), Tt::White.color());
+        assert_eq!(colours("Titre"), (Tt::Green.color(), black));
+        assert_eq!(colours("fort"), (Tt::Yellow.color(), black));
+        assert_eq!(colours("doux"), (Tt::Magenta.color(), black));
+        assert_eq!(colours("lien"), (Tt::Cyan.color(), black));
+        assert_eq!(colours("code"), (black, white));
+        assert_eq!(colours("vieux"), (Tt::Red.color(), black));
+        assert_eq!(colours("simple"), (white, black));
+        for line in &state.article.as_ref().unwrap().lines {
+            assert_eq!(prose_row(line, 31).width(), 31);
+            assert_eq!(prose_row(line, 3).width(), 3);
+        }
+    }
+
+    #[test]
+    fn hostile_article_text_stays_in_its_column_in_the_reader() {
+        let html = format!(
+            "<p>Café ☕ 東京 {}]0;x{} fin {}31m</p>",
+            '\x1b', '\x07', '\u{9b}'
+        );
+        for width in [140u16, 100, 70] {
+            let state = reading_state_with(width, 30, rows(), &html, false);
+            let out = draw(&state, width, 30);
+            assert!(
+                !out.chars()
+                    .any(|c| c == '\x1b' || c == '\x07' || c == '\u{9b}'),
+                "{out}"
+            );
+        }
+    }
+
+    const PHOTO: &str = "https://example.com/p.png";
+
+    /// Red above, blue below: half-blocks have two colours to draw, and neither is a teletext
+    /// colour in this photo's real version.
+    fn photo() -> image::DynamicImage {
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(400, 300, |_, y| {
+            if y < 150 {
+                image::Rgb([200, 120, 40])
+            } else {
+                image::Rgb([40, 60, 200])
+            }
+        }))
+    }
+
+    fn image_state(real: bool) -> ReaderState {
+        let html = format!("<p>Avant</p><img src=\"{PHOTO}\" alt=\"Le port\"><p>Après</p>");
+        let mut s = reading_state_with(140, 30, rows(), &html, true);
+        s.antiope_real_images = real;
+        s
+    }
+
+    fn draw_with(state: &ReaderState, images: &mut ImageStore) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(f, state, images);
+            })
+            .unwrap();
+        terminal
+    }
+
+    #[test]
+    fn antiope_images_are_wanted_then_drawn_as_teletext_mosaics() {
+        use ratatui_image::picker::Picker;
+        let state = image_state(false);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        let loading = draw_with(&state, &mut images).backend().to_string();
+        assert!(loading.contains("[LOADING IMAGE…]"), "{loading}");
+        assert_eq!(images.take_wanted(), vec![PHOTO.to_string()]);
+        images.ingest(PHOTO, photo());
+        let terminal = draw_with(&state, &mut images);
+        let out = terminal.backend().to_string();
+        assert!(out.contains('▀') && !out.contains("LOADING IMAGE"), "{out}");
+        // Every cell, the picture's included, is one of the eight colours.
+        let palette: Vec<Color> = Tt::ALL.iter().map(|c| c.color()).collect();
+        let buffer = terminal.backend().buffer();
+        for y in 0..30 {
+            for x in 0..140 {
+                let cell = &buffer[(x, y)];
+                assert!(
+                    palette.contains(&cell.fg) && palette.contains(&cell.bg),
+                    "{x},{y}: {cell:?}"
+                );
+            }
+        }
+        // The picture sits in the reader column, whole, below the header.
+        assert!(images.rows_for(PHOTO, Variant::Teletext, 72, 10) <= 10);
+    }
+
+    #[test]
+    fn i_swaps_the_mosaic_for_the_real_image() {
+        use ratatui_image::picker::Picker;
+        let mut state = image_state(false);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        images.ingest(PHOTO, photo());
+        press(&mut state, KeyCode::Char('i'));
+        assert!(state.antiope_real_images);
+        assert!(
+            state.settings.images,
+            "the setting of the Native look is not touched"
+        );
+        let terminal = draw_with(&state, &mut images);
+        let buffer = terminal.backend().buffer();
+        let real = Color::Rgb(200, 120, 40);
+        assert!(
+            (0..30)
+                .any(|y| (0..140).any(|x| buffer[(x, y)].fg == real || buffer[(x, y)].bg == real))
+        );
+        press(&mut state, KeyCode::Char('i'));
+        assert!(!state.antiope_real_images);
+        // `i` does nothing on a special page.
+        press(&mut state, KeyCode::Char('S'));
+        press(&mut state, KeyCode::Char('i'));
+        assert!(!state.antiope_real_images);
+    }
+
+    #[test]
+    fn images_off_or_failed_keep_the_alt_text() {
+        use ratatui_image::picker::Picker;
+        let state = image_state(false);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        images.fail(PHOTO);
+        assert!(
+            draw_with(&state, &mut images)
+                .backend()
+                .to_string()
+                .contains("[image: Le port]")
+        );
+        let off = reading_state_with(
+            140,
+            30,
+            rows(),
+            &format!("<img src=\"{PHOTO}\" alt=\"Le port\">"),
+            false,
+        );
+        let mut fresh = ImageStore::new(Picker::halfblocks());
+        assert!(
+            draw_with(&off, &mut fresh)
+                .backend()
+                .to_string()
+                .contains("[image: Le port]")
+        );
+        assert!(fresh.take_wanted().is_empty());
+    }
+
+    #[test]
+    fn the_header_label_types_then_reports_an_unknown_page_for_two_seconds() {
+        let mut state = antiope_state(140, 34);
+        assert_eq!(header_label(&state), HeaderLabel::Page(Some(104)));
+        press(&mut state, KeyCode::Char('4'));
+        assert_eq!(header_label(&state), HeaderLabel::Typing("4__".into()));
+        assert!(row_text(&draw_terminal(&state, 140, 34), 0).starts_with("P4__ RESSAC"));
+        press(&mut state, KeyCode::Backspace);
+        assert_eq!(header_label(&state), HeaderLabel::Page(Some(104)));
+        type_page(&mut state, "437");
+        assert_eq!(header_label(&state), HeaderLabel::NotFound(437));
+        let terminal = draw_terminal(&state, 140, 34);
+        assert!(row_text(&terminal, 0).starts_with("P437 NOT FOUND"));
+        assert_eq!(terminal.backend().buffer()[(0, 0)].fg, Tt::Red.color());
+        state.on_event(Event::Tick {
+            now: Utc.with_ymd_and_hms(2026, 10, 16, 16, 33, 13).unwrap(),
+            local: local(18, 33, 13),
+        });
+        assert_eq!(
+            header_label(&state),
+            HeaderLabel::NotFound(437),
+            "one second later"
+        );
+        state.on_event(Event::Tick {
+            now: Utc.with_ymd_and_hms(2026, 10, 16, 16, 33, 14).unwrap(),
+            local: local(18, 33, 14),
+        });
+        assert_eq!(header_label(&state), HeaderLabel::Page(Some(104)));
+    }
+
+    #[test]
+    fn wrapping_counts_display_cells_and_cuts_long_words() {
+        assert_eq!(wrap("un deux trois", 7), ["un deux", "trois"]);
+        assert_eq!(wrap("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        assert_eq!(wrap("☕☕☕", 4), ["☕☕", "☕"]);
+        assert_eq!(wrap("☕", 1), ["☕"]);
+        assert!(wrap("x", 0).is_empty());
+        assert_eq!(wrap("a\u{1b}b", 5), ["a\u{FFFD}b"]);
+    }
+
+    #[test]
+    fn the_pages_of_the_rhythm_groups_and_folders_are_ordinary_lists() {
+        let mut state = antiope_state(140, 34);
+        let commands = type_page(&mut state, "105");
+        assert_eq!(state.source(), Source::Cadence(CadenceGroup::Daily));
+        assert!(commands.iter().any(|c| matches!(
+            c,
+            Command::LoadEntries {
+                source: Source::Cadence(_),
+                ..
+            }
+        )));
+        assert!(row_text(&draw_terminal(&state, 140, 34), 0).starts_with("P105 RESSAC"));
+        type_page(&mut state, "400");
+        assert_eq!(state.source(), Source::Folder(4));
+        assert!(row_text(&draw_terminal(&state, 140, 34), 0).starts_with("P400 RESSAC"));
     }
 }

@@ -20,6 +20,9 @@ use crate::tui::state::{self as garden_state, GardenState};
 use super::html::{RenderedArticle, is_web_url, render_html};
 use super::journal::{self, END_LINE, JournalLine, JournalPhase, OFFLINE};
 use super::layout::{Column, LayoutClass, Look, columns, layout_class, text_height, text_width};
+use super::pages::{
+    AntiopeNav, NavContext, NavOutcome, PageDestination, PageDirectory, ReaderPage,
+};
 use super::rhythm::{self, RhythmInfo};
 use super::settings::TerminalSettings;
 use super::sidebar::{self, SidebarRow};
@@ -187,7 +190,7 @@ impl GardenView {
         }
     }
 
-    fn filter(self) -> garden_state::Filter {
+    pub(super) fn filter(self) -> garden_state::Filter {
         match self {
             GardenView::NeedsTriage => garden_state::Filter::Queue,
             GardenView::AllFeeds => garden_state::Filter::All,
@@ -220,11 +223,15 @@ pub struct ReaderState {
     pub sources: Option<SourcesSnapshot>,
     /// Every teletext page (reserved, then folders and feeds), empty until the first load.
     pub pages: Vec<PageRow>,
-    /// The special page Antiope shows in the reader column (100 SOMMAIRE, 899 GUIDE); `None` is
-    /// the selected entry. Antiope's page navigation (phase 9b) is what sets it.
-    pub antiope_page: Option<u16>,
-    /// First row of the GUIDE shown by the help overlay in Antiope.
-    pub guide_scroll: usize,
+    /// The page directory (`pages` and the counts of `sources`), rebuilt when either arrives.
+    pub directory: PageDirectory,
+    /// The Antiope look's navigation: the page number being typed, `NOT FOUND`, the page shown
+    /// in the reader column (P100, P899, `FIN DE L'EDITION` or the entry).
+    pub antiope: AntiopeNav,
+    /// First row of P100 or P899 in the reader column.
+    pub page_scroll: usize,
+    /// Antiope draws the real images instead of the teletext mosaics (`i`).
+    pub antiope_real_images: bool,
     pub sidebar: Vec<SidebarRow>,
     pub sidebar_index: usize,
     pub entries: Vec<EntryRow>,
@@ -297,10 +304,7 @@ pub struct ReaderView<'a> {
     pub look: Look,
     pub layout: LayoutClass,
     pub focus: Column,
-    #[allow(dead_code, reason = "read by the Antiope look (phase 9)")]
-    pub sources_overlay: bool,
     pub now_local: DateTime<FixedOffset>,
-    #[allow(dead_code, reason = "read by the Antiope look (phase 9)")]
     pub source: Source,
     pub source_title: String,
     /// A garden page is showing instead of the entries and reader columns.
@@ -310,7 +314,6 @@ pub struct ReaderView<'a> {
     pub search: Option<&'a str>,
     pub entries: &'a [EntryRow],
     pub entry_cursor: Option<usize>,
-    #[allow(dead_code, reason = "read by the Antiope look (phase 9)")]
     pub total: usize,
     pub unread: usize,
     /// The Journal column is showing (the Journal, unfiltered, no search): its rows or, while
@@ -326,7 +329,6 @@ pub struct ReaderView<'a> {
     pub article: Option<&'a RenderedArticle>,
     pub show_fulltext: bool,
     pub reader_scroll: usize,
-    #[allow(dead_code, reason = "read by the image drawing (phase 6)")]
     pub images: bool,
     pub progress: Option<(&'a str, usize, usize)>,
     pub message: Option<&'a str>,
@@ -364,8 +366,10 @@ impl ReaderState {
             filter: ListFilter::All,
             sources: None,
             pages: Vec::new(),
-            antiope_page: None,
-            guide_scroll: 0,
+            directory: PageDirectory::default(),
+            antiope: AntiopeNav::default(),
+            page_scroll: 0,
+            antiope_real_images: false,
             sidebar: Vec::new(),
             sidebar_index: 0,
             entries: Vec::new(),
@@ -419,22 +423,16 @@ impl ReaderState {
         commands.extend(self.sync_rhythm());
         commands
     }
-
-    #[allow(dead_code, reason = "read by the Antiope Journal page (phase 9)")]
+    #[cfg(test)]
     pub fn journal_phase(&self) -> &JournalPhase {
         &self.journal_phase
     }
-
-    #[allow(dead_code, reason = "read by the Antiope Journal page (phase 9)")]
     pub fn journal(&self) -> Option<&JournalView> {
         self.journal.as_ref()
     }
 
     /// The rhythm of the feed in view, once it has arrived.
-    #[allow(
-        dead_code,
-        reason = "read by the tests and the Antiope pages (phase 9)"
-    )]
+    #[cfg(test)]
     pub fn rhythm(&self) -> Option<&RhythmInfo> {
         self.rhythm.as_ref()
     }
@@ -479,25 +477,17 @@ impl ReaderState {
     }
 
     /// Entry points for other screens (Antiope page jumps, phase 9).
-    #[allow(dead_code, reason = "used by Antiope page jumps (phase 9)")]
     pub fn go_to(&mut self, source: Source) -> Vec<Command> {
         let mut commands = self.switch_source(source);
         commands.extend(self.sync_rhythm());
         commands
     }
-
-    #[allow(dead_code, reason = "used by Antiope page jumps (phase 9)")]
     pub fn select_entry(&mut self, entry_id: i64) -> Vec<Command> {
         match self.entries.iter().position(|row| row.entry_id == entry_id) {
             Some(index) => self.select(index, true),
             None => Vec::new(),
         }
     }
-
-    #[allow(
-        dead_code,
-        reason = "read by the tests and the Antiope pages (phase 9)"
-    )]
     pub fn set_focus(&mut self, column: Column) {
         self.focus = column;
     }
@@ -505,29 +495,18 @@ impl ReaderState {
     pub fn look(&self) -> Look {
         self.settings.look
     }
-
-    #[allow(
-        dead_code,
-        reason = "read by the tests and the Antiope pages (phase 9)"
-    )]
     pub fn focus(&self) -> Column {
         self.focus
     }
-
-    #[allow(
-        dead_code,
-        reason = "read by the tests and the Antiope pages (phase 9)"
-    )]
     pub fn source(&self) -> Source {
         self.source
     }
 
-    #[allow(dead_code, reason = "used by the image and Antiope phases (6 and 9)")]
     pub fn selected_entry(&self) -> Option<i64> {
         self.selected
     }
 
-    #[allow(dead_code, reason = "used by the image and garden phases (6 and 8)")]
+    #[cfg(test)]
     pub fn class(&self) -> LayoutClass {
         self.class
     }
@@ -574,7 +553,6 @@ impl ReaderState {
             look: self.look(),
             layout: self.class,
             focus: self.focus,
-            sources_overlay: self.class == LayoutClass::Two && self.focus == Column::Sources,
             now_local: self.local.unwrap_or(DateTime::UNIX_EPOCH.fixed_offset()),
             source: self.source,
             source_title,
@@ -622,24 +600,126 @@ impl ReaderState {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        let before = (self.source, self.garden_view, self.selected);
+        let page = self.antiope.reader_page();
         let mut commands = self.handle_key(key);
+        // A key that moves to another list or entry, without choosing a page, brings the entry
+        // back over P100, P899 or `FIN DE L'EDITION`.
+        if (self.source, self.garden_view, self.selected) != before
+            && self.antiope.reader_page() == page
+        {
+            self.antiope.show(ReaderPage::Article);
+        }
         commands.extend(self.sync_rhythm());
         commands
     }
 
-    /// A scroll key of the GUIDE: one row for the arrows and `j`/`k`, a page for Space. The
-    /// bound comes from the last draw's metrics (the GUIDE's rows and the rows visible).
-    fn scroll_guide(&mut self, code: KeyCode) -> bool {
+    fn rebuild_directory(&mut self) {
+        self.directory = PageDirectory::new(&self.pages, self.sources.as_ref());
+    }
+
+    /// The Antiope page keys (spec §5, §6): digits and `⌫`, `Esc`, `S`, `?`, SUITE past the
+    /// edition, and the scrolling of P100 and P899. `None` lets the key through to the rest.
+    fn on_antiope_key(&mut self, key: KeyEvent) -> Option<Vec<Command>> {
+        let in_journal =
+            self.source() == Source::Journal && self.garden_view.is_none() && self.journal_mode();
+        let rank_of = |id: i64| {
+            self.journal()
+                .and_then(|view| view.items.iter().find(|item| item.row.entry_id == id))
+                .map(|item| item.rank)
+        };
+        let ctx = NavContext {
+            dir: &self.directory,
+            now: self.now.unwrap_or(DateTime::UNIX_EPOCH),
+            in_text_input: self.search_editing,
+            journal_last: self
+                .journal()
+                .and_then(|view| view.items.iter().map(|item| item.rank).max()),
+            on_journal_entry: self.selected.filter(|_| in_journal).and_then(rank_of),
+        };
+        match self.antiope.on_key(key, &ctx) {
+            NavOutcome::Unhandled => self.scroll_page(key.code).then(Vec::new),
+            NavOutcome::Consumed | NavOutcome::BackToLastEntry => Some(Vec::new()),
+            NavOutcome::EndOfEdition => Some(self.land_on_end()),
+            NavOutcome::Jump(destination) => Some(self.jump(destination)),
+        }
+    }
+
+    /// Typing a page number (spec §6): the source or garden page opens with the focus on its
+    /// list; P100 and P899 open in the reader. A garden page is left for them, so that the
+    /// garden's keys never act on a row that is no longer on screen.
+    fn jump(&mut self, destination: PageDestination) -> Vec<Command> {
+        self.page_scroll = 0;
+        match destination {
+            PageDestination::Source(source) => {
+                let commands = self.go_to(source);
+                self.set_focus(Column::Entries);
+                commands
+            }
+            PageDestination::Garden(view) => self.open_garden(view),
+            PageDestination::Sommaire | PageDestination::Guide => {
+                let commands = if self.garden_view.is_some() {
+                    self.switch_source(self.source)
+                } else {
+                    Vec::new()
+                };
+                self.set_focus(Column::Reader);
+                commands
+            }
+        }
+    }
+
+    /// SUITE past P104's last entry: the entry is read, as `j` and Space do between entries,
+    /// and `FIN DE L'EDITION` shows.
+    fn land_on_end(&mut self) -> Vec<Command> {
+        self.antiope.show(ReaderPage::EndOfEdition);
+        match self.selected_entry() {
+            Some(id) => self.select_entry(id),
+            None => Vec::new(),
+        }
+    }
+
+    /// `i` in Antiope: the article's images swap between mosaics and the originals, as in the
+    /// app, on an open article only.
+    fn toggle_real_images(&mut self) -> Vec<Command> {
+        if self.antiope.reader_page() == ReaderPage::Article && self.selected.is_some() {
+            self.antiope_real_images = !self.antiope_real_images;
+        }
+        Vec::new()
+    }
+
+    /// The keys that scroll P100 and P899 while one is in the reader: one row for `j` and `k`
+    /// (and the arrows outside the sources column), a page for Space. SUITE at the bottom leaves
+    /// the page, as in the app. The bound comes from the last draw (the page's rows and the
+    /// rows visible).
+    fn scroll_page(&mut self, code: KeyCode) -> bool {
+        if !matches!(
+            self.antiope.reader_page(),
+            ReaderPage::Sommaire | ReaderPage::Guide
+        ) {
+            return false;
+        }
+        let arrows = self.focus() != Column::Sources;
         let (total, viewport) = self.metrics.unwrap_or((0, 1));
         let max = total.saturating_sub(usize::from(viewport));
         let page = usize::from(viewport).saturating_sub(1).max(1);
-        self.guide_scroll = match code {
-            KeyCode::Down | KeyCode::Char('j') => self.guide_scroll + 1,
-            KeyCode::Char(' ') => self.guide_scroll + page,
-            KeyCode::Up | KeyCode::Char('k') => self.guide_scroll.saturating_sub(1),
+        match code {
+            KeyCode::Char('j') | KeyCode::Char(' ') | KeyCode::Down
+                if code != KeyCode::Down || arrows =>
+            {
+                if self.page_scroll >= max {
+                    self.antiope.show(ReaderPage::Article);
+                    self.page_scroll = 0;
+                } else {
+                    let step = if code == KeyCode::Char(' ') { page } else { 1 };
+                    self.page_scroll = (self.page_scroll + step).min(max);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up if code != KeyCode::Up || arrows => {
+                self.page_scroll = self.page_scroll.saturating_sub(1);
+            }
             _ => return false,
         }
-        .min(max);
         true
     }
 
@@ -652,18 +732,17 @@ impl ReaderState {
         }
         match self.overlay {
             Overlay::Help => {
-                // Antiope shows the GUIDE (P899), taller than a short pane: these keys scroll it,
-                // any other closes it.
-                if self.look() == Look::Antiope && self.scroll_guide(key.code) {
-                    return Vec::new();
-                }
                 self.overlay = Overlay::None;
-                self.guide_scroll = 0;
                 return Vec::new();
             }
             Overlay::LinkPrompt => return self.on_link_key(key.code),
             Overlay::Rhythm { .. } => return self.on_rhythm_key(key.code),
             Overlay::None => {}
+        }
+        if self.look() == Look::Antiope
+            && let Some(commands) = self.on_antiope_key(key)
+        {
+            return commands;
         }
         if self.garden_view.is_some()
             && self.focus != Column::Sources
@@ -674,9 +753,9 @@ impl ReaderState {
         self.message = None;
         match key.code {
             KeyCode::Char('q') => vec![Command::Quit],
+            // Antiope's `?` is the GUIDE page (`on_antiope_key`); this is Native's help.
             KeyCode::Char('?') => {
                 self.overlay = Overlay::Help;
-                self.guide_scroll = 0;
                 Vec::new()
             }
             KeyCode::Char('t') => {
@@ -684,9 +763,15 @@ impl ReaderState {
                     Look::Native => Look::Antiope,
                     Look::Antiope => Look::Native,
                 };
+                // Each look starts from the entry: no page number half typed, no special page,
+                // mosaics.
+                self.antiope = AntiopeNav::default();
+                self.page_scroll = 0;
+                self.antiope_real_images = false;
                 self.render_article();
                 vec![Command::SaveSettings]
             }
+            KeyCode::Char('i') if self.look() == Look::Antiope => self.toggle_real_images(),
             KeyCode::Char('i') => {
                 self.settings.images = !self.settings.images;
                 vec![Command::SaveSettings]
@@ -793,10 +878,12 @@ impl ReaderState {
                 }
                 .unwrap_or(fallback);
                 self.sources = Some(snapshot);
+                self.rebuild_directory();
                 Vec::new()
             }
             Event::Pages(pages) => {
                 self.pages = pages;
+                self.rebuild_directory();
                 Vec::new()
             }
             Event::GardenRows(rows) => {
@@ -1154,6 +1241,9 @@ impl ReaderState {
             self.pending_advance = true;
             return self.load_more().into_iter().collect();
         }
+        if self.look() == Look::Antiope && self.on_last_journal_entry() {
+            return self.land_on_end();
+        }
         let end = if self.source == Source::Journal {
             END_LINE
         } else {
@@ -1161,6 +1251,17 @@ impl ReaderState {
         };
         self.message = Some(end.to_string());
         Vec::new()
+    }
+
+    /// The Journal's last entry by rank is the one open in the reader.
+    fn on_last_journal_entry(&self) -> bool {
+        let (Some(view), Some(id)) = (self.journal.as_ref(), self.selected) else {
+            return false;
+        };
+        let last = view.items.iter().max_by_key(|item| item.rank);
+        self.source == Source::Journal
+            && self.garden_view.is_none()
+            && last.is_some_and(|item| item.row.entry_id == id)
     }
 
     fn focus_right(&mut self, wrap: bool) -> Vec<Command> {
@@ -2806,7 +2907,6 @@ mod tests {
         assert_eq!(v.source_title, "Journal");
         assert_eq!(v.entries.len(), 4);
         assert_eq!(v.filter, ListFilter::All);
-        assert!(!v.sources_overlay);
         assert!(
             v.source_lines
                 .iter()
@@ -3271,6 +3371,287 @@ mod tests {
             state.go_to(Source::Unread);
             state.go_to(Source::Journal);
             assert_eq!(state.view().journal_cursor, None);
+        }
+
+        // Antiope's page navigation (spec §5, §6).
+
+        fn antiope() -> ReaderState {
+            let mut state = loaded(false);
+            state.on_event(Event::Pages(
+                crate::tui::reader::pages::tests::sample_pages(),
+            ));
+            state.settings.look = Look::Antiope;
+            state
+        }
+
+        fn type_page(state: &mut ReaderState, digits: &str) -> Vec<Command> {
+            let mut commands = Vec::new();
+            for c in digits.chars() {
+                commands = char_key(state, c);
+            }
+            commands
+        }
+
+        #[test]
+        fn typing_412_in_antiope_opens_the_feed() {
+            let mut state = antiope();
+            let commands = type_page(&mut state, "412");
+            assert_eq!(state.source(), Source::Feed(12));
+            assert!(
+                loads_entries_of(&commands, Source::Feed(12)),
+                "{commands:?}"
+            );
+            assert_eq!(state.focus(), Column::Entries);
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Article);
+        }
+
+        #[test]
+        fn digits_do_nothing_in_native() {
+            let mut state = loaded(false);
+            state.on_event(Event::Pages(
+                crate::tui::reader::pages::tests::sample_pages(),
+            ));
+            assert!(type_page(&mut state, "412").is_empty());
+            assert_eq!(state.source(), Source::Journal);
+            assert_eq!(state.antiope.typing(), None);
+        }
+
+        #[test]
+        fn the_rhythm_pages_and_the_garden_pages_open_by_number() {
+            let mut state = antiope();
+            type_page(&mut state, "106");
+            assert_eq!(state.source(), Source::Cadence(CadenceGroup::Weekly));
+            let commands = type_page(&mut state, "801");
+            assert_eq!(state.garden_view(), Some(GardenView::AllFeeds));
+            assert!(commands.contains(&Command::LoadGarden), "{commands:?}");
+            assert_eq!(state.focus(), Column::Entries);
+            // A reading page takes the garden down again.
+            type_page(&mut state, "101");
+            assert_eq!(state.garden_view(), None);
+            assert_eq!(state.source(), Source::Unread);
+        }
+
+        #[test]
+        fn sommaire_and_guide_open_in_the_reader_and_leave_the_garden() {
+            let mut state = antiope();
+            type_page(&mut state, "100");
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Sommaire);
+            assert_eq!(state.focus(), Column::Reader);
+            type_page(&mut state, "800");
+            assert_eq!(state.garden_view(), Some(GardenView::NeedsTriage));
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Article);
+            // `?` over a garden page: the GUIDE shows and the garden's keys stop.
+            char_key(&mut state, '?');
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Guide);
+            assert_eq!(state.garden_view(), None);
+            assert_eq!(state.overlay, Overlay::None);
+            char_key(&mut state, 'S');
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Sommaire);
+        }
+
+        #[test]
+        fn native_help_is_untouched_by_antiope() {
+            let mut state = loaded(false);
+            char_key(&mut state, '?');
+            assert_eq!(state.overlay, Overlay::Help);
+            let mut state = antiope();
+            char_key(&mut state, '?');
+            assert_eq!(state.overlay, Overlay::None);
+        }
+
+        #[test]
+        fn backspace_and_escape_correct_and_cancel_the_number() {
+            let mut state = antiope();
+            type_page(&mut state, "41");
+            assert_eq!(state.antiope.typing(), Some("41_".into()));
+            key(&mut state, KeyCode::Backspace);
+            assert_eq!(state.antiope.typing(), Some("4__".into()));
+            key(&mut state, KeyCode::Esc);
+            assert_eq!(state.antiope.typing(), None);
+            assert_eq!(state.source(), Source::Journal, "nothing was jumped to");
+        }
+
+        #[test]
+        fn an_unknown_page_changes_nothing_but_the_header() {
+            let mut state = antiope();
+            let before = state.selected_entry();
+            assert!(type_page(&mut state, "437").is_empty());
+            assert_eq!(state.source(), Source::Journal);
+            assert_eq!(state.selected_entry(), before);
+            let at = state.now.unwrap_or(DateTime::UNIX_EPOCH);
+            assert_eq!(state.antiope.not_found(at), Some(437));
+        }
+
+        #[test]
+        fn the_search_and_the_link_prompt_keep_their_digits() {
+            let mut state = antiope();
+            char_key(&mut state, '/');
+            type_page(&mut state, "412");
+            assert_eq!(state.search.as_deref(), Some("412"));
+            assert_eq!(state.antiope.typing(), None);
+            assert_eq!(state.source(), Source::Journal);
+            key(&mut state, KeyCode::Esc);
+            state.on_event(Event::Entry(detail(10, 3)));
+            char_key(&mut state, 'o');
+            char_key(&mut state, '1');
+            assert_eq!(
+                state.antiope.typing(),
+                None,
+                "1 is link 1, not a page digit"
+            );
+        }
+
+        #[test]
+        fn suite_walks_the_journal_by_rank_then_reaches_fin_de_l_edition() {
+            let mut state = antiope();
+            assert_eq!(state.selected_entry(), Some(10));
+            for expected in [11, 12, 13] {
+                char_key(&mut state, 'j');
+                assert_eq!(state.selected_entry(), Some(expected));
+                assert_eq!(state.antiope.reader_page(), ReaderPage::Article);
+            }
+            let commands = char_key(&mut state, 'j');
+            assert!(commands.is_empty(), "13 was read on arrival: {commands:?}");
+            assert_eq!(state.antiope.reader_page(), ReaderPage::EndOfEdition);
+            assert!(char_key(&mut state, 'j').is_empty());
+            assert_eq!(state.antiope.reader_page(), ReaderPage::EndOfEdition);
+            char_key(&mut state, 'k');
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Article);
+            assert_eq!(state.selected_entry(), Some(13));
+        }
+
+        #[test]
+        fn space_on_the_last_entry_scrolls_then_lands_on_the_end_and_marks_it_read() {
+            let mut state = antiope();
+            for e in &mut state.entries {
+                e.is_read = true;
+            }
+            state.entries[3].is_read = false;
+            state.selected = Some(13);
+            state.on_event(Event::Entry(detail(13, 40)));
+            state.set_reader_metrics(79, 20);
+            char_key(&mut state, ' ');
+            assert_eq!(
+                state.antiope.reader_page(),
+                ReaderPage::Article,
+                "scrolled first"
+            );
+            assert!(state.scroll > 0);
+            state.scroll = state.max_scroll();
+            let commands = char_key(&mut state, ' ');
+            assert_eq!(state.antiope.reader_page(), ReaderPage::EndOfEdition);
+            assert_eq!(commands, [Command::SetRead(13, true)]);
+            // Native keeps its own end: a message.
+            let mut native = loaded(false);
+            for e in &mut native.entries {
+                e.is_read = true;
+            }
+            native.selected = Some(13);
+            char_key(&mut native, ' ');
+            assert_eq!(native.antiope.reader_page(), ReaderPage::Article);
+        }
+
+        #[test]
+        fn another_entry_or_list_brings_the_article_back() {
+            let mut state = antiope();
+            state.on_event(Event::Sources(sample_snapshot()));
+            type_page(&mut state, "100");
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Sommaire);
+            // Choosing a reading source from the index column leaves the page.
+            state.set_focus(Column::Sources);
+            key(&mut state, KeyCode::Down);
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Article);
+        }
+
+        #[test]
+        fn j_k_and_space_scroll_the_special_pages_and_suite_at_the_bottom_leaves_them() {
+            let mut state = antiope();
+            type_page(&mut state, "899");
+            state.set_reader_metrics(30, 10);
+            char_key(&mut state, 'j');
+            assert_eq!(state.page_scroll, 1);
+            char_key(&mut state, ' ');
+            assert_eq!(
+                state.page_scroll, 10,
+                "a page less the overlap, then the bound"
+            );
+            char_key(&mut state, 'k');
+            assert_eq!(state.page_scroll, 9);
+            state.page_scroll = 20;
+            char_key(&mut state, 'j');
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Article);
+            assert_eq!(state.page_scroll, 0);
+            assert_eq!(state.selected_entry(), Some(10), "the entry did not move");
+        }
+
+        #[test]
+        fn the_look_switch_keeps_the_selection_and_forgets_the_page() {
+            let mut state = antiope();
+            type_page(&mut state, "100");
+            state.page_scroll = 3;
+            let selected = state.selected_entry();
+            char_key(&mut state, 't');
+            assert_eq!(state.look(), Look::Native);
+            assert_eq!(state.selected_entry(), selected);
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Article);
+            assert_eq!(state.page_scroll, 0);
+            char_key(&mut state, 't');
+            assert_eq!(state.antiope.reader_page(), ReaderPage::Article);
+        }
+
+        #[test]
+        fn r_retries_an_offline_edition_in_antiope() {
+            let mut state = antiope();
+            state.edition_job = false;
+            state.on_event(Event::JobDone(JobOutcome::EditionOffline));
+            assert_eq!(state.journal_phase(), &JournalPhase::Offline);
+            assert!(char_key(&mut state, 'r').contains(&Command::BuildEdition));
+        }
+
+        #[test]
+        fn i_toggles_the_real_images_on_an_article_only_and_not_the_setting() {
+            let mut state = antiope();
+            state.on_event(Event::Entry(detail(10, 3)));
+            let images = state.settings.images;
+            assert!(char_key(&mut state, 'i').is_empty());
+            assert!(state.antiope_real_images);
+            assert_eq!(state.settings.images, images);
+            char_key(&mut state, 'i');
+            assert!(!state.antiope_real_images);
+            type_page(&mut state, "100");
+            char_key(&mut state, 'i');
+            assert!(!state.antiope_real_images);
+            // Native's `i` is still the setting.
+            let mut native = loaded(false);
+            assert_eq!(char_key(&mut native, 'i'), [Command::SaveSettings]);
+        }
+
+        #[test]
+        fn the_directory_is_rebuilt_when_the_pages_or_the_sources_arrive() {
+            let mut state = loaded(false);
+            assert!(state.directory.rows().is_empty());
+            state.on_event(Event::Pages(
+                crate::tui::reader::pages::tests::sample_pages(),
+            ));
+            let rows = state.directory.rows().len();
+            assert!(rows > 14);
+            let mut snapshot = crate::tui::reader::sidebar::sample_snapshot();
+            snapshot.counts.unread = 77;
+            state.on_event(Event::Sources(snapshot));
+            let unread = state
+                .directory
+                .rows()
+                .iter()
+                .find(|r| r.page == 101)
+                .and_then(|r| r.count);
+            assert_eq!(unread, Some(77));
+            // Another event leaves it as it is.
+            let kept = state.directory.clone();
+            state.on_event(Event::Tick {
+                now: state.now.unwrap(),
+                local: state.local.unwrap(),
+            });
+            assert_eq!(state.directory, kept);
         }
     }
 }

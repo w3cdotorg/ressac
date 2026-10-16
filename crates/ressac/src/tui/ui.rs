@@ -254,7 +254,7 @@ fn fetch_history_lines(row: &GardenRow) -> Vec<Line<'static>> {
 }
 
 /// `HTTP 200 · 14 entries`, `HTTP 304 · not modified`, or the error label.
-fn attempt_outcome(a: &AttemptRecord) -> String {
+pub(crate) fn attempt_outcome(a: &AttemptRecord) -> String {
     let mut out = match (&a.error, a.http_status) {
         (Some(e), _) => e.label(),
         (None, Some(code)) => format!("HTTP {code}"),
