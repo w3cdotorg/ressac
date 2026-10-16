@@ -521,7 +521,7 @@ enum PendingPanel: Equatable, Sendable {
         switch selection {
         case let .feed(id): runs.start(.fetch(feeds: [id]))
         case let .folder(id): runs.start(.fetch(folder: id))
-        case .unread, .today, .starred, .garden: runs.start(.fetch(feeds: []))
+        case .unread, .today, .starred, .journal, .cadence, .garden: runs.start(.fetch(feeds: []))
         }
     }
 
@@ -614,6 +614,11 @@ enum PendingPanel: Equatable, Sendable {
         selectedEntryId.flatMap { id in entries.firstIndex { $0.entryId == id } }
     }
 
+    /// Each entry's place in the latest edition, for the Journal's order (spec §6, Order).
+    private var journalRanks: [Int64: Int] {
+        Dictionary((journal.edition?.items ?? []).map { ($0.entryId, $0.rank) }, uniquingKeysWith: { first, _ in first })
+    }
+
     /// The floor one page below `current` (below the newest row when nil), lowered to keep entry
     /// `keeping` loaded; nil when the rest of the list fits in the page.
     private func floor(below current: ListFloor?, keeping entryId: Int64?) throws -> ListFloor? {
@@ -643,7 +648,8 @@ enum PendingPanel: Equatable, Sendable {
     }
 
     private func listDidLoad(_ page: EntryPage) {
-        let merged = Self.merge(fresh: page.rows, previous: entries, retained: retained, floor: listFloor)
+        let rank = selection == .journal ? journalRanks : [:]
+        let merged = Self.merge(fresh: page.rows, previous: entries, retained: retained, floor: listFloor, rank: rank)
         // Equal after an optimistic change already made: the views are not updated twice.
         if merged != entries { entries = merged }
         entryTotal = page.total + merged.count - page.rows.count
@@ -651,7 +657,7 @@ enum PendingPanel: Equatable, Sendable {
         hasMoreEntries = page.rows.count < page.total
         // A list that was whole when it started (a short one) and that a refresh made long, as on
         // the first run: one page again. On the next turn, not inside the observation's callback.
-        if listFloor == nil, !listFloorFailed, page.rows.count > listPageSize {
+        if listFloor == nil, !listFloorFailed, selection != .journal, page.rows.count > listPageSize {
             Task { [weak self] in
                 guard let self, listFloor == nil, !listFloorFailed, entries.count > listPageSize else { return }
                 listDidChange()
@@ -725,19 +731,24 @@ enum PendingPanel: Equatable, Sendable {
     }
 
     /// Fresh rows, plus the entries read during this visit that an unread-only query
-    /// dropped, newest first. Only rows at or after `floor` are kept: below it, a row of the
-    /// list is merely not loaded.
-    static func merge(fresh: [EntryRow], previous: [EntryRow], retained: Set<Int64>, floor: ListFloor?) -> [EntryRow] {
+    /// dropped: newest first, or by `rank` when given (the Journal). Only rows at or after
+    /// `floor` are kept: below it, a row of the list is merely not loaded.
+    static func merge(fresh: [EntryRow], previous: [EntryRow], retained: Set<Int64>, floor: ListFloor?,
+                      rank: [Int64: Int] = [:]) -> [EntryRow] {
         let freshIds = Set(fresh.map(\.entryId))
         let kept = previous.filter {
             retained.contains($0.entryId) && !freshIds.contains($0.entryId) && floor?.admits($0) != false
         }
         guard !kept.isEmpty else { return fresh }
-        return (fresh + kept.map { row in
+        let rows = fresh + kept.map { row in
             var row = row
             row.isRead = true
             return row
-        }).sorted { ($0.publishedAt, $0.entryId) > ($1.publishedAt, $1.entryId) }
+        }
+        guard rank.isEmpty else {
+            return rows.sorted { (rank[$0.entryId] ?? .max, $0.entryId) < (rank[$1.entryId] ?? .max, $1.entryId) }
+        }
+        return rows.sorted { ($0.publishedAt, $0.entryId) > ($1.publishedAt, $1.entryId) }
     }
 }
 
