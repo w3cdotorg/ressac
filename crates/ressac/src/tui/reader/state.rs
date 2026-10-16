@@ -12,6 +12,8 @@ use ressac_core::store::{
     EntryDetail, EntryPage, EntryRow, JournalView, ListCursor, ListFilter, Source, SourcesSnapshot,
 };
 
+use crate::output::printable;
+
 use super::html::{RenderedArticle, is_web_url, render_html};
 use super::layout::{Column, LayoutClass, Look, columns, layout_class, text_height, text_width};
 use super::settings::TerminalSettings;
@@ -199,6 +201,66 @@ pub struct ReaderState {
     pinned: Option<(usize, EntryRow)>,
     /// The entry whose full-text extraction is running.
     extracting: Option<i64>,
+    /// What the last draw measured (the article's height in rows, the visible rows): images and
+    /// the links list change both. `None` until a draw, and again whenever the article changes.
+    metrics: Option<(usize, u16)>,
+}
+
+/// One line of the sources column, ready to draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLine {
+    pub label: String,
+    pub unread: usize,
+    pub depth: u16,
+    pub selected: bool,
+    pub heading: bool,
+}
+
+/// The state as the renderers see it: borrowed, read-only, every feed string already through
+/// `output::printable` where it is built here (the renderers do the rest).
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "total, journal and images are read by phases 5b, 6, 7 and 9"
+    )
+)]
+pub struct ReaderView<'a> {
+    pub look: Look,
+    pub layout: LayoutClass,
+    pub focus: Column,
+    pub sources_overlay: bool,
+    pub now_local: DateTime<FixedOffset>,
+    pub source: Source,
+    pub source_title: String,
+    pub source_lines: Vec<SourceLine>,
+    pub filter: ListFilter,
+    pub search: Option<&'a str>,
+    pub entries: &'a [EntryRow],
+    pub entry_cursor: Option<usize>,
+    pub total: usize,
+    pub unread: usize,
+    pub journal: Option<&'a JournalView>,
+    pub entry: Option<&'a EntryDetail>,
+    pub article: Option<&'a RenderedArticle>,
+    pub show_fulltext: bool,
+    pub reader_scroll: usize,
+    pub images: bool,
+    pub progress: Option<(&'a str, usize, usize)>,
+    pub message: Option<&'a str>,
+    pub help: bool,
+    pub rhythm: Option<(usize, usize)>,
+}
+
+/// `Daily`, `Weekly`...: the group's name as the sources column and the menu show it.
+pub fn group_label(group: CadenceGroup) -> String {
+    let name = group.as_str();
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 impl ReaderState {
@@ -237,6 +299,7 @@ impl ReaderState {
             loading_more: false,
             pinned: None,
             extracting: None,
+            metrics: None,
         }
     }
 
@@ -282,6 +345,69 @@ impl ReaderState {
 
     pub fn class(&self) -> LayoutClass {
         self.class
+    }
+
+    /// The renderers' borrowed projection of the state.
+    pub fn view(&self) -> ReaderView<'_> {
+        let source_lines: Vec<SourceLine> = self
+            .sidebar
+            .iter()
+            .enumerate()
+            .map(|(i, row)| source_line(row, i == self.sidebar_index))
+            .collect();
+        let source_title = self
+            .sidebar
+            .iter()
+            .find(|row| row.source() == Some(self.source))
+            .map(|row| source_line(row, false).label)
+            .unwrap_or_else(|| {
+                match self.source {
+                    Source::Journal => "Journal",
+                    Source::Unread => "Unread",
+                    Source::Today => "Today",
+                    Source::Starred => "Starred",
+                    _ => "",
+                }
+                .to_string()
+            });
+        ReaderView {
+            look: self.look(),
+            layout: self.class,
+            focus: self.focus,
+            sources_overlay: self.class == LayoutClass::Two && self.focus == Column::Sources,
+            now_local: self.local.unwrap_or(DateTime::UNIX_EPOCH.fixed_offset()),
+            source: self.source,
+            source_title,
+            source_lines,
+            filter: self.filter,
+            search: self.search.as_deref(),
+            entries: &self.entries,
+            entry_cursor: self.index(),
+            total: self.total,
+            unread: self.unread,
+            journal: self.journal.as_ref(),
+            entry: self.detail.as_ref(),
+            article: self.article.as_ref(),
+            show_fulltext: self.show_fulltext,
+            reader_scroll: self.scroll,
+            images: self.settings.images,
+            progress: self
+                .progress
+                .as_ref()
+                .map(|(label, done, total)| (label.as_str(), *done, *total)),
+            message: self.message.as_deref(),
+            help: self.overlay == Overlay::Help,
+            rhythm: match self.overlay {
+                Overlay::Rhythm { choice, .. } => Some((choice, RHYTHM_CHOICES.len())),
+                _ => None,
+            },
+        }
+    }
+
+    /// The renderer reports the article's height in rows and the reader's visible rows (below
+    /// the header); Space uses them.
+    pub fn set_reader_metrics(&mut self, total_rows: usize, viewport_rows: u16) {
+        self.metrics = Some((total_rows, viewport_rows));
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Command> {
@@ -471,6 +597,7 @@ impl ReaderState {
             self.article = None;
             self.scroll = 0;
             self.show_fulltext = false;
+            self.metrics = None;
             commands.push(Command::LoadEntry(id));
         }
         if mark_read && !was_read {
@@ -506,6 +633,9 @@ impl ReaderState {
 
     /// Article lines visible at once.
     fn page_height(&self) -> usize {
+        if let Some((_, viewport)) = self.metrics {
+            return usize::from(viewport).max(1);
+        }
         self.reader_rect().map_or(1, |rect| {
             usize::from(text_height(rect, self.look()))
                 .saturating_sub(READER_HEADER_LINES)
@@ -519,9 +649,12 @@ impl ReaderState {
     }
 
     fn max_scroll(&self) -> usize {
-        self.article
-            .as_ref()
-            .map_or(0, |a| a.lines.len().saturating_sub(self.page_height()))
+        let rows = self
+            .metrics
+            .map(|(total, _)| total)
+            .or_else(|| self.article.as_ref().map(|a| a.lines.len()))
+            .unwrap_or(0);
+        rows.saturating_sub(self.page_height())
     }
 
     /// Space (spec §5): scroll the article, then the next unread entry of the source.
@@ -715,6 +848,7 @@ impl ReaderState {
             detail.row.url.as_deref(),
         );
         self.article = Some(article);
+        self.metrics = None;
         self.scroll = self.scroll.min(self.max_scroll());
     }
 
@@ -938,6 +1072,7 @@ impl ReaderState {
         let before = self.class;
         self.width = width;
         self.height = height;
+        self.metrics = None;
         self.class = layout_class(width, height);
         if self.class == LayoutClass::One
             && before != LayoutClass::One
@@ -951,6 +1086,38 @@ impl ReaderState {
         if self.class != LayoutClass::TooSmall {
             self.render_article();
         }
+    }
+}
+
+/// A sidebar row as a drawable line: titles from the feeds go through `printable`.
+fn source_line(row: &SidebarRow, selected: bool) -> SourceLine {
+    let line = |label: &str, unread: usize, depth: usize| SourceLine {
+        label: printable(label).into_owned(),
+        unread,
+        depth: u16::try_from(depth).unwrap_or(u16::MAX),
+        selected,
+        heading: false,
+    };
+    match row {
+        SidebarRow::Heading(label) => SourceLine {
+            heading: true,
+            selected: false,
+            ..line(label, 0, 0)
+        },
+        SidebarRow::Smart { title, unread, .. } => line(title, *unread, 0),
+        SidebarRow::Folder {
+            name,
+            depth,
+            unread,
+            ..
+        } => line(name, *unread, *depth),
+        SidebarRow::Feed {
+            title,
+            depth,
+            unread,
+            ..
+        } => line(title, *unread, *depth),
+        SidebarRow::Rhythm { group, unread } => line(&group_label(*group), *unread, 0),
     }
 }
 
@@ -1939,5 +2106,87 @@ mod tests {
             "The database is busy.".into(),
         )));
         assert_eq!(state.message.as_deref(), Some("The database is busy."));
+    }
+
+    #[test]
+    fn the_view_shows_what_the_state_holds() {
+        let state = reader();
+        let v = state.view();
+        assert_eq!(v.look, Look::Native);
+        assert_eq!(v.source, Source::Journal);
+        assert_eq!(v.source_title, "Journal");
+        assert_eq!(v.entries.len(), 4);
+        assert_eq!(v.filter, ListFilter::All);
+        assert!(!v.sources_overlay);
+        assert!(
+            v.source_lines
+                .iter()
+                .any(|l| l.heading && l.label == "Feeds")
+        );
+        assert!(
+            v.source_lines
+                .iter()
+                .any(|l| l.label == "Daring Fireball" && l.depth == 1)
+        );
+        assert!(
+            v.source_lines
+                .iter()
+                .any(|l| l.label == "Daily" && l.unread == 3)
+        );
+        assert_eq!(v.source_lines.iter().filter(|l| l.selected).count(), 1);
+        assert_eq!(v.now_local.offset().local_minus_utc(), 7200);
+    }
+
+    #[test]
+    fn the_view_neutralises_feed_titles() {
+        let mut state = reader();
+        let mut snapshot = sample_snapshot();
+        if let ressac_core::store::SourceNodeKind::Folder { name, .. } = &mut snapshot.tree[0].kind
+        {
+            *name = "In\u{1b}]0;x\u{7}fos".into();
+        }
+        state.on_event(Event::Sources(snapshot));
+        let v = state.view();
+        assert!(
+            v.source_lines
+                .iter()
+                .all(|l| !l.label.chars().any(char::is_control))
+        );
+    }
+
+    #[test]
+    fn reader_metrics_drive_space_scrolling() {
+        let mut state = reader();
+        char_key(&mut state, 'l');
+        state.on_event(Event::Entry(detail(1, 3)));
+        assert_eq!(state.view().reader_scroll, 0);
+        // The renderer measured 120 rows (images make the article taller than its text lines).
+        state.set_reader_metrics(120, 30);
+        char_key(&mut state, ' ');
+        assert_eq!(state.view().reader_scroll, 29);
+        for _ in 0..3 {
+            char_key(&mut state, ' ');
+        }
+        assert_eq!(state.view().reader_scroll, 90, "never past the last page");
+        // At the end of the article Space moves on to the next unread entry.
+        char_key(&mut state, ' ');
+        assert_eq!(state.selected_entry(), Some(3));
+        assert_eq!(state.view().reader_scroll, 0);
+    }
+
+    #[test]
+    fn a_late_article_for_another_entry_is_ignored() {
+        let mut state = reader();
+        char_key(&mut state, 'l');
+        assert_eq!(state.selected_entry(), Some(1));
+        state.on_event(Event::Entry(detail(1, 3)));
+        char_key(&mut state, 'j');
+        assert_eq!(state.selected_entry(), Some(2));
+        // The answer for entry 1 arrives after the reader moved on.
+        state.on_event(Event::Entry(detail(1, 5)));
+        assert!(state.detail.is_none(), "entry 2 is still loading");
+        state.on_event(Event::Entry(detail(2, 3)));
+        state.on_event(Event::Entry(detail(1, 5)));
+        assert_eq!(state.detail.as_ref().map(|d| d.row.entry_id), Some(2));
     }
 }

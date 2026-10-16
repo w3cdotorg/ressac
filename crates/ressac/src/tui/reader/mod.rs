@@ -11,6 +11,7 @@
 
 pub mod html;
 pub mod layout;
+pub mod native;
 pub mod settings;
 pub mod sidebar;
 pub mod state;
