@@ -92,6 +92,16 @@ struct JournalSection: Identifiable, Equatable {
         return progress.total > 0 ? "Edition… \(progress.done)/\(progress.total)" : "Edition…"
     }
 
+    /// Horizontal inset between the toolbar pill's rounded ends and the progress view, so neither the
+    /// label nor the bar's end is clipped by the capsule (macOS 27).
+    static let progressInset: CGFloat = 10
+
+    /// The progress view's content width, inside `progressInset`: wider for an edition build, whose
+    /// text carries the feed count. `ViewThatFits` measures against this width.
+    static func progressContentWidth(_ progress: RunProgress) -> CGFloat {
+        progress.label == RunCoordinator.editionProgressLabel ? 260 : 140
+    }
+
     /// "+12 more in Actualitté".
     static func overflowLabel(_ item: EditionOverflowItem) -> String {
         "+\(item.hiddenCount) more in \(item.feedTitle)"

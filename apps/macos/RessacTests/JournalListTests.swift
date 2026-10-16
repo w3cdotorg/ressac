@@ -250,4 +250,11 @@ private func overflowItem(_ section: EditionSection, feed: Int64, _ hidden: Int,
         #expect(JournalLayout.compactProgressText(RunProgress(done: 0, total: 0, label: label)) == "Edition…")
         #expect(JournalLayout.compactProgressText(RunProgress(done: 3, total: 10, label: "Fetching feeds")) == "Fetching feeds")
     }
+
+    /// The progress view sits inset inside the toolbar pill; the content widths are unchanged.
+    @Test func the_toolbar_progress_is_inset_inside_its_pill() {
+        #expect(JournalLayout.progressInset == 10)
+        #expect(JournalLayout.progressContentWidth(RunProgress(done: 1, total: 2, label: RunCoordinator.editionProgressLabel)) == 260)
+        #expect(JournalLayout.progressContentWidth(RunProgress(done: 1, total: 2, label: "Fetching feeds")) == 140)
+    }
 }

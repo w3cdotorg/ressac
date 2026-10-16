@@ -56,7 +56,8 @@ struct MainView: View {
                         .monospacedDigit()
                     }
                     .progressViewStyle(.linear)
-                    .frame(width: progress.label == RunCoordinator.editionProgressLabel ? 260 : 140)
+                    .frame(width: JournalLayout.progressContentWidth(progress))
+                    .padding(.horizontal, JournalLayout.progressInset)
                     .help(text)
                 } else {
                     Button("Refresh", systemImage: "arrow.clockwise") { state.refreshCurrent() }
