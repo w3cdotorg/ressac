@@ -119,7 +119,7 @@ impl EventSink for Sink {
                 Event::Started { total } => bar.set_length(*total as u64),
                 Event::FeedDone { title, .. } => {
                     bar.inc(1);
-                    bar.set_message(title.clone());
+                    bar.set_message(progress_title(title));
                 }
                 Event::NetworkUnreachable { failed, attempted } => bar.println(format!(
                     "Network looks unreachable ({failed}/{attempted} feeds could not connect) — results not recorded as failures."
@@ -217,6 +217,11 @@ pub fn printable(text: &str) -> std::borrow::Cow<'_, str> {
     } else {
         text.into()
     }
+}
+
+/// A feed title as the progress bar shows it: controls neutralised, like every other terminal line.
+fn progress_title(title: &str) -> String {
+    printable(title).into_owned()
 }
 
 /// One line of `ressac page list` and `ressac page set`: `page kind id title`, with `-`
@@ -431,6 +436,12 @@ mod tests {
             String::from_utf8(text).unwrap(),
             "Undid the last decision (#4).\n"
         );
+    }
+
+    #[test]
+    fn progress_title_neutralises_controls() {
+        assert_eq!(progress_title("a\u{1b}[2Jb"), "a\u{FFFD}[2Jb");
+        assert_eq!(progress_title("Courrier"), "Courrier");
     }
 
     #[test]
