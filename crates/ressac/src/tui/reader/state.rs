@@ -9,6 +9,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ressac_core::garden::GardenRow;
 use ressac_core::model::{CadenceGroup, FeedId};
+use ressac_core::store::pages::PageRow;
 use ressac_core::store::{
     EntryDetail, EntryPage, EntryRow, JournalView, ListCursor, ListFilter, Source, SourcesSnapshot,
 };
@@ -47,6 +48,8 @@ pub const RHYTHM_CHOICES: [Option<CadenceGroup>; 6] = [
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     LoadSources,
+    /// The teletext page numbers (`Ressac::pages`): the Antiope index and its destinations.
+    LoadPages,
     /// A page of a list. `after: None` is a fresh list (it replaces the rows), `Some` the next
     /// page (it is appended). The runner echoes `request` in the `Event::Entries` it answers
     /// with; the state ignores answers older than its current request.
@@ -97,6 +100,7 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Sources(SourcesSnapshot),
+    Pages(Vec<PageRow>),
     /// The answer to a `Command::LoadEntries` or `Command::Search`: `request` is echoed from the
     /// command, so a late answer to a list the reader has left is recognised and dropped.
     Entries {
@@ -214,6 +218,11 @@ pub struct ReaderState {
     pub source: Source,
     pub filter: ListFilter,
     pub sources: Option<SourcesSnapshot>,
+    /// Every teletext page (reserved, then folders and feeds), empty until the first load.
+    pub pages: Vec<PageRow>,
+    /// The special page Antiope shows in the reader column (100 SOMMAIRE, 899 GUIDE); `None` is
+    /// the selected entry. Antiope's page navigation (phase 9b) is what sets it.
+    pub antiope_page: Option<u16>,
     pub sidebar: Vec<SidebarRow>,
     pub sidebar_index: usize,
     pub entries: Vec<EntryRow>,
@@ -352,6 +361,8 @@ impl ReaderState {
             source: Source::Journal,
             filter: ListFilter::All,
             sources: None,
+            pages: Vec::new(),
+            antiope_page: None,
             sidebar: Vec::new(),
             sidebar_index: 0,
             entries: Vec::new(),
@@ -395,7 +406,12 @@ impl ReaderState {
         self.now = Some(now);
         self.local = Some(local);
         self.last_day = Some(journal::day_of(local));
-        let mut commands = vec![Command::LoadSources, Command::LoadJournal, self.reload()];
+        let mut commands = vec![
+            Command::LoadSources,
+            Command::LoadPages,
+            Command::LoadJournal,
+            self.reload(),
+        ];
         commands.extend(self.build_edition());
         commands.extend(self.sync_rhythm());
         commands
@@ -751,6 +767,10 @@ impl ReaderState {
                 }
                 .unwrap_or(fallback);
                 self.sources = Some(snapshot);
+                Vec::new()
+            }
+            Event::Pages(pages) => {
+                self.pages = pages;
                 Vec::new()
             }
             Event::GardenRows(rows) => {
@@ -1633,7 +1653,7 @@ impl ReaderState {
 
     /// Another process (or this one) changed the database: reload, keeping the selection.
     fn data_changed(&mut self) -> Vec<Command> {
-        let mut commands = vec![Command::LoadSources];
+        let mut commands = vec![Command::LoadSources, Command::LoadPages];
         if self.garden_view.is_some() {
             commands.push(Command::LoadGarden);
         }
@@ -1821,6 +1841,28 @@ mod tests {
     }
 
     #[test]
+    fn the_page_list_follows_the_sources_and_is_kept() {
+        use ressac_core::store::pages::{PageKind, PageRow};
+        let mut state = reader();
+        let page = PageRow {
+            page: 412,
+            kind: PageKind::Feed,
+            id: Some(12),
+            title: "Courrier international".into(),
+            parent_page: None,
+        };
+        assert!(state.pages.is_empty());
+        assert!(state.on_event(Event::Pages(vec![page.clone()])).is_empty());
+        assert_eq!(state.pages, [page]);
+        // Another process may renumber: every data change asks again.
+        assert!(
+            state
+                .on_event(Event::DataChanged)
+                .contains(&Command::LoadPages)
+        );
+    }
+
+    #[test]
     fn the_reader_opens_on_the_journal() {
         let mut state = ReaderState::new(TerminalSettings::default(), 140, 40);
         assert_eq!(state.source(), Source::Journal);
@@ -1832,6 +1874,7 @@ mod tests {
             state.start(now, local),
             [
                 Command::LoadSources,
+                Command::LoadPages,
                 Command::LoadJournal,
                 Command::LoadEntries {
                     source: Source::Journal,
@@ -2298,6 +2341,7 @@ mod tests {
             state.on_event(Event::DataChanged),
             [
                 Command::LoadSources,
+                Command::LoadPages,
                 Command::LoadJournal,
                 Command::LoadEntries {
                     source: Source::Journal,
@@ -2395,6 +2439,7 @@ mod tests {
         let reload = |request| {
             [
                 Command::LoadSources,
+                Command::LoadPages,
                 Command::LoadJournal,
                 Command::LoadEntries {
                     source: Source::Journal,

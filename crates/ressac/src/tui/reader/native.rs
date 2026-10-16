@@ -406,7 +406,7 @@ fn entry_item(row: &EntryRow, now: DateTime<FixedOffset>) -> ListItem<'static> {
 }
 
 /// `09:30` today, `Thu 15 Oct` this year, `15 Oct 2025` before; in the state's local offset.
-fn short_date(at: DateTime<Utc>, now: DateTime<FixedOffset>) -> String {
+pub(super) fn short_date(at: DateTime<Utc>, now: DateTime<FixedOffset>) -> String {
     let local = at.with_timezone(now.offset());
     if local.date_naive() == now.date_naive() {
         local.format("%H:%M").to_string()

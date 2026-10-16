@@ -1,0 +1,386 @@
+//! The teletext page directory of the terminal reader (Antiope spec §4, §6): every reserved page
+//! and every numbered folder and feed, where each one leads, and its count.
+
+use std::collections::HashMap;
+
+use ressac_core::model::CadenceGroup;
+use ressac_core::store::pages::{PageKind, PageRow};
+use ressac_core::store::{Source, SourceNode, SourceNodeKind, SourcesSnapshot};
+
+use super::state::GardenView;
+
+/// Where typing a page number leads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageDestination {
+    Sommaire,
+    Guide,
+    Source(Source),
+    Garden(GardenView),
+}
+
+/// What the reader column of the Antiope look shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderPage {
+    /// The selected entry (or P100 while none is selected).
+    Article,
+    Sommaire,
+    Guide,
+}
+
+impl ReaderPage {
+    /// `antiope_page` is the special page the reader shows, if any; `help` is the `?` overlay,
+    /// which in Antiope is the GUIDE (P899) until the next key.
+    pub fn of(antiope_page: Option<u16>, help: bool) -> Self {
+        match antiope_page {
+            _ if help => ReaderPage::Guide,
+            Some(100) => ReaderPage::Sommaire,
+            Some(899) => ReaderPage::Guide,
+            _ => ReaderPage::Article,
+        }
+    }
+}
+
+/// One row of the index column and of P100.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirRow {
+    pub page: u16,
+    pub title: String,
+    pub kind: PageKind,
+    pub depth: usize,
+    pub is_root_folder: bool,
+    /// Unread entries (feeds, folders, smart lists, rhythm groups) or feeds to triage (P800).
+    pub count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageDirectory {
+    rows: Vec<DirRow>,
+    destinations: HashMap<u16, PageDestination>,
+    pages_of: HashMap<Source, u16>,
+}
+
+fn reserved_destination(page: u16) -> Option<PageDestination> {
+    use PageDestination::{Garden, Guide, Sommaire};
+    let source = |s| Some(PageDestination::Source(s));
+    match page {
+        100 => Some(Sommaire),
+        101 => source(Source::Unread),
+        102 => source(Source::Today),
+        103 => source(Source::Starred),
+        104 => source(Source::Journal),
+        105 => source(Source::Cadence(CadenceGroup::Daily)),
+        106 => source(Source::Cadence(CadenceGroup::Weekly)),
+        107 => source(Source::Cadence(CadenceGroup::Monthly)),
+        108 => source(Source::Cadence(CadenceGroup::Rare)),
+        109 => source(Source::Cadence(CadenceGroup::Silent)),
+        800 => Some(Garden(GardenView::NeedsTriage)),
+        801 => Some(Garden(GardenView::AllFeeds)),
+        802 => Some(Garden(GardenView::Cemetery)),
+        899 => Some(Guide),
+        _ => None,
+    }
+}
+
+impl PageDirectory {
+    /// `pages` as `Ressac::pages()` returns them (reserved first, then by page); `sources` gives
+    /// the counts, absent until the first load.
+    pub fn new(pages: &[PageRow], sources: Option<&SourcesSnapshot>) -> Self {
+        let counts = sources.map(unread_by_node).unwrap_or_default();
+        let by_page: HashMap<u16, &PageRow> = pages.iter().map(|r| (r.page, r)).collect();
+        let mut destinations = HashMap::new();
+        let mut pages_of = HashMap::new();
+        let mut rows = Vec::with_capacity(pages.len());
+        for row in pages {
+            let destination = match row.kind {
+                PageKind::Reserved => reserved_destination(row.page),
+                PageKind::Folder => row.id.map(|id| PageDestination::Source(Source::Folder(id))),
+                PageKind::Feed => row.id.map(|id| PageDestination::Source(Source::Feed(id))),
+            };
+            if let Some(destination) = destination {
+                destinations.insert(row.page, destination);
+                if let PageDestination::Source(source) = destination {
+                    pages_of.insert(source, row.page);
+                }
+            }
+            // A parent chain cannot loop (pages are a tree), but never trust the data: stop at
+            // the number of rows.
+            let mut depth = 0;
+            let mut parent = row.parent_page;
+            while let Some(p) = parent {
+                depth += 1;
+                if depth > pages.len() {
+                    break;
+                }
+                parent = by_page.get(&p).and_then(|r| r.parent_page);
+            }
+            let count = match (row.kind, sources) {
+                (PageKind::Reserved, Some(s)) => reserved_count(row.page, s),
+                (PageKind::Reserved, None) => None,
+                (PageKind::Folder, _) => row.id.and_then(|id| counts.folders.get(&id).copied()),
+                (PageKind::Feed, _) => row.id.and_then(|id| counts.feeds.get(&id).copied()),
+            };
+            rows.push(DirRow {
+                page: row.page,
+                title: row.title.clone(),
+                kind: row.kind,
+                depth,
+                is_root_folder: row.kind == PageKind::Folder && row.parent_page.is_none(),
+                count,
+            });
+        }
+        PageDirectory {
+            rows,
+            destinations,
+            pages_of,
+        }
+    }
+
+    pub fn rows(&self) -> &[DirRow] {
+        &self.rows
+    }
+
+    #[allow(dead_code, reason = "phase 9b jumps to a typed page number")]
+    pub fn destination(&self, page: u16) -> Option<PageDestination> {
+        self.destinations.get(&page).copied()
+    }
+
+    /// The page a source sits on, for the header and the index column's selection.
+    pub fn page_of(&self, source: Source) -> Option<u16> {
+        self.pages_of.get(&source).copied()
+    }
+
+    #[allow(dead_code, reason = "phase 9b names the garden page in the header")]
+    pub fn page_of_garden(&self, view: GardenView) -> u16 {
+        match view {
+            GardenView::NeedsTriage => 800,
+            GardenView::AllFeeds => 801,
+            GardenView::Cemetery => 802,
+        }
+    }
+}
+
+fn reserved_count(page: u16, s: &SourcesSnapshot) -> Option<usize> {
+    let c = &s.counts;
+    let group = |g| c.cadence.get(&g).copied().unwrap_or(0);
+    Some(match page {
+        101 => c.unread,
+        102 => c.today,
+        103 => c.starred,
+        104 => c.journal,
+        105 => group(CadenceGroup::Daily),
+        106 => group(CadenceGroup::Weekly),
+        107 => group(CadenceGroup::Monthly),
+        108 => group(CadenceGroup::Rare),
+        109 => group(CadenceGroup::Silent),
+        800 => c.needs_triage,
+        _ => return None,
+    })
+}
+
+/// Unread entries per folder and per feed (`PageKind` has no `Hash`, so two maps).
+#[derive(Default)]
+struct NodeCounts {
+    folders: HashMap<i64, usize>,
+    feeds: HashMap<i64, usize>,
+}
+
+fn unread_by_node(s: &SourcesSnapshot) -> NodeCounts {
+    fn walk(nodes: &[SourceNode], out: &mut NodeCounts) {
+        for n in nodes {
+            match &n.kind {
+                SourceNodeKind::Folder { id, .. } => out.folders.insert(*id, n.unread),
+                SourceNodeKind::Feed { id, .. } => out.feeds.insert(*id, n.unread),
+            };
+            walk(&n.children, out);
+        }
+    }
+    let mut out = NodeCounts::default();
+    walk(&s.tree, &mut out);
+    out
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    fn reserved(page: u16, title: &str) -> PageRow {
+        PageRow {
+            page,
+            kind: PageKind::Reserved,
+            id: None,
+            title: title.into(),
+            parent_page: None,
+        }
+    }
+
+    pub(crate) fn sample_pages() -> Vec<PageRow> {
+        let mut rows: Vec<PageRow> = ressac_core::store::pages::RESERVED_PAGES
+            .iter()
+            .zip([
+                "Index",
+                "Unread",
+                "Today",
+                "Starred",
+                "Journal",
+                "Daily",
+                "Weekly",
+                "Monthly",
+                "Rare",
+                "Silent",
+                "Needs triage",
+                "All feeds",
+                "Cemetery",
+                "Guide",
+            ])
+            .map(|(p, t)| reserved(*p, t))
+            .collect();
+        rows.push(PageRow {
+            page: 400,
+            kind: PageKind::Folder,
+            id: Some(4),
+            title: "Infos".into(),
+            parent_page: None,
+        });
+        rows.push(PageRow {
+            page: 403,
+            kind: PageKind::Feed,
+            id: Some(31),
+            title: "Actualitté".into(),
+            parent_page: Some(400),
+        });
+        rows.push(PageRow {
+            page: 412,
+            kind: PageKind::Feed,
+            id: Some(12),
+            title: "Courrier international".into(),
+            parent_page: Some(400),
+        });
+        rows.push(PageRow {
+            page: 110,
+            kind: PageKind::Feed,
+            id: Some(2),
+            title: "Daring Fireball".into(),
+            parent_page: None,
+        });
+        rows.sort_by_key(|r| (r.kind != PageKind::Reserved, r.page));
+        rows
+    }
+
+    #[test]
+    fn reserved_pages_go_where_the_app_sends_them() {
+        let dir = PageDirectory::new(&sample_pages(), None);
+        assert_eq!(dir.destination(100), Some(PageDestination::Sommaire));
+        assert_eq!(
+            dir.destination(101),
+            Some(PageDestination::Source(Source::Unread))
+        );
+        assert_eq!(
+            dir.destination(102),
+            Some(PageDestination::Source(Source::Today))
+        );
+        assert_eq!(
+            dir.destination(103),
+            Some(PageDestination::Source(Source::Starred))
+        );
+        assert_eq!(
+            dir.destination(104),
+            Some(PageDestination::Source(Source::Journal))
+        );
+        assert_eq!(
+            dir.destination(105),
+            Some(PageDestination::Source(Source::Cadence(
+                CadenceGroup::Daily
+            )))
+        );
+        assert_eq!(
+            dir.destination(109),
+            Some(PageDestination::Source(Source::Cadence(
+                CadenceGroup::Silent
+            )))
+        );
+        assert_eq!(
+            dir.destination(800),
+            Some(PageDestination::Garden(GardenView::NeedsTriage))
+        );
+        assert_eq!(
+            dir.destination(801),
+            Some(PageDestination::Garden(GardenView::AllFeeds))
+        );
+        assert_eq!(
+            dir.destination(802),
+            Some(PageDestination::Garden(GardenView::Cemetery))
+        );
+        assert_eq!(dir.destination(899), Some(PageDestination::Guide));
+    }
+
+    #[test]
+    fn folders_and_feeds_go_to_their_source() {
+        let dir = PageDirectory::new(&sample_pages(), None);
+        assert_eq!(
+            dir.destination(400),
+            Some(PageDestination::Source(Source::Folder(4)))
+        );
+        assert_eq!(
+            dir.destination(412),
+            Some(PageDestination::Source(Source::Feed(12)))
+        );
+        assert_eq!(dir.destination(437), None);
+        assert_eq!(dir.page_of(Source::Feed(12)), Some(412));
+        assert_eq!(dir.page_of(Source::Journal), Some(104));
+        assert_eq!(dir.page_of(Source::Feed(99)), None);
+    }
+
+    #[test]
+    fn rows_have_depth_and_root_folders_are_marked() {
+        let dir = PageDirectory::new(&sample_pages(), None);
+        let infos = dir.rows().iter().find(|r| r.page == 400).unwrap();
+        let actualitte = dir.rows().iter().find(|r| r.page == 403).unwrap();
+        assert_eq!((infos.depth, infos.is_root_folder), (0, true));
+        assert_eq!((actualitte.depth, actualitte.is_root_folder), (1, false));
+    }
+
+    #[test]
+    fn counts_come_from_the_sources() {
+        use ressac_core::store::SourceCounts;
+        let snapshot = SourcesSnapshot {
+            counts: SourceCounts {
+                unread: 1083,
+                needs_triage: 7,
+                ..SourceCounts::default()
+            },
+            tree: vec![SourceNode {
+                kind: SourceNodeKind::Folder {
+                    id: 4,
+                    name: "Infos".into(),
+                },
+                page: Some(400),
+                unread: 12,
+                children: vec![SourceNode {
+                    kind: SourceNodeKind::Feed {
+                        id: 12,
+                        title: "Courrier international".into(),
+                    },
+                    page: Some(412),
+                    unread: 5,
+                    children: Vec::new(),
+                }],
+            }],
+        };
+        let dir = PageDirectory::new(&sample_pages(), Some(&snapshot));
+        let count = |page| dir.rows().iter().find(|r| r.page == page).unwrap().count;
+        assert_eq!(count(101), Some(1083));
+        assert_eq!(count(800), Some(7));
+        assert_eq!(count(400), Some(12));
+        assert_eq!(count(412), Some(5));
+        assert_eq!(count(100), None);
+        assert_eq!(count(110), None);
+    }
+
+    #[test]
+    fn the_reader_page_follows_the_special_page_and_the_help_overlay() {
+        assert_eq!(ReaderPage::of(None, false), ReaderPage::Article);
+        assert_eq!(ReaderPage::of(Some(100), false), ReaderPage::Sommaire);
+        assert_eq!(ReaderPage::of(Some(899), false), ReaderPage::Guide);
+        assert_eq!(ReaderPage::of(None, true), ReaderPage::Guide);
+    }
+}

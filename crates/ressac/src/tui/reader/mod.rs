@@ -1,11 +1,13 @@
 //! `ressac read`: the reader's event loop. The state decides, this module executes.
 
+pub mod antiope;
 pub mod html;
 pub mod images;
 pub mod jobs;
 pub mod journal;
 pub mod layout;
 pub mod native;
+pub mod pages;
 pub mod rhythm;
 pub mod settings;
 pub mod sidebar;
@@ -28,6 +30,7 @@ use ressac_core::store::{EntryPage, ListCursor, ListFilter, PAGE_SIZE, Source, S
 
 use jobs::{Msg, ProgressSink};
 use journal::BUILDING;
+use layout::Look;
 use native::{EXTRACT_PROGRESS_LABEL, FETCH_PROGRESS_LABEL};
 use rhythm::RhythmInfo;
 use settings::TerminalSettings;
@@ -36,6 +39,17 @@ use state::{Command, Event, JobOutcome, ReaderState};
 const IDLE_POLL: Duration = Duration::from_secs(2);
 const INPUT_WAIT: Duration = Duration::from_millis(100);
 const TICK: Duration = Duration::from_secs(1);
+/// Antiope's page counter rolls while a job runs (spec §8): a tenth of a second per page.
+const ROLLING_TICK: Duration = Duration::from_millis(100);
+
+/// How often the clock ticks: every second, every tenth while Antiope shows a running job.
+fn tick_interval(state: &ReaderState) -> Duration {
+    if state.look() == Look::Antiope && state.progress.is_some() {
+        ROLLING_TICK
+    } else {
+        TICK
+    }
+}
 
 /// Local midnight of the day `now` belongs to, in UTC (the app's "Today").
 pub fn today_start<Tz: TimeZone>(now: DateTime<Tz>) -> DateTime<Utc> {
@@ -194,6 +208,10 @@ impl<'a> Executor<'a> {
             Command::LoadSources => store
                 .sources(today)
                 .map(|s| vec![Event::Sources(s)])
+                .map_err(Into::into),
+            Command::LoadPages => app
+                .pages()
+                .map(|pages| vec![Event::Pages(pages)])
                 .map_err(Into::into),
             Command::LoadEntries {
                 source,
@@ -516,7 +534,12 @@ fn event_loop(
             }
         }
         let mut metrics = None;
-        terminal.draw(|frame| metrics = Some(native::render(frame, state, images)))?;
+        terminal.draw(|frame| {
+            metrics = Some(match state.look() {
+                Look::Native => native::render(frame, state, images),
+                Look::Antiope => antiope::render(frame, state, images),
+            });
+        })?;
         if let Some(m) = metrics {
             state.set_reader_metrics(m.total_rows, m.viewport_rows);
         }
@@ -552,7 +575,7 @@ fn event_loop(
             }
         }
         // The clock, and what Ressac.app or a job wrote.
-        if last_tick.elapsed() >= TICK {
+        if last_tick.elapsed() >= tick_interval(state) {
             last_tick = Instant::now();
             pending.extend(state.on_event(Clock::system().tick()));
         }
@@ -863,6 +886,38 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn the_page_list_is_answered_with_the_reserved_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        let (tx, _rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        let events = exec.run(Command::LoadPages, test_clock());
+        let [Event::Pages(pages)] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        let numbers: Vec<u16> = pages.iter().map(|p| p.page).collect();
+        for reserved in [100, 104, 800, 899] {
+            assert!(numbers.contains(&reserved), "{numbers:?}");
+        }
+    }
+
+    #[test]
+    fn antiope_rolls_its_counter_every_tenth_of_a_second_while_a_job_runs() {
+        use settings::TerminalSettings;
+        let antiope = TerminalSettings {
+            look: Look::Antiope,
+            images: false,
+        };
+        let mut state = ReaderState::new(antiope, 140, 40);
+        assert_eq!(tick_interval(&state), Duration::from_secs(1));
+        state.progress = Some(("Fetching feeds".into(), 1, 9));
+        assert_eq!(tick_interval(&state), Duration::from_millis(100));
+        let mut native = ReaderState::new(TerminalSettings::default(), 140, 40);
+        native.progress = Some(("Fetching feeds".into(), 1, 9));
+        assert_eq!(tick_interval(&native), Duration::from_secs(1));
     }
 
     #[test]
