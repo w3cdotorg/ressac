@@ -202,3 +202,88 @@ enum JournalPage {
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }
+
+/// The entry column of P104 (spec §8): the rows of `JournalPage.lines`, entries and overflow rows
+/// clickable, the selection followed as `EntryPageColumn` does.
+struct JournalEntryPage: View {
+    @Environment(AppState.self) private var app
+    @Environment(AntiopeState.self) private var antiope
+
+    var body: some View {
+        let lines = JournalPage.lines(edition: app.journal.edition, phase: app.journal.phase,
+                                      selected: app.selectedEntryId, cells: EntryPageColumn.cells)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(lines) { line in
+                        row(line)
+                    }
+                }
+            }
+            .scrollIndicators(.never)
+            // `j`, `k` and Space select from the keyboard: the column follows the selection.
+            .onChange(of: app.selectedEntryId) { _, id in
+                if let id { proxy.scrollTo("entry-\(id)-0") }
+            }
+        }
+    }
+
+    @ViewBuilder private func row(_ line: JournalPage.Line) -> some View {
+        switch line.role {
+        case let .entry(entryId):
+            Button { open(entryId) } label: { CellLineView(line: line.cells) }
+                .buttonStyle(.plain)
+                .focusable(false)  // Full Keyboard Access would give Space to the button, not to SUITE
+                .accessibilityLabel(line.cells.accessibilityText)
+                .accessibilityHidden(line.cells.accessibilityText.isEmpty)
+                .accessibilityAddTraits(line.isSelected ? .isSelected : [])
+                .id(line.id)
+        case let .overflow(feedId, page):
+            Button { openFeed(feedId, page: page) } label: { CellLineView(line: line.cells) }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .accessibilityLabel(line.cells.accessibilityText)
+                .accessibilityAddTraits(.isLink)
+        case .header, .message, .blank, .end, .heading:
+            Group {
+                if line.isDoubleHeight {
+                    DoubleHeight(line: line.cells)
+                } else {
+                    CellLineView(line: line.cells)
+                }
+            }
+            .accessibilityHidden(line.cells.accessibilityText.isEmpty)
+        }
+    }
+
+    private func open(_ entryId: Int64) {
+        app.selectedEntryId = entryId
+        antiope.column = .entries
+        antiope.readerPage = .article
+    }
+
+    /// The feed's page, as typing its number would; a feed without a number yet is selected directly.
+    private func openFeed(_ feedId: Int64, page: Int?) {
+        if let page {
+            antiope.jump(to: page)
+        } else {
+            app.selection = .feed(feedId)
+            antiope.readerPage = .article
+            antiope.column = .index
+        }
+    }
+}
+
+/// The reader column after P104's last entry: `FIN DE L'EDITION` in double height, centred.
+struct EndOfEditionPage: View {
+    @Environment(\.teletextSize) private var size
+
+    var body: some View {
+        let cell = TeletextFont.cell(forSize: size)
+        GeometryReader { proxy in
+            DoubleHeight(line: JournalPage.endLine(cells: max(0, Int(proxy.size.width / cell.width))).cells)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(TeletextColor.black.color)
+    }
+}
