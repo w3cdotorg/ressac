@@ -148,7 +148,7 @@ fn predicate(source: Source, today_start: DateTime<Utc>) -> (String, Vec<Value>)
         Source::Feed(id) => ("feed_id = ?".to_string(), vec![Value::Integer(id)]),
         Source::Folder(id) => (
             "folder_id IN (WITH RECURSIVE sub(id) AS \
-             (SELECT ? UNION ALL SELECT f.id FROM folder f JOIN sub ON f.parent_id = sub.id) \
+             (SELECT ? UNION SELECT f.id FROM folder f JOIN sub ON f.parent_id = sub.id) \
              SELECT id FROM sub)"
                 .to_string(),
             vec![Value::Integer(id)],
@@ -182,9 +182,24 @@ fn children(
     folders: &[FolderLine],
     feeds: &[FeedLine],
 ) -> Vec<SourceNode> {
+    walk(parent, folders, feeds, &mut Vec::new())
+}
+
+/// `children` with the folders on the way down: a folder already on it (a corrupt parent cycle)
+/// is not entered again.
+fn walk(
+    parent: Option<FolderId>,
+    folders: &[FolderLine],
+    feeds: &[FeedLine],
+    path: &mut Vec<FolderId>,
+) -> Vec<SourceNode> {
+    path.extend(parent);
     let mut items: Vec<(i64, u8, i64, SourceNode)> = Vec::new();
     for f in folders.iter().filter(|f| f.parent == parent) {
-        let nested = children(Some(f.id), folders, feeds);
+        if path.contains(&f.id) {
+            continue;
+        }
+        let nested = walk(Some(f.id), folders, feeds, path);
         let unread = nested.iter().map(|n| n.unread).sum();
         items.push((
             f.position,
@@ -216,6 +231,9 @@ fn children(
                 children: Vec::new(),
             },
         ));
+    }
+    if parent.is_some() {
+        path.pop();
     }
     items.sort_by_key(|(position, rank, id, _)| (*position, *rank, *id));
     items.into_iter().map(|(_, _, _, node)| node).collect()
@@ -883,6 +901,49 @@ mod tests {
             SourceNodeKind::Feed { id: 9, .. }
         ));
         assert_eq!(snap.tree[0].unread, 0);
+    }
+
+    /// Folders 1 and 2 are each other's parent (a corrupt tree: the schema cannot forbid it).
+    fn corrupt_cycle(s: &Store) {
+        add_folder(s, 1, None, 0, None);
+        add_folder(s, 2, Some(1), 0, None);
+        s.conn()
+            .execute("UPDATE folder SET parent_id = 2 WHERE id = 1", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn a_folder_parent_cycle_cannot_hang_a_folder_list() {
+        let s = Store::open_in_memory().unwrap();
+        corrupt_cycle(&s);
+        add_feed(&s, 9, Some(2), 0, None, "active", "daily");
+        add_entry(&s, 1, 9, "inside", "2026-10-16T05:00:00Z", false, false);
+        let page = s
+            .entries(Source::Folder(1), ListFilter::All, None, today())
+            .unwrap();
+        assert_eq!(ids(&page), [1]);
+        let page = s
+            .entries(Source::Folder(2), ListFilter::All, None, today())
+            .unwrap();
+        assert_eq!(ids(&page), [1]);
+        // Neither folder is reachable from the root: the tree simply leaves them out.
+        assert!(s.sources(today()).unwrap().tree.is_empty());
+    }
+
+    #[test]
+    fn the_tree_walk_stops_on_a_cycle() {
+        let folder = |id, parent| FolderLine {
+            id,
+            parent,
+            name: format!("Folder {id}"),
+            position: 0,
+            page: None,
+        };
+        let folders = [folder(1, Some(2)), folder(2, Some(1))];
+        let nodes = children(Some(1), &folders, &[]);
+        // 1 holds 2, which would hold 1 again: the walk stops there.
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].children.is_empty());
     }
 
     fn ids(page: &EntryPage) -> Vec<i64> {
