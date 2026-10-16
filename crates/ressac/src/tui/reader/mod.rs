@@ -3,6 +3,7 @@
 pub mod html;
 pub mod images;
 pub mod jobs;
+pub mod journal;
 pub mod layout;
 pub mod native;
 pub mod settings;
