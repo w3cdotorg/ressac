@@ -591,7 +591,7 @@ fn migrate_reports_the_schema_version() {
     let home = tempfile::tempdir().unwrap();
     let text = ressac(home.path(), &["migrate"]);
     assert!(text.status.success(), "{text:?}");
-    assert_eq!(stdout(&text), "Schema version 3.\n");
+    assert_eq!(stdout(&text), "Schema version 4.\n");
     assert!(home.path().join("db.sqlite").exists());
     let json = ressac(home.path(), &["--json", "migrate"]);
     assert!(json.status.success(), "{json:?}");

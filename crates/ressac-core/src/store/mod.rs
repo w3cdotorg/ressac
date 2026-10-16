@@ -21,13 +21,14 @@ pub use health::TriageFacts;
 pub use reading::{FulltextRow, plain_text};
 
 /// Highest schema version this binary knows.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Ordered migrations, embedded at compile time from the repository's `schema/` folder.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../../../schema/0001_init.sql")),
     (2, include_str!("../../../../schema/0002_reading.sql")),
     (3, include_str!("../../../../schema/0003_pages.sql")),
+    (4, include_str!("../../../../schema/0004_edition.sql")),
 ];
 
 /// The migration after which existing entries get their search rows.
@@ -35,6 +36,10 @@ const FTS_MIGRATION: i64 = 2;
 
 /// The migration after which existing folders and feeds get their page numbers.
 const PAGES_MIGRATION: i64 = 3;
+
+/// The migration after which pages 104 to 109 are reserved and stored diagnoses get their
+/// rhythm group.
+const CADENCE_MIGRATION: i64 = 4;
 
 /// `schema_meta.version`, or 0 for a database without it.
 fn read_version(conn: &Connection) -> Result<i64> {
@@ -130,6 +135,17 @@ impl Store {
             if *version == PAGES_MIGRATION {
                 pages::assign_missing(&tx)?;
             }
+            if *version == CADENCE_MIGRATION {
+                // Pages 104–109 become reserved (Journal and the rhythm groups). Nothing can
+                // hold them (`ASSIGNABLE` starts at 110); a hand-edited database still gets
+                // its squatter renumbered.
+                tx.execute_batch(
+                    "UPDATE folder SET page = NULL WHERE page BETWEEN 104 AND 109;
+                     UPDATE feed SET page = NULL WHERE page BETWEEN 104 AND 109;",
+                )?;
+                pages::assign_missing(&tx)?;
+                health::backfill_cadence_groups(&tx, chrono::Utc::now())?;
+            }
             tx.execute("UPDATE schema_meta SET version = ?1", [version])?;
             tx.commit()?;
         }
@@ -194,11 +210,14 @@ mod tests {
     }
 
     #[test]
-    fn fresh_store_has_schema_v3() {
+    fn fresh_store_has_schema_v4() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         let names = object_names(&store);
         for expected in [
+            "edition",
+            "edition_entry",
+            "edition_overflow",
             "entry",
             "entry_fts",
             "entry_fulltext",
@@ -208,6 +227,9 @@ mod tests {
             "folder",
             "garden_decision",
             "schema_meta",
+            "v_cadence",
+            "v_edition_overflow",
+            "v_edition_today",
             "v_entry",
             "v_feed_overview",
             "v_folder_path",
@@ -225,7 +247,7 @@ mod tests {
         let path = dir.path().join("sub/ressac.sqlite");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         let mode: String = store
             .conn()
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
@@ -288,7 +310,7 @@ mod tests {
             .unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         assert!(path.with_extension("sqlite.bak-v1").exists());
         let read: Vec<Option<String>> = store
             .conn()
@@ -337,10 +359,13 @@ mod tests {
         let bak = path.with_extension("sqlite.bak-v1");
         std::fs::write(&bak, b"earlier attempt").unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(std::fs::read(&bak).unwrap(), b"earlier attempt");
         drop(store);
-        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 3);
+        assert_eq!(
+            Store::open(&path).unwrap().schema_version().unwrap(),
+            SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -377,7 +402,10 @@ mod tests {
         assert_eq!(columns, 0, "ALTER rolled back");
         raw.execute_batch("DROP TABLE entry_fulltext").unwrap();
         drop(raw);
-        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 3);
+        assert_eq!(
+            Store::open(&path).unwrap().schema_version().unwrap(),
+            SCHEMA_VERSION
+        );
     }
 
     /// A v2 database: two root items, a subfolder and a buried feed, no page column yet.
@@ -402,7 +430,7 @@ mod tests {
         let path = dir.path().join("ressac.sqlite");
         drop(v2_database(&path));
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         assert!(path.with_extension("sqlite.bak-v2").exists());
         let missing: i64 = store
             .conn()
@@ -462,6 +490,100 @@ mod tests {
         assert!(path.with_extension("sqlite.bak-v2").exists());
         raw.execute_batch("DROP VIEW v_page").unwrap();
         drop(raw);
-        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 3);
+        assert_eq!(
+            Store::open(&path).unwrap().schema_version().unwrap(),
+            SCHEMA_VERSION
+        );
+    }
+
+    /// A v3 database: `v2_database` numbered, a feed squatting page 105 (now reserved), two
+    /// stored diagnoses (a daily feed, a fossil) and the buried feed without one.
+    fn v3_database(path: &Path) -> Connection {
+        let v3 = v2_database(path);
+        v3.execute_batch(MIGRATIONS[2].1).unwrap();
+        v3.execute_batch(&format!(
+            "UPDATE folder SET page = 200 WHERE id = 1; UPDATE folder SET page = 202 WHERE id = 2;
+             UPDATE feed SET page = 105 WHERE id = 1; UPDATE feed SET page = 201 WHERE id = 2;
+             UPDATE feed SET page = 203 WHERE id = 3;
+             INSERT INTO feed_health (feed_id, status, reason, last_entry_at, median_interval_days, computed_at) VALUES \
+             (1, 'Alive', 'r', '{recent}', 0.5, '2026-10-14T08:00:00.000Z'), \
+             (2, 'Fossil', 'r', '2019-01-01T00:00:00.000Z', 3.0, '2026-10-14T08:00:00.000Z');",
+            recent = crate::model::ts(chrono::Utc::now() - chrono::Duration::days(1)),
+        ))
+        .unwrap();
+        v3
+    }
+
+    #[test]
+    fn migration_from_v3_frees_pages_104_to_109_and_classifies_every_feed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        drop(v3_database(&path));
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 4);
+        assert!(path.with_extension("sqlite.bak-v3").exists());
+        let page: u16 = store
+            .conn()
+            .query_row("SELECT page FROM feed WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            page, 110,
+            "the root feed leaves 105 for the first root-feed number"
+        );
+        let groups: Vec<(i64, String)> = store
+            .conn()
+            .prepare("SELECT feed_id, cadence_group FROM feed_health ORDER BY feed_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            groups,
+            [(1, "daily".to_string()), (2, "silent".to_string())]
+        );
+        let overrides: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM feed WHERE cadence_override IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(overrides, 0);
+    }
+
+    #[test]
+    fn a_failing_v4_migration_leaves_v3_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        {
+            let v3 = v3_database(&path);
+            // Poison: 0004 creates this table after its ALTERs have already run.
+            v3.execute_batch("CREATE TABLE edition (x)").unwrap();
+        }
+        assert!(Store::open(&path).is_err());
+        let raw = Connection::open(&path).unwrap();
+        let version: i64 = raw
+            .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        let columns: i64 = raw
+            .query_row(
+                "SELECT (SELECT count(*) FROM pragma_table_info('feed') WHERE name = 'cadence_override') \
+                 + (SELECT count(*) FROM pragma_table_info('feed_health') WHERE name = 'cadence_group')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 0, "ALTERs rolled back");
+        let page: u16 = raw
+            .query_row("SELECT page FROM feed WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(page, 105, "the page move rolled back too");
+        assert!(path.with_extension("sqlite.bak-v3").exists());
+        raw.execute_batch("DROP TABLE edition").unwrap();
+        drop(raw);
+        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 4);
     }
 }
