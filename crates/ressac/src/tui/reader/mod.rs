@@ -1,6 +1,7 @@
 //! `ressac read`: the reader's event loop. The state decides, this module executes.
 
 pub mod html;
+pub mod images;
 pub mod jobs;
 pub mod layout;
 pub mod native;
@@ -273,7 +274,8 @@ impl<'a> Executor<'a> {
                 );
                 Ok(Vec::new())
             }
-            // Phase 6 fetches images; phase 8 runs the garden's commands: nothing to do yet.
+            // The loop handles `FetchImage` itself (the image store owns those threads);
+            // phase 8 runs the garden's commands: nothing to do yet.
             Command::FetchImage(_) | Command::Garden(_) => Ok(Vec::new()),
             // Both are handled by the loop itself (it owns the settings path and the exit).
             Command::SaveSettings | Command::Quit => Ok(Vec::new()),
@@ -379,7 +381,16 @@ pub fn run(app: &Ressac, db: &Path, settings_path: &Path) -> anyhow::Result<()> 
     let result = (|| {
         let size = terminal.size()?;
         let mut state = ReaderState::new(settings, size.width, size.height);
-        event_loop(&mut terminal, app, db, settings_path, &mut state)
+        // After the init, never before it: see `images::detect_picker`.
+        let mut images = images::ImageStore::new(images::detect_picker());
+        event_loop(
+            &mut terminal,
+            app,
+            db,
+            settings_path,
+            &mut state,
+            &mut images,
+        )
     })();
     ratatui::restore();
     forward_panics_to(&original);
@@ -399,6 +410,7 @@ fn event_loop(
     db: &Path,
     settings_path: &Path,
     state: &mut ReaderState,
+    images: &mut images::ImageStore,
 ) -> anyhow::Result<()> {
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let mut exec = Executor::new(app, db.to_path_buf(), tx);
@@ -418,6 +430,8 @@ fn event_loop(
                     // Never blocks reading: an unwritable file only forgets the choice.
                     let _ = state.settings.save(settings_path);
                 }
+                // Not a long job: its own thread and its own queue, the long-job slot stays free.
+                Command::FetchImage(url) => images.fetch(db, url),
                 other => {
                     for event in exec.run(other, Clock::system()) {
                         // Its own writes do not move `data_version`: their `DataChanged` is here.
@@ -427,9 +441,14 @@ fn event_loop(
             }
         }
         let mut metrics = None;
-        terminal.draw(|frame| metrics = Some(native::render(frame, state)))?;
+        terminal.draw(|frame| metrics = Some(native::render(frame, state, images)))?;
         if let Some(m) = metrics {
             state.set_reader_metrics(m.total_rows, m.viewport_rows);
+        }
+        // Images the renderer asked for start (four at a time); the ones that ended come back.
+        images.start_wanted(db);
+        for event in images.drain(db) {
+            pending.extend(state.on_event(event));
         }
         // Messages from the jobs.
         while let Ok(msg) = rx.try_recv() {

@@ -3,15 +3,20 @@
 //! article's measured height goes back to the loop as `ReaderMetrics`. Dates come from the
 //! state's local clock, never from the machine's.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, FixedOffset, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui_image::StatefulImage;
+use ratatui_image::protocol::StatefulProtocol;
 use ressac_core::store::{EntryDetail, EntryRow, ListFilter};
 
-use super::html::MAX_TEXT_WIDTH;
+use super::html::{ImageRef, MAX_TEXT_WIDTH};
+use super::images::{ImageState, ImageStore, Variant};
 use super::layout::{Column, LayoutClass, columns};
 use super::state::{RHYTHM_CHOICES, ReaderState, ReaderView, SourceLine, group_label};
 use crate::output::printable;
@@ -20,6 +25,7 @@ pub const EDITION_PROGRESS_LABEL: &str = "Building this morning's edition…";
 pub const FETCH_PROGRESS_LABEL: &str = "Fetching feeds";
 pub const EXTRACT_PROGRESS_LABEL: &str = "Fetching the full article";
 pub const TOO_SMALL: &str = "Window too small";
+pub const LOADING_IMAGE: &str = "[loading image…]";
 const HELP_HINT: &str = "? help";
 const EDITING_HINT: &str = "Enter apply  Esc cancel";
 
@@ -61,7 +67,7 @@ fn frame_block(title: &str, focused: bool) -> Block<'static> {
         .title(Span::raw(format!(" {title} ")))
 }
 
-pub fn render(frame: &mut Frame, state: &ReaderState) -> ReaderMetrics {
+pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -> ReaderMetrics {
     let view = state.view();
     let area = frame.area();
     if view.layout == LayoutClass::TooSmall {
@@ -80,7 +86,7 @@ pub fn render(frame: &mut Frame, state: &ReaderState) -> ReaderMetrics {
         render_entries(frame, &view, rect, view.focus == Column::Entries);
     }
     let metrics = match rects.reader {
-        Some(rect) => render_reader(frame, &view, rect, view.focus == Column::Reader),
+        Some(rect) => render_reader(frame, &view, images, rect, view.focus == Column::Reader),
         None => ReaderMetrics::default(),
     };
     // Last: in the two-column class the sources slide over the entries.
@@ -238,9 +244,21 @@ fn short_date(at: DateTime<Utc>, now: DateTime<FixedOffset>) -> String {
     }
 }
 
+/// What one article line becomes on screen.
+enum Piece<'a> {
+    /// The line as `render_html` made it (also `[image: alt text]` for a failed image or with
+    /// images off).
+    Text(&'a Line<'static>),
+    /// An image that is on its way: one placeholder row.
+    Loading,
+    /// A decoded image, drawn in the rows reserved for it.
+    Image { url: &'a str },
+}
+
 fn render_reader(
     frame: &mut Frame,
     view: &ReaderView<'_>,
+    images: &mut ImageStore,
     area: Rect,
     focused: bool,
 ) -> ReaderMetrics {
@@ -275,18 +293,61 @@ fn render_reader(
             ..header_area
         },
     );
-    // `render_html` already ends the article with its numbered links list.
-    let total_rows = article.lines.len();
-    let rows: Vec<Line<'static>> = article
-        .lines
-        .iter()
-        .skip(view.reader_scroll)
-        .take(usize::from(body_area.height))
-        .cloned()
-        .collect();
-    frame.render_widget(Paragraph::new(rows), Rect { width, ..body_area });
+    // `render_html` already ends the article with its numbered links list. Each line is one
+    // block; an image's placeholder line grows into the rows of the picture (at most half the
+    // body), so scrolling is in screen rows.
+    let viewport = usize::from(body_area.height);
+    let max_image_rows = (body_area.height / 2).max(1);
+    let show_images = view.images && images.enabled();
+    let at_line: HashMap<usize, &ImageRef> = article.images.iter().map(|i| (i.line, i)).collect();
+    let scroll = view.reader_scroll;
+    let mut top = 0usize;
+    for (index, line) in article.lines.iter().enumerate() {
+        let (piece, rows) = match at_line.get(&index) {
+            Some(image) if show_images => match images.state_of(&image.url) {
+                ImageState::Ready => {
+                    let rows = images.rows_for(&image.url, Variant::Native, width, max_image_rows);
+                    (Piece::Image { url: &image.url }, usize::from(rows))
+                }
+                ImageState::Failed => (Piece::Text(line), 1),
+                ImageState::Absent | ImageState::Loading => {
+                    // Lazy loading: from one viewport above to two below the visible rows.
+                    if top + viewport >= scroll && top <= scroll + 2 * viewport {
+                        images.want(&image.url);
+                    }
+                    (Piece::Loading, 1)
+                }
+            },
+            _ => (Piece::Text(line), 1),
+        };
+        // A picture cannot be cut: only blocks wholly inside the viewport are drawn.
+        if top >= scroll && top + rows <= scroll + viewport {
+            let place = Rect {
+                x: body_area.x,
+                y: body_area.y + u16::try_from(top - scroll).unwrap_or(u16::MAX),
+                width,
+                height: u16::try_from(rows).unwrap_or(u16::MAX),
+            };
+            match piece {
+                Piece::Text(line) => frame.render_widget(Paragraph::new(line.clone()), place),
+                Piece::Loading => {
+                    frame.render_widget(Paragraph::new(Span::styled(LOADING_IMAGE, DIM)), place);
+                }
+                Piece::Image { url, .. } => {
+                    if let Some(protocol) = images.protocol(url, Variant::Native) {
+                        frame.render_stateful_widget(
+                            StatefulImage::<StatefulProtocol>::default(),
+                            place,
+                            protocol,
+                        );
+                    }
+                }
+            }
+        }
+        top += rows;
+    }
     ReaderMetrics {
-        total_rows,
+        total_rows: top,
         viewport_rows: body_area.height,
     }
 }
@@ -378,14 +439,20 @@ mod tests {
     use crate::tui::reader::settings::TerminalSettings;
     use crate::tui::reader::state::{Event, JobOutcome};
     use chrono::{FixedOffset, TimeZone, Utc};
+    use image::{DynamicImage, Rgb, RgbImage};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui_image::picker::Picker;
     use ressac_core::model::CadenceGroup;
     use ressac_core::store::{
         EntryPage, Source, SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot,
     };
     use std::collections::BTreeMap;
+
+    const PHOTO: &str = "https://example.com/photo.jpg";
+    const WITH_IMAGE: &str = "<p>Avant.</p><img src=\"https://example.com/photo.jpg\" \
+        alt=\"Le port\"><p>Après.</p>";
 
     const ARTICLE: &str = "<h2>Le jardin</h2><p>Un <b>long</b> texte avec un \
         <a href=\"https://example.com/a\">premier lien</a> et un \
@@ -492,10 +559,14 @@ mod tests {
     }
 
     fn draw(s: &ReaderState, width: u16, height: u16) -> String {
+        draw_with(s, &mut ImageStore::new(Picker::halfblocks()), width, height)
+    }
+
+    fn draw_with(s: &ReaderState, images: &mut ImageStore, width: u16, height: u16) -> String {
         let mut terminal = terminal(width, height);
         terminal
             .draw(|f| {
-                render(f, s);
+                render(f, s, images);
             })
             .unwrap();
         terminal.backend().to_string()
@@ -556,7 +627,7 @@ mod tests {
             let mut terminal = terminal(width, height);
             terminal
                 .draw(|f| {
-                    render(f, &s);
+                    render(f, &s, &mut ImageStore::new(Picker::halfblocks()));
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
@@ -655,7 +726,7 @@ mod tests {
         let mut metrics = None;
         terminal
             .draw(|f| {
-                metrics = Some(render(f, &s));
+                metrics = Some(render(f, &s, &mut ImageStore::new(Picker::halfblocks())));
             })
             .unwrap();
         let metrics = metrics.unwrap();
@@ -698,5 +769,94 @@ mod tests {
         s.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         let out = draw(&s, 140, 30);
         assert!(out.contains("Auto") && out.contains("Silent"), "{out}");
+    }
+
+    /// The first entry open on an article with one photo; `images_on` is the `i` setting.
+    fn image_state(width: u16, height: u16, images_on: bool) -> ReaderState {
+        let mut s = state(width, height, rows());
+        s.settings.images = images_on;
+        let open = s.entries[0].clone();
+        s.on_event(Event::Entry(Box::new(EntryDetail {
+            content_html: Some(WITH_IMAGE.into()),
+            ..detail_for(open, None)
+        })));
+        s
+    }
+
+    fn photo() -> DynamicImage {
+        // Rows of different colours: a uniform picture would draw as blank cells with a background.
+        DynamicImage::ImageRgb8(RgbImage::from_fn(400, 300, |_, y| {
+            Rgb([(y % 256) as u8, 120, 255 - (y % 256) as u8])
+        }))
+    }
+
+    #[test]
+    fn an_image_not_loaded_yet_is_wanted_and_shows_loading() {
+        let s = image_state(140, 30, true);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        let out = draw_with(&s, &mut images, 140, 30);
+        assert!(out.contains(LOADING_IMAGE), "{out}");
+        assert_eq!(images.take_wanted(), vec![PHOTO.to_string()]);
+    }
+
+    #[test]
+    fn a_ready_image_is_drawn_in_half_blocks_without_a_protocol() {
+        let s = image_state(140, 30, true);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        images.ingest(PHOTO, photo());
+        let out = draw_with(&s, &mut images, 140, 30);
+        assert!(
+            out.contains('▀') || out.contains('▄'),
+            "half-blocks drawn: {out}"
+        );
+        assert!(!out.contains(LOADING_IMAGE));
+        assert!(images.rows_for(PHOTO, Variant::Native, 72, 13) <= 13);
+    }
+
+    #[test]
+    fn a_failed_image_or_images_off_show_the_alt_text() {
+        let s = image_state(140, 30, true);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        images.fail(PHOTO);
+        assert!(draw_with(&s, &mut images, 140, 30).contains("[image: Le port]"));
+
+        let off = image_state(140, 30, false);
+        let mut fresh = ImageStore::new(Picker::halfblocks());
+        assert!(draw_with(&off, &mut fresh, 140, 30).contains("[image: Le port]"));
+        assert!(
+            fresh.take_wanted().is_empty(),
+            "images off: nothing is fetched"
+        );
+        assert_eq!(fresh.state_of(PHOTO), ImageState::Absent);
+
+        let mut disabled = ImageStore::disabled();
+        let out = draw_with(&s, &mut disabled, 140, 30);
+        assert!(
+            out.contains("[image: Le port]") && !out.contains(LOADING_IMAGE),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_image_far_below_the_viewport_is_not_wanted_yet() {
+        let filler = "<p>Ligne de remplissage.</p>".repeat(120);
+        let html = format!("{filler}<img src=\"{PHOTO}\" alt=\"Loin\">");
+        let mut s = state(140, 30, rows());
+        let open = s.entries[0].clone();
+        s.on_event(Event::Entry(Box::new(EntryDetail {
+            content_html: Some(html),
+            ..detail_for(open, None)
+        })));
+        let mut images = ImageStore::new(Picker::halfblocks());
+        draw_with(&s, &mut images, 140, 30);
+        assert!(images.take_wanted().is_empty(), "lazy loading");
+    }
+
+    #[test]
+    fn native_reader_with_an_image() {
+        let s = image_state(140, 30, true);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        images.ingest(PHOTO, photo());
+        insta::assert_snapshot!(draw_with(&s, &mut images, 140, 30));
     }
 }

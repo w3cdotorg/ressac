@@ -10,9 +10,11 @@ license.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+image.workspace = true
 indicatif.workspace = true
 open.workspace = true
 ratatui.workspace = true
+ratatui-image.workspace = true
 scraper.workspace = true
 ressac-core = { path = "../ressac-core" }
 url.workspace = true
