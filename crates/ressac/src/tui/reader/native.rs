@@ -94,10 +94,13 @@ pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -
             (entries, reader) => entries.or(reader),
         };
         if let Some(mut area) = area {
-            // The rhythm line, dimmed, above the garden screen: one row taken off the top.
-            if let Some(line) = view.rhythm_line.as_deref() {
+            // The rhythm line, dimmed, above the garden screen: its rows taken off the top, kept
+            // empty until the line arrives.
+            if let Some(line) = rhythm_text(&view) {
                 let (row, rest) = split_rhythm_row(area, line);
-                frame.render_widget(rhythm_paragraph(line), row);
+                if view.rhythm_line.is_some() {
+                    frame.render_widget(rhythm_paragraph(line), row);
+                }
                 area = rest;
             }
             match state.garden() {
@@ -250,7 +253,7 @@ fn render_entries(frame: &mut Frame, view: &ReaderView<'_>, area: Rect, focused:
     let mut list_state = ListState::default().with_selected(view.entry_cursor);
     let block = frame_block(&view.source_title, focused);
     // A feed source: its rhythm line under the header, inside the frame.
-    let Some(line) = view.rhythm_line.as_deref() else {
+    let Some(line) = rhythm_text(view) else {
         let list = List::new(items).block(block).highlight_style(SELECTED);
         frame.render_stateful_widget(list, area, &mut list_state);
         return;
@@ -258,12 +261,24 @@ fn render_entries(frame: &mut Frame, view: &ReaderView<'_>, area: Rect, focused:
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let (row, rest) = split_rhythm_row(inner, line);
-    frame.render_widget(rhythm_paragraph(line), row);
+    if view.rhythm_line.is_some() {
+        frame.render_widget(rhythm_paragraph(line), row);
+    }
     frame.render_stateful_widget(
         List::new(items).highlight_style(SELECTED),
         rest,
         &mut list_state,
     );
+}
+
+/// A typical rhythm line: it sizes the rows kept for the line until the real one arrives.
+const RHYTHM_SIZING: &str = "Rhythm: Weekly · median 10.5 d · last entry 10 h ago";
+
+/// The rhythm line to draw, or the sizing text while a feed is in view and its line is not here.
+fn rhythm_text<'a>(view: &'a ReaderView<'_>) -> Option<&'a str> {
+    view.rhythm_line
+        .as_deref()
+        .or(view.rhythm_reserved.then_some(RHYTHM_SIZING))
 }
 
 /// The rhythm line: dimmed, folded to its rows (the wording is ours, the numbers are computed).
@@ -1345,6 +1360,58 @@ mod tests {
         let menu = draw(&s, 140, 30);
         assert!(menu.contains("• Weekly") && menu.contains("↑↓ choose  ↵ set  esc close"));
         insta::assert_snapshot!(menu);
+    }
+
+    /// The screen row of the first line holding `needle`.
+    fn row_of(screen: &str, needle: &str) -> usize {
+        screen
+            .lines()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {screen}"))
+    }
+
+    #[test]
+    fn the_garden_does_not_jump_when_the_rhythm_line_arrives() {
+        let mut s = garden_state(
+            140,
+            30,
+            GardenView::NeedsTriage,
+            crate::tui::state::sample_rows(),
+        );
+        at_nine(&mut s);
+        let title = s.garden().unwrap().selected_row().unwrap().title.clone();
+        let feed = s.garden().unwrap().selected_row().unwrap().feed_id;
+        let before = draw(&s, 140, 30);
+        assert!(!before.contains("Rhythm:"));
+        s.on_event(cadence(feed, CadenceGroup::Weekly, true));
+        let after = draw(&s, 140, 30);
+        assert!(after.contains("Rhythm:"));
+        assert_eq!(row_of(&before, &title), row_of(&after, &title));
+    }
+
+    #[test]
+    fn a_feed_source_does_not_jump_when_the_rhythm_line_arrives() {
+        let mut s = state(140, 30, rows());
+        s.go_to(Source::Feed(3));
+        s.on_event(Event::Entries {
+            source: Source::Feed(3),
+            page: ressac_core::store::EntryPage {
+                rows: rows(),
+                total: 3,
+                unread: 2,
+                next: None,
+            },
+            appended: false,
+            request: s.request,
+        });
+        let before = draw(&s, 140, 30);
+        s.on_event(cadence(3, CadenceGroup::Daily, false));
+        let after = draw(&s, 140, 30);
+        assert!(after.contains("Rhythm: Daily"), "{after}");
+        assert_eq!(
+            row_of(&before, "Un deuxième article"),
+            row_of(&after, "Un deuxième article")
+        );
     }
 
     #[test]

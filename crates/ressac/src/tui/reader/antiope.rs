@@ -1439,7 +1439,9 @@ fn garden_page(view: &ReaderView<'_>, garden: &GardenState, width: usize) -> Vec
     let rhythm = view
         .rhythm_line
         .as_deref()
-        .map(|line| line.trim_start_matches("Rhythm: "));
+        .map(|line| line.trim_start_matches("Rhythm: "))
+        // Until it arrives the row is held by an ellipsis: the page does not jump.
+        .or(view.rhythm_reserved.then_some("…"));
     garden_inspector(
         garden.selected_row(),
         rhythm,
@@ -2836,6 +2838,32 @@ mod tests {
         press(&mut state, KeyCode::Enter);
         let detail = draw(&state, 70, 34);
         assert!(detail.contains("EVIDENCE"), "{detail}");
+    }
+
+    #[test]
+    fn the_garden_detail_does_not_jump_when_the_rhythm_arrives() {
+        let mut state = garden_state(70, 34, "800");
+        state.set_focus(Column::Entries);
+        press(&mut state, KeyCode::Enter);
+        let feed = state.garden().unwrap().selected_row().unwrap().feed_id;
+        let find = |terminal: &Terminal<TestBackend>| {
+            (0..34)
+                .find(|y| row_text(terminal, *y).contains("EVIDENCE"))
+                .expect("the evidence heading")
+        };
+        let before = find(&draw_terminal(&state, 70, 34));
+        state.on_event(Event::Cadence(crate::tui::reader::rhythm::RhythmInfo {
+            feed_id: feed,
+            effective: CadenceGroup::Weekly,
+            computed: CadenceGroup::Weekly,
+            is_override: false,
+            median_days: Some(1.5),
+            last_entry_at: None,
+        }));
+        let after = draw_terminal(&state, 70, 34);
+        let shown = after.backend().to_string();
+        assert!(shown.to_lowercase().contains("rhythm"), "{shown}");
+        assert_eq!(find(&after), before);
     }
 
     #[test]

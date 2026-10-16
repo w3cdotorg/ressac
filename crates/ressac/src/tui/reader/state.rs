@@ -341,6 +341,9 @@ pub struct ReaderView<'a> {
     /// "Rhythm: Daily · median 0.4 d · last entry 2 h ago" for the feed in view: the selected
     /// garden row (not a buried one) or the feed source; `None` until the info arrives.
     pub rhythm_line: Option<String>,
+    /// A feed is in view: the rhythm line's row is kept even before the line arrives, so that
+    /// the list under it does not jump when it does.
+    pub rhythm_reserved: bool,
 }
 
 /// `Daily`, `Weekly`...: the group's name as the sources column and the menu show it.
@@ -589,6 +592,7 @@ impl ReaderState {
                 _ => None,
             },
             rhythm_line: self.rhythm_line(),
+            rhythm_reserved: self.feed_in_view().is_some(),
         }
     }
 
