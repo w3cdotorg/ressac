@@ -8,6 +8,10 @@ enum GardenScope: Hashable, Sendable {
 /// What the sidebar selects (spec §7, Sidebar sections).
 enum Source: Hashable, Sendable {
     case unread, today, starred
+    /// The latest morning edition, in rank order (spec §8, Journal screen).
+    case journal
+    /// The feeds of one rhythm group, by effective group (spec §4).
+    case cadence(CadenceGroup)
     case folder(Int64)
     case feed(Int64)
     case garden(GardenScope)
@@ -24,6 +28,10 @@ struct SidebarSnapshot: Equatable, Sendable {
     var today = 0
     var starred = 0
     var needsTriage = 0
+    /// Unread entries of the latest edition.
+    var journalUnread = 0
+    /// Unread entries per rhythm group (effective group, active feeds); a group with none is absent.
+    var cadenceUnread: [CadenceGroup: Int] = [:]
 }
 
 /// Where a long entry list stops: the `published_at` text and the id of its oldest loaded row.
@@ -71,6 +79,12 @@ struct Queries {
         NULL AS content_html
         """
 
+    /// An entry's rank in the latest edition: the Journal's order (spec §6, Order).
+    private static let editionRank = """
+        (SELECT ee.rank FROM edition_entry ee
+         WHERE ee.entry_id = v_entry.entry_id AND ee.edition_id = (SELECT MAX(id) FROM edition))
+        """
+
     static func sidebar(now: Date = Date()) -> LiveQuery<SidebarSnapshot> {
         let midnight = Timestamp.string(from: Calendar.current.startOfDay(for: now))
         return ValueObservation.tracking { db in
@@ -93,22 +107,40 @@ struct Queries {
                     arguments: [midnight]) ?? 0,
                 starred: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v_entry WHERE is_starred") ?? 0,
                 needsTriage: try Int.fetchOne(
-                    db, sql: "SELECT COUNT(*) FROM v_garden_row WHERE needs_triage AND state = 'active'") ?? 0
+                    db, sql: "SELECT COUNT(*) FROM v_garden_row WHERE needs_triage AND state = 'active'") ?? 0,
+                // Through `v_entry`, like the Journal list: a feed buried since the build drops out.
+                journalUnread: try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM v_entry
+                    WHERE NOT is_read AND entry_id IN (
+                        SELECT entry_id FROM edition_entry WHERE edition_id = (SELECT MAX(id) FROM edition))
+                    """) ?? 0,
+                cadenceUnread: try Dictionary(
+                    Row.fetchAll(db, sql: """
+                        SELECT effective_group, SUM(unread) AS unread FROM v_cadence
+                        GROUP BY effective_group HAVING SUM(unread) > 0
+                        """)
+                    .compactMap { row -> (CadenceGroup, Int)? in
+                        guard let group = (row["effective_group"] as String?).flatMap(CadenceGroup.init(rawValue:)) else { return nil }
+                        return (group, row["unread"])
+                    },
+                    uniquingKeysWith: { first, _ in first })
             )
         }
         .removeDuplicates()
     }
 
-    /// The entry list of a source, newest first, down to `floor` (every row when nil). Garden
-    /// sources have no entries.
+    /// The entry list of a source, newest first (the Journal: in rank order), down to `floor`
+    /// (every row when nil). Garden sources have no entries.
     static func entries(source: Source, unreadOnly: Bool, floor: ListFloor? = nil, now: Date = Date()) -> LiveQuery<EntryPage> {
-        page(of: condition(source: source, unreadOnly: unreadOnly, search: nil, now: now), floor: floor)
+        page(of: condition(source: source, unreadOnly: unreadOnly, search: nil, now: now), floor: floor,
+             ranked: source == .journal)
     }
 
     /// Full-text search within a source (spec §7, Search), down to `floor` like `entries`. Every
     /// word must appear (see `ftsQuery`).
     static func search(_ text: String, in source: Source, floor: ListFloor? = nil, now: Date = Date()) -> LiveQuery<EntryPage> {
-        page(of: condition(source: source, unreadOnly: false, search: text, now: now), floor: floor)
+        page(of: condition(source: source, unreadOnly: false, search: text, now: now), floor: floor,
+             ranked: source == .journal)
     }
 
     /// The floor that loads `rows` more rows of a list after `below` (from its newest row when
@@ -116,7 +148,9 @@ struct Queries {
     /// left: they all load. `search` nil is the plain list.
     static func floor(source: Source, unreadOnly: Bool, search: String?, below: ListFloor?, rows: Int,
                       keeping entryId: Int64? = nil, now: Date = Date(), in db: Database) throws -> ListFloor? {
-        guard let list = condition(source: source, unreadOnly: unreadOnly, search: search, now: now) else { return nil }
+        // The Journal always loads whole: its order is the edition's, not the floor's dates.
+        guard source != .journal,
+              let list = condition(source: source, unreadOnly: unreadOnly, search: search, now: now) else { return nil }
         let rest = bounded(list, by: below, "<")
         guard let row = try Row.fetchOne(db, sql: """
             SELECT published_at, entry_id FROM v_entry WHERE \(rest.sql)
@@ -184,6 +218,54 @@ struct Queries {
         .removeDuplicates()
     }
 
+    /// The latest edition (spec §8, Journal screen), nil before the first one. Its header comes
+    /// from `edition` itself: an empty edition has no row in `v_edition_today`. Entries and overflow
+    /// rows of a feed buried since the build are left out, as the Journal list leaves them out, so
+    /// that every surface counts the same entries (an edition emptied that way reads as empty).
+    static func edition() -> LiveQuery<Edition?> {
+        ValueObservation.tracking { db -> Edition? in
+            guard let info = try EditionInfo.fetchOne(db, sql: """
+                SELECT id, built_at, window_start, window_end, unreachable FROM edition ORDER BY id DESC LIMIT 1
+                """)
+            else { return nil }
+            let items = try EditionItem.fetchAll(db, sql: """
+                SELECT entry_id, section, rank, feed_id, feed_title, title, published_at,
+                       read_at IS NOT NULL AS is_read, starred_at IS NOT NULL AS is_starred
+                FROM v_edition_today
+                WHERE feed_id IN (SELECT id FROM feed WHERE state = 'active') ORDER BY rank
+                """)
+            let overflow = try EditionOverflowItem.fetchAll(db, sql: """
+                SELECT section, feed_id, feed_title, page, hidden_count FROM v_edition_overflow
+                WHERE feed_id IN (SELECT id FROM feed WHERE state = 'active')
+                ORDER BY CASE section WHEN 'front' THEN 0 WHEN 'week' THEN 1 ELSE 2 END, page IS NULL, page, feed_id
+                """)
+            return Edition(info: info, items: items, overflow: overflow)
+        }
+        .removeDuplicates()
+    }
+
+    /// Every active, diagnosed feed's rhythm, by title (spec §8, Rhythm section and inspector).
+    static func cadenceRows() -> LiveQuery<[CadenceRow]> {
+        ValueObservation.tracking { db in
+            try CadenceRow.fetchAll(db, sql: """
+                SELECT feed_id, effective_group AS effective, computed_group AS computed, is_override,
+                       median_interval_days, entries_per_month, last_entry_at, unread
+                FROM v_cadence ORDER BY title COLLATE NOCASE, feed_id
+                """)
+        }
+        .removeDuplicates()
+    }
+
+    /// True while no edition was built at or after `dayStart` (see `EditionClock.dayStart`).
+    /// The core repeats this check inside its write transaction.
+    static func isEditionDue(dayStart: Date) -> @Sendable (Database) throws -> Bool {
+        let start = Timestamp.string(from: dayStart)
+        return { db in
+            try Bool.fetchOne(db, sql: "SELECT NOT EXISTS (SELECT 1 FROM edition WHERE built_at >= ?)",
+                              arguments: [start]) ?? true
+        }
+    }
+
     /// The core's `Status::ALL` order (urgency), unknown statuses last.
     static let urgencyOrder = """
         CASE status WHEN 'Duplicate' THEN 0 WHEN 'Hijacked' THEN 1 WHEN 'Moved' THEN 2 WHEN 'Dead' THEN 3 \
@@ -204,6 +286,10 @@ struct Queries {
             Predicate(sql: "published_at >= ?", arguments: [Timestamp.string(from: Calendar.current.startOfDay(for: now))])
         case .starred:
             Predicate(sql: "is_starred")
+        case .journal:
+            Predicate(sql: "entry_id IN (SELECT entry_id FROM edition_entry WHERE edition_id = (SELECT MAX(id) FROM edition))")
+        case let .cadence(group):
+            Predicate(sql: "feed_id IN (SELECT feed_id FROM v_cadence WHERE effective_group = ?)", arguments: [group.rawValue])
         case let .feed(id):
             Predicate(sql: "feed_id = ?", arguments: [id])
         case let .folder(id):
@@ -222,7 +308,8 @@ struct Queries {
     /// newest row when nil), as the floor that loads it. Nil when none is left.
     static func nextUnread(source: Source, unreadOnly: Bool, search: String?, after entryId: Int64?,
                            now: Date = Date(), in db: Database) throws -> ListFloor? {
-        guard let list = condition(source: source, unreadOnly: unreadOnly, search: search, now: now) else { return nil }
+        guard source != .journal,
+              let list = condition(source: source, unreadOnly: unreadOnly, search: search, now: now) else { return nil }
         var rest = Predicate(sql: list.sql + " AND NOT is_read", arguments: list.arguments)
         if let entryId, let from = try Row.fetchOne(db, sql: "SELECT published_at, id FROM entry WHERE id = ?", arguments: [entryId]) {
             rest = bounded(rest, by: ListFloor(publishedAt: from["published_at"], entryId: from["id"]), "<")
@@ -254,14 +341,16 @@ struct Queries {
                          arguments: list.arguments + [floor.publishedAt, floor.entryId])
     }
 
-    /// The rows of `list` down to `floor`, and the counts of the whole list.
-    private static func page(of list: Predicate?, floor: ListFloor?) -> LiveQuery<EntryPage> {
-        ValueObservation.tracking { db in
+    /// The rows of `list` down to `floor`, and the counts of the whole list. `ranked`: in the
+    /// latest edition's order (the Journal), else newest first.
+    private static func page(of list: Predicate?, floor: ListFloor?, ranked: Bool = false) -> LiveQuery<EntryPage> {
+        let order = ranked ? "\(editionRank), entry_id" : "published_at DESC, entry_id DESC"
+        return ValueObservation.tracking { db in
             guard let list else { return EntryPage() }
             let loaded = bounded(list, by: floor, ">=")
             let rows = try EntryRow.fetchAll(db, sql: """
                 SELECT \(listColumns) FROM v_entry WHERE \(loaded.sql)
-                ORDER BY published_at DESC, entry_id DESC
+                ORDER BY \(order)
                 """, arguments: loaded.arguments)
             guard let counts = try Row.fetchOne(db, sql: """
                 SELECT COUNT(*) AS total, COALESCE(SUM(NOT is_read), 0) AS unread FROM v_entry WHERE \(list.sql)

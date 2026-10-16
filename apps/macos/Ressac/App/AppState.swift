@@ -56,7 +56,7 @@ struct SidebarNode: Identifiable, Equatable, Sendable {
     }
 }
 
-/// Import and export panels, presented by the window (phase 11).
+/// Import and export panels, presented by the window.
 enum PendingPanel: Equatable, Sendable {
     case importOPML, exportOPML
 }
@@ -86,7 +86,7 @@ enum PendingPanel: Equatable, Sendable {
     /// extraction, so that the page keeps its "Full article unavailable" notice until the
     /// selection changes; `isShowingFullText` says whether the article is on screen.
     var readerShowsFullText = false
-    /// The feed selected in the Garden table (phase 12); garden commands act on it.
+    /// The feed selected in the Garden table; garden commands act on it.
     var selectedFeedId: Int64?
     var pendingPanel: PendingPanel?
 
@@ -116,6 +116,8 @@ enum PendingPanel: Equatable, Sendable {
     let database: AppDatabase
     let writes: Writes
     let runs: RunCoordinator
+    /// Today's edition: the due check, the build run and the latest edition (spec §8).
+    let journal: JournalModel
 
     @ObservationIgnored var autoReadDelay: Duration = .seconds(1)
     /// Rows a list loads at a time. A list starts with one page and grows by one per `loadMoreEntries`.
@@ -124,7 +126,7 @@ enum PendingPanel: Equatable, Sendable {
     static let loadMoreMargin = 20
     @ObservationIgnored var now: @MainActor () -> Date = { Date() }
     @ObservationIgnored var openURL: @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
-    /// Set by the reader (phase 10): scrolls one page of the given entry and returns false at
+    /// Set by the reader: scrolls one page of the given entry and returns false at
     /// its bottom. True, with nothing done, while that entry's page is still loading.
     @ObservationIgnored var readerPageDown: (@MainActor (Int64) async -> Bool)?
 
@@ -161,6 +163,7 @@ enum PendingPanel: Equatable, Sendable {
         self.database = database
         self.writes = Writes(db: database)
         self.runs = runs
+        self.journal = JournalModel(database: database, coordinator: runs)
         runs.onDatabaseChange = { [database] in
             Task { try? await database.notifyExternalChanges() }
         }
@@ -179,7 +182,8 @@ enum PendingPanel: Equatable, Sendable {
 
     /// Starts what the running app needs from the system: refreshing on activation and polling
     /// for terminal writes (`ExternalChangeMonitor`), the midnight restart of the date-based
-    /// queries, and tracking which window has the keyboard. Not started in unit tests.
+    /// queries, the morning edition (at launch, on activation and at 04:00), and tracking which
+    /// window has the keyboard. Not started in unit tests.
     func startSystemObservers() {
         guard externalChanges == nil else { return }
         let monitor = ExternalChangeMonitor(database: database)
@@ -199,12 +203,27 @@ enum PendingPanel: Equatable, Sendable {
                 MainActor.assumeIsolated { self?.windowDidChangeKey(window, isKey: false) }
             },
         ]
+        // In the unit-test host, launched windows run stubs that do not know `edition build`, and a
+        // build would take the long-run slot the tests' own refreshes expect (as
+        // `AppearanceSwitchTests` does). `JournalModelTests` drive the model directly.
+        guard !Launcher.isRunningTests else { return }
+        systemObservers.append(
+            center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.applicationDidBecomeActive() }
+            })
+        journal.scheduleRollover()
+        Task { await journal.checkAndBuild() }
     }
 
     /// Midnight passed: "Today" counts and lists were built around the previous day's start.
     func dayDidChange() {
         startSidebarObservation()
         listDidChange()
+    }
+
+    /// The app came to the front: the edition may have become due while it was in the background.
+    func applicationDidBecomeActive() {
+        Task { await journal.checkAndBuild() }
     }
 
     /// Single-letter shortcuts belong to the reading window: while a panel or another window has
@@ -451,7 +470,7 @@ enum PendingPanel: Equatable, Sendable {
         if let link = selectedEntry?.link { openURL(link) }
     }
 
-    func scheduleAutoRead(entryId: Int64) {
+    private func scheduleAutoRead(entryId: Int64) {
         autoReadTask?.cancel()
         autoReadTask = Task { [weak self, autoReadDelay] in
             try? await Task.sleep(for: autoReadDelay)
@@ -462,10 +481,9 @@ enum PendingPanel: Equatable, Sendable {
         }
     }
 
-    /// The reader's Full article toggle (spec §7, Reader).
+    /// The reader's Full article toggle (spec §7, Reader). On: back to the feed's text. Off with a
+    /// stored article: show it. Otherwise fetch it, which after a failure is a retry.
     @discardableResult
-    /// On: back to the feed's text. Off with a stored article: show it. Otherwise fetch it,
-    /// which after a failure is a retry.
     func requestFullText() -> Task<Void, Never>? {
         guard let entry = selectedEntry, entry.link != nil else { return nil }
         if isShowingFullText {
@@ -503,7 +521,7 @@ enum PendingPanel: Equatable, Sendable {
         switch selection {
         case let .feed(id): runs.start(.fetch(feeds: [id]))
         case let .folder(id): runs.start(.fetch(folder: id))
-        case .unread, .today, .starred, .garden: runs.start(.fetch(feeds: []))
+        case .unread, .today, .starred, .journal, .cadence, .garden: runs.start(.fetch(feeds: []))
         }
     }
 
@@ -528,6 +546,12 @@ enum PendingPanel: Equatable, Sendable {
         }
     }
 
+    /// The inspector's Rhythm menu (spec §8): a group, or nil for Auto. The core writes it.
+    @discardableResult
+    func setCadence(feedId: Int64, _ group: CadenceGroup?) -> Task<RunOutcome, Never> {
+        runs.start(.setCadence(feedId: feedId, group))
+    }
+
     func openSite(feedId: Int64) {
         let site = sidebar.feeds.first { $0.feedId == feedId }?.htmlUrl
         if let site, let url = URL(string: site) { openURL(url) }
@@ -538,7 +562,7 @@ enum PendingPanel: Equatable, Sendable {
         selectedFeedId = feedId
     }
 
-    // MARK: Garden (UI in phase 12)
+    // MARK: Garden
 
     @discardableResult
     func gardenDecide(_ decision: GardenDecision) -> Task<RunOutcome, Never>? {
@@ -596,6 +620,11 @@ enum PendingPanel: Equatable, Sendable {
         selectedEntryId.flatMap { id in entries.firstIndex { $0.entryId == id } }
     }
 
+    /// Each entry's place in the latest edition, for the Journal's order (spec §6, Order).
+    private var journalRanks: [Int64: Int] {
+        Dictionary((journal.edition?.items ?? []).map { ($0.entryId, $0.rank) }, uniquingKeysWith: { first, _ in first })
+    }
+
     /// The floor one page below `current` (below the newest row when nil), lowered to keep entry
     /// `keeping` loaded; nil when the rest of the list fits in the page.
     private func floor(below current: ListFloor?, keeping entryId: Int64?) throws -> ListFloor? {
@@ -625,7 +654,8 @@ enum PendingPanel: Equatable, Sendable {
     }
 
     private func listDidLoad(_ page: EntryPage) {
-        let merged = Self.merge(fresh: page.rows, previous: entries, retained: retained, floor: listFloor)
+        let rank = selection == .journal ? journalRanks : [:]
+        let merged = Self.merge(fresh: page.rows, previous: entries, retained: retained, floor: listFloor, rank: rank)
         // Equal after an optimistic change already made: the views are not updated twice.
         if merged != entries { entries = merged }
         entryTotal = page.total + merged.count - page.rows.count
@@ -633,7 +663,7 @@ enum PendingPanel: Equatable, Sendable {
         hasMoreEntries = page.rows.count < page.total
         // A list that was whole when it started (a short one) and that a refresh made long, as on
         // the first run: one page again. On the next turn, not inside the observation's callback.
-        if listFloor == nil, !listFloorFailed, page.rows.count > listPageSize {
+        if listFloor == nil, !listFloorFailed, selection != .journal, page.rows.count > listPageSize {
             Task { [weak self] in
                 guard let self, listFloor == nil, !listFloorFailed, entries.count > listPageSize else { return }
                 listDidChange()
@@ -707,19 +737,24 @@ enum PendingPanel: Equatable, Sendable {
     }
 
     /// Fresh rows, plus the entries read during this visit that an unread-only query
-    /// dropped, newest first. Only rows at or after `floor` are kept: below it, a row of the
-    /// list is merely not loaded.
-    static func merge(fresh: [EntryRow], previous: [EntryRow], retained: Set<Int64>, floor: ListFloor?) -> [EntryRow] {
+    /// dropped: newest first, or by `rank` when given (the Journal). Only rows at or after
+    /// `floor` are kept: below it, a row of the list is merely not loaded.
+    static func merge(fresh: [EntryRow], previous: [EntryRow], retained: Set<Int64>, floor: ListFloor?,
+                      rank: [Int64: Int] = [:]) -> [EntryRow] {
         let freshIds = Set(fresh.map(\.entryId))
         let kept = previous.filter {
             retained.contains($0.entryId) && !freshIds.contains($0.entryId) && floor?.admits($0) != false
         }
         guard !kept.isEmpty else { return fresh }
-        return (fresh + kept.map { row in
+        let rows = fresh + kept.map { row in
             var row = row
             row.isRead = true
             return row
-        }).sorted { ($0.publishedAt, $0.entryId) > ($1.publishedAt, $1.entryId) }
+        }
+        guard rank.isEmpty else {
+            return rows.sorted { (rank[$0.entryId] ?? .max, $0.entryId) < (rank[$1.entryId] ?? .max, $1.entryId) }
+        }
+        return rows.sorted { ($0.publishedAt, $0.entryId) > ($1.publishedAt, $1.entryId) }
     }
 }
 
@@ -791,7 +826,7 @@ enum PendingPanel: Equatable, Sendable {
                 return
             case .missing, .needsMigration:
                 // A missing file is created by `migrate` too: the first-run screen then
-                // deals with "no feeds" only (phase 11).
+                // deals with "no feeds" only.
                 phase = .migrating
                 guard await runs.submit(.migrate()), try AppDatabase.check(at: url) == .ok else {
                     phase = .failed(runs.banner?.message ?? "The database could not be migrated.")

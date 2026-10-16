@@ -22,9 +22,10 @@ enum AntiopeColumn: Sendable {
     }
 }
 
-/// What the reader column shows: the selected entry, P100 SOMMAIRE or P899 GUIDE.
+/// What the reader column shows: the selected entry, P100 SOMMAIRE, P899 GUIDE, or the end of
+/// the morning edition that SUITE reaches from P104's last entry.
 enum ReaderPage: Equatable, Sendable {
-    case article, index, guide
+    case article, index, guide, endOfEdition
 }
 
 /// What only the Antiope look needs, beside the shared `AppState` (spec §5, approach A): the
@@ -56,6 +57,9 @@ enum ReaderPage: Equatable, Sendable {
     /// How many times `directory` was rebuilt, for the tests.
     @ObservationIgnored private(set) var directoryBuilds = 0
 
+    /// A Space on the edition's last entry is scrolling the article before landing on the end.
+    @ObservationIgnored private var isAdvancingToEnd = false
+
     init(app: AppState, clock: any Clock<Duration> = ContinuousClock()) {
         self.app = app
         self.clock = clock
@@ -79,6 +83,7 @@ enum ReaderPage: Equatable, Sendable {
         switch readerPage {
         case .index: ReservedPage.index.rawValue
         case .guide: ReservedPage.guide.rawValue
+        case .endOfEdition: ReservedPage.journal.rawValue
         case .article: directory.number(for: app.selection)
         }
     }
@@ -128,6 +133,11 @@ enum ReaderPage: Equatable, Sendable {
             jump(to: ReservedPage.guide.rawValue)
             return true
         case .repetition:
+            // Offline or failed on P104: RÉPÉTITION retries the edition (spec §9).
+            if app.selection == .journal, Self.retriesJournal(app.journal.phase) {
+                Task { await app.journal.retry() }
+                return true
+            }
             guard app.canRefresh else { return false }
             app.refreshCurrent()
             return true
@@ -144,11 +154,19 @@ enum ReaderPage: Equatable, Sendable {
         case .previousIndexRow:
             return moveInIndex(by: -1)
         case .nextEntry, .previousEntry, .advance:
+            if readerPage == .endOfEdition {
+                // FIN DE L'EDITION: nothing comes after it; RETOUR brings the last entry back.
+                if command == .previousEntry { readerPage = .article }
+                return true
+            }
+            if readerPage == .article {
+                return command != .previousEntry && suiteFromTheLastEntry(advancing: command == .advance)
+            }
             // SUITE and RETOUR are today's commands and `AppState` performs them (Space still
             // scrolls the article first). Leaving P100 or P899 brings the article back, and that
             // first press is all it does: `AppState` would otherwise move on in the same press,
             // with no reader on screen to scroll, and skip the entry unseen.
-            guard readerPage != .article, app.canNavigateEntries else { return false }
+            guard app.canNavigateEntries else { return false }
             readerPage = .article
             return app.selectedEntryId != nil
         case .toggleRead, .toggleStar, .focusEntryList, .focusSidebar:
@@ -165,6 +183,44 @@ enum ReaderPage: Equatable, Sendable {
     }
 
     // MARK: Private
+
+    /// Whether RÉPÉTITION on P104 retries the edition rather than refreshing: offline, failed, or
+    /// turned away by another long run (`due`).
+    static func retriesJournal(_ phase: JournalModel.Phase) -> Bool {
+        switch phase {
+        case .offline, .failed, .due: true
+        case .idle, .building: false
+        }
+    }
+
+    /// SUITE on P104's last entry (spec §8): `j` lands on FIN DE L'EDITION at once; Space scrolls
+    /// the article first, as everywhere, and lands there at its bottom. False anywhere else, so that
+    /// `AppState` moves on as usual.
+    private func suiteFromTheLastEntry(advancing: Bool) -> Bool {
+        guard app.selection == .journal, let id = app.selectedEntryId,
+              id == JournalPage.lastEntryId(of: app.journal.edition) else { return false }
+        guard advancing else {
+            landOnEndOfEdition()
+            return true
+        }
+        guard !isAdvancingToEnd else { return true }
+        isAdvancingToEnd = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { isAdvancingToEnd = false }
+            if let pageDown = app.readerPageDown, await pageDown(id) { return }
+            // Not when a click or a jump moved on meanwhile.
+            guard app.selectedEntryId == id, app.selection == .journal, readerPage == .article else { return }
+            landOnEndOfEdition()
+        }
+        return true
+    }
+
+    /// Moving past the last entry marks it read, as `j` and Space do between entries (app spec §7).
+    private func landOnEndOfEdition() {
+        if app.selectedEntry?.isRead == false { app.toggleRead() }
+        readerPage = .endOfEdition
+    }
 
     private func move(to target: AntiopeColumn?) -> Bool {
         guard let target else { return false }

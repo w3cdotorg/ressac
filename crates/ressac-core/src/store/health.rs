@@ -8,10 +8,11 @@ use rusqlite::{Row, params};
 use super::Store;
 use super::fetch::bad_timestamp;
 use crate::error::Result;
-use crate::model::{Cadence, Decision, Diagnosis, FeedId, Status, parse_ts, ts};
+use crate::health::classify;
+use crate::model::{Cadence, CadenceGroup, Decision, Diagnosis, FeedId, Status, parse_ts, ts};
 
 const HEALTH_COLUMNS: &str = "feed_id, status, reason, evidence, remarks, proposed_action, hijack_score, \
-     last_entry_at, median_interval_days, entries_per_month";
+     last_entry_at, median_interval_days, entries_per_month, cadence_group";
 
 fn json_error(col: usize, e: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(col, rusqlite::types::Type::Text, Box::new(e))
@@ -23,6 +24,7 @@ fn health_row(r: &Row<'_>) -> rusqlite::Result<(FeedId, Diagnosis)> {
     let remarks: String = r.get(4)?;
     let action: Option<String> = r.get(5)?;
     let last_entry: Option<String> = r.get(7)?;
+    let group: String = r.get(10)?;
     Ok((
         r.get(0)?,
         Diagnosis {
@@ -45,6 +47,8 @@ fn health_row(r: &Row<'_>) -> rusqlite::Result<(FeedId, Diagnosis)> {
                 last_entry_at: last_entry.as_deref().and_then(parse_ts),
                 median_interval_days: r.get(8)?,
                 entries_per_month: r.get(9)?,
+                group: CadenceGroup::parse(&group)
+                    .ok_or_else(|| unknown(10, "rhythm group", &group))?,
             },
         },
     ))
@@ -110,6 +114,25 @@ fn write_triage(conn: &rusqlite::Connection, flags: &HashMap<FeedId, bool>) -> R
     Ok(())
 }
 
+/// Schema v4: gives every stored diagnosis its rhythm group from the cadence already in
+/// `feed_health`, without fetching. Returns how many rows were classified.
+pub(super) fn backfill_cadence_groups(
+    conn: &rusqlite::Connection,
+    now: DateTime<Utc>,
+) -> Result<usize> {
+    let rows: Vec<(FeedId, Option<String>, Option<f64>)> = conn
+        .prepare("SELECT feed_id, last_entry_at, median_interval_days FROM feed_health")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut update =
+        conn.prepare("UPDATE feed_health SET cadence_group = ?2 WHERE feed_id = ?1")?;
+    for (feed_id, last_entry, median) in &rows {
+        let group = classify(last_entry.as_deref().and_then(parse_ts), *median, now);
+        update.execute(params![feed_id, group.as_str()])?;
+    }
+    Ok(rows.len())
+}
+
 impl Store {
     pub fn save_diagnoses(
         &self,
@@ -120,13 +143,13 @@ impl Store {
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO feed_health (feed_id, status, reason, evidence, remarks, proposed_action, hijack_score, \
-                 last_entry_at, median_interval_days, entries_per_month, computed_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+                 last_entry_at, median_interval_days, entries_per_month, computed_at, cadence_group) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
                  ON CONFLICT(feed_id) DO UPDATE SET status = excluded.status, reason = excluded.reason, \
                  evidence = excluded.evidence, remarks = excluded.remarks, proposed_action = excluded.proposed_action, \
                  hijack_score = excluded.hijack_score, last_entry_at = excluded.last_entry_at, \
                  median_interval_days = excluded.median_interval_days, entries_per_month = excluded.entries_per_month, \
-                 computed_at = excluded.computed_at",
+                 computed_at = excluded.computed_at, cadence_group = excluded.cadence_group",
             )?;
             for (feed_id, d) in diags {
                 stmt.execute(params![
@@ -140,7 +163,8 @@ impl Store {
                     d.cadence.last_entry_at.map(ts),
                     d.cadence.median_interval_days,
                     d.cadence.entries_per_month,
-                    ts(now)
+                    ts(now),
+                    d.cadence.group.as_str()
                 ])?;
             }
         }
@@ -241,7 +265,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Action, Cadence, Evidence, Remark, Status};
+    use crate::model::{Action, Cadence, CadenceGroup, Evidence, Remark, Status};
     use crate::opml;
 
     fn now() -> DateTime<Utc> {
@@ -272,6 +296,7 @@ mod tests {
                 last_entry_at: Some(now()),
                 median_interval_days: Some(7.0),
                 entries_per_month: 1.5,
+                group: CadenceGroup::Weekly,
             },
         }
     }
@@ -359,5 +384,52 @@ mod tests {
         assert_eq!(triage_flags(&s)[0], (1, true));
         s.save_triage(&HashMap::from([(1, false)])).unwrap();
         assert_eq!(triage_flags(&s)[0], (1, false));
+    }
+
+    #[test]
+    fn unknown_cadence_group_is_an_error() {
+        let s = store();
+        s.save_diagnoses(&HashMap::from([(1, sample())]), now())
+            .unwrap();
+        let stored: String = s
+            .conn()
+            .query_row(
+                "SELECT cadence_group FROM feed_health WHERE feed_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "weekly");
+        s.conn()
+            .execute(
+                "UPDATE feed_health SET cadence_group = 'hourly' WHERE feed_id = 1",
+                [],
+            )
+            .unwrap();
+        assert!(s.diagnosis(1).is_err());
+    }
+
+    #[test]
+    fn backfill_classifies_every_stored_diagnosis_without_fetching() {
+        let s = store();
+        s.conn()
+            .execute_batch(&format!(
+                "INSERT INTO feed_health (feed_id, status, reason, last_entry_at, median_interval_days, computed_at) VALUES \
+                 (1, 'Alive', 'r', '{recent}', 0.5, '{at}'), \
+                 (2, 'Fossil', 'r', '2019-01-01T00:00:00.000Z', 3.0, '{at}');",
+                recent = ts(now() - chrono::Duration::days(1)),
+                at = ts(now()),
+            ))
+            .unwrap();
+        assert_eq!(backfill_cadence_groups(s.conn(), now()).unwrap(), 2);
+        let groups: Vec<String> = s
+            .conn()
+            .prepare("SELECT cadence_group FROM feed_health ORDER BY feed_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(groups, ["daily", "silent"]);
     }
 }

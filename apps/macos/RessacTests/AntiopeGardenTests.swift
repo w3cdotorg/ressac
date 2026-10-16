@@ -416,3 +416,61 @@ private func trailingTrimmed(_ text: String) -> String {
         }
     }
 }
+
+private func cadenceRow(_ id: Int64, effective: CadenceGroup = .weekly, computed: CadenceGroup = .weekly,
+                        override: Bool = false) -> CadenceRow {
+    CadenceRow(feedId: id, effective: effective, computed: computed, isOverride: override, medianIntervalDays: 6.5,
+               entriesPerMonth: 4.2, lastEntryAt: Timestamp.date(from: "2026-10-15T08:00:00.000Z"), unread: 3)
+}
+
+@MainActor @Suite struct AntiopeRhythmTests {
+    let now = Timestamp.date(from: "2026-10-16T08:00:00.000Z")!
+
+    @Test func theInspectorShowsTheRhythmUnderTheStatus() throws {
+        let row = gardenRow(7, "Six Colors", status: "Alive", reason: "Last entry on 2026-10-15.")
+        let cadence = cadenceRow(7)
+        let lines = GardenPage.inspectorLines(row, log: [], cells: 80, timeZone: .gmt, cadence: cadence, now: now)
+        let rhythm = try #require(lines.firstIndex { $0.text.hasPrefix("RHYTHM") })
+        #expect(trailingTrimmed(lines[rhythm].text) == "RHYTHM    " + GardenModel.rhythmText(cadence, now: now))
+        #expect(lines[rhythm].cells.spans[0].foreground == .cyan && lines[rhythm].cells.spans[1].foreground == .white)
+        #expect(lines[rhythm + 1].role == .rhythm)  // the anchor of the override rows
+        let reason = try #require(lines.firstIndex { $0.text.hasPrefix("Last entry") })
+        let evidence = lines.firstIndex { $0.text.hasPrefix("LINKS") }
+        #expect(reason < rhythm && rhythm < (evidence ?? .max))
+        for width in [0, 1, 24, 40] {
+            #expect(GardenPage.inspectorLines(row, log: [], cells: width, cadence: cadence, now: now)
+                .allSatisfy { $0.cells.width == width })
+        }
+    }
+
+    @Test func noRhythmForABuriedFeedOrWithoutCadence() {
+        let alive = gardenRow(7, "Six Colors", status: "Alive")
+        #expect(!GardenPage.inspectorLines(alive, log: [], cells: 40).contains { $0.role == .rhythm })
+        let buried = gardenRow(8, "Gone", status: "Dead", state: "buried", decision: "bury")
+        #expect(!GardenPage.inspectorLines(buried, log: [], cells: 40, cadence: cadenceRow(8), now: now)
+            .contains { $0.role == .rhythm || $0.text.hasPrefix("RHYTHM") })
+    }
+
+    @Test func theRhythmRowsBelongToTheSelectedFeedOnly() {
+        let row = cadenceRow(7)
+        #expect(GardenPage.cadence(row, forSelected: 7) == row)
+        #expect(GardenPage.cadence(row, forSelected: 8) == nil)  // the previous feed's row, one beat late
+        #expect(GardenPage.cadence(row, forSelected: nil) == nil)
+        #expect(GardenPage.cadence(nil, forSelected: 7) == nil)
+    }
+
+    @Test func theOverrideRowsShowTheChoiceInForce() {
+        let auto = GardenPage.cadenceChoices(cadenceRow(7), cells: 24)
+        #expect(auto.map(\.group) == [nil, .daily, .weekly, .monthly, .rare, .silent])
+        #expect(auto.map { trailingTrimmed($0.line.text) } == [" AUTO", " DAILY", " WEEKLY", " MONTHLY", " RARE", " SILENT"])
+        #expect(auto[0].line.isSelected && auto[0].line.cells.spans.allSatisfy { $0.foreground == .black && $0.background == .cyan })
+        #expect(auto.dropFirst().allSatisfy { !$0.line.isSelected && $0.line.cells.spans[0].foreground == .cyan })
+        #expect(auto[0].line.cells.accessibilityText == "Auto, current" && auto[1].line.cells.accessibilityText == "Daily")
+        let forced = GardenPage.cadenceChoices(cadenceRow(7, effective: .daily, override: true), cells: 24)
+        #expect(forced.filter(\.line.isSelected).map(\.group) == [.daily])
+        #expect(Set(forced.map(\.id)).count == 6)
+        for width in [0, 1, 8, 24, 40] {
+            #expect(GardenPage.cadenceChoices(cadenceRow(7), cells: width).allSatisfy { $0.line.cells.width == width })
+        }
+    }
+}

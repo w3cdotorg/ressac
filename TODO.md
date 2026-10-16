@@ -1,6 +1,6 @@
 # TODO
 
-Prochaines étapes de Ressac, au 15/10/2026. Le détail des décisions passées est dans `notes.md`.
+Prochaines étapes de Ressac, au 16/10/2026. Le détail des décisions passées est dans `notes.md`.
 
 ## Mise en service
 
@@ -14,8 +14,8 @@ Prochaines étapes de Ressac, au 15/10/2026. Le détail des décisions passées 
 
 Ordre convenu le 14/10/2026 : 3, puis 2b.
 
-- [ ] **3 : rythme et journal du matin.** Tri des flux par rythme de publication, édition du matin.
-- [ ] **2b : la lecture dans le terminal.** Trois colonnes en ratatui sur le même schéma (v3) : lu, favori, recherche, article complet, avec clappuccino comme référence. Habillage Antiope du terminal compris (palette et numéros de page du sous-projet 4).
+- [ ] **2b : la lecture dans le terminal.** Trois colonnes en ratatui sur le même schéma (v4) : lu, favori, recherche, article complet, avec clappuccino comme référence. Habillage Antiope du terminal compris (palette et numéros de page du sous-projet 4), ainsi que le journal du matin et les groupes de rythme (vues `v_edition_today`, `v_edition_overflow` et `v_cadence`).
+- [x] **3 : rythme et journal du matin.** Fait le 16/10/2026 sur la branche `cadence-edition` ; recette et trouvailles dans `notes.md`.
 - [x] **4 : thème Antiope (appli Mac).** Fait le 15/10/2026 sur la branche `antiope` ; recette et trouvailles dans `notes.md`.
 
 ## Reporté (relectures du sous-projet 2a)
@@ -56,6 +56,15 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 
 - [ ] Défilement des gros dossiers : accrocs même sans écran CRT (38 ms/s sur la page 400), optimisation possible (voir `notes.md`).
 - [x] Mineurs des relectures : un `DateFormatter` gardé par motif et fuseau, lignes de P100 et boutons de la bannière hors de la boucle du clavier complet (todo-fixes, phase 8), liens de la bannière native et de `GardenInspector` par `AppState.openURL` (phase 7), `main.rs` découpé (phase 2).
+
+### Rythme et journal (sous-projet 3)
+
+- [ ] Pas de temporisation des relances automatiques après un échec hors ligne ou une panne : à chaque retour au premier plan (Cmd-Tab), l'appli relance la fabrication tant que le réseau ou la CLI est en défaut, et chaque relance force un rafraîchissement. À revoir après une semaine de vrais matins.
+- [ ] `ressac edition show` avec `--cap-week 0` ou `--cap-wire 0` (option d'essai) : une section sans entrée mais avec du débordement n'affiche pas ses lignes « +N more ».
+- [ ] Le décompte et la liste d'Aujourd'hui (`Queries.swift`) utilisent `Calendar.current`, antérieur à cette branche : ils ne suivent un changement de fuseau qu'au relancement.
+- [ ] La liste du Journal reprend le clavier à chaque apparition (comme le jardin) ; à revoir si cela gêne la saisie ailleurs.
+- [ ] Antiope : lignes de débordement ouvertes au clic seulement, sans `↩` (écart assumé par rapport à la spec).
+- [ ] Mineurs des relectures : la fabrication d'une édition peut reprendre l'id d'une édition reconstruite (pas d'AUTOINCREMENT, change de schéma si besoin) ; le Journal masque les entrées d'un flux enterré en cours de journée (choix assumé) ; sélecteur Statut | Rythme du jardin qui peut prendre le focus des touches `k`, `r`, `b` ; quelques tests à renforcer (voir le registre local `.superpowers/`, hors dépôt).
 
 ### Durcissement proposé, non fait
 

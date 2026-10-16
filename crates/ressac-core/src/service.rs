@@ -13,12 +13,13 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 
 use crate::discover::{alternate_feeds, same_feed};
-use crate::error::Result;
+use crate::edition::{Caps, Composition, Section, day_start};
+use crate::error::{Error, Result};
 use crate::extract::{Article, ExtractError, extract_article};
 use crate::garden;
 use crate::health::links::{LinkInput, apply_similar_titles, find_duplicates};
 use crate::health::{FeedEvidence, diagnose};
-use crate::model::{Action, Diagnosis, ErrorKind, FeedId, Status, parse_ts, ts};
+use crate::model::{Action, CadenceGroup, Diagnosis, ErrorKind, FeedId, Status, parse_ts, ts};
 use crate::opml::{self, clean_description};
 use crate::parse::{
     CHALLENGE_SNIFF_BYTES, ParsedFeed, is_challenge_page, looks_like_html, parse_feed,
@@ -27,7 +28,8 @@ use crate::source::{
     FeedRef, FetchAttempt, FetchLimits, HostPacer, LocalSource, RawResponse, Source,
 };
 use crate::store::pages::{self, PageKind, PageRow};
-use crate::store::{FeedRow, ImportReport, Store};
+use crate::store::{CadenceRow, EditionParams, EditionRecord, FeedRow, ImportReport, Store};
+pub use crate::store::{EditionEntryRow, EditionOverflowRow, EditionView};
 use crate::url_key::{https_variant, url_key};
 use crate::wayback::Wayback;
 
@@ -95,6 +97,16 @@ pub enum Event {
     },
     /// One line of `ressac page list`, or the row `ressac page set` renumbered.
     Page(PageRow),
+    /// `ressac edition build`: the edition just written.
+    Edition {
+        id: i64,
+        entries: usize,
+        front: usize,
+        week: usize,
+        wire: usize,
+        overflow: u32,
+        unreachable: u32,
+    },
 }
 
 pub trait EventSink {
@@ -105,6 +117,21 @@ pub struct NullSink;
 
 impl EventSink for NullSink {
     fn emit(&self, _: &Event) {}
+}
+
+/// Passes every event on and counts the feeds whose fetch failed.
+struct FailureCounter<'a> {
+    inner: &'a dyn EventSink,
+    failed: std::sync::atomic::AtomicU32,
+}
+
+impl EventSink for FailureCounter<'_> {
+    fn emit(&self, event: &Event) {
+        if let Event::FeedDone { error: Some(_), .. } = event {
+            self.failed.fetch_add(1, Ordering::Relaxed);
+        }
+        self.inner.emit(event);
+    }
 }
 
 /// What `Ressac::extract_entry` did. `NoUrl` and `UnknownEntry` store nothing and emit nothing.
@@ -141,6 +168,66 @@ impl Summary {
     pub fn safe_repairs(&self) -> usize {
         self.https_repairs + self.redirect_repairs
     }
+}
+
+/// What `Ressac::build_edition` is asked to do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EditionOptions {
+    pub caps: Caps,
+    /// Replace today's edition, keeping its window start.
+    pub rebuild: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EditionReport {
+    pub id: i64,
+    pub entries: usize,
+    pub front: usize,
+    pub week: usize,
+    pub wire: usize,
+    /// Sum of the overflow counts: eligible entries the caps left in their feeds.
+    pub overflow: u32,
+    /// Feeds whose fetch failed during the build's refresh.
+    pub unreachable: u32,
+}
+
+impl EditionReport {
+    pub fn new(record: &EditionRecord, comp: &Composition) -> Self {
+        let count = |s: Section| comp.entries.iter().filter(|p| p.section == s).count();
+        EditionReport {
+            id: record.id,
+            entries: comp.entries.len(),
+            front: count(Section::Front),
+            week: count(Section::Week),
+            wire: count(Section::Wire),
+            overflow: comp.overflow.iter().map(|o| o.hidden_count).sum(),
+            unreachable: record.unreachable,
+        }
+    }
+
+    pub fn event(&self) -> Event {
+        Event::Edition {
+            id: self.id,
+            entries: self.entries,
+            front: self.front,
+            week: self.week,
+            wire: self.wire,
+            overflow: self.overflow,
+            unreachable: self.unreachable,
+        }
+    }
+}
+
+/// How a build ended. Only `Built` wrote anything.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditionOutcome {
+    Built(EditionReport),
+    /// An edition already exists since today's 04:00 (and `rebuild` was not asked).
+    NotDue,
+    /// The refresh found the network unreachable: no edition, the window stays where it was.
+    Offline,
+    /// The stop flag was raised during the refresh: no edition.
+    Interrupted,
 }
 
 pub struct Ressac {
@@ -581,6 +668,71 @@ impl Ressac {
         Ok(error)
     }
 
+    /// The morning edition (spec §6): due check (skipped with `rebuild`), a refresh of the due
+    /// feeds, then one transaction that composes and stores the edition. `now` and `tz` decide
+    /// the day (04:00 local); the window ends at the later of `now` and the real clock after
+    /// the refresh, since the refresh stamps `fetched_at` with the real clock.
+    pub async fn build_edition(
+        &self,
+        opts: EditionOptions,
+        now: DateTime<Utc>,
+        tz: &impl chrono::TimeZone,
+        sink: &dyn EventSink,
+        stop: Arc<AtomicBool>,
+    ) -> Result<EditionOutcome> {
+        let day = day_start(now.with_timezone(tz));
+        if !opts.rebuild && !self.store.edition_due(day)? {
+            return Ok(EditionOutcome::NotDue);
+        }
+        let counter = FailureCounter {
+            inner: sink,
+            failed: std::sync::atomic::AtomicU32::new(0),
+        };
+        let summary = self
+            .refresh(
+                // Force: a feed fetched within 30 minutes (even a failed try) would otherwise
+                // be skipped, so a Retry after an offline build would see no network failure
+                // and write an empty edition (spec §9).
+                RefreshOptions {
+                    force: true,
+                    only: None,
+                },
+                &counter,
+                stop.clone(),
+            )
+            .await?;
+        if stop.load(Ordering::Relaxed) {
+            return Ok(EditionOutcome::Interrupted);
+        }
+        if summary.network_unreachable {
+            return Ok(EditionOutcome::Offline);
+        }
+        let end = Utc::now().max(now);
+        let params = EditionParams {
+            day_start: day,
+            window_end: end,
+            built_at: end,
+            caps: opts.caps,
+            unreachable: counter.failed.load(Ordering::Relaxed),
+            rebuild: opts.rebuild,
+        };
+        let (record, composition) = match self.store.write_edition(&params) {
+            Ok(written) => written,
+            // Another process built it while this one was refreshing.
+            Err(Error::EditionNotDue) => return Ok(EditionOutcome::NotDue),
+            Err(e) => return Err(e),
+        };
+        let report = EditionReport::new(&record, &composition);
+        tracing::info!(id = report.id, entries = report.entries, "edition built");
+        sink.emit(&report.event());
+        Ok(EditionOutcome::Built(report))
+    }
+
+    /// The latest edition with its entries and overflow; `None` before the first one.
+    pub fn edition_today(&self) -> Result<Option<EditionView>> {
+        self.store.edition_view()
+    }
+
     /// Every teletext page: the reserved ones, then each numbered folder and feed.
     pub fn pages(&self) -> Result<Vec<PageRow>> {
         pages::list(self.store.conn())
@@ -589,6 +741,13 @@ impl Ressac {
     /// Gives a folder or a feed another page; see `store::pages::set` for the refusals.
     pub fn set_page(&self, kind: PageKind, id: i64, page: u16) -> Result<()> {
         pages::set(self.store.conn(), kind, id, page)
+    }
+
+    /// Forces a feed's rhythm group, or gives it back to the computed one (`None`); see
+    /// `Store::set_cadence_override` for the refusals. Returns the feed's row afterwards.
+    pub fn set_cadence(&self, feed_id: FeedId, group: Option<CadenceGroup>) -> Result<CadenceRow> {
+        self.store.set_cadence_override(feed_id, group)?;
+        self.store.cadence_row(feed_id)
     }
 
     /// Status counts and safe repairs over active feeds (decisions are not considered).
@@ -1113,6 +1272,91 @@ mod tests {
     }
 
     #[test]
+    fn edition_events_have_stable_json() {
+        let event = Event::Edition {
+            id: 12,
+            entries: 43,
+            front: 2,
+            week: 7,
+            wire: 34,
+            overflow: 61,
+            unreachable: 3,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"event":"edition","id":12,"entries":43,"front":2,"week":7,"wire":34,"overflow":61,"unreachable":3}"#
+        );
+    }
+
+    #[test]
+    fn an_edition_report_counts_sections_and_hidden_entries() {
+        use crate::edition::{Composition, Overflow, Placed, Section};
+        let record = crate::store::EditionRecord {
+            id: 4,
+            built_at: Utc::now(),
+            window_start: Utc::now(),
+            window_end: Utc::now(),
+            unreachable: 1,
+        };
+        let comp = Composition {
+            entries: vec![
+                Placed {
+                    entry_id: 1,
+                    section: Section::Front,
+                    rank: 1,
+                },
+                Placed {
+                    entry_id: 2,
+                    section: Section::Wire,
+                    rank: 2,
+                },
+                Placed {
+                    entry_id: 3,
+                    section: Section::Wire,
+                    rank: 3,
+                },
+            ],
+            overflow: vec![
+                Overflow {
+                    feed_id: 1,
+                    section: Section::Wire,
+                    hidden_count: 4,
+                },
+                Overflow {
+                    feed_id: 2,
+                    section: Section::Week,
+                    hidden_count: 2,
+                },
+            ],
+        };
+        let report = EditionReport::new(&record, &comp);
+        assert_eq!(
+            report,
+            EditionReport {
+                id: 4,
+                entries: 3,
+                front: 1,
+                week: 0,
+                wire: 2,
+                overflow: 6,
+                unreachable: 1
+            }
+        );
+        assert_eq!(
+            report.event(),
+            Event::Edition {
+                id: 4,
+                entries: 3,
+                front: 1,
+                week: 0,
+                wire: 2,
+                overflow: 6,
+                unreachable: 1
+            }
+        );
+    }
+
+    #[test]
     fn pages_and_set_page_go_through_the_store() {
         let app = Ressac::with_parts(
             Store::open_in_memory().unwrap(),
@@ -1129,7 +1373,7 @@ mod tests {
             app.pages()
                 .unwrap()
                 .into_iter()
-                .skip(8)
+                .skip(pages::RESERVED_PAGES.len())
                 .map(|r| (r.page, r.kind, r.id))
                 .collect()
         };
@@ -1145,6 +1389,31 @@ mod tests {
         assert!(matches!(
             app.set_page(PageKind::Feed, 1, 200),
             Err(crate::Error::PageTaken { page: 200 })
+        ));
+    }
+
+    #[test]
+    fn set_cadence_goes_through_the_store_and_returns_the_row() {
+        let app = Ressac::with_parts(
+            Store::open_in_memory().unwrap(),
+            FetchLimits::default(),
+            "http://127.0.0.1:9",
+        )
+        .unwrap();
+        app.import_opml(
+            r#"<opml><body><outline text="A" xmlUrl="https://a.example.org/feed"/></body></opml>"#,
+            false,
+        )
+        .unwrap();
+        let row = app.set_cadence(1, Some(CadenceGroup::Weekly)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&row).unwrap(),
+            serde_json::json!({"feed_id": 1, "effective_group": "weekly", "computed_group": "silent", "is_override": true})
+        );
+        assert!(!app.set_cadence(1, None).unwrap().is_override);
+        assert!(matches!(
+            app.set_cadence(7, None).unwrap_err(),
+            crate::error::Error::UnknownFeed(7)
         ));
     }
 

@@ -4,7 +4,9 @@ mod cadence;
 pub mod hijack;
 pub mod links;
 
-pub use cadence::cadence;
+pub use cadence::{
+    DAILY_BELOW_DAYS, MONTHLY_BELOW_DAYS, SILENT_AFTER_DAYS, WEEKLY_BELOW_DAYS, cadence, classify,
+};
 
 use chrono::{DateTime, Duration, Utc};
 

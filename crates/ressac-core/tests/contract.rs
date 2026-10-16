@@ -7,12 +7,13 @@ use chrono::{DateTime, Duration, Utc};
 use ressac_core::extract::{Article, ExtractError};
 use ressac_core::garden;
 use ressac_core::model::{
-    Action, Cadence, Decision, Diagnosis, ErrorKind, Evidence, FeedId, Hop, Remark, Status, ts,
+    Action, Cadence, CadenceGroup, Decision, Diagnosis, ErrorKind, Evidence, FeedId, Hop, Remark,
+    Status, ts,
 };
 use ressac_core::parse::{ParsedEntry, ParsedFeed};
 use ressac_core::source::FetchAttempt;
 use ressac_core::store::Store;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params};
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -158,7 +159,7 @@ fn reading_columns_and_views_are_stable() {
     let version: i64 = conn
         .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     assert_eq!(version, ressac_core::store::SCHEMA_VERSION);
 }
 
@@ -209,13 +210,84 @@ fn page_columns_and_view_are_stable() {
     assert!(columns(&conn, "feed").contains(&"page".to_string()));
 }
 
+#[test]
+fn cadence_and_edition_columns_and_views_are_stable() {
+    let (_dir, conn) = live_store();
+    assert_eq!(
+        columns(&conn, "v_cadence"),
+        [
+            "feed_id",
+            "title",
+            "page",
+            "folder_path",
+            "effective_group",
+            "computed_group",
+            "is_override",
+            "median_interval_days",
+            "entries_per_month",
+            "last_entry_at",
+            "unread"
+        ]
+    );
+    assert_eq!(
+        columns(&conn, "v_edition_today"),
+        [
+            "edition_id",
+            "built_at",
+            "window_start",
+            "window_end",
+            "unreachable",
+            "entry_id",
+            "section",
+            "rank",
+            "feed_id",
+            "feed_title",
+            "title",
+            "published_at",
+            "read_at",
+            "starred_at"
+        ]
+    );
+    assert_eq!(
+        columns(&conn, "v_edition_overflow"),
+        [
+            "edition_id",
+            "section",
+            "feed_id",
+            "feed_title",
+            "page",
+            "hidden_count"
+        ]
+    );
+    assert_eq!(
+        columns(&conn, "edition"),
+        [
+            "id",
+            "built_at",
+            "window_start",
+            "window_end",
+            "unreachable"
+        ]
+    );
+    assert_eq!(
+        columns(&conn, "edition_entry"),
+        ["edition_id", "entry_id", "section", "rank"]
+    );
+    assert_eq!(
+        columns(&conn, "edition_overflow"),
+        ["edition_id", "feed_id", "section", "hidden_count"]
+    );
+    assert!(columns(&conn, "feed").contains(&"cadence_override".to_string()));
+    assert!(columns(&conn, "feed_health").contains(&"cadence_group".to_string()));
+}
+
 /// What the Swift tests rely on in the committed fixture (rows found by guid or title).
 #[test]
 fn contract_fixture_covers_the_reading_cases() {
     let db = fixture();
     let int = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
     let text = |sql: &str| -> String { db.query_row(sql, [], |r| r.get(0)).unwrap() };
-    assert_eq!(int("SELECT version FROM schema_meta"), 3);
+    assert_eq!(int("SELECT version FROM schema_meta"), 4);
 
     // One FTS row per entry; the backlog rule on xkcd's first fill.
     assert_eq!(int("SELECT count(*) FROM entry"), 6);
@@ -345,6 +417,64 @@ fn contract_fixture_numbers_every_folder_and_feed() {
     assert_eq!(state, "buried");
 }
 
+/// What the Swift tests rely on for rhythm and the edition (rows found by title or guid).
+#[test]
+fn contract_fixture_covers_rhythm_and_the_edition() {
+    let db = fixture();
+    let int = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
+
+    // v_cadence: diagnosed active feeds only (the buried Photos and the undiagnosed are out).
+    let mut stmt = db
+        .prepare("SELECT title, effective_group, computed_group, is_override FROM v_cadence ORDER BY page")
+        .unwrap();
+    let rows: Vec<(String, String, String, bool)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    let expected = [
+        ("xkcd.com", "daily", "daily", false),
+        ("Orange Drenka", "silent", "silent", false),
+        ("Girl on the Couch", "monthly", "monthly", false),
+        ("Bibliobsession 2.0", "weekly", "rare", true),
+        ("Unphotographable", "silent", "silent", false),
+        ("Daring Fireball", "weekly", "weekly", false),
+    ]
+    .map(|(t, e, c, o)| (t.to_string(), e.to_string(), c.to_string(), o));
+    assert_eq!(rows, expected);
+    assert_eq!(
+        int("SELECT unread FROM v_cadence WHERE title = 'xkcd.com'"),
+        3
+    );
+
+    // The edition: This Week then The Wire, no Front Page; xkcd keeps two entries.
+    assert_eq!(int("SELECT count(*) FROM edition"), 1);
+    assert_eq!(int("SELECT unreachable FROM edition"), 1);
+    let mut stmt = db
+        .prepare("SELECT rank, section, feed_title, title FROM v_edition_today ORDER BY rank")
+        .unwrap();
+    let entries: Vec<(i64, String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    let expected = [
+        (1, "week", "Daring Fireball", "Linked: Tides"),
+        (2, "week", "Daring Fireball", "Walled"),
+        (3, "wire", "xkcd.com", "Recent comic"),
+    ]
+    .map(|(r, s, f, t)| (r, s.to_string(), f.to_string(), t.to_string()));
+    assert_eq!(entries, expected);
+    let overflow: (String, String, u16, i64) = db
+        .query_row(
+            "SELECT section, feed_title, page, hidden_count FROM v_edition_overflow",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(overflow, ("wire".into(), "xkcd.com".into(), 201, 2));
+}
+
 /// Regenerates the fixture shared with the Swift tests:
 /// `RESSAC_WRITE_CONTRACT=1 cargo test -p ressac-core --test contract`.
 #[test]
@@ -446,6 +576,21 @@ fn diagnosis(status: Status, clue: &str, action: Option<Action>) -> Diagnosis {
         action,
         hijack_score: 0.0,
         cadence: Cadence::default(),
+    }
+}
+
+/// A stored rhythm: the latest entry a day ago (in 2014 for Silent), `median` days apart.
+fn rhythm(group: CadenceGroup, median: f64) -> Cadence {
+    let last = if group == CadenceGroup::Silent {
+        "2014-06-01T00:00:00Z".parse().unwrap()
+    } else {
+        now() - Duration::days(1)
+    };
+    Cadence {
+        last_entry_at: Some(last),
+        median_interval_days: Some(median),
+        entries_per_month: 30.4375 / median,
+        group,
     }
 }
 
@@ -564,12 +709,25 @@ fn fill_contract_store(path: &Path) {
     store
         .save_diagnoses(
             &HashMap::from([
-                (xkcd, diagnosis(Status::Alive, "", None)),
-                (fireball, diagnosis(Status::Alive, "", None)),
+                (
+                    xkcd,
+                    Diagnosis {
+                        cadence: rhythm(CadenceGroup::Daily, 0.5),
+                        ..diagnosis(Status::Alive, "", None)
+                    },
+                ),
+                (
+                    fireball,
+                    Diagnosis {
+                        cadence: rhythm(CadenceGroup::Weekly, 4.0),
+                        ..diagnosis(Status::Alive, "", None)
+                    },
+                ),
                 (
                     girl,
                     Diagnosis {
                         remarks: vec![Remark::HttpOnly],
+                        cadence: rhythm(CadenceGroup::Monthly, 20.0),
                         ..diagnosis(
                             Status::Moved,
                             "301",
@@ -581,9 +739,18 @@ fn fill_contract_store(path: &Path) {
                 ),
                 (
                     biblio,
-                    diagnosis(Status::Hijacked, "vie ⚠", Some(Action::Bury)),
+                    Diagnosis {
+                        cadence: rhythm(CadenceGroup::Rare, 60.0),
+                        ..diagnosis(Status::Hijacked, "vie ⚠", Some(Action::Bury))
+                    },
                 ),
-                (orange, diagnosis(Status::Fossil, "2014", None)),
+                (
+                    orange,
+                    Diagnosis {
+                        cadence: rhythm(CadenceGroup::Silent, 30.0),
+                        ..diagnosis(Status::Fossil, "2014", None)
+                    },
+                ),
                 (unphoto, diagnosis(Status::Dead, "410", Some(Action::Bury))),
             ]),
             now(),
@@ -598,4 +765,35 @@ fn fill_contract_store(path: &Path) {
     garden::decide(&store, unphoto, Decision::Keep, now()).unwrap();
     garden::decide(&store, photos, Decision::Bury, now()).unwrap();
     garden::recompute_triage(&store).unwrap();
+
+    // Rhythm: one forced group. The column is core-written (`ressac feed cadence`); the
+    // fixture sets it directly, like `starred_at` above.
+    conn.execute(
+        "UPDATE feed SET cadence_override = 'weekly' WHERE id = ?1",
+        [biblio],
+    )
+    .unwrap();
+    // Morning edition, written by hand (the edition builder is phase 2b): Daring Fireball's
+    // two entries in This Week, xkcd's newest in The Wire and two more left in xkcd.
+    conn.execute(
+        "INSERT INTO edition (id, built_at, window_start, window_end, unreachable) VALUES (1, ?1, ?2, ?1, 1)",
+        params![ts(now()), ts(now() - Duration::days(1))],
+    )
+    .unwrap();
+    for (guid, section, rank) in [
+        ("df-extracted", "week", 1),
+        ("df-walled", "week", 2),
+        ("x-recent", "wire", 3),
+    ] {
+        conn.execute(
+            "INSERT INTO edition_entry (edition_id, entry_id, section, rank) VALUES (1, ?1, ?2, ?3)",
+            params![entry(guid), section, rank],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO edition_overflow (edition_id, feed_id, section, hidden_count) VALUES (1, ?1, 'wire', 2)",
+        [xkcd],
+    )
+    .unwrap();
 }

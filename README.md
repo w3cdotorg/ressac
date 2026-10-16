@@ -21,16 +21,19 @@ ressac extract 4521                    # fetch and extract the full article of a
 ressac garden decide 12 keep           # keep | repair | bury, without the terminal UI
 ressac garden undo                     # revert the latest decision
 ressac garden apply-safe               # apply every undecided safe repair; --json also gives applied and skipped
-ressac migrate                         # bring the database to the current schema (v3)
+ressac migrate                         # bring the database to the current schema (v4)
 ressac page list                       # every page number, reserved ones first; --json for NDJSON
 ressac page set feed 12 412            # renumber a feed (or a folder) by hand, within 110-799
+ressac edition build                   # refresh, then compose this morning's edition (once a day, from 04:00)
+ressac edition show                    # today's edition by section; --json for NDJSON
+ressac feed cadence 12 daily           # force a feed's rhythm group (daily, weekly, monthly, rare, silent) or auto
 ```
 
 Global flags: `--db <file>` (or `RESSAC_DB`), `--json`, `--ascii`, `-v`.
-Exit codes: `0` done, `1` error, `2` a refused request (an unknown id, nothing to repair, an address another active feed already uses), `130` stopped by Ctrl-C.
+Exit codes: `0` done, `1` error, `2` a refused request (an unknown id, nothing to repair, an address another active feed already uses, an edition already built this morning, no network to build one), `130` stopped by Ctrl-C.
 The database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs in `~/Library/Logs/Ressac/`.
 
-**Schema v3.** The Mac app migrates the shared database to schema v3 on first launch, after a backup next to it (`ressac.sqlite.bak-v2`, or `ressac.sqlite.bak-v1` for an older database). v3 gives every folder and feed a three-digit page number, used by the Antiope look and listed by `ressac page list`; numbers never change on their own. A `ressac` built before v3 refuses the database ("database created by a newer Ressac"). Get a v3 CLI with `cargo install --path crates/ressac`, or use the app's own copy at `Ressac.app/Contents/Helpers/ressac`.
+**Schema v4.** The Mac app migrates the shared database to schema v4 on first launch, after a backup next to it (`ressac.sqlite.bak-v3`, or the backup of whichever older version it found). v4 adds each feed's rhythm group, the per-feed override and the morning editions; v3 already gave every folder and feed a three-digit page number (`ressac page list`). A `ressac` built before v4 refuses the database ("database created by a newer Ressac"). Get a v4 CLI with `cargo install --path crates/ressac`, or use the app's own copy at `Ressac.app/Contents/Helpers/ressac`.
 
 ## The Mac app
 
@@ -52,7 +55,9 @@ open build/Ressac.app
 Quit Ressac before replacing the build. To install it for every launch instead, copy `build/Ressac.app` to `/Applications/` (the commands below assume that location; with the local build, use `apps/macos/build/Ressac.app`).
 
 - **First run:** drop an OPML file on the window (or choose one, `⌘O`). A sheet shows what `ressac import --dry-run` found, then the app imports and fetches every feed.
-- **Reading:** three columns (sidebar with Unread, Today, Starred, your folders and the Garden; entry list; reader). `j`/`k` next/previous, `Space` scrolls then moves on, `m` read, `s` star, `⇧⌘A` mark all read, `⌘R` refresh the selection, `⇧⌘R` refresh everything, `⌘F` search, `⌘↩` open in the browser. Refresh is manual only. Long lists load 500 entries at a time; scrolling or `j` loads the next ones, and `Space` jumps to the next unread entry even beyond the loaded rows.
+- **Reading:** three columns (sidebar with the Journal, Unread, Today, Starred, your folders, the Rhythm groups and the Garden; entry list; reader). `j`/`k` next/previous, `Space` scrolls then moves on, `m` read, `s` star, `⇧⌘A` mark all read, `⌘R` refresh the selection, `⇧⌘R` refresh everything, `⌘F` search, `⌘↩` open in the browser. Refresh is manual only. Long lists load 500 entries at a time; scrolling or `j` loads the next ones, and `Space` jumps to the next unread entry even beyond the loaded rows.
+- **Journal:** the first time you open Ressac each day (a day starts at 04:00), it refreshes every feed and composes a morning edition of what appeared since the previous one: **Front Page** (feeds that publish monthly or less, every new entry), **This Week** (weekly feeds, three entries each at most) and **The Wire** (daily feeds, their latest entry). What the caps leave out stays unread in its feed, behind a `+12 more in …` line. The edition is frozen once built; read it to `That's the edition.`. Offline, the Journal says so and offers Retry. `⇧⌘A` marks only the edition read.
+- **Rhythm:** every feed is Daily, Weekly, Monthly, Rare or Silent, from the median gap between its recent entries. The sidebar's Rhythm section lists each group like a folder; the garden's inspector shows a feed's rhythm and lets you force its group (`Auto` gives it back to the computation), and Garden ▸ All feeds has a Rhythm column.
 - **Full article:** the toolbar's Full Article toggle fetches and extracts the page of a truncated entry; a feed's context menu offers "Always fetch full article". Articles render with JavaScript off, and every link opens in your browser.
 - **Garden:** the sidebar's Needs triage, All feeds and Cemetery lists, with the terminal's keys: `k` keep, `r` repair, `b` bury, `u` undo, `o` site, `w` Wayback, `⇧R` apply safe repairs. The Cemetery shows how many entries each buried feed left unread.
 - **Settings (`⌘,`):** appearance (Native or Antiope, see below), article font (SF Pro, New York, Charter, Newsreader, Atkinson Hyperlegible Next), text size (`⌘+` / `⌘−` / `⌘0` in the View menu), line width (three widths or exactly 40 columns), database location, logs.
@@ -71,6 +76,8 @@ Settings ▸ Reading ▸ Appearance switches the reading window to **Antiope**, 
   |---|---|
   | 100 | SOMMAIRE, every page with its unread count |
   | 101, 102, 103 | Unread, Today, Starred |
+  | 104 | JOURNAL, this morning's edition; its entries are sub-pages ("104 3/43"), and SUITE after the last one shows FIN DE L'EDITION |
+  | 105-109 | Rhythm groups: Daily, Weekly, Monthly, Rare, Silent |
   | 110-199 | Feeds outside any folder |
   | 200-700 | Root folders (six at most), each followed by its subfolders and feeds |
   | 800, 801, 802 | Garden: Needs triage, All feeds, Cemetery |

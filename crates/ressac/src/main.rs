@@ -81,6 +81,8 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Export { output, cemetery } => commands::export(&g, output, cemetery, &mut out),
         Command::Migrate => commands::migrate(&g, &mut out),
         Command::Page { action } => commands::page(&g, action, &mut out),
+        Command::Edition { action } => commands::edition::edition(&g, action, &mut out).await,
+        Command::Feed { action } => commands::feed::feed(&g, action, &mut out),
     }
 }
 

@@ -73,7 +73,8 @@ struct MinitelBar: View {
                 SearchPrompt(width: max(0, width - Self.keysCells))
             } else {
                 CellLineView(line: Self.hintLine(
-                    Self.status(progress: app.runs.progress, message: app.selection.isGarden ? garden.message : nil)
+                    Self.status(progress: app.runs.progress, message: app.selection.isGarden ? garden.message : nil,
+                                journal: app.journal.phase)
                         ?? Self.hint(column: antiope.column, isGarden: app.selection.isGarden, searchText: app.searchText),
                     width: max(0, width - Self.keysCells)))
             }
@@ -96,9 +97,13 @@ struct MinitelBar: View {
     }
 
     /// What replaces the hints (spec §6): the garden's last refusal ("Nothing to repair for this
-    /// feed."), else "REFRESHING 42/155" while a run is going, in yellow. Nil keeps the hints.
-    static func status(progress: RunProgress?, message: String?) -> MinitelHint? {
+    /// feed."), else `EDITION IN PROGRESS 34/156` while the morning edition builds, else
+    /// `REFRESHING 42/155` while a run is going, all in yellow. Nil keeps the hints.
+    static func status(progress: RunProgress?, message: String?, journal: JournalModel.Phase = .idle) -> MinitelHint? {
         if let message { return MinitelHint(text: message, colour: .yellow) }
+        if case let .building(done, total) = journal {
+            return MinitelHint(text: JournalPage.progressText(done: done, total: total), colour: .yellow)
+        }
         guard let progress else { return nil }
         let text = progress.total > 0 ? "REFRESHING \(progress.done)/\(progress.total)" : "REFRESHING"
         return MinitelHint(text: text, colour: .yellow)

@@ -108,14 +108,60 @@ func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async 
         #expect(runs.banner == Banner(message: "No feed #9.", showLog: true))
     }
 
-    @Test func only_garden_decisions_and_undo_can_be_refused() {
+    @Test func only_garden_edition_and_cadence_runs_can_be_refused() {
         let exitTwo = RunFailure(exitCode: 2, lastStderrLine: "Feed #10 already uses https://e.org/feed; cannot restore.")
         #expect(RunRequest.decide(feedId: 9, .keep).isRefusal(exitTwo))
         #expect(RunRequest.undo().isRefusal(exitTwo))
+        #expect(RunRequest.buildEdition().isRefusal(exitTwo))
+        #expect(RunRequest.buildEdition(rebuild: true).isRefusal(exitTwo))
+        #expect(RunRequest.setCadence(feedId: 9, .rare).isRefusal(exitTwo))
+        #expect(RunRequest.setCadence(feedId: 9, nil).isRefusal(exitTwo))
         #expect(!RunRequest.applySafe().isRefusal(exitTwo))
         #expect(!RunRequest.fetch(feeds: [9]).isRefusal(exitTwo))
         #expect(!RunRequest.migrate().isRefusal(exitTwo))
         #expect(!RunRequest.decide(feedId: 9, .keep).isRefusal(RunFailure(exitCode: 1, lastStderrLine: "error: disk I/O error")))
+        #expect(!RunRequest.buildEdition().isRefusal(RunFailure(exitCode: 1, lastStderrLine: "error: disk I/O error")))
+    }
+
+    /// Spec §9: offline and "already built" refusals of `edition build`, and an override on a
+    /// buried feed, show the CLI's sentence without Show log.
+    @Test func edition_and_cadence_refusals_show_their_sentence_without_the_log_button() async throws {
+        let stub = try Stub("""
+            case "$4 $5" in
+              "edition build")
+                echo '{"event":"started","total":2}'
+                echo '{"event":"network_unreachable","failed":2,"attempted":2}'
+                echo 'The network is unreachable: no edition built.' >&2 ;;
+              "feed cadence") echo 'Feed #11 is buried.' >&2 ;;
+            esac
+            exit 2
+            """)
+        let runs = RunCoordinator(cli: stub.cli)
+        let offline = "The network is unreachable: no edition built."
+        #expect(await runs.perform(.buildEdition()) == .failed(RunFailure(exitCode: 2, lastStderrLine: offline)))
+        #expect(runs.banner == Banner(message: offline, showLog: false))
+        #expect(!runs.isLongRunActive)
+        let buried = "Feed #11 is buried."
+        #expect(await runs.perform(.setCadence(feedId: 11, .daily)) == .failed(RunFailure(exitCode: 2, lastStderrLine: buried)))
+        #expect(runs.banner == Banner(message: buried, showLog: false))
+    }
+
+    /// The edition event reaches the caller; the run counts feeds like a fetch and ends cleanly.
+    @Test func an_edition_build_reports_its_edition_and_tells_the_observations() async throws {
+        let stub = try Stub("""
+            echo '{"event":"started","total":1}'
+            echo '{"event":"feed_done","feed_id":1,"title":"A","error":null}'
+            echo '{"event":"finished"}'
+            echo '{"event":"edition","id":4,"entries":2,"front":1,"week":0,"wire":1,"overflow":5,"unreachable":0}'
+            """)
+        let runs = RunCoordinator(cli: stub.cli)
+        var notices = 0
+        runs.onDatabaseChange = { notices += 1 }
+        var events: [EngineEvent] = []
+        #expect(await runs.perform(.buildEdition()) { events.append($0) } == .succeeded)
+        #expect(events.last == .edition(id: 4, entries: 2, overflow: 5, unreachable: 0))
+        #expect(runs.progress == nil && runs.banner == nil && !runs.isLongRunActive)
+        #expect(notices >= 1)
     }
 
     @Test func extraction_failure_stays_out_of_the_banner() async throws {

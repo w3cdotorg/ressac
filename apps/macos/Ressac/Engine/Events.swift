@@ -29,14 +29,21 @@ enum EngineEvent: Decodable, Sendable, Equatable {
     case extracted(entryId: Int64, ok: Bool, error: String?)
     case decided(feedId: Int64, decision: String)
     case undone(feedId: Int64?)
+    /// The edition `edition build` wrote (the core's `Event::Edition`); `front`, `week` and
+    /// `wire` are read from the database by the Journal, not from here.
+    case edition(id: Int64, entries: Int, overflow: Int, unreachable: Int)
+    /// `feed cadence`: the feed's effective group and whether Clément set it.
+    case cadence(feedId: Int64, group: String, isOverride: Bool)
     /// A JSON object this build does not know (for example the `import --json` report,
     /// which has no `event` key). Holds the raw line.
     case unknown(String)
 
     private enum CodingKeys: String, CodingKey {
         case event, total, title, error, failed, attempted, what, found, summary, ok, decision
+        case id, entries, overflow, unreachable, group
         case feedId = "feed_id"
         case entryId = "entry_id"
+        case isOverride = "override"
     }
 
     private struct UnknownTag: Error {}
@@ -70,6 +77,14 @@ enum EngineEvent: Decodable, Sendable, Equatable {
                 feedId: try c.decode(Int64.self, forKey: .feedId), decision: try c.decode(String.self, forKey: .decision))
         case "undone":
             self = .undone(feedId: try c.decodeIfPresent(Int64.self, forKey: .feedId))
+        case "edition":
+            self = .edition(
+                id: try c.decode(Int64.self, forKey: .id), entries: try c.decode(Int.self, forKey: .entries),
+                overflow: try c.decode(Int.self, forKey: .overflow), unreachable: try c.decode(Int.self, forKey: .unreachable))
+        case "cadence":
+            self = .cadence(
+                feedId: try c.decode(Int64.self, forKey: .feedId), group: try c.decode(String.self, forKey: .group),
+                isOverride: try c.decode(Bool.self, forKey: .isOverride))
         default:
             throw UnknownTag()
         }

@@ -14,6 +14,8 @@ enum GardenPage {
             /// A feed row, clickable.
             case feed(Int64)
             case text, blank
+            /// Under the rhythm line: where `GardenInspectorPage` draws the override rows.
+            case rhythm
         }
 
         var id: String
@@ -154,7 +156,7 @@ enum GardenPage {
     /// The garden inspector as a teletext page `cells` wide (spec §8): name and folder path, the
     /// status in double height, then evidence, remarks, links, redirects and the fetch log.
     static func inspectorLines(_ row: GardenRow?, log: [FetchLogRow], cells: Int,
-                               timeZone: TimeZone = .current) -> [Line] {
+                               timeZone: TimeZone = .current, cadence: CadenceRow? = nil, now: Date = Date()) -> [Line] {
         guard cells > 0 else { return [] }
         var lines: [Line] = []
 
@@ -212,6 +214,13 @@ enum GardenPage {
         if let reason = row.reason {
             paragraph(reason, color: .white)
         }
+        // The rhythm (sub-project 3): the native inspector's line, then the override rows'
+        // anchor. Not for a buried feed, which has no rhythm group.
+        if let cadence, !buried {
+            blank()
+            labeled("Rhythm", GardenModel.rhythmText(cadence, now: now))
+            lines.append(Line(id: "inspector-rhythm", role: .rhythm, cells: .blank(cells)))
+        }
         if let bullets = row.evidence?.bullets, !bullets.isEmpty {
             blank()
             heading("Evidence", .green)
@@ -258,6 +267,36 @@ enum GardenPage {
             paragraph(GardenModel.outcome(of: entry), color: .white, lead: (date + "  ", .cyan), spokenLead: "\(date), ")
         }
         return lines
+    }
+
+    /// One row of the rhythm override (spec §8, Inspector): `nil` is Auto.
+    struct CadenceChoice: Identifiable, Equatable, Sendable {
+        var group: CadenceGroup?
+        var line: Line
+        var id: String { line.id }
+    }
+
+    /// The observed rhythm row, only while it is the selected feed's: a selection change leaves the
+    /// previous feed's row in place until the new observation lands, and it must not be drawn or clicked.
+    static func cadence(_ row: CadenceRow?, forSelected feedId: Int64?) -> CadenceRow? {
+        guard let row, row.feedId == feedId else { return nil }
+        return row
+    }
+
+    /// `AUTO`, then the five groups, one row each, cyan; the choice in force (Auto unless the feed
+    /// is overridden) in reverse video, black on cyan. Every row is exactly `cells` wide.
+    static func cadenceChoices(_ cadence: CadenceRow, cells: Int) -> [CadenceChoice] {
+        let width = max(0, cells)
+        let choices: [CadenceGroup?] = [nil] + CadenceGroup.allCases.map { Optional($0) }
+        return choices.map { group in
+            let title = group?.title ?? "Auto"
+            let current = cadence.isOverride ? group == cadence.effective : group == nil
+            let line = CellLine([CellSpan(" " + title.uppercased(), cells: width, foreground: .cyan)],
+                                accessibilityText: current ? "\(title), current" : title)
+            return CadenceChoice(group: group, line: Line(id: "cadence-\(group?.rawValue ?? "auto")", role: .text,
+                                                          cells: current ? line.reversed(.black, on: .cyan) : line,
+                                                          isSelected: current))
+        }
     }
 
     /// Greedy word wrap into rows of at most `cells` characters; a word longer than a row (a URL)

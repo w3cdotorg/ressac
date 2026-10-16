@@ -1,5 +1,7 @@
 //! Crate-wide error type. Per-feed fetch failures are data (`model::ErrorKind`), not errors.
 
+use crate::model::FeedId;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("database error: {0}")]
@@ -28,6 +30,13 @@ pub enum Error {
     PageTaken { page: u16 },
     #[error("No {kind} #{id}.")]
     UnknownPageTarget { kind: &'static str, id: i64 },
+    #[error("No feed #{0}.")]
+    UnknownFeed(FeedId),
+    #[error("Feed #{0} is buried.")]
+    FeedBuried(FeedId),
+    /// Phase 2b's refusal; declared here because Phase 2b's five files are taken.
+    #[error("An edition was already built this morning.")]
+    EditionNotDue,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

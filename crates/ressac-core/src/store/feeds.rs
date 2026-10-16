@@ -4,10 +4,11 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
+use serde::Serialize;
 
 use super::Store;
-use crate::error::Result;
-use crate::model::{FeedId, FolderId, ts};
+use crate::error::{Error, Result};
+use crate::model::{CadenceGroup, FeedId, FolderId, ts};
 use crate::opml::Outline;
 use crate::url_key::url_key;
 
@@ -51,6 +52,31 @@ pub struct FolderRow {
     pub parent_id: Option<FolderId>,
     pub name: String,
     pub position: i64,
+}
+
+/// One feed's rhythm as the apps see it in `v_cadence`: the group in use, the computed one,
+/// and whether Clément forced it (spec §4, Override).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CadenceRow {
+    pub feed_id: FeedId,
+    pub effective_group: CadenceGroup,
+    pub computed_group: CadenceGroup,
+    pub is_override: bool,
+}
+
+/// A group name read from the database, or a conversion error naming the column.
+fn group_at(r: &Row<'_>, col: usize) -> rusqlite::Result<Option<CadenceGroup>> {
+    let name: Option<String> = r.get(col)?;
+    name.map(|n| {
+        CadenceGroup::parse(&n).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                col,
+                rusqlite::types::Type::Text,
+                format!("unknown rhythm group {n:?}").into(),
+            )
+        })
+    })
+    .transpose()
 }
 
 const FEED_COLUMNS: &str = "id, folder_id, position, title, xml_url, xml_url_original, html_url, url_key, \
@@ -139,6 +165,51 @@ impl Store {
             [id],
             feed_row,
         )?)
+    }
+
+    /// Forces a feed's rhythm group, or clears the override (`None`). Refuses an unknown
+    /// feed and a buried one; nothing is written then. Never cleared automatically.
+    pub fn set_cadence_override(&self, feed_id: FeedId, group: Option<CadenceGroup>) -> Result<()> {
+        let tx = self.write_tx()?;
+        let state: Option<String> = tx
+            .query_row("SELECT state FROM feed WHERE id = ?1", [feed_id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        match state.as_deref() {
+            None => return Err(Error::UnknownFeed(feed_id)),
+            Some("active") => {}
+            Some(_) => return Err(Error::FeedBuried(feed_id)),
+        }
+        tx.execute(
+            "UPDATE feed SET cadence_override = ?2 WHERE id = ?1",
+            params![feed_id, group.map(CadenceGroup::as_str)],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A feed's rhythm, diagnosed or not (computed `Silent` without a diagnosis).
+    pub fn cadence_row(&self, feed_id: FeedId) -> Result<CadenceRow> {
+        let row = self
+            .conn()
+            .query_row(
+                "SELECT d.cadence_override, h.cadence_group FROM feed d \
+                 LEFT JOIN feed_health h ON h.feed_id = d.id WHERE d.id = ?1",
+                [feed_id],
+                |r| Ok((group_at(r, 0)?, group_at(r, 1)?)),
+            )
+            .optional()?;
+        let Some((forced, computed)) = row else {
+            return Err(Error::UnknownFeed(feed_id));
+        };
+        let computed = computed.unwrap_or_default();
+        Ok(CadenceRow {
+            feed_id,
+            effective_group: forced.unwrap_or(computed),
+            computed_group: computed,
+            is_override: forced.is_some(),
+        })
     }
 
     pub fn folders(&self) -> Result<Vec<FolderRow>> {
@@ -289,7 +360,7 @@ fn import_level(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Action, Decision, Status};
+    use crate::model::{Action, Cadence, CadenceGroup, Decision, Diagnosis, Evidence, Status};
     use crate::opml;
 
     const FIXTURE: &str = include_str!("../../../../tests/fixtures/vienna-like.opml");
@@ -573,5 +644,115 @@ mod tests {
             .import_outlines(&opml::parse(extra).unwrap(), true, now())
             .unwrap();
         assert_eq!(pages(&store), before);
+    }
+
+    fn diagnosed(store: &Store, feed_id: FeedId, group: CadenceGroup) {
+        let d = Diagnosis {
+            status: Status::Alive,
+            reason: "r".into(),
+            evidence: Evidence::default(),
+            remarks: vec![],
+            action: None,
+            hijack_score: 0.0,
+            cadence: Cadence {
+                group,
+                ..Cadence::default()
+            },
+        };
+        store
+            .save_diagnoses(&HashMap::from([(feed_id, d)]), now())
+            .unwrap();
+    }
+
+    #[test]
+    fn an_override_wins_until_cleared_and_survives_a_new_diagnosis() {
+        let (store, _) = imported();
+        diagnosed(&store, 1, CadenceGroup::Weekly);
+        store
+            .set_cadence_override(1, Some(CadenceGroup::Daily))
+            .unwrap();
+        assert_eq!(
+            store.cadence_row(1).unwrap(),
+            CadenceRow {
+                feed_id: 1,
+                effective_group: CadenceGroup::Daily,
+                computed_group: CadenceGroup::Weekly,
+                is_override: true,
+            }
+        );
+        // The next refresh reclassifies the feed; the override is never cleared on its own.
+        diagnosed(&store, 1, CadenceGroup::Rare);
+        let row = store.cadence_row(1).unwrap();
+        assert_eq!(
+            (row.effective_group, row.computed_group, row.is_override),
+            (CadenceGroup::Daily, CadenceGroup::Rare, true)
+        );
+        let effective: String = store
+            .conn()
+            .query_row(
+                "SELECT effective_group FROM v_cadence WHERE feed_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(effective, "daily");
+        store.set_cadence_override(1, None).unwrap();
+        assert_eq!(
+            store.cadence_row(1).unwrap(),
+            CadenceRow {
+                feed_id: 1,
+                effective_group: CadenceGroup::Rare,
+                computed_group: CadenceGroup::Rare,
+                is_override: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_feed_without_a_diagnosis_reads_as_silent() {
+        let (store, _) = imported();
+        assert_eq!(
+            store.cadence_row(2).unwrap(),
+            CadenceRow {
+                feed_id: 2,
+                effective_group: CadenceGroup::Silent,
+                computed_group: CadenceGroup::Silent,
+                is_override: false,
+            }
+        );
+        store
+            .set_cadence_override(2, Some(CadenceGroup::Rare))
+            .unwrap();
+        assert_eq!(
+            store.cadence_row(2).unwrap().effective_group,
+            CadenceGroup::Rare
+        );
+    }
+
+    #[test]
+    fn the_override_refuses_an_unknown_or_buried_feed_and_writes_nothing() {
+        let (store, _) = imported();
+        let err = store
+            .set_cadence_override(999, Some(CadenceGroup::Daily))
+            .unwrap_err();
+        assert!(matches!(err, Error::UnknownFeed(999)), "{err:?}");
+        assert_eq!(err.to_string(), "No feed #999.");
+        assert!(matches!(
+            store.cadence_row(999).unwrap_err(),
+            Error::UnknownFeed(999)
+        ));
+        store
+            .conn()
+            .execute("UPDATE feed SET state = 'buried' WHERE id = 3", [])
+            .unwrap();
+        let err = store
+            .set_cadence_override(3, Some(CadenceGroup::Daily))
+            .unwrap_err();
+        assert!(matches!(err, Error::FeedBuried(3)), "{err:?}");
+        assert_eq!(err.to_string(), "Feed #3 is buried.");
+        assert!(
+            !store.cadence_row(3).unwrap().is_override,
+            "nothing written"
+        );
     }
 }

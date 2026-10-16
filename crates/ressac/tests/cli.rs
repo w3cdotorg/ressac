@@ -233,6 +233,11 @@ fn commands_on_an_empty_store_hint_at_import() {
         &["garden", "apply-safe"],
         &["page", "list"],
         &["page", "set", "feed", "1", "300"],
+        &["edition", "build"],
+        &["--json", "edition", "build"],
+        &["edition", "show"],
+        &["feed", "cadence", "1", "daily"],
+        &["--json", "feed", "cadence", "1", "auto"],
     ] {
         let out = ressac(home.path(), args);
         assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
@@ -257,6 +262,14 @@ fn usage_errors_exit_2() {
         &["page"],
         &["page", "set", "entry", "1", "300"],
         &["page", "set", "feed", "1", "70000"],
+        &["edition"],
+        &["edition", "frobnicate"],
+        &["edition", "build", "--cap-wire", "x"],
+        &["edition", "build", "--cap-week", "-1"],
+        &["feed"],
+        &["feed", "cadence", "1"],
+        &["feed", "cadence", "1", "sometimes"],
+        &["feed", "cadence", "x", "daily"],
     ] {
         assert_eq!(ressac(home.path(), args).status.code(), Some(2), "{args:?}");
     }
@@ -591,7 +604,7 @@ fn migrate_reports_the_schema_version() {
     let home = tempfile::tempdir().unwrap();
     let text = ressac(home.path(), &["migrate"]);
     assert!(text.status.success(), "{text:?}");
-    assert_eq!(stdout(&text), "Schema version 3.\n");
+    assert_eq!(stdout(&text), "Schema version 4.\n");
     assert!(home.path().join("db.sqlite").exists());
     let json = ressac(home.path(), &["--json", "migrate"]);
     assert!(json.status.success(), "{json:?}");
@@ -613,6 +626,12 @@ fn page_list_prints_reserved_pages_then_every_folder_and_feed() {
          101 reserved - Unread\n\
          102 reserved - Today\n\
          103 reserved - Starred\n\
+         104 reserved - Journal\n\
+         105 reserved - Daily\n\
+         106 reserved - Weekly\n\
+         107 reserved - Monthly\n\
+         108 reserved - Rare\n\
+         109 reserved - Silent\n\
          800 reserved - Needs triage\n\
          801 reserved - All feeds\n\
          802 reserved - Cemetery\n\
@@ -640,13 +659,13 @@ fn page_list_prints_reserved_pages_then_every_folder_and_feed() {
     let json = ressac(home.path(), &["--json", "page", "list"]);
     assert!(json.status.success(), "{json:?}");
     let lines = json_lines(&json);
-    assert_eq!(lines.len(), 26);
+    assert_eq!(lines.len(), 32);
     assert_eq!(
         lines[0],
         json!({"event": "page", "page": 100, "kind": "reserved", "id": null, "title": "Index", "parent_page": null})
     );
     assert_eq!(
-        lines[11],
+        lines[17],
         json!({"event": "page", "page": 203, "kind": "feed", "id": 2, "title": "Orange Drenka", "parent_page": 202})
     );
     assert!(lines.iter().all(|l| l["event"] == "page"));
@@ -703,7 +722,7 @@ fn page_set_refusals_exit_2_and_write_nothing() {
         ),
         (
             &["page", "set", "feed", "2", "109"],
-            "Page 109 is not between 110 and 799.\n",
+            "Page 109 is reserved.\n",
         ),
         (
             &["page", "set", "feed", "2", "201"],
@@ -748,4 +767,417 @@ fn page_commands_exit_1_on_a_database_error() {
             "{out:?}"
         );
     }
+}
+
+/// One RSS item dated `ago` before now.
+fn dated_item(guid: &str, title: &str, ago: chrono::Duration) -> String {
+    let date = (chrono::Utc::now() - ago).to_rfc2822();
+    format!("<item><guid>{guid}</guid><title>{title}</title><pubDate>{date}</pubDate></item>")
+}
+
+/// Three top-level feeds with a known rhythm, imported but not fetched: Rare (#1, page 110),
+/// Weekly (#2, 111) and Wire (#3, 112). See Task 3a.2 for the edition they give.
+async fn edition_home(server: &MockServer) -> tempfile::TempDir {
+    use chrono::Duration;
+    let feeds = [
+        (
+            "Rare",
+            "/rare.xml",
+            dated_item("r1", "Rare news", Duration::hours(20))
+                + &dated_item("r0", "Rare old", Duration::days(100)),
+        ),
+        (
+            "Weekly",
+            "/weekly.xml",
+            [1, 6, 11, 16]
+                .iter()
+                .map(|d| {
+                    dated_item(
+                        &format!("w{d}"),
+                        &format!("Weekly {d}d"),
+                        Duration::days(*d),
+                    )
+                })
+                .collect::<String>(),
+        ),
+        (
+            "Wire",
+            "/wire.xml",
+            [1, 3, 5]
+                .iter()
+                .map(|h| dated_item(&format!("h{h}"), &format!("Wire {h}h"), Duration::hours(*h)))
+                .collect::<String>(),
+        ),
+    ];
+    let base = server.uri();
+    let mut outlines = String::new();
+    for (title, at, items) in &feeds {
+        Mock::given(method("GET"))
+            .and(path(*at))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(channel(title, items), "application/rss+xml"),
+            )
+            .mount(server)
+            .await;
+        outlines.push_str(&format!(r#"<outline text="{title}" xmlUrl="{base}{at}"/>"#));
+    }
+    let home = tempfile::tempdir().unwrap();
+    let opml = home.path().join("edition.opml");
+    std::fs::write(&opml, format!("<opml><body>{outlines}</body></opml>")).unwrap();
+    let import = ressac_async(home.path(), &["import", opml.to_str().unwrap()]).await;
+    assert!(import.status.success(), "{import:?}");
+    home
+}
+
+#[tokio::test]
+async fn edition_build_composes_once_a_morning() {
+    let server = MockServer::start().await;
+    let home = edition_home(&server).await;
+
+    let built = ressac_async(home.path(), &["--json", "edition", "build"]).await;
+    assert!(built.status.success(), "{built:?}");
+    let lines = json_lines(&built);
+    assert_eq!(lines.first().unwrap()["event"], "started");
+    assert!(lines.iter().any(|l| l["event"] == "feed_done"));
+    assert_eq!(
+        lines.last().unwrap(),
+        &json!({"event": "edition", "id": 1, "entries": 4, "front": 1, "week": 2,
+                "wire": 1, "overflow": 2, "unreachable": 0})
+    );
+
+    let again = ressac_async(home.path(), &["edition", "build"]).await;
+    assert_eq!(again.status.code(), Some(2), "{again:?}");
+    assert_eq!(
+        stderr(&again),
+        "An edition was already built this morning.\n"
+    );
+    assert!(again.stdout.is_empty(), "refused before any refresh");
+
+    // Same window, other caps: the wire keeps all three entries of Wire.
+    let rebuilt = ressac_async(
+        home.path(),
+        &["edition", "build", "--rebuild", "--cap-wire", "3"],
+    )
+    .await;
+    assert!(rebuilt.status.success(), "{rebuilt:?}");
+    let text = stdout(&rebuilt);
+    assert!(
+        text.contains(": 6 entries (front 1, week 2, wire 3)."),
+        "{text}"
+    );
+    assert!(
+        text.contains("run `ressac garden` to triage"),
+        "the refresh summary comes first: {text}"
+    );
+}
+
+#[tokio::test]
+async fn edition_show_prints_sections_overflow_and_header() {
+    let server = MockServer::start().await;
+    let home = edition_home(&server).await;
+    let built = ressac_async(home.path(), &["edition", "build"]).await;
+    assert!(built.status.success(), "{built:?}");
+
+    let text = ressac_async(home.path(), &["edition", "show"]).await;
+    assert!(text.status.success(), "{text:?}");
+    let out = stdout(&text);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[..lines.len() - 1],
+        [
+            "Front Page",
+            "1 110 Rare news",
+            "This Week",
+            "2 111 Weekly 1d",
+            "3 111 Weekly 6d",
+            "The Wire",
+            "4 112 Wire 1h",
+            "+2 more in Wire",
+        ]
+    );
+    assert!(
+        lines.last().unwrap().ends_with(" · 4 entries · 0 read"),
+        "{out}"
+    );
+
+    let json = ressac_async(home.path(), &["--json", "edition", "show"]).await;
+    assert!(json.status.success(), "{json:?}");
+    let rows = json_lines(&json);
+    assert_eq!(rows.len(), 5, "4 entries, then 1 overflow");
+    assert_eq!(rows[0]["event"], "edition_entry");
+    assert_eq!(rows[0]["edition_id"], 1);
+    assert_eq!(rows[0]["section"], "front");
+    assert_eq!(rows[0]["rank"], 1);
+    assert_eq!(rows[0]["feed_id"], 1);
+    assert_eq!(rows[0]["feed_title"], "Rare");
+    assert_eq!(rows[0]["title"], "Rare news");
+    assert_eq!(rows[0]["read_at"], Value::Null);
+    assert_eq!(rows[0]["unreachable"], 0);
+    for key in [
+        "built_at",
+        "window_start",
+        "window_end",
+        "published_at",
+        "entry_id",
+    ] {
+        assert!(!rows[0][key].is_null(), "{key}");
+    }
+    assert_eq!(rows[3]["section"], "wire");
+    assert_eq!(rows[3]["title"], "Wire 1h");
+    assert_eq!(
+        rows[4],
+        json!({"event": "edition_overflow", "edition_id": 1, "section": "wire",
+               "feed_id": 3, "feed_title": "Wire", "page": 112, "hidden_count": 2})
+    );
+}
+
+#[test]
+fn edition_show_before_any_edition() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let text = ressac(home.path(), &["edition", "show"]);
+    assert_eq!(text.status.code(), Some(0), "{text:?}");
+    assert_eq!(stdout(&text), "No edition yet.\n");
+    let json = ressac(home.path(), &["--json", "edition", "show"]);
+    assert_eq!(json.status.code(), Some(0), "{json:?}");
+    assert!(json.stdout.is_empty(), "an empty NDJSON stream");
+}
+
+/// Four feeds on a port nobody listens to: every fetch fails to connect, so the refresh's
+/// network guard (4 attempts at least, more than half network failures) calls the network
+/// unreachable, and no edition is written (spec §9).
+#[test]
+fn edition_build_offline_writes_nothing() {
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let home = tempfile::tempdir().unwrap();
+    let outlines: String = (1..=4)
+        .map(|i| format!(r#"<outline text="F{i}" xmlUrl="http://127.0.0.1:{port}/f{i}.xml"/>"#))
+        .collect();
+    let opml = home.path().join("closed.opml");
+    std::fs::write(&opml, format!("<opml><body>{outlines}</body></opml>")).unwrap();
+    assert!(
+        ressac(home.path(), &["import", opml.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    let out = ressac(home.path(), &["edition", "build"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        stderr(&out).ends_with("The network is unreachable: no edition built.\n"),
+        "{out:?}"
+    );
+    assert_eq!(
+        stdout(&ressac(home.path(), &["edition", "show"])),
+        "No edition yet.\n"
+    );
+
+    let json = ressac(home.path(), &["--json", "edition", "build"]);
+    assert_eq!(
+        json.status.code(),
+        Some(2),
+        "still due, still offline: {json:?}"
+    );
+    assert!(
+        json_lines(&json)
+            .iter()
+            .any(|l| l["event"] == "network_unreachable"),
+        "{json:?}"
+    );
+    assert!(!json_lines(&json).iter().any(|l| l["event"] == "edition"));
+}
+
+#[test]
+fn edition_commands_exit_1_on_a_database_error() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("db.sqlite"), b"this is not a database").unwrap();
+    for args in [&["edition", "show"][..], &["edition", "build"]] {
+        let out = ressac(home.path(), args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+        assert!(
+            stderr(&out).starts_with("error: cannot open database"),
+            "{out:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn edition_show_and_page_list_neutralise_terminal_escapes() {
+    let server = MockServer::start().await;
+    let body = r#"{"version":"https://jsonfeed.org/version/1.1","title":"Feed \u001b[31mred","items":[{"id":"1","title":"Hi \u001b]0;pwn\u0007 \u009b2J","content_text":"x","date_published":"2099-01-01T00:00:00Z"}]}"#;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/feed+json"))
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let opml = home.path().join("j.opml");
+    std::fs::write(
+        &opml,
+        format!(
+            r#"<opml><body><outline text="J" xmlUrl="{}/j.json"/></body></opml>"#,
+            server.uri()
+        ),
+    )
+    .unwrap();
+    assert!(
+        ressac_async(home.path(), &["import", opml.to_str().unwrap()])
+            .await
+            .status
+            .success()
+    );
+    assert!(
+        ressac_async(home.path(), &["edition", "build"])
+            .await
+            .status
+            .success()
+    );
+    for args in [&["edition", "show"][..], &["page", "list"]] {
+        let out = stdout(&ressac_async(home.path(), args).await);
+        if args[0] == "edition" {
+            assert!(out.contains("Hi \u{FFFD}]0;pwn"), "{out:?}");
+        }
+        assert!(
+            !out.chars().any(|c| c.is_control() && c != '\n'),
+            "{args:?}: {out:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn feed_cadence_forces_a_group_and_the_edition_follows() {
+    let server = MockServer::start().await;
+    let home = edition_home(&server).await;
+    let fetched = ressac_async(home.path(), &["fetch"]).await;
+    assert!(fetched.status.success(), "{fetched:?}");
+
+    let forced = ressac_async(home.path(), &["feed", "cadence", "3", "weekly"]).await;
+    assert!(forced.status.success(), "{forced:?}");
+    assert_eq!(stdout(&forced), "#3 Weekly (set by you)\n");
+
+    let auto = ressac_async(home.path(), &["--json", "feed", "cadence", "3", "auto"]).await;
+    assert!(auto.status.success(), "{auto:?}");
+    assert_eq!(
+        json_lines(&auto),
+        [json!({"event": "cadence", "feed_id": 3, "group": "daily",
+                "computed": "daily", "override": false})]
+    );
+
+    let rare_to_daily =
+        ressac_async(home.path(), &["--json", "feed", "cadence", "1", "daily"]).await;
+    assert_eq!(
+        json_lines(&rare_to_daily),
+        [json!({"event": "cadence", "feed_id": 1, "group": "daily",
+                "computed": "rare", "override": true})]
+    );
+    assert_eq!(
+        stdout(&ressac_async(home.path(), &["feed", "cadence", "2", "auto"]).await),
+        "#2 Weekly (auto)\n"
+    );
+
+    // Rare forced to Daily leaves the front page and joins the wire, capped to one entry.
+    let built = ressac_async(home.path(), &["--json", "edition", "build"]).await;
+    assert!(built.status.success(), "{built:?}");
+    assert_eq!(
+        json_lines(&built).last().unwrap(),
+        &json!({"event": "edition", "id": 1, "entries": 4, "front": 0, "week": 2,
+                "wire": 2, "overflow": 2, "unreachable": 0})
+    );
+    let shown = stdout(&ressac_async(home.path(), &["edition", "show"]).await);
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(
+        lines[..lines.len() - 1],
+        [
+            "This Week",
+            "1 111 Weekly 1d",
+            "2 111 Weekly 6d",
+            "The Wire",
+            "3 110 Rare news",
+            "4 112 Wire 1h",
+            "+2 more in Wire",
+        ]
+    );
+
+    for (args, message) in [
+        (&["feed", "cadence", "99", "daily"][..], "No feed #99.\n"),
+        (
+            &["--json", "feed", "cadence", "99", "auto"],
+            "No feed #99.\n",
+        ),
+    ] {
+        let out = ressac_async(home.path(), args).await;
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert_eq!(stderr(&out), message, "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    let buried = ressac_async(home.path(), &["garden", "decide", "2", "bury"]).await;
+    assert!(buried.status.success(), "{buried:?}");
+    let refused = ressac_async(home.path(), &["feed", "cadence", "2", "daily"]).await;
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    assert_eq!(stderr(&refused), "Feed #2 is buried.\n");
+    assert!(refused.stdout.is_empty());
+}
+
+#[test]
+fn feed_cadence_exits_1_on_a_database_error() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("db.sqlite"), b"this is not a database").unwrap();
+    let out = ressac(home.path(), &["feed", "cadence", "1", "daily"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr(&out).starts_with("error: cannot open database"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn page_commands_know_the_journal_and_rhythm_pages() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let run = |args: &[&str]| ressac(home.path(), args);
+
+    let list = stdout(&run(&["page", "list"]));
+    let reserved: Vec<&str> = list.lines().take(14).collect();
+    assert_eq!(
+        reserved,
+        [
+            "100 reserved - Index",
+            "101 reserved - Unread",
+            "102 reserved - Today",
+            "103 reserved - Starred",
+            "104 reserved - Journal",
+            "105 reserved - Daily",
+            "106 reserved - Weekly",
+            "107 reserved - Monthly",
+            "108 reserved - Rare",
+            "109 reserved - Silent",
+            "800 reserved - Needs triage",
+            "801 reserved - All feeds",
+            "802 reserved - Cemetery",
+            "899 reserved - Guide",
+        ]
+    );
+    let json = json_lines(&run(&["--json", "page", "list"]));
+    assert_eq!(
+        json[4],
+        json!({"event": "page", "page": 104, "kind": "reserved", "id": null,
+               "title": "Journal", "parent_page": null})
+    );
+
+    for page in 104..=109 {
+        for kind in ["feed", "folder"] {
+            let page_arg = page.to_string();
+            let out = run(&["page", "set", kind, "2", &page_arg]);
+            assert_eq!(out.status.code(), Some(2), "{kind} {page}: {out:?}");
+            assert_eq!(stderr(&out), format!("Page {page} is reserved.\n"));
+            assert!(out.stdout.is_empty());
+        }
+    }
+    assert!(
+        stdout(&run(&["page", "list"])).contains("203 feed 2 Orange Drenka\n"),
+        "unchanged"
+    );
 }

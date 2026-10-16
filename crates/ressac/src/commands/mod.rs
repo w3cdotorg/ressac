@@ -1,6 +1,8 @@
 //! The command handlers. Each one runs a subcommand and returns the process's exit code;
 //! `main` only parses the command line and dispatches here.
 
+pub mod edition;
+pub mod feed;
 pub mod garden;
 pub mod network;
 

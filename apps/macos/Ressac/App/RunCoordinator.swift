@@ -43,6 +43,10 @@ enum RunOutcome: Equatable, Sendable {
     @ObservationIgnored private var bannerSetDuringRun = false
     private static let log = Logger(subsystem: "org.w3cdotorg.ressac", category: "runs")
 
+    /// The progress label of `ressac edition build` (spec §8): the refresh it starts with is the
+    /// morning edition being made.
+    static let editionProgressLabel = "Building this morning's edition…"
+
     init(cli: RessacCLI) {
         self.cli = cli
     }
@@ -92,7 +96,7 @@ enum RunOutcome: Equatable, Sendable {
         do {
             for try await event in await cli.run(request) {
                 if request.kind == .long {
-                    apply(event)
+                    apply(event, request: request)
                 }
                 onEvent?(event)
                 noteChange(after: event)
@@ -124,10 +128,11 @@ enum RunOutcome: Equatable, Sendable {
         return outcome
     }
 
-    private func apply(_ event: EngineEvent) {
+    private func apply(_ event: EngineEvent, request: RunRequest) {
         switch event {
         case let .started(total):
-            progress = RunProgress(done: 0, total: total, label: "Fetching feeds")
+            let isEdition = request.arguments.starts(with: ["edition", "build"])
+            progress = RunProgress(done: 0, total: total, label: isEdition ? Self.editionProgressLabel : "Fetching feeds")
         case .feedDone, .extracted:
             progress?.done += 1
         case let .probing(what, total):
@@ -138,14 +143,14 @@ enum RunOutcome: Equatable, Sendable {
                 message: "The network looks unreachable: \(failed) of \(attempted) feeds could not connect.",
                 showLog: false)
             bannerSetDuringRun = true
-        case .waybackDone, .finished, .decided, .undone, .unknown:
+        case .waybackDone, .finished, .decided, .undone, .edition, .cadence, .unknown:
             break
         }
     }
 
     private func noteChange(after event: EngineEvent) {
         switch event {
-        case .feedDone, .extracted, .decided, .undone, .finished:
+        case .feedDone, .extracted, .decided, .undone, .finished, .edition, .cadence:
             if ContinuousClock.now - lastChangeNotice >= .seconds(1) {
                 lastChangeNotice = .now
                 onDatabaseChange?()

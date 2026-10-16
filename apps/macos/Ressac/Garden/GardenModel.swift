@@ -260,3 +260,85 @@ enum GardenModel {
         return "no response"
     }
 }
+
+/// How Garden › All Feeds groups its rows (spec §8): by status, as everywhere in the garden, or
+/// by publishing rhythm.
+enum GardenGrouping: String, CaseIterable, Sendable {
+    case status, rhythm
+
+    var title: String {
+        switch self {
+        case .status: "Status"
+        case .rhythm: "Rhythm"
+        }
+    }
+}
+
+// MARK: - Rhythm (spec §4, §8)
+
+extension GardenModel {
+    /// Section glyphs of the rhythm grouping; `nil` is a feed without a diagnosis yet.
+    static func rhythmGlyph(_ group: CadenceGroup?) -> String {
+        switch group {
+        case .daily: "⚡"
+        case .weekly: "📅"
+        case .monthly: "🌗"
+        case .rare: "✨"
+        case .silent: "💤"
+        case nil: "❔"
+        }
+    }
+
+    /// `v_cadence` rows keyed by feed, for the joins with the garden rows.
+    static func byFeed(_ rows: [CadenceRow]) -> [Int64: CadenceRow] {
+        Dictionary(rows.map { ($0.feedId, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// The All Feeds row label: "Daily", or "Daily*" when the group was set by hand. Nil for a
+    /// feed with no rhythm yet (not diagnosed, or buried).
+    static func rhythmLabel(_ cadence: CadenceRow?) -> String? {
+        guard let cadence else { return nil }
+        return cadence.isOverride ? "\(cadence.effective.title)*" : cadence.effective.title
+    }
+
+    /// "Rhythm: Daily · median 0.4 d · last entry 2 h ago", ending in " (set by you)" when the
+    /// group was set by hand.
+    static func rhythmLine(_ cadence: CadenceRow, now: Date) -> String {
+        "Rhythm: " + rhythmText(cadence, now: now)
+    }
+
+    /// The line without its "Rhythm: " label, shared with the Antiope inspector (phase 6c) so
+    /// that both looks say the same thing. A missing median or last entry leaves its part out.
+    static func rhythmText(_ cadence: CadenceRow, now: Date) -> String {
+        var parts = [cadence.effective.title]
+        if let median = cadence.medianIntervalDays {
+            parts.append(median < 10 ? String(format: "median %.1f d", median) : "median \(Int(median.rounded())) d")
+        }
+        if let last = cadence.lastEntryAt {
+            parts.append("last entry \(ago(last, now: now))")
+        }
+        return parts.joined(separator: " · ") + (cadence.isOverride ? " (set by you)" : "")
+    }
+
+    /// "45 min ago", "2 h ago" (under two days), "3 d ago" (under 60 days), then "13 mo ago".
+    static func ago(_ date: Date, now: Date) -> String {
+        let minutes = max(0, Int(now.timeIntervalSince(date) / 60))
+        if minutes < 60 { return "\(minutes) min ago" }
+        let hours = minutes / 60
+        if hours < 48 { return "\(hours) h ago" }
+        let days = hours / 24
+        if days < 60 { return "\(days) d ago" }
+        return "\(days / 30) mo ago"
+    }
+
+    /// All Feeds grouped by effective rhythm, Daily to Silent, then the feeds without one
+    /// ("Unchecked"); inside a group, the status sections' order (top folder, then title).
+    static func rhythmSections(_ rows: [GardenRow], cadence: [Int64: CadenceRow]) -> [Section] {
+        let groups: [CadenceGroup?] = CadenceGroup.allCases.map(Optional.some) + [nil]
+        return groups.compactMap { group in
+            let members = rows.filter { cadence[$0.feedId]?.effective == group }.sorted(by: rowOrder)
+            guard !members.isEmpty else { return nil }
+            return Section(id: group?.title ?? "Unchecked", glyph: rhythmGlyph(group), rows: members)
+        }
+    }
+}

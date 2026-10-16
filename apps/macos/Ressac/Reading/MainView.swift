@@ -13,6 +13,8 @@ struct MainView: View {
             Group {
                 if case let .garden(scope) = state.selection {
                     GardenTable(state: state, scope: scope)
+                } else if state.selection == .journal {
+                    JournalListView(state: state)
                 } else {
                     EntryListView(state: state)
                 }
@@ -43,10 +45,20 @@ struct MainView: View {
             }
             ToolbarItem {
                 if let progress = state.runs.progress {
-                    ProgressView(value: progress.fraction) { Text(progress.label) }
-                        .progressViewStyle(.linear)
-                        .frame(width: 140)
-                        .help(progress.label)
+                    let text = JournalLayout.progressText(progress)
+                    // The full text when it fits the pill, else the short one (acceptance, item 2).
+                    ProgressView(value: progress.fraction) {
+                        ViewThatFits(in: .horizontal) {
+                            Text(text)
+                            Text(JournalLayout.compactProgressText(progress))
+                        }
+                        .lineLimit(1)
+                        .monospacedDigit()
+                    }
+                    .progressViewStyle(.linear)
+                    .frame(width: JournalLayout.progressContentWidth(progress))
+                    .padding(.horizontal, JournalLayout.progressInset)
+                    .help(text)
                 } else {
                     Button("Refresh", systemImage: "arrow.clockwise") { state.refreshCurrent() }
                         .disabled(!state.canRefresh)
@@ -89,6 +101,7 @@ struct SidebarView: View {
     var body: some View {
         List(selection: $state.selection) {
             Section("Smart Lists") {
+                Label("Journal", systemImage: "newspaper").badge(state.sidebar.journalUnread).tag(Source.journal)
                 Label("Unread", systemImage: "circle.inset.filled").badge(state.sidebar.unread).tag(Source.unread)
                 Label("Today", systemImage: "sun.max").badge(state.sidebar.today).tag(Source.today)
                 Label("Starred", systemImage: "star").badge(state.sidebar.starred).tag(Source.starred)
@@ -96,6 +109,14 @@ struct SidebarView: View {
             Section("Feeds") {
                 OutlineGroup(state.sidebarTree, children: \.children) { node in
                     SidebarRow(node: node, state: state).tag(node.source)
+                }
+            }
+            Section("Rhythm") {
+                // Silent stays listed at zero: it is where feeds that stopped publishing end up.
+                ForEach(CadenceGroup.allCases, id: \.self) { group in
+                    Label(group.title, systemImage: group.symbol)
+                        .badge(state.sidebar.cadenceUnread[group] ?? 0)
+                        .tag(Source.cadence(group))
                 }
             }
             Section("Garden") {
@@ -193,5 +214,17 @@ struct EntryRowView: View {
             }
         }
         .padding(.vertical, 3)
+    }
+}
+
+private extension CadenceGroup {
+    var symbol: String {
+        switch self {
+        case .daily: "bolt"
+        case .weekly: "calendar"
+        case .monthly: "moon"
+        case .rare: "sparkles"
+        case .silent: "zzz"
+        }
     }
 }

@@ -73,10 +73,12 @@ struct AntiopeRootView: View {
         }
     }
 
-    /// The entry list, or P800–P802 in a Garden scope.
+    /// The entry list, P104's edition, or P800–P802 in a Garden scope.
     @ViewBuilder private var entriesColumn: some View {
         if case let .garden(scope) = state.selection {
             GardenEntryPage(scope: scope)
+        } else if state.selection == .journal {
+            JournalEntryPage()
         } else {
             EntryPageColumn()
         }
@@ -96,6 +98,8 @@ struct AntiopeRootView: View {
             SommairePage()
         case .guide:
             GuidePage()
+        case .endOfEdition:
+            EndOfEditionPage()
         }
     }
 }

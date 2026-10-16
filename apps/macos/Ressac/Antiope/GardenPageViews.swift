@@ -95,21 +95,37 @@ struct GardenEntryPage: View {
     }
 }
 
-/// The reader column of the garden pages: the selected feed's inspector as a teletext page.
+/// The reader column of the garden pages: the selected feed's inspector as a teletext page, with
+/// its rhythm and the six override rows (sub-project 3).
 struct GardenInspectorPage: View {
     @Environment(AppState.self) private var state
     @Environment(GardenStore.self) private var store
     @Environment(\.teletextSize) private var size
+    @State private var cadence: CadenceRow?
 
     var body: some View {
         let cell = TeletextFont.cell(forSize: size)
         GeometryReader { proxy in
-            let lines = GardenPage.inspectorLines(store.selectedRow(state), log: store.log,
-                                                  cells: Int(proxy.size.width / cell.width))
+            let cells = Int(proxy.size.width / cell.width)
+            let cadence = GardenPage.cadence(cadence, forSelected: state.selectedFeedId)
+            let lines = GardenPage.inspectorLines(store.selectedRow(state), log: store.log, cells: cells,
+                                                  cadence: cadence, now: Date())
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(lines) { line in
                         GardenLineView(line: line)
+                        if line.role == .rhythm, let cadence {
+                            ForEach(GardenPage.cadenceChoices(cadence, cells: cells)) { choice in
+                                Button {
+                                    state.setCadence(feedId: cadence.feedId, choice.group)
+                                } label: {
+                                    GardenLineView(line: choice.line)
+                                }
+                                .buttonStyle(.plain)
+                                .focusable(false)
+                                .accessibilityLabel(choice.line.cells.accessibilityText)
+                            }
+                        }
                     }
                 }
             }
@@ -118,6 +134,23 @@ struct GardenInspectorPage: View {
         .background(TeletextColor.black.color)
         .task(id: state.selectedFeedId) {
             await store.observeLog(feedId: state.selectedFeedId, app: state)
+        }
+        .task(id: state.selectedFeedId) {
+            await observeCadence(feedId: state.selectedFeedId)
+        }
+    }
+
+    /// The selected feed's row of `v_cadence`, live; nil for a buried feed (the view lists active
+    /// feeds only) or when nothing is selected. A failed read drops the rows, as the log does.
+    private func observeCadence(feedId: Int64?) async {
+        cadence = nil
+        guard let feedId else { return }
+        do {
+            for try await rows in Queries.cadenceRows().values(in: state.database.reader) {
+                cadence = GardenModel.byFeed(rows)[feedId]
+            }
+        } catch {
+            cadence = nil
         }
     }
 }
