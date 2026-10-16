@@ -221,6 +221,31 @@ fn children(
     items.into_iter().map(|(_, _, _, node)| node).collect()
 }
 
+/// One `v_entry` row read with `ROW_COLUMNS`, with its raw `published_at` text (the cursor).
+fn entry_row(r: &Row<'_>) -> rusqlite::Result<(EntryRow, String)> {
+    let published: String = r.get(6)?;
+    let row = EntryRow {
+        entry_id: r.get(0)?,
+        feed_id: r.get(1)?,
+        feed_title: r.get(2)?,
+        title: r.get(3)?,
+        author: r.get(4)?,
+        url: r.get(5)?,
+        published_at: parse_ts(&published).ok_or_else(|| bad_timestamp(6))?,
+        is_read: r.get(7)?,
+        is_starred: r.get(8)?,
+        has_fulltext: r.get(9)?,
+    };
+    Ok((row, published))
+}
+
+fn section_at(r: &Row<'_>, col: usize) -> rusqlite::Result<Section> {
+    let text: String = r.get(col)?;
+    Section::parse(&text).ok_or_else(|| {
+        rusqlite::Error::InvalidColumnType(col, "section".into(), rusqlite::types::Type::Text)
+    })
+}
+
 impl Store {
     /// The reader's sources column (spec §4, Sources). `today_start` is local midnight in UTC,
     /// computed by the caller from its zone.
@@ -293,6 +318,120 @@ impl Store {
             counts,
             tree: children(None, &folders, &feeds),
         })
+    }
+
+    /// The entries of `source` (spec §4, Entry lists): newest first, pages of `PAGE_SIZE`
+    /// strictly older than `after`; the Journal in rank order and whole.
+    pub fn entries(
+        &self,
+        source: Source,
+        filter: ListFilter,
+        after: Option<&ListCursor>,
+        today_start: DateTime<Utc>,
+    ) -> Result<EntryPage> {
+        let (mut list, args) = predicate(source, today_start);
+        if filter == ListFilter::Unread {
+            list.push_str(" AND NOT is_read");
+        }
+        self.page_of(&list, args, after, source == Source::Journal)
+    }
+
+    /// The rows of `list` (a `v_entry` condition and its arguments) and the counts of the
+    /// whole list. `ranked`: the latest edition's order, whole; else newest first, paged.
+    fn page_of(
+        &self,
+        list: &str,
+        args: Vec<Value>,
+        after: Option<&ListCursor>,
+        ranked: bool,
+    ) -> Result<EntryPage> {
+        let conn = self.conn();
+        let (total, unread): (i64, i64) = conn.query_row(
+            &format!("SELECT COUNT(*), COALESCE(SUM(NOT is_read), 0) FROM v_entry WHERE {list}"),
+            params_from_iter(args.iter()),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let mut bounded = list.to_string();
+        let mut bound_args = args;
+        let (order, limit) = if ranked {
+            (format!("{EDITION_RANK}, entry_id"), String::new())
+        } else {
+            if let Some(cursor) = after {
+                bounded.push_str(" AND (published_at, entry_id) < (?, ?)");
+                bound_args.push(Value::Text(cursor.published_at.clone()));
+                bound_args.push(Value::Integer(cursor.entry_id));
+            }
+            (
+                "published_at DESC, entry_id DESC".to_string(),
+                format!(" LIMIT {}", PAGE_SIZE + 1),
+            )
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ROW_COLUMNS} FROM v_entry WHERE {bounded} ORDER BY {order}{limit}"
+        ))?;
+        let mut rows = stmt
+            .query_map(params_from_iter(bound_args.iter()), entry_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let next = if !ranked && rows.len() > PAGE_SIZE {
+            rows.truncate(PAGE_SIZE);
+            rows.last().map(|(row, published)| ListCursor {
+                published_at: published.clone(),
+                entry_id: row.entry_id,
+            })
+        } else {
+            None
+        };
+        Ok(EntryPage {
+            rows: rows.into_iter().map(|(row, _)| row).collect(),
+            total: total as usize,
+            unread: unread as usize,
+            next,
+        })
+    }
+
+    /// The latest edition for the reader (spec §6, The Journal), `None` before the first one.
+    pub fn journal(&self) -> Result<Option<JournalView>> {
+        let Some(edition) = self.latest_edition()? else {
+            return Ok(None);
+        };
+        let conn = self.conn();
+        let items = conn
+            .prepare(
+                "SELECT v.entry_id, v.feed_id, v.feed_title, v.title, v.author, v.url, v.published_at, \
+                 v.is_read, v.is_starred, v.has_fulltext, ee.section, ee.rank \
+                 FROM edition_entry ee JOIN v_entry v ON v.entry_id = ee.entry_id \
+                 WHERE ee.edition_id = ?1 ORDER BY ee.rank",
+            )?
+            .query_map([edition.id], |r| {
+                Ok(JournalItem {
+                    row: entry_row(r)?.0,
+                    section: section_at(r, 10)?,
+                    rank: r.get(11)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let overflow = conn
+            .prepare(
+                "SELECT section, feed_id, feed_title, page, hidden_count FROM v_edition_overflow \
+                 WHERE feed_id IN (SELECT id FROM feed WHERE state = 'active') \
+                 ORDER BY CASE section WHEN 'front' THEN 0 WHEN 'week' THEN 1 ELSE 2 END, \
+                 page IS NULL, page, feed_id",
+            )?
+            .query_map([], |r| {
+                Ok(EditionOverflowRow {
+                    section: section_at(r, 0)?,
+                    feed_id: r.get(1)?,
+                    feed_title: r.get(2)?,
+                    page: r.get(3)?,
+                    hidden_count: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(JournalView {
+            edition,
+            items,
+            overflow,
+        }))
     }
 }
 
@@ -566,5 +705,154 @@ mod tests {
             SourceNodeKind::Feed { id: 9, .. }
         ));
         assert_eq!(snap.tree[0].unread, 0);
+    }
+
+    fn ids(page: &EntryPage) -> Vec<i64> {
+        page.rows.iter().map(|r| r.entry_id).collect()
+    }
+
+    #[test]
+    fn lists_are_newest_first_and_follow_their_source() {
+        let s = library();
+        let all = |src| ids(&s.entries(src, ListFilter::All, None, today()).unwrap());
+        assert_eq!(
+            all(Source::Unread),
+            [1, 4, 3],
+            "newest first; buried feed's entry 5 absent"
+        );
+        assert_eq!(all(Source::Today), [1, 4]);
+        assert_eq!(all(Source::Starred), [3, 2]);
+        assert_eq!(all(Source::Feed(1)), [1, 2]);
+        assert_eq!(
+            all(Source::Folder(1)),
+            [1, 3, 2],
+            "Infos and its subfolder Sub"
+        );
+        assert_eq!(all(Source::Cadence(CadenceGroup::Weekly)), [3]);
+        let unread = s
+            .entries(Source::Feed(1), ListFilter::Unread, None, today())
+            .unwrap();
+        assert_eq!(ids(&unread), [1]);
+        assert_eq!((unread.total, unread.unread), (1, 1));
+        let feed = s
+            .entries(Source::Feed(1), ListFilter::All, None, today())
+            .unwrap();
+        assert_eq!((feed.total, feed.unread, feed.next.clone()), (2, 1, None));
+        let row = &feed.rows[1];
+        assert_eq!(row.title.as_deref(), Some("Old news"));
+        assert!(row.is_read && row.is_starred && !row.has_fulltext);
+        assert_eq!(row.feed_title, "Feed 1");
+        assert_eq!(row.published_at, at("2026-10-14T06:00:00Z"));
+    }
+
+    #[test]
+    fn a_long_list_comes_in_pages_of_500() {
+        let s = Store::open_in_memory().unwrap();
+        add_feed(&s, 1, None, 0, None, "active", "daily");
+        for i in 0..(PAGE_SIZE as i64 + 2) {
+            let published =
+                (at("2026-10-01T00:00:00Z") + chrono::Duration::minutes(i)).to_rfc3339();
+            add_entry(&s, i + 1, 1, &format!("E{i}"), &published, false, false);
+        }
+        let first = s
+            .entries(Source::Feed(1), ListFilter::All, None, today())
+            .unwrap();
+        assert_eq!(first.rows.len(), PAGE_SIZE);
+        assert_eq!(first.total, PAGE_SIZE + 2);
+        assert_eq!(first.rows[0].entry_id, PAGE_SIZE as i64 + 2, "newest first");
+        let cursor = first.next.clone().expect("more rows remain");
+        assert_eq!(cursor.entry_id, 3);
+        let second = s
+            .entries(Source::Feed(1), ListFilter::All, Some(&cursor), today())
+            .unwrap();
+        assert_eq!(ids(&second), [2, 1]);
+        assert_eq!(second.next, None);
+        assert_eq!(second.total, PAGE_SIZE + 2, "counts cover the whole list");
+    }
+
+    #[test]
+    fn entries_published_at_the_same_time_page_by_id() {
+        let s = Store::open_in_memory().unwrap();
+        add_feed(&s, 1, None, 0, None, "active", "daily");
+        for i in 1..=(PAGE_SIZE as i64 + 1) {
+            add_entry(&s, i, 1, "Same", "2026-10-10T00:00:00Z", false, false);
+        }
+        let first = s
+            .entries(Source::Feed(1), ListFilter::All, None, today())
+            .unwrap();
+        let second = s
+            .entries(
+                Source::Feed(1),
+                ListFilter::All,
+                first.next.as_ref(),
+                today(),
+            )
+            .unwrap();
+        assert_eq!(
+            ids(&second),
+            [1],
+            "no row lost or repeated across the page boundary"
+        );
+    }
+
+    #[test]
+    fn the_journal_is_in_rank_order_and_leaves_buried_feeds_out() {
+        let s = library();
+        // Ranks differ from dates: 3 (2026-10-15) first, then 4, then 1; 5 is a buried feed's.
+        add_edition(
+            &s,
+            1,
+            &[
+                (3, "week", 1),
+                (5, "wire", 2),
+                (4, "front", 3),
+                (1, "wire", 4),
+            ],
+            &[(1, "wire", 12), (4, "wire", 3), (3, "front", 1)],
+        );
+        let list = s
+            .entries(Source::Journal, ListFilter::All, None, today())
+            .unwrap();
+        assert_eq!(ids(&list), [3, 4, 1]);
+        assert_eq!(list.next, None, "always whole");
+        let view = s.journal().unwrap().expect("an edition exists");
+        assert_eq!(view.edition.id, 1);
+        let items: Vec<(i64, Section, u32)> = view
+            .items
+            .iter()
+            .map(|i| (i.row.entry_id, i.section, i.rank))
+            .collect();
+        assert_eq!(
+            items,
+            [
+                (3, Section::Week, 1),
+                (4, Section::Front, 3),
+                (1, Section::Wire, 4)
+            ]
+        );
+        let overflow: Vec<(i64, Section)> = view
+            .overflow
+            .iter()
+            .map(|o| (o.feed_id, o.section))
+            .collect();
+        assert_eq!(
+            overflow,
+            [(3, Section::Front), (1, Section::Wire)],
+            "front first; buried feed 4 dropped"
+        );
+        assert_eq!(view.overflow[1].hidden_count, 12);
+        assert_eq!(view.overflow[1].page, Some(401));
+    }
+
+    #[test]
+    fn no_edition_means_no_journal() {
+        let s = library();
+        assert_eq!(s.journal().unwrap(), None);
+        assert!(
+            s.entries(Source::Journal, ListFilter::All, None, today())
+                .unwrap()
+                .rows
+                .is_empty()
+        );
     }
 }

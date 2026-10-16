@@ -202,7 +202,7 @@ impl Store {
         Ok(rows)
     }
 
-    pub fn entries(&self, feed_id: FeedId, limit: usize) -> Result<Vec<EntryRecord>> {
+    pub fn recent_entries(&self, feed_id: FeedId, limit: usize) -> Result<Vec<EntryRecord>> {
         let mut stmt = self.conn().prepare(
             "SELECT guid, url, title, summary_html, published_at, published_at_is_fallback, fetched_at \
              FROM entry WHERE feed_id = ?1 ORDER BY published_at DESC, id DESC LIMIT ?2",
@@ -306,7 +306,7 @@ mod tests {
                 .unwrap(),
             1
         );
-        let entries = store.entries(1, 10).unwrap();
+        let entries = store.recent_entries(1, 10).unwrap();
         assert_eq!(entries.len(), 3);
         let feed = store.feed(1).unwrap();
         assert_eq!(feed.etag.as_deref(), Some("\"e1\""));

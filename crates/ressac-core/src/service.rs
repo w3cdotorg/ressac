@@ -537,7 +537,7 @@ impl Ressac {
         let mut evidence = Vec::with_capacity(feeds.len());
         for f in &feeds {
             let attempts = self.store.attempts(f.id, EVIDENCE_ATTEMPTS)?;
-            let entries = self.store.entries(f.id, EVIDENCE_ENTRIES)?;
+            let entries = self.store.recent_entries(f.id, EVIDENCE_ENTRIES)?;
             inputs.push(LinkInput {
                 feed_id: f.id,
                 folder_id: f.folder_id,
