@@ -52,6 +52,14 @@ fn tick_interval(state: &ReaderState) -> Duration {
     }
 }
 
+/// Whether a clock tick changes what is on screen: Antiope shows seconds (and times its
+/// `NOT FOUND`), the Native look only dates and minutes. A running job's progress arrives as
+/// events, which redraw on their own.
+fn tick_redraws(look: Look, before: DateTime<FixedOffset>, after: DateTime<FixedOffset>) -> bool {
+    look == Look::Antiope
+        || before.format("%Y%m%d%H%M").to_string() != after.format("%Y%m%d%H%M").to_string()
+}
+
 /// Local midnight of the day `now` belongs to, in UTC (the app's "Today").
 pub fn today_start<Tz: TimeZone>(now: DateTime<Tz>) -> DateTime<Utc> {
     let midnight = now.date_naive().and_hms_opt(0, 0, 0).expect("00:00 exists");
@@ -532,6 +540,9 @@ fn event_loop(
     let mut last_tick = Instant::now();
     let clock = Clock::system();
     let mut pending: VecDeque<Command> = state.start(clock.now, clock.local()).into();
+    // The screen is drawn when something that changes it happened: a key, a resize, an event of
+    // the state (a job's message, a finished image, a poll) or a tick that shows. Not every 100 ms.
+    let mut dirty = true;
     loop {
         // Execute everything the state asked for; quick answers go straight back to it.
         while let Some(command) = pending.pop_front() {
@@ -546,32 +557,40 @@ fn event_loop(
                 }
                 other => {
                     for event in exec.run(other, Clock::system()) {
-                        // Its own writes do not move `data_version`: their `DataChanged` is here.
+                        // Its own writes do not move `data_version`: their event is here.
+                        dirty = true;
                         pending.extend(state.on_event(event));
                     }
                 }
             }
         }
-        let mut metrics = None;
-        terminal.draw(|frame| {
-            metrics = Some(match state.look() {
-                Look::Native => native::render(frame, state, images),
-                Look::Antiope => antiope::render(frame, state, images),
-            });
-        })?;
-        if let Some(m) = metrics {
-            state.set_reader_metrics(m.total_rows, m.viewport_rows);
+        if std::mem::take(&mut dirty) {
+            let mut metrics = None;
+            terminal.draw(|frame| {
+                metrics = Some(match state.look() {
+                    Look::Native => native::render(frame, state, images),
+                    Look::Antiope => antiope::render(frame, state, images),
+                });
+            })?;
+            if let Some(m) = metrics {
+                state.set_reader_metrics(m.total_rows, m.viewport_rows);
+            }
         }
         // Images the renderer asked for start (four at a time); the ones that ended come back.
         images.start_wanted(db);
         for event in images.drain(db) {
+            dirty = true;
             pending.extend(state.on_event(event));
         }
         // Messages from the jobs.
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                Msg::Event(event) => pending.extend(state.on_event(event)),
+                Msg::Event(event) => {
+                    dirty = true;
+                    pending.extend(state.on_event(event));
+                }
                 Msg::LongJobDone(outcome) => {
+                    dirty = true;
                     let outcome = exec.long_job_outcome(outcome);
                     pending.extend(state.on_event(Event::JobDone(outcome)));
                     for e in exec.long_job_done(Clock::system()) {
@@ -585,9 +604,11 @@ fn event_loop(
             match event::read()? {
                 TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     poll.keyed(Instant::now());
+                    dirty = true;
                     pending.extend(state.on_key(key));
                 }
                 TermEvent::Resize(width, height) => {
+                    dirty = true;
                     pending.extend(state.on_event(Event::Resize { width, height }));
                 }
                 _ => {}
@@ -596,13 +617,21 @@ fn event_loop(
         // The clock, and what Ressac.app or a job wrote.
         if last_tick.elapsed() >= tick_interval(state) {
             last_tick = Instant::now();
-            pending.extend(state.on_event(Clock::system().tick()));
+            let before = state.local;
+            let tick = Clock::system().tick();
+            if let (Event::Tick { local, .. }, Some(before)) = (&tick, before) {
+                dirty |= tick_redraws(state.look(), before, *local);
+            } else {
+                dirty = true;
+            }
+            pending.extend(state.on_event(tick));
         }
         let now = Instant::now();
         if poll.due(now) {
             match app.store().data_version() {
                 Ok(version) => pending.extend(
                     poll.check(now, version)
+                        .inspect(|_| dirty = true)
                         .map(|e| state.on_event(e))
                         .into_iter()
                         .flatten(),
@@ -663,6 +692,21 @@ mod tests {
             published_at: "2026-10-15T08:00:00.000Z".into(),
             entry_id: id,
         }
+    }
+
+    #[test]
+    fn an_idle_tick_redraws_antiope_each_time_and_native_each_minute() {
+        let at = |s: &str| {
+            paris_summer()
+                .with_ymd_and_hms(2026, 10, 16, 9, 0, s.parse().unwrap())
+                .unwrap()
+        };
+        assert!(tick_redraws(Look::Antiope, at("1"), at("2")));
+        assert!(!tick_redraws(Look::Native, at("1"), at("2")));
+        let next_minute = paris_summer()
+            .with_ymd_and_hms(2026, 10, 16, 9, 1, 0)
+            .unwrap();
+        assert!(tick_redraws(Look::Native, at("59"), next_minute));
     }
 
     #[test]
