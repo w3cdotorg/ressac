@@ -25,6 +25,9 @@ use crate::output::printable;
 pub const FETCH_PROGRESS_LABEL: &str = "Fetching feeds";
 pub const EXTRACT_PROGRESS_LABEL: &str = "Fetching the full article";
 pub const TOO_SMALL: &str = "Window too small";
+/// Ends the garden footer inside the reader: how to go back to the sources column. A no-break
+/// space keeps it whole when the footer wraps.
+const GARDEN_BACK_HINT: &str = "Esc\u{a0}sources";
 pub const LOADING: &str = "Loading…";
 pub const LOADING_IMAGE: &str = "[loading image…]";
 const HELP_HINT: &str = "? help";
@@ -91,7 +94,9 @@ pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -
         };
         if let Some(area) = area {
             match state.garden() {
-                Some(garden) => crate::tui::ui::render_in(frame, area, garden),
+                Some(garden) => {
+                    crate::tui::ui::render_in(frame, area, garden, Some(GARDEN_BACK_HINT))
+                }
                 None => frame.render_widget(Paragraph::new(Span::styled(LOADING, DIM)), area),
             }
         }
@@ -1267,6 +1272,7 @@ mod tests {
             "the bottom line shows the garden's keys"
         );
         assert!(out.contains("Needs triage"), "the top line names the page");
+        assert!(out.contains(GARDEN_BACK_HINT), "the way back is said");
         insta::assert_snapshot!(out);
     }
 

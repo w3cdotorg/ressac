@@ -30,5 +30,5 @@ expression: out
 "│                        ││                                              ││                                                                │"
 "│                        │└──────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘"
 "│                        │k keep  r repair  b bury  ↵ details  o site  w wayback  u undo  f filter  R safe repairs (2)  ? help  q quit      "
-"└────────────────────────┘                                                                                                                  "
+"└────────────────────────┘Esc sources                                                                                                       "
 "                                                                                                                                            "

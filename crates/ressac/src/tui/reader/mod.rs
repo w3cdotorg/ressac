@@ -297,6 +297,14 @@ impl<'a> Executor<'a> {
                 Ok(Vec::new())
             }
             Command::LoadGarden => garden_events(store, today, None),
+            // Nothing changes in the database: no rows or sources to reload.
+            Command::Garden(
+                command @ (crate::tui::state::Command::None
+                | crate::tui::state::Command::Quit
+                | crate::tui::state::Command::Open(_)),
+            ) => crate::tui::apply_garden_command(app, command)
+                .or_else(|e| Ok(Some(busy_or(&e))))
+                .map(|message| vec![Event::GardenMessage(message)]),
             Command::Garden(command) => {
                 let message = match crate::tui::apply_garden_command(app, command) {
                     Ok(message) => message,
@@ -941,6 +949,19 @@ mod tests {
             events.iter().any(|e| matches!(e, Event::Sources(_))),
             "the counts change after a bury"
         );
+    }
+
+    #[test]
+    fn a_garden_command_that_writes_nothing_reloads_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        let (tx, _rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        let events = exec.run(
+            Command::Garden(crate::tui::state::Command::None),
+            test_clock(),
+        );
+        assert_eq!(events, vec![Event::GardenMessage(None)]);
     }
 
     #[test]
