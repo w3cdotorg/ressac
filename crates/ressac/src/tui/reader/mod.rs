@@ -276,13 +276,14 @@ impl<'a> Executor<'a> {
                 .entry_detail(id)
                 .map(|d| d.map(|d| Event::Entry(Box::new(d))).into_iter().collect())
                 .map_err(Into::into),
+            // The state already updated the row: only the counts are asked for again.
             Command::SetRead(id, read) => store
                 .set_read(id, read, clock.now)
-                .map(|()| vec![Event::DataChanged])
+                .map(|()| vec![Event::OwnWrite])
                 .map_err(Into::into),
             Command::SetStarred(id, on) => store
                 .set_starred(id, on, clock.now)
-                .map(|()| vec![Event::DataChanged])
+                .map(|()| vec![Event::OwnWrite])
                 .map_err(Into::into),
             Command::MarkAllRead(source) => store
                 .mark_all_read(source, today, clock.now)
@@ -839,6 +840,19 @@ mod tests {
         let mut exec = Executor::new(&app, db, tx);
         let events = exec.run(Command::MarkAllRead(Source::Unread), test_clock());
         assert!(events.contains(&Event::DataChanged), "{events:?}");
+    }
+
+    #[test]
+    fn a_single_entry_write_asks_only_for_the_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        let (tx, _rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        // The entry does not exist: the write is a no-op, the answer is what is under test.
+        let read = exec.run(Command::SetRead(1, true), test_clock());
+        let star = exec.run(Command::SetStarred(1, true), test_clock());
+        assert_eq!(read, vec![Event::OwnWrite], "{read:?}");
+        assert_eq!(star, vec![Event::OwnWrite], "{star:?}");
     }
 
     #[test]

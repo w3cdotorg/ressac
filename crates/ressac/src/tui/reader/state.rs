@@ -130,7 +130,11 @@ pub enum Event {
         total: usize,
     },
     JobDone(JobOutcome),
+    /// Another process changed the database (`data_version`), or a bulk write of ours did.
     DataChanged,
+    /// This reader's own single-entry write (`SetRead`, `SetStarred`): the row was updated
+    /// locally, only the counts follow.
+    OwnWrite,
     Tick {
         now: DateTime<Utc>,
         local: DateTime<FixedOffset>,
@@ -986,6 +990,7 @@ impl ReaderState {
             }
             Event::JobDone(outcome) => self.job_done(outcome),
             Event::DataChanged => self.data_changed(),
+            Event::OwnWrite => self.own_write(),
             Event::Tick { now, local } => {
                 self.now = Some(now);
                 self.local = Some(local);
@@ -1849,6 +1854,16 @@ impl ReaderState {
             commands.push(Command::LoadJournal);
         }
         commands.push(self.reload_in_place());
+        commands
+    }
+
+    /// A `j`, `m` or `s` of this reader: the list in view and the open article already show the
+    /// change, so only the sources' counts (and the Journal's header) are asked for again.
+    fn own_write(&mut self) -> Vec<Command> {
+        let mut commands = vec![Command::LoadSources];
+        if self.source == Source::Journal {
+            commands.push(Command::LoadJournal);
+        }
         commands
     }
 
@@ -3056,6 +3071,20 @@ mod tests {
 
     /// Every key that acts on the selected entry or the list.
     const ENTRY_KEYS: [char; 9] = ['j', 'k', ' ', 'm', 's', 'A', 'u', 'f', 'o'];
+
+    #[test]
+    fn an_own_write_reloads_the_counts_and_not_the_list() {
+        let mut state = reader();
+        // On the Journal: its counts and the sources.
+        assert_eq!(
+            state.on_event(Event::OwnWrite),
+            vec![Command::LoadSources, Command::LoadJournal]
+        );
+        state.go_to(Source::Unread);
+        assert_eq!(state.on_event(Event::OwnWrite), vec![Command::LoadSources]);
+        // The same change from outside still reloads everything and keeps the selection.
+        assert!(state.on_event(Event::DataChanged).len() >= 3);
+    }
 
     #[test]
     fn keys_do_not_act_on_the_list_behind_a_garden_page() {
