@@ -10,6 +10,8 @@ struct GardenInspector: View {
     @State private var buried: [GardenRow] = []
     @State private var log: [FetchLogRow] = []
     @State private var showsHistory = false
+    /// `v_cadence` by feed: active feeds only, so a buried feed shows no rhythm.
+    @State private var cadence: [Int64: CadenceRow] = [:]
 
     var body: some View {
         Group {
@@ -28,6 +30,7 @@ struct GardenInspector: View {
         // Active feeds and the Cemetery: a feed buried during the visit stays inspectable.
         .task(id: scope) { await observe(.all) { active = $0 } }
         .task(id: scope) { await observe(.cemetery) { buried = $0 } }
+        .task { await observeCadence() }
     }
 
     @ViewBuilder
@@ -54,6 +57,10 @@ struct GardenInspector: View {
                 if let reason = row.reason {
                     Text(reason).fixedSize(horizontal: false, vertical: true)
                 }
+            }
+
+            if let rhythm = cadence[row.feedId], !buried {
+                rhythmControl(rhythm, feedId: row.feedId)
             }
 
             if let bullets = row.evidence?.bullets, !bullets.isEmpty {
@@ -109,6 +116,28 @@ struct GardenInspector: View {
             .disabled(LinkPolicy.webURL(row.waybackUrl) == nil)
         }
         .controlSize(.small)
+    }
+
+    /// "Rhythm: Daily · median 0.4 d · last entry 2 h ago" and the Auto / group menu.
+    private func rhythmControl(_ rhythm: CadenceRow, feedId: Int64) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(GardenModel.rhythmLine(rhythm, now: state.now()))
+                .fixedSize(horizontal: false, vertical: true)
+            Picker("Rhythm", selection: Binding(
+                get: { rhythm.isOverride ? Optional(rhythm.effective) : nil },
+                set: { state.setCadence(feedId: feedId, $0) })) {
+                Text("Auto").tag(CadenceGroup?.none)
+                ForEach(CadenceGroup.allCases, id: \.self) { group in
+                    Text(group.title).tag(Optional(group))
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            .controlSize(.small)
+            .help("Auto follows how often the feed publishes; a group chosen here stays until you choose Auto.")
+        }
+        .font(.callout)
     }
 
     @ViewBuilder
@@ -167,6 +196,16 @@ struct GardenInspector: View {
             }
         } catch {
             store([])
+        }
+    }
+
+    private func observeCadence() async {
+        do {
+            for try await rows in Queries.cadenceRows().values(in: state.database.reader) {
+                cadence = GardenModel.byFeed(rows)
+            }
+        } catch {
+            cadence = [:]
         }
     }
 

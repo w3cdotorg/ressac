@@ -8,13 +8,18 @@ struct GardenTable: View {
 
     @State private var store = GardenStore()
     @FocusState private var listFocused: Bool
+    @State private var grouping = GardenGrouping.status
+    /// `v_cadence` by feed, for the Rhythm label and grouping of All Feeds.
+    @State private var cadence: [Int64: CadenceRow] = [:]
 
     private var rows: [GardenRow] { store.rows }
     private var retained: Set<Int64> { store.retained(state) }
 
     var body: some View {
         let visible = GardenModel.visibleRows(rows, scope: scope, seenInQueue: retained)
-        let sections = GardenModel.sections(visible, scope: scope)
+        let sections = scope == .all && grouping == .rhythm
+            ? GardenModel.rhythmSections(visible, cadence: cadence)
+            : GardenModel.sections(visible, scope: scope)
         let safeRepairs = GardenModel.safeRepairs(rows)
 
         VStack(spacing: 0) {
@@ -27,7 +32,8 @@ struct GardenTable: View {
                     ForEach(sections) { section in
                         Section(section.header) {
                             ForEach(section.rows) { row in
-                                GardenRowView(row: row, dimmed: GardenModel.isDimmed(row, scope: scope, seenInQueue: retained))
+                                GardenRowView(row: row, dimmed: GardenModel.isDimmed(row, scope: scope, seenInQueue: retained),
+                                              rhythm: scope == .all ? GardenModel.rhythmLabel(cadence[row.feedId]) : nil)
                                     .tag(row.feedId)
                             }
                         }
@@ -49,6 +55,7 @@ struct GardenTable: View {
             listFocused = true
             await store.observe(page: scope, app: state)
         }
+        .task { await observeCadence() }
     }
 
     private func header(visibleCount: Int, safeRepairCount: Int) -> some View {
@@ -62,6 +69,15 @@ struct GardenTable: View {
                 .padding(.horizontal, 7)
                 .padding(.vertical, 2)
                 .background(.quaternary, in: Capsule())
+            if scope == .all {
+                Picker("Group by", selection: $grouping) {
+                    ForEach(GardenGrouping.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("Group the feeds by status or by publishing rhythm")
+            }
             Spacer(minLength: 8)
             if let message = store.message {
                 Text(message)
@@ -97,6 +113,16 @@ struct GardenTable: View {
         }
     }
 
+    private func observeCadence() async {
+        do {
+            for try await rows in Queries.cadenceRows().values(in: state.database.reader) {
+                cadence = GardenModel.byFeed(rows)
+            }
+        } catch {
+            cadence = [:]
+        }
+    }
+
     private func handle(_ key: String, modifiers: EventModifiers, safeRepairCount: Int) -> KeyPress.Result {
         let row = rows.first { $0.feedId == state.selectedFeedId }
         guard let command = GardenModel.command(for: key, modifiers: modifiers, row: row, safeRepairCount: safeRepairCount) else {
@@ -110,6 +136,8 @@ struct GardenTable: View {
 private struct GardenRowView: View {
     let row: GardenRow
     let dimmed: Bool
+    /// "Daily" or "Daily*" in All Feeds, nil elsewhere.
+    let rhythm: String?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -125,6 +153,13 @@ private struct GardenRowView: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+            }
+            if let rhythm {
+                Text(rhythm)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(rhythm.hasSuffix("*") ? "Rhythm set by you" : "Rhythm")
             }
             if let unread = GardenModel.unreadLabel(for: row) {
                 Text(unread)

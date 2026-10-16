@@ -546,6 +546,12 @@ enum PendingPanel: Equatable, Sendable {
         }
     }
 
+    /// The inspector's Rhythm menu (spec §8): a group, or nil for Auto. The core writes it.
+    @discardableResult
+    func setCadence(feedId: Int64, _ group: CadenceGroup?) -> Task<RunOutcome, Never> {
+        runs.start(.setCadence(feedId: feedId, group))
+    }
+
     func openSite(feedId: Int64) {
         let site = sidebar.feeds.first { $0.feedId == feedId }?.htmlUrl
         if let site, let url = URL(string: site) { openURL(url) }

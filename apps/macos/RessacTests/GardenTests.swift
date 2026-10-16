@@ -346,3 +346,60 @@ private func row(_ id: Int64, _ title: String, status: String?, folder: String? 
         #expect(!statuses.contains { GardenStatusStyle.teletextColor(for: $0) == .black })
     }
 }
+
+private func cadence(_ id: Int64, _ group: CadenceGroup, override: Bool = false, median: Double? = 0.4,
+                     last: Date? = nil) -> CadenceRow {
+    CadenceRow(feedId: id, effective: group, computed: override ? .weekly : group, isOverride: override,
+               medianIntervalDays: median, entriesPerMonth: 12, lastEntryAt: last, unread: 0)
+}
+
+@MainActor @Suite struct GardenRhythmTests {
+    let now = Timestamp.date(from: "2026-10-16T09:00:00.000Z")!
+
+    @Test func theRhythmLineReadsLikeTheSpec() {
+        let twoHours = now.addingTimeInterval(-2 * 3600)
+        #expect(GardenModel.rhythmLine(cadence(1, .daily, last: twoHours), now: now)
+            == "Rhythm: Daily · median 0.4 d · last entry 2 h ago")
+        #expect(GardenModel.rhythmLine(cadence(1, .daily, override: true, last: twoHours), now: now)
+            == "Rhythm: Daily · median 0.4 d · last entry 2 h ago (set by you)")
+        #expect(GardenModel.rhythmLine(cadence(2, .monthly, median: 12.3, last: now.addingTimeInterval(-3 * 86_400)), now: now)
+            == "Rhythm: Monthly · median 12 d · last entry 3 d ago")
+        #expect(GardenModel.rhythmLine(cadence(3, .silent, median: nil), now: now) == "Rhythm: Silent")
+        #expect(GardenModel.rhythmText(cadence(1, .daily, override: true, last: twoHours), now: now)
+            == "Daily · median 0.4 d · last entry 2 h ago (set by you)")
+    }
+
+    @Test func agesCountMinutesHoursDaysThenMonths() {
+        #expect(GardenModel.ago(now.addingTimeInterval(-45 * 60), now: now) == "45 min ago")
+        #expect(GardenModel.ago(now.addingTimeInterval(-47 * 3600), now: now) == "47 h ago")
+        #expect(GardenModel.ago(now.addingTimeInterval(-59 * 86_400), now: now) == "59 d ago")
+        #expect(GardenModel.ago(now.addingTimeInterval(-400 * 86_400), now: now) == "13 mo ago")
+        #expect(GardenModel.ago(now.addingTimeInterval(60), now: now) == "0 min ago")  // a clock ahead of the feed
+    }
+
+    @Test func theLabelMarksAGroupSetByHand() {
+        #expect(GardenModel.rhythmLabel(cadence(1, .daily)) == "Daily")
+        #expect(GardenModel.rhythmLabel(cadence(1, .rare, override: true)) == "Rare*")
+        #expect(GardenModel.rhythmLabel(nil) == nil)
+    }
+
+    @Test func allFeedsGroupsByRhythmThenUnchecked() {
+        let rows = [row(1, "Zeta", status: "Alive"), row(2, "Alpha", status: "Dead"),
+                    row(3, "Mid", status: "Alive"), row(4, "New", status: nil)]
+        let groups: [Int64: CadenceRow] = [1: cadence(1, .daily), 2: cadence(2, .daily), 3: cadence(3, .rare, override: true)]
+        let sections = GardenModel.rhythmSections(rows, cadence: groups)
+        #expect(sections.map(\.id) == ["Daily", "Rare", "Unchecked"])
+        #expect(sections.map { $0.rows.map(\.feedId) } == [[2, 1], [3], [4]])
+        #expect(sections.map(\.header) == ["⚡ DAILY · 2", "✨ RARE · 1", "❔ UNCHECKED · 1"])
+        #expect(GardenGrouping.allCases.map(\.title) == ["Status", "Rhythm"])
+    }
+
+    @Test func theInspectorMenuRunsFeedCadence() async throws {
+        let (state, _, stub) = try makeState()
+        _ = await state.setCadence(feedId: 3, .daily).value
+        _ = await state.setCadence(feedId: 3, nil).value
+        #expect(try calls(stub).map { $0.split(separator: " ").dropFirst(3).joined(separator: " ") } == [
+            "feed cadence 3 daily", "feed cadence 3 auto",
+        ])
+    }
+}
