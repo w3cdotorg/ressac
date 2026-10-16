@@ -1,7 +1,7 @@
 # Ressac — Sub-project 3: cadence and the morning edition
 
 - **Date:** 2026-10-16
-- **Status:** Draft, awaiting review
+- **Status:** Approved 2026-10-16 (with six adjustments found while writing the plan)
 - **Scope:** publication-rhythm groups for every feed (core, Mac app in Native and Antiope, CLI) and a daily morning edition composed and stored by the core. The terminal UI shows both with sub-project 2b, through the views defined here.
 - **Builds on:** `docs/specs/2026-10-10-core-and-garden-design.md` (*the core spec*), `docs/specs/2026-10-10-mac-app-design.md` (*the app spec*) and `docs/specs/2026-10-14-antiope-design.md` (*the Antiope spec*), all merged.
 - **Order agreed with the user:** 3 (this spec), then 2b (terminal reading).
@@ -211,17 +211,19 @@ When nothing is eligible, the edition is written anyway with no entries. The win
 - `⇧⌘A` marks the edition's entries read, never the overflow.
 - When every entry is read: a closing line `That's the edition.`
 - Empty edition: `Nothing new this morning.`
+- No edition at all yet: `No edition yet`; a failed build shows the error text as is. Counts use the singular when needed (`1 entry`).
+- At launch the app keeps opening on Unread, as today; the Journal is one click away.
 
 **Build on launch.** At launch, when the app comes back to the foreground, and at the 04:00 rollover while it runs (the same mechanism that already rolls Today over at midnight in `AppState`, moved into `JournalModel` for the edition), the app asks the core whether an edition is due (a read of `edition` through GRDB). If so, it starts `ressac edition build` as a long run through `RunCoordinator`. The refresh banner reads `Building this morning's edition… 34/156`. Until the `edition` event, the Journal shows that line; every other list stays usable. A second launch or a manual `⇧⌘R` during the build follows the coordinator's existing rule for long runs.
 
 **Inspector.** A rhythm line `Rhythm: Daily · median 0.4 d · last entry 2 h ago` and a menu `Auto / Daily / Weekly / Monthly / Rare / Silent`; when overridden, the line ends with `(set by you)`. The menu runs `ressac feed cadence` as a short run.
 
-**Garden › All feeds.** A sortable `Rhythm` column (effective group, override marked).
+**Garden › All feeds.** The garden list is made of sections, not a table, so there is no sortable column: every row carries a rhythm label (`Daily`, or `Daily*` when overridden), and a `Status | Rhythm` picker groups the rows by status (as today) or by rhythm group.
 
 ### Antiope
 
-- **P104 JOURNAL.** In the entry column, section headings coloured as the P800 status headings: `FRONT PAGE` yellow, `THIS WEEK` cyan, `THE WIRE` green. Overflow rows in blue, `+12 MORE IN ACTUALITTE`, opened with a click or `↩`.
-- **Sub-pages.** An edition entry is a sub-page of P104 by `rank`: `104 3/43`. SUITE (`Space`, `j`) and RETOUR (`k`) walk the edition in order. After the last entry, a double-height `FIN DE L'EDITION` line.
+- **P104 JOURNAL.** In the entry column, section headings coloured as the P800 status headings: `FRONT PAGE` yellow, `THIS WEEK` cyan, `THE WIRE` green. Overflow rows in white on a blue background (blue never colours text in Antiope), accents kept: `+12 MORE IN ACTUALITTÉ`, opened with a click (column rows are not selectable one by one from the keyboard).
+- **Sub-pages.** An edition entry is a sub-page of P104 by `rank`: `104 3/43`. SUITE (`Space`, `j`) and RETOUR (`k`) walk the edition in order. After the last entry, SUITE leads to a double-height `FIN DE L'EDITION` page in the reader; the same line closes the entry column once every entry is read. With no edition yet, or while it is being built, P104 shows `EDITION IN PROGRESS`.
 - **P105–P109.** The rhythm groups, each shown like a folder page (its feeds, their unread counts).
 - **P100 SOMMAIRE** lists 104–109 with the other reserved pages, in colour, with their counts. **P899 GUIDE** is unchanged (no new key).
 - **Build progress.** The page number searches as during a refresh (decorative, off with Reduce Motion); the banner reads `EDITION IN PROGRESS 34/156`.
