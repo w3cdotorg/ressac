@@ -61,11 +61,13 @@ pub enum Command {
     },
     LoadJournal,
     /// A search in `source`. The runner applies `filter` (only the unread hits under
-    /// `ListFilter::Unread`) and echoes `request` in its `Event::Entries`.
+    /// `ListFilter::Unread`), passes `after` to `Store::search_entries` (`Some` is the next page
+    /// of the hits, appended) and echoes `request` in its `Event::Entries`.
     Search {
         source: Source,
         text: String,
         filter: ListFilter,
+        after: Option<ListCursor>,
         request: u64,
     },
     LoadEntry(i64),
@@ -410,17 +412,23 @@ impl ReaderState {
         self.pending_advance = false;
         self.loading_more = false;
         self.pinned = None;
+        self.list_command(None)
+    }
+
+    /// The load of the list in view: the search when one is active, else the source.
+    fn list_command(&self, after: Option<ListCursor>) -> Command {
         match &self.search {
             Some(text) if !text.is_empty() && !self.search_editing => Command::Search {
                 source: self.source,
                 text: text.clone(),
                 filter: self.filter,
+                after,
                 request: self.request,
             },
             _ => Command::LoadEntries {
                 source: self.source,
                 filter: self.filter,
-                after: None,
+                after,
                 request: self.request,
             },
         }
@@ -442,12 +450,7 @@ impl ReaderState {
         }
         let after = self.next.clone()?;
         self.loading_more = true;
-        Some(Command::LoadEntries {
-            source: self.source,
-            filter: self.filter,
-            after: Some(after),
-            request: self.request,
-        })
+        Some(self.list_command(Some(after)))
     }
 
     fn index(&self) -> Option<usize> {
@@ -1386,6 +1389,7 @@ mod tests {
                 source: Source::Journal,
                 text: "rus".into(),
                 filter: ListFilter::All,
+                after: None,
                 request: 2
             }]
         );
@@ -1863,9 +1867,44 @@ mod tests {
                 source: Source::Journal,
                 text: "r".into(),
                 filter: ListFilter::Unread,
+                after: None,
                 request: state.request,
             }]
         );
+    }
+
+    #[test]
+    fn paging_inside_a_search_asks_the_search() {
+        let mut state = reader();
+        char_key(&mut state, '/');
+        char_key(&mut state, 'r');
+        key(&mut state, KeyCode::Enter);
+        let hits = vec![row(1, 7, false), row(3, 8, false)];
+        state.on_event(entries(
+            &state,
+            Source::Journal,
+            hits.clone(),
+            Some(cursor()),
+        ));
+        char_key(&mut state, 'j');
+        let ask = Command::Search {
+            source: Source::Journal,
+            text: "r".into(),
+            filter: ListFilter::All,
+            after: Some(cursor()),
+            request: state.request,
+        };
+        assert_eq!(char_key(&mut state, 'j'), std::slice::from_ref(&ask));
+        assert!(char_key(&mut state, 'j').is_empty());
+        let more = Event::Entries {
+            source: Source::Journal,
+            page: page(vec![row(3, 8, false), row(4, 8, false)], None),
+            appended: true,
+            request: state.request,
+        };
+        state.on_event(more);
+        let ids: Vec<i64> = state.entries.iter().map(|r| r.entry_id).collect();
+        assert_eq!(ids, [1, 3, 4]);
     }
 
     #[test]
