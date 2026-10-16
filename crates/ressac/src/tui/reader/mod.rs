@@ -25,7 +25,8 @@ use ressac_core::service::{EditionOptions, NullSink, RefreshOptions, Ressac};
 use ressac_core::store::{EntryPage, ListCursor, ListFilter, PAGE_SIZE, Source, Store};
 
 use jobs::{Msg, ProgressSink};
-use native::{EDITION_PROGRESS_LABEL, EXTRACT_PROGRESS_LABEL, FETCH_PROGRESS_LABEL};
+use journal::BUILDING;
+use native::{EXTRACT_PROGRESS_LABEL, FETCH_PROGRESS_LABEL};
 use settings::TerminalSettings;
 use state::{Command, Event, JobOutcome, ReaderState};
 
@@ -123,6 +124,8 @@ pub struct Executor<'a> {
     tx: Sender<Msg>,
     stop: Arc<AtomicBool>,
     long_running: bool,
+    /// The long job in the slot is the edition build (else a refresh): see `long_job_outcome`.
+    edition_running: bool,
     queue: VecDeque<Command>,
 }
 
@@ -134,6 +137,7 @@ impl<'a> Executor<'a> {
             tx,
             stop: Arc::new(AtomicBool::new(false)),
             long_running: false,
+            edition_running: false,
             queue: VecDeque::new(),
         }
     }
@@ -146,6 +150,20 @@ impl<'a> Executor<'a> {
     #[cfg(test)]
     pub fn long_job_running(&self) -> bool {
         self.long_running
+    }
+
+    /// The outcome of the long job that just ended, in its own terms: a failure or an offline
+    /// answer of the edition build is the edition's (`EditionFailed`, `EditionOffline`), so that
+    /// the Journal's phase never follows a refresh or a quick command. Call it before
+    /// `long_job_done`, which may start the next job.
+    pub fn long_job_outcome(&self, outcome: JobOutcome) -> JobOutcome {
+        match outcome {
+            JobOutcome::Failed(sentence) if self.edition_running => {
+                JobOutcome::EditionFailed(sentence)
+            }
+            JobOutcome::Offline if self.edition_running => JobOutcome::EditionOffline,
+            other => other,
+        }
     }
 
     /// Called when a long job reports `JobDone`: the next queued one starts.
@@ -259,16 +277,19 @@ impl<'a> Executor<'a> {
             Command::Refresh(source) => self.refresh(source),
             Command::BuildEdition => {
                 self.long_running = true;
+                self.edition_running = true;
+                // The edition's day and zone are the injected clock's, not the machine's.
                 let now = clock.now;
+                let zone = clock.local.timezone();
                 jobs::spawn(
                     self.db.clone(),
                     self.tx.clone(),
                     self.stop.clone(),
                     true,
                     move |app, tx, stop| async move {
-                        let sink = ProgressSink::new(EDITION_PROGRESS_LABEL, tx);
+                        let sink = ProgressSink::new(BUILDING, tx);
                         jobs::edition_outcome(
-                            app.build_edition(EditionOptions::default(), now, &Local, &sink, stop)
+                            app.build_edition(EditionOptions::default(), now, &zone, &sink, stop)
                                 .await,
                         )
                     },
@@ -291,6 +312,7 @@ impl<'a> Executor<'a> {
             _ => None,
         };
         self.long_running = true;
+        self.edition_running = false;
         jobs::spawn(
             self.db.clone(),
             self.tx.clone(),
@@ -456,6 +478,7 @@ fn event_loop(
             match msg {
                 Msg::Event(event) => pending.extend(state.on_event(event)),
                 Msg::LongJobDone(outcome) => {
+                    let outcome = exec.long_job_outcome(outcome);
                     pending.extend(state.on_event(Event::JobDone(outcome)));
                     for e in exec.long_job_done(Clock::system()) {
                         pending.extend(state.on_event(e));
@@ -652,6 +675,116 @@ mod tests {
         assert!(exec.long_job_running(), "the edition started");
         exec.long_job_done(test_clock());
         assert!(!exec.long_job_running());
+    }
+
+    /// Everything a long job sends, up to and including its `LongJobDone`.
+    fn until_long_job_done(rx: &Receiver<Msg>) -> (Vec<Event>, JobOutcome) {
+        let mut events = Vec::new();
+        loop {
+            match rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the job reports")
+            {
+                Msg::Event(event) => events.push(event),
+                Msg::LongJobDone(outcome) => return (events, outcome),
+            }
+        }
+    }
+
+    #[test]
+    fn the_edition_build_runs_as_a_job_and_reports_its_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        let (tx, rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        assert!(exec.run(Command::BuildEdition, test_clock()).is_empty());
+        let (events, outcome) = until_long_job_done(&rx);
+        assert_eq!(outcome, JobOutcome::EditionBuilt);
+        // Whatever progress it reported is the edition's, under the edition's label.
+        assert!(
+            events
+                .iter()
+                .all(|e| matches!(e, Event::Progress { label, .. } if label == journal::BUILDING))
+        );
+        exec.long_job_done(test_clock());
+        // The same morning, by the injected clock's 04:00 rule: not due, and no progress at all.
+        let later = Clock {
+            now: test_clock().now + chrono::Duration::hours(3),
+            local: test_clock().local + chrono::Duration::hours(3),
+        };
+        exec.run(Command::BuildEdition, later);
+        let (events, outcome) = until_long_job_done(&rx);
+        assert_eq!(outcome, JobOutcome::EditionNotDue);
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn the_edition_s_day_is_the_injected_clock_s_not_the_machine_s() {
+        // 03:30 local on the 17th is still the 16th's edition day: the build at 09:00 on the 16th
+        // already covers it, whatever the machine's own clock and zone say.
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        let (tx, rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        exec.run(Command::BuildEdition, test_clock());
+        assert_eq!(until_long_job_done(&rx).1, JobOutcome::EditionBuilt);
+        exec.long_job_done(test_clock());
+        let night = paris_summer()
+            .with_ymd_and_hms(2026, 10, 17, 3, 30, 0)
+            .unwrap();
+        exec.run(
+            Command::BuildEdition,
+            Clock {
+                now: night.with_timezone(&Utc),
+                local: night,
+            },
+        );
+        assert_eq!(until_long_job_done(&rx).1, JobOutcome::EditionNotDue);
+        exec.long_job_done(test_clock());
+        let morning = paris_summer()
+            .with_ymd_and_hms(2026, 10, 17, 4, 0, 0)
+            .unwrap();
+        exec.run(
+            Command::BuildEdition,
+            Clock {
+                now: morning.with_timezone(&Utc),
+                local: morning,
+            },
+        );
+        assert_eq!(until_long_job_done(&rx).1, JobOutcome::EditionBuilt);
+    }
+
+    #[test]
+    fn only_the_edition_job_s_failures_are_the_editions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = open_app(&dir);
+        let (tx, rx) = mpsc::channel();
+        let mut exec = Executor::new(&app, db, tx);
+        let failed = || JobOutcome::Failed("The job stopped unexpectedly.".into());
+        // A refresh: its outcomes stay its own.
+        exec.run(Command::Refresh(None), test_clock());
+        assert_eq!(exec.long_job_outcome(failed()), failed());
+        assert_eq!(
+            exec.long_job_outcome(JobOutcome::Offline),
+            JobOutcome::Offline
+        );
+        let _ = until_long_job_done(&rx);
+        // The edition: a panic or a database that would not open is its failure.
+        exec.long_job_done(test_clock());
+        exec.run(Command::BuildEdition, test_clock());
+        assert_eq!(
+            exec.long_job_outcome(failed()),
+            JobOutcome::EditionFailed("The job stopped unexpectedly.".into())
+        );
+        assert_eq!(
+            exec.long_job_outcome(JobOutcome::Offline),
+            JobOutcome::EditionOffline
+        );
+        assert_eq!(
+            exec.long_job_outcome(JobOutcome::EditionBuilt),
+            JobOutcome::EditionBuilt
+        );
+        let _ = until_long_job_done(&rx);
     }
 
     #[test]

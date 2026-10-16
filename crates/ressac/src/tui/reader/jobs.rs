@@ -108,13 +108,17 @@ fn tokio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
+/// The edition job's result, in the outcomes only it produces (the Journal's phase follows these
+/// and no other). `NotDue` covers both "already built this morning" and "built by another
+/// process during the refresh": the core does not tell them apart, and the state reloads the
+/// Journal quietly either way.
 pub fn edition_outcome(result: ressac_core::Result<EditionOutcome>) -> JobOutcome {
     match result {
         Ok(EditionOutcome::Built(_)) => JobOutcome::EditionBuilt,
         Ok(EditionOutcome::NotDue) => JobOutcome::EditionNotDue,
-        Ok(EditionOutcome::Offline) => JobOutcome::Offline,
-        Ok(EditionOutcome::Interrupted) => JobOutcome::Failed("Interrupted.".into()),
-        Err(e) => JobOutcome::Failed(sentence(e.to_string())),
+        Ok(EditionOutcome::Offline) => JobOutcome::EditionOffline,
+        Ok(EditionOutcome::Interrupted) => JobOutcome::EditionFailed("Interrupted.".into()),
+        Err(e) => JobOutcome::EditionFailed(sentence(e.to_string())),
     }
 }
 
@@ -207,15 +211,15 @@ mod tests {
         );
         assert_eq!(
             edition_outcome(Ok(EditionOutcome::Offline)),
-            JobOutcome::Offline
+            JobOutcome::EditionOffline
         );
         assert_eq!(
             edition_outcome(Ok(EditionOutcome::Interrupted)),
-            JobOutcome::Failed("Interrupted.".into())
+            JobOutcome::EditionFailed("Interrupted.".into())
         );
         assert!(matches!(
             edition_outcome(Err(ressac_core::Error::Invalid("boom".into()))),
-            JobOutcome::Failed(m) if m.contains("boom")
+            JobOutcome::EditionFailed(m) if m.contains("boom")
         ));
     }
 
@@ -290,7 +294,7 @@ mod tests {
             edition_outcome(Err(ressac_core::Error::Invalid(
                 "database is locked".into()
             ))),
-            JobOutcome::Failed(busy.into())
+            JobOutcome::EditionFailed(busy.into())
         );
         assert_eq!(
             extract_outcome(
