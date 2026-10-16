@@ -101,6 +101,9 @@ struct JournalSection: Identifiable, Equatable {
 /// The list column while the Journal is selected (spec §8).
 struct JournalListView: View {
     @Bindable var state: AppState
+    /// The list takes the keyboard when it appears, as the Garden table does: it replaces the list
+    /// column's view, so the table that had the keyboard leaves the window (acceptance, item 3).
+    @FocusState private var listFocused: Bool
 
     var body: some View {
         let journal = state.journal
@@ -155,6 +158,9 @@ struct JournalListView: View {
                                 // Not selectable: a click opens the feed in the sidebar.
                                 Button(JournalLayout.overflowLabel(item)) { state.selection = .feed(item.feedId) }
                                     .buttonStyle(.plain)
+                                    // Full Keyboard Access would make it a stop of its own in the
+                                    // list, as in Antiope (1c42b72): the list keeps the keyboard.
+                                    .focusable(false)
                                     .font(.callout)
                                     .foregroundStyle(.secondary)
                             }
@@ -168,6 +174,8 @@ struct JournalListView: View {
                         .padding(.vertical, 8)
                 }
             }
+            .focused($listFocused)
+            .task { listFocused = true }
             // As in `EntryListView`: the keyboard moves the selection, the list follows on the next turn.
             .onChange(of: state.selectedEntryId) { _, id in
                 guard let id else { return }

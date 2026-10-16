@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import Testing
 import WebKit
 
@@ -299,6 +300,135 @@ import WebKit
             #expect(!router.handle(event))
         }
         #expect(state.selection == .unread && state.selectedEntryId == nil)
+    }
+}
+
+/// The native window hosting the real `MainView`, offscreen: the Journal's list column must keep
+/// the keyboard as the other lists do (acceptance, item 3).
+@MainActor @Suite struct JournalKeyboardTests {
+    /// Never ordered in: it only claims to be key, so that SwiftUI and the router treat it as the
+    /// reading window without taking the keyboard from the person at the Mac.
+    final class ClaimedKeyWindow: NSWindow {
+        override var isKeyWindow: Bool { true }
+    }
+
+    @MainActor struct Hosted {
+        let state: AppState
+        let test: TestDatabase
+        let window: ClaimedKeyWindow
+        let router: ReadingKeyRouter
+        let entries: [Int64]
+
+        /// The window's tables, breadth first: the list column's comes before the sidebar's.
+        var listTable: NSTableView? { tables.first }
+        var sidebarTable: NSTableView? { tables.last }
+        private var tables: [NSTableView] {
+            var found: [NSTableView] = []
+            var pending = window.contentView.map { [$0] } ?? []
+            while !pending.isEmpty {
+                let view = pending.removeFirst()
+                if let table = view as? NSTableView { found.append(table) }
+                pending += view.subviews
+            }
+            return found
+        }
+
+        var focus: KeyFocus { ResponderFocusProvider().keyFocus(in: window) }
+
+        func settle() async {
+            _ = await eventually(timeout: .milliseconds(300)) {
+                window.contentView?.layoutSubtreeIfNeeded()
+                return false
+            }
+        }
+    }
+
+    /// Three entries of feed 1 in today's edition, with a "+4 more" row, and `MainView` on `.feed(1)`.
+    func host() async throws -> Hosted {
+        let (state, test, _) = try makeJournalState()
+        let first = try test.entry(feed: 1, published: "2026-10-15T06:00:00.000Z")
+        let second = try test.entry(feed: 1, published: "2026-10-15T09:00:00.000Z")
+        let third = try test.entry(feed: 1, published: "2026-10-15T08:00:00.000Z")
+        try seedEdition(test, items: [(first, "week", 1), (second, "wire", 2), (third, "wire", 3)],
+                        overflow: [(feed: 1, section: "wire", hidden: 4)])
+        try await state.database.notifyExternalChanges()
+        #expect(await eventually { state.journal.edition?.items.count == 3 })
+        state.autoReadDelay = .seconds(60)
+        state.selection = .feed(1)
+        let window = ClaimedKeyWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 700),
+                                      styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentView = NSHostingView(rootView: MainView(state: state).environment(state))
+        state.windowDidChangeKey(window, isKey: true)
+        let router = ReadingKeyRouter(state: state, focus: ResponderFocusProvider(), antiope: nil)
+        router.window = window
+        let hosted = Hosted(state: state, test: test, window: window, router: router, entries: [first, second, third])
+        await hosted.settle()
+        return hosted
+    }
+
+    @Test func theJournalListTakesTheKeyboardWhenItAppears() async throws {
+        let h = try await host()
+        defer { h.window.contentView = nil }
+        // From the sidebar, as a click on "Journal" leaves it…
+        let sidebar = try #require(h.sidebarTable)
+        #expect(h.window.makeFirstResponder(sidebar))
+        h.state.selection = .journal
+        #expect(await eventually { h.window.contentView?.layoutSubtreeIfNeeded(); return h.focus == .entryList })
+        // …and from another list whose table had the keyboard: that table leaves the window.
+        h.state.selection = .feed(1)
+        await h.settle()
+        let feedList = try #require(h.listTable)
+        #expect(h.window.makeFirstResponder(feedList))
+        h.state.selection = .journal
+        #expect(await eventually { h.window.contentView?.layoutSubtreeIfNeeded(); return h.focus == .entryList })
+    }
+
+    /// What `NSWindow.sendEvent` does with a click (an offscreen window drops real mouse events):
+    /// the hit view takes the keyboard when it accepts it, then tracks the press until the release.
+    func click(row: Int, of table: NSTableView, in window: NSWindow) {
+        let rect = table.rect(ofRow: row)
+        let point = table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+        func event(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        guard let content = window.contentView, let hit = content.hitTest(content.convert(point, from: nil)) else { return }
+        if hit.acceptsFirstResponder { window.makeFirstResponder(hit) }
+        NSApp.postEvent(event(.leftMouseUp), atStart: false)
+        hit.mouseDown(with: event(.leftMouseDown))
+    }
+
+    /// The "+N more" button cannot be pressed this way (SwiftUI's buttons need the real event
+    /// dispatch); it is `.focusable(false)` like Antiope's clickable rows.
+    @Test func aClickOnAnEntrySelectsItAndTheListKeepsTheKeyboard() async throws {
+        let h = try await host()
+        defer { h.window.contentView = nil }
+        h.state.selection = .journal
+        #expect(await eventually { h.window.contentView?.layoutSubtreeIfNeeded(); return h.focus == .entryList })
+        let table = try #require(h.listTable)
+        click(row: 3, of: table, in: h.window)  // The Wire's first entry
+        #expect(await eventually { h.state.selectedEntryId == h.entries[1] })
+        #expect(h.focus == .entryList)
+        #expect(h.router.handle(keyEvent("j", window: h.window)))
+        #expect(h.state.selectedEntryId == h.entries[2])
+    }
+
+    @Test func theJournalReadsWithTheArrowsAndJAsEveryList() async throws {
+        let h = try await host()
+        defer { h.window.contentView = nil }
+        h.state.selection = .journal
+        #expect(await eventually { h.window.contentView?.layoutSubtreeIfNeeded(); return h.focus == .entryList })
+        let table = try #require(h.listTable)
+        #expect(h.router.handle(keyEvent("j", window: h.window)))
+        #expect(h.state.selectedEntryId == h.entries[0])
+        #expect(h.router.handle(arrowEvent(NSDownArrowFunctionKey, window: h.window)))
+        #expect(h.state.selectedEntryId == h.entries[1])
+        await h.settle()
+        #expect(table.selectedRow == 3)  // This Week's header, its entry, The Wire's header, then this one
+        #expect(h.router.handle(arrowEvent(NSUpArrowFunctionKey, window: h.window)))
+        #expect(h.router.handle(keyEvent("k", window: h.window)))
+        #expect(h.state.selectedEntryId == h.entries[0])
+        #expect(h.focus == .entryList)
     }
 }
 
