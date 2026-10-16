@@ -938,8 +938,11 @@ fn edition_show_before_any_edition() {
     assert!(json.stdout.is_empty(), "an empty NDJSON stream");
 }
 
-/// Four feeds on a port nobody listens to, imported but not fetched.
-fn closed_port_home() -> tempfile::TempDir {
+/// Four feeds on a port nobody listens to: every fetch fails to connect, so the refresh's
+/// network guard (4 attempts at least, more than half network failures) calls the network
+/// unreachable, and no edition is written (spec §9).
+#[test]
+fn edition_build_offline_writes_nothing() {
     let port = {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap().port()
@@ -955,15 +958,6 @@ fn closed_port_home() -> tempfile::TempDir {
             .status
             .success()
     );
-    home
-}
-
-/// Every fetch fails to connect, so the refresh's network guard (4 attempts at least, more
-/// than half network failures) calls the network unreachable, and no edition is written
-/// (spec §9).
-#[test]
-fn edition_build_offline_writes_nothing() {
-    let home = closed_port_home();
 
     let out = ressac(home.path(), &["edition", "build"]);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
@@ -976,11 +970,12 @@ fn edition_build_offline_writes_nothing() {
         "No edition yet.\n"
     );
 
-    // A second home: the first run put its feeds in backoff, so a second build there would
-    // have nothing due to fetch.
-    let json_home = closed_port_home();
-    let json = ressac(json_home.path(), &["--json", "edition", "build"]);
-    assert_eq!(json.status.code(), Some(2), "{json:?}");
+    let json = ressac(home.path(), &["--json", "edition", "build"]);
+    assert_eq!(
+        json.status.code(),
+        Some(2),
+        "still due, still offline: {json:?}"
+    );
     assert!(
         json_lines(&json)
             .iter()
@@ -1000,6 +995,48 @@ fn edition_commands_exit_1_on_a_database_error() {
         assert!(
             stderr(&out).starts_with("error: cannot open database"),
             "{out:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn edition_show_and_page_list_neutralise_terminal_escapes() {
+    let server = MockServer::start().await;
+    let body = r#"{"version":"https://jsonfeed.org/version/1.1","title":"Feed \u001b[31mred","items":[{"id":"1","title":"Hi \u001b]0;pwn\u0007 \u009b2J","content_text":"x","date_published":"2099-01-01T00:00:00Z"}]}"#;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/feed+json"))
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let opml = home.path().join("j.opml");
+    std::fs::write(
+        &opml,
+        format!(
+            r#"<opml><body><outline text="J" xmlUrl="{}/j.json"/></body></opml>"#,
+            server.uri()
+        ),
+    )
+    .unwrap();
+    assert!(
+        ressac_async(home.path(), &["import", opml.to_str().unwrap()])
+            .await
+            .status
+            .success()
+    );
+    assert!(
+        ressac_async(home.path(), &["edition", "build"])
+            .await
+            .status
+            .success()
+    );
+    for args in [&["edition", "show"][..], &["page", "list"]] {
+        let out = stdout(&ressac_async(home.path(), args).await);
+        if args[0] == "edition" {
+            assert!(out.contains("Hi \u{FFFD}]0;pwn"), "{out:?}");
+        }
+        assert!(
+            !out.chars().any(|c| c.is_control() && c != '\n'),
+            "{args:?}: {out:?}"
         );
     }
 }

@@ -205,11 +205,30 @@ pub fn migrated_text(version: i64) -> String {
     format!("Schema version {version}.")
 }
 
+/// Text for a terminal: every control character (ESC, C1 such as U+009B, tab, newline) is
+/// replaced by U+FFFD, so a feed or entry title cannot inject escape sequences. Plain text is
+/// returned borrowed. JSON output does not need it: serde escapes controls.
+pub fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.chars().any(char::is_control) {
+        text.chars()
+            .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+            .collect::<String>()
+            .into()
+    } else {
+        text.into()
+    }
+}
+
 /// One line of `ressac page list` and `ressac page set`: `page kind id title`, with `-`
 /// for the id of a reserved page.
 pub fn page_text(row: &PageRow) -> String {
     let id = row.id.map_or("-".to_string(), |id| id.to_string());
-    format!("{} {} {id} {}", row.page, row.kind.as_str(), row.title)
+    format!(
+        "{} {} {id} {}",
+        row.page,
+        row.kind.as_str(),
+        printable(&row.title)
+    )
 }
 
 /// Printed on stderr after a run stopped by Ctrl-C.
@@ -412,6 +431,18 @@ mod tests {
             String::from_utf8(text).unwrap(),
             "Undid the last decision (#4).\n"
         );
+    }
+
+    #[test]
+    fn printable_replaces_controls_and_borrows_plain_text() {
+        assert_eq!(
+            printable("a\u{1b}[31mb\u{9b}2J\tc\n"),
+            "a\u{FFFD}[31mb\u{FFFD}2J\u{FFFD}c\u{FFFD}"
+        );
+        assert!(matches!(
+            printable("Courrier international é"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]

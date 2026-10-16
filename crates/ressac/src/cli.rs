@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use ressac_core::edition::{CAP_WEEK, CAP_WIRE};
 use ressac_core::model::{Decision, FeedId, FolderId};
 use ressac_core::store::pages::PageKind;
 
@@ -128,12 +129,12 @@ pub enum PageCommand {
 pub enum EditionCommand {
     /// Refresh every feed, then compose this morning's edition (once a day, from 04:00)
     Build {
-        /// Entries per weekly feed [default: 3]
-        #[arg(long, value_name = "N")]
-        cap_week: Option<usize>,
-        /// Entries per daily feed [default: 1]
-        #[arg(long, value_name = "N")]
-        cap_wire: Option<usize>,
+        /// Entries per weekly feed
+        #[arg(long, value_name = "N", default_value_t = CAP_WEEK)]
+        cap_week: usize,
+        /// Entries per daily feed
+        #[arg(long, value_name = "N", default_value_t = CAP_WIRE)]
+        cap_wire: usize,
         /// Replace this morning's edition, over the same window
         #[arg(long)]
         rebuild: bool,

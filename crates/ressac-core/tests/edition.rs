@@ -370,3 +370,68 @@ async fn no_edition_yet() {
     .unwrap();
     assert_eq!(app.edition_today().unwrap(), None);
 }
+
+/// Spec §9: offline means no edition and an unchanged window, and a Retry within 30 minutes
+/// (the feeds were just tried) must see the network failure again instead of finding nothing
+/// due and writing an empty edition.
+#[tokio::test]
+async fn a_retry_right_after_an_offline_build_is_offline_again_then_builds() {
+    let addr = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap()
+    };
+    let base = format!("http://{addr}");
+    let outlines: String = (1..=4)
+        .map(|i| format!(r#"<outline text="F{i}" xmlUrl="{base}/f{i}.xml"/>"#))
+        .collect();
+    let app = Ressac::with_parts(
+        Store::open_in_memory().unwrap(),
+        limits(),
+        "http://127.0.0.1:9",
+    )
+    .unwrap();
+    app.import_opml(&format!("<opml><body>{outlines}</body></opml>"), false)
+        .unwrap();
+    for _ in 0..2 {
+        let outcome = app
+            .build_edition(
+                EditionOptions::default(),
+                Utc::now(),
+                &Utc,
+                &Recorder::default(),
+                go(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, EditionOutcome::Offline);
+        assert_eq!(app.store().latest_edition().unwrap(), None);
+    }
+
+    // The network comes back: the same port now answers.
+    let server = MockServer::builder()
+        .listener(std::net::TcpListener::bind(addr).unwrap())
+        .start()
+        .await;
+    let now = Utc::now();
+    for i in 1..=4 {
+        serve(
+            &server,
+            &format!("/f{i}.xml"),
+            ok_rss(rss(&format!("F{i}"), &[(&format!("g{i}"), now - hours(1))])),
+        )
+        .await;
+    }
+    let report = built(
+        app.build_edition(
+            EditionOptions::default(),
+            Utc::now(),
+            &Utc,
+            &Recorder::default(),
+            go(),
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(report.entries, 4);
+    assert_eq!(report.unreachable, 0);
+}

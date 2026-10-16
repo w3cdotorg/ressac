@@ -45,16 +45,15 @@ fn edition_error(e: ressac_core::Error) -> anyhow::Error {
 async fn build(
     g: &Globals,
     app: &Ressac,
-    cap_week: Option<usize>,
-    cap_wire: Option<usize>,
+    cap_week: usize,
+    cap_wire: usize,
     rebuild: bool,
     out: &mut impl Write,
 ) -> anyhow::Result<ExitCode> {
-    let defaults = Caps::default();
     let opts = EditionOptions {
         caps: Caps {
-            week: cap_week.unwrap_or(defaults.week),
-            wire: cap_wire.unwrap_or(defaults.wire),
+            week: cap_week,
+            wire: cap_wire,
         },
         rebuild,
     };
@@ -228,7 +227,15 @@ fn show(g: &Globals, app: &Ressac, out: &mut impl Write) -> anyhow::Result<ExitC
         writeln!(out, "{}", section_title(section))?;
         for e in entries {
             let page = pages.get(&e.feed_id).copied();
-            writeln!(out, "{}", entry_line(e.rank, page, e.title.as_deref()))?;
+            writeln!(
+                out,
+                "{}",
+                entry_line(
+                    e.rank,
+                    page,
+                    e.title.as_deref().map(output::printable).as_deref(),
+                )
+            )?;
         }
         let mut overflow: Vec<_> = view
             .overflow
@@ -237,7 +244,11 @@ fn show(g: &Globals, app: &Ressac, out: &mut impl Write) -> anyhow::Result<ExitC
             .collect();
         overflow.sort_by_key(|o| (o.page.is_none(), o.page, o.feed_id));
         for o in overflow {
-            writeln!(out, "{}", overflow_line(o.hidden_count, &o.feed_title))?;
+            writeln!(
+                out,
+                "{}",
+                overflow_line(o.hidden_count, &output::printable(&o.feed_title))
+            )?;
         }
     }
     let read = view.entries.iter().filter(|e| e.read_at.is_some()).count();

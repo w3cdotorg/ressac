@@ -689,7 +689,17 @@ impl Ressac {
             failed: std::sync::atomic::AtomicU32::new(0),
         };
         let summary = self
-            .refresh(RefreshOptions::default(), &counter, stop.clone())
+            .refresh(
+                // Force: a feed fetched within 30 minutes (even a failed try) would otherwise
+                // be skipped, so a Retry after an offline build would see no network failure
+                // and write an empty edition (spec §9).
+                RefreshOptions {
+                    force: true,
+                    only: None,
+                },
+                &counter,
+                stop.clone(),
+            )
             .await?;
         if stop.load(Ordering::Relaxed) {
             return Ok(EditionOutcome::Interrupted);
