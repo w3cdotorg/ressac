@@ -82,6 +82,11 @@ pub enum Command {
         #[command(subcommand)]
         action: PageCommand,
     },
+    /// Build or show the morning edition
+    Edition {
+        #[command(subcommand)]
+        action: EditionCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -117,6 +122,24 @@ pub enum PageCommand {
         id: i64,
         page: u16,
     },
+}
+
+#[derive(Subcommand)]
+pub enum EditionCommand {
+    /// Refresh every feed, then compose this morning's edition (once a day, from 04:00)
+    Build {
+        /// Entries per weekly feed [default: 3]
+        #[arg(long, value_name = "N")]
+        cap_week: Option<usize>,
+        /// Entries per daily feed [default: 1]
+        #[arg(long, value_name = "N")]
+        cap_wire: Option<usize>,
+        /// Replace this morning's edition, over the same window
+        #[arg(long)]
+        rebuild: bool,
+    },
+    /// Print this morning's edition by section
+    Show,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
