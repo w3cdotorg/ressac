@@ -12,9 +12,7 @@ Prochaines étapes de Ressac, au 16/10/2026. Le détail des décisions passées 
 
 ## Sous-projets suivants
 
-Ordre convenu le 14/10/2026 : 3, puis 2b.
-
-- [ ] **2b : la lecture dans le terminal.** Trois colonnes en ratatui sur le même schéma (v4) : lu, favori, recherche, article complet, avec clappuccino comme référence. Habillage Antiope du terminal compris (palette et numéros de page du sous-projet 4), ainsi que le journal du matin et les groupes de rythme (vues `v_edition_today`, `v_edition_overflow` et `v_cadence`).
+- [x] **2b : la lecture dans le terminal.** Fait le 19/10/2026 sur la branche `terminal-reading` ; recette et trouvailles dans `notes.md`.
 - [x] **3 : rythme et journal du matin.** Fait le 16/10/2026 sur la branche `cadence-edition` ; recette et trouvailles dans `notes.md`.
 - [x] **4 : thème Antiope (appli Mac).** Fait le 15/10/2026 sur la branche `antiope` ; recette et trouvailles dans `notes.md`.
 
@@ -65,6 +63,21 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] La liste du Journal reprend le clavier à chaque apparition (comme le jardin) ; à revoir si cela gêne la saisie ailleurs.
 - [ ] Antiope : lignes de débordement ouvertes au clic seulement, sans `↩` (écart assumé par rapport à la spec).
 - [ ] Mineurs des relectures : la fabrication d'une édition peut reprendre l'id d'une édition reconstruite (pas d'AUTOINCREMENT, change de schéma si besoin) ; le Journal masque les entrées d'un flux enterré en cours de journée (choix assumé) ; sélecteur Statut | Rythme du jardin qui peut prendre le focus des touches `k`, `r`, `b` ; quelques tests à renforcer (voir le registre local `.superpowers/`, hors dépôt).
+
+### Lecture dans le terminal (sous-projet 2b)
+
+- [ ] `c` (rythme) n'est pas conditionné à l'affichage de la liste : derrière une page du jardin, il ouvre le menu pour un flux caché (une écriture exige quand même un choix explicite dans le menu). Idem Entrée sur une ligne de débordement sous le placeholder du Journal (navigation seulement).
+- [ ] Mémoire des images : bornée, mais environ 330 Mo dans le pire cas ; à revoir si cela gêne.
+- [ ] `r` sur la bannière occupée (fabrication ou tâche en cours) lance un rafraîchissement réseau.
+- [ ] Le type de contenu d'une image n'est vérifié qu'après avoir mis le corps en mémoire (32 Mo au plus, échec transitoire).
+- [ ] Avec `-v`, la trace va aussi sur stderr, par-dessus l'écran alterné ; un signal externe (SIGINT, SIGTERM) laisse le terminal en mode brut, comme le jardin.
+- [ ] L'inspecteur du jardin ne défile pas sous environ 30 lignes.
+- [ ] HTML au-delà de 64 niveaux d'imbrication : texte aplati, blocs collés, liens et images perdus ; lignes de `<pre>` coupées par la colonne, non repliées.
+- [ ] Caractères de contrôle bidirectionnels (U+202E) : affichés tels quels (nuisance d'usurpation, pas d'injection d'échappement : ratatui écarte les caractères de contrôle). Le libellé de dossier du titre de la liste du jardin ne passe pas par `printable` (cosmétique).
+- [ ] Course résiduelle à `window_end` : un autre écrivain peut dater `fetched_at` avant `window_end` mais valider après la transaction de l'édition (antérieur à cette branche).
+- [ ] Antiope : mosaïques séparées ; synchroniser le look du terminal avec l'Apparence de l'appli ; une crate séparée pour le lecteur si les temps de compilation augmentent.
+- [ ] À signaler en amont : `ratatui-image` 11.1.0 abandonne le protocole détecté quand aucune taille de police ne répond (sous tmux), et son constructeur avec police (`Picker::from_fontsize`) est déprécié.
+- [ ] Mineurs des relectures (détail dans le registre local `.superpowers/`, hors dépôt) : un champ invalide efface tout `terminal.json`, la ligne de rythme du jardin fait sauter une rangée à l'arrivée, une entrée lue par une écriture propre reste dans Non lus jusqu'au prochain rechargement complet (comme l'appli).
 
 ### Durcissement proposé, non fait
 
