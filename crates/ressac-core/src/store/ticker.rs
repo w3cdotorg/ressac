@@ -22,6 +22,15 @@ pub struct TickerEntry {
 const SELECT: &str = "SELECT v.entry_id, v.feed_id, v.feed_title, v.title, v.url \
      FROM v_entry v JOIN entry e ON e.id = v.entry_id";
 
+/// The pool query. `NOT IN` over `edition_entry.entry_id` (NOT NULL) is evaluated once; a
+/// correlated `NOT EXISTS` scanned `edition_entry` for every candidate row.
+const POOL_SQL: &str = "SELECT v.entry_id, v.feed_id, v.feed_title, v.title, v.url \
+     FROM v_entry v JOIN entry e ON e.id = v.entry_id \
+     WHERE e.read_at IS NULL AND v.published_at >= ?1 \
+     AND v.entry_id NOT IN (SELECT entry_id FROM edition_entry) \
+     AND (v.url LIKE 'http://%' OR v.url LIKE 'https://%') AND trim(v.title) <> '' \
+     ORDER BY v.published_at DESC, v.entry_id DESC LIMIT 2000";
+
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TickerEntry> {
     Ok(TickerEntry {
         entry_id: r.get(0)?,
@@ -37,12 +46,7 @@ impl Store {
     /// edition, with an http(s) URL and a non-blank title. Newest first, at most 2000.
     pub fn ticker_pool(&self, now: DateTime<Utc>) -> Result<Vec<TickerEntry>> {
         let since = ts(now - chrono::Duration::days(TICKER_WINDOW_DAYS));
-        let mut stmt = self.conn().prepare(&format!(
-            "{SELECT} WHERE e.read_at IS NULL AND v.published_at >= ?1 \
-             AND NOT EXISTS (SELECT 1 FROM edition_entry ee WHERE ee.entry_id = v.entry_id) \
-             AND (v.url LIKE 'http://%' OR v.url LIKE 'https://%') AND trim(v.title) <> '' \
-             ORDER BY v.published_at DESC, v.entry_id DESC LIMIT 2000"
-        ))?;
+        let mut stmt = self.conn().prepare(POOL_SQL)?;
         let rows = stmt.query_map([since], row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -99,6 +103,24 @@ mod tests {
         add_edition(&s, 1, &[(4, "front", 1)], &[]);
         add_edition(&s, 2, &[(5, "front", 1)], &[]);
         s
+    }
+
+    #[test]
+    fn pool_does_not_scan_edition_entry_per_row() {
+        let s = store();
+        let mut stmt = s
+            .conn()
+            .prepare(&format!("EXPLAIN QUERY PLAN {POOL_SQL}"))
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(["2026-10-12T12:00:00.000Z"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().all(|row| !row.contains("CORRELATED")),
+            "{plan:?}"
+        );
     }
 
     #[test]
