@@ -3,6 +3,8 @@
 mod cli;
 mod commands;
 mod output;
+#[allow(dead_code, unused_imports)] // used by `ressac ticker` (Task 5)
+mod ticker;
 mod tui;
 
 use std::path::PathBuf;
