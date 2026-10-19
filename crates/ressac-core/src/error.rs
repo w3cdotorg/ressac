@@ -1,5 +1,7 @@
 //! Crate-wide error type. Per-feed fetch failures are data (`model::ErrorKind`), not errors.
 
+use std::path::PathBuf;
+
 use crate::model::FeedId;
 
 #[derive(Debug, thiserror::Error)]
@@ -8,6 +10,12 @@ pub enum Error {
     Db(#[from] rusqlite::Error),
     #[error("database schema v{found} is newer than this ressac (knows v{known}); update ressac")]
     SchemaTooNew { found: i64, known: i64 },
+    /// `Store::open_existing*` found no file to open (it never creates one).
+    #[error("No database at {}.", .0.display())]
+    DatabaseMissing(PathBuf),
+    /// `Store::open_existing*` found a schema it will neither migrate nor read.
+    #[error("Database schema v{found} does not match this ressac (v{expected}).")]
+    SchemaMismatch { found: i64, expected: i64 },
     #[error("cannot read OPML at line {line}, column {column}: {message}")]
     Opml {
         line: usize,

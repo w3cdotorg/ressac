@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::error::{Error, Result};
 
@@ -87,6 +87,48 @@ impl Store {
         };
         store.configure()?;
         store.migrate()?;
+        Ok(store)
+    }
+
+    /// Opens a database that must already exist at the current schema: never creates the
+    /// file or its directory, never migrates, never backs up (the ticker's write path).
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        Self::open_existing_with(path, false)
+    }
+
+    /// Like [`Store::open_existing`], but refuses writes (`PRAGMA query_only`) and waits at
+    /// most 250 ms for a lock. Not `SQLITE_OPEN_READ_ONLY`: a WAL database without its
+    /// `-shm` file cannot be read through a read-only connection.
+    pub fn open_existing_query_only(path: &Path) -> Result<Self> {
+        Self::open_existing_with(path, true)
+    }
+
+    fn open_existing_with(path: &Path, query_only: bool) -> Result<Self> {
+        if !path.exists() {
+            return Err(Error::DatabaseMissing(path.to_path_buf()));
+        }
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        let store = Store {
+            conn,
+            path: Some(path.to_path_buf()),
+        };
+        store.configure()?;
+        if query_only {
+            store.conn.execute_batch("PRAGMA query_only = ON;")?;
+            store.conn.busy_timeout(Duration::from_millis(250))?;
+        }
+        let found = store.schema_version()?;
+        if found != SCHEMA_VERSION {
+            return Err(Error::SchemaMismatch {
+                found,
+                expected: SCHEMA_VERSION,
+            });
+        }
         Ok(store)
     }
 
@@ -593,5 +635,114 @@ mod tests {
         raw.execute_batch("DROP TABLE edition").unwrap();
         drop(raw);
         assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 4);
+    }
+
+    const TEST_FEED_AND_ENTRY: &str = "INSERT INTO feed (id, position, title, xml_url, xml_url_original, url_key, added_at) \
+         VALUES (1, 0, 'F', 'https://f.example.org/feed', 'https://f.example.org/feed', \
+         'f.example.org/feed', '2026-01-01T00:00:00.000Z'); \
+         INSERT INTO entry (id, feed_id, guid, title, published_at, fetched_at) \
+         VALUES (1, 1, 'a', 'Tides', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z');";
+
+    #[test]
+    fn open_existing_refuses_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("missing");
+        let path = sub.join("ressac.sqlite");
+        assert!(matches!(
+            Store::open_existing(&path),
+            Err(Error::DatabaseMissing(_))
+        ));
+        assert!(matches!(
+            Store::open_existing_query_only(&path),
+            Err(Error::DatabaseMissing(_))
+        ));
+        assert!(!path.exists());
+        assert!(!sub.exists());
+    }
+
+    #[test]
+    fn open_existing_refuses_another_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        drop(Store::open(&path).unwrap());
+        let raw = Connection::open(&path).unwrap();
+        raw.execute("UPDATE schema_meta SET version = 3", [])
+            .unwrap();
+        match Store::open_existing(&path) {
+            Err(Error::SchemaMismatch {
+                found: 3,
+                expected: SCHEMA_VERSION,
+            }) => {}
+            Err(other) => panic!("unexpected error {other}"),
+            Ok(_) => panic!("another schema version was accepted"),
+        }
+        let version: i64 = raw
+            .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        assert!(!path.with_extension("sqlite.bak-v3").exists());
+    }
+
+    #[test]
+    fn open_existing_can_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        let first = Store::open(&path).unwrap();
+        first.conn().execute_batch(TEST_FEED_AND_ENTRY).unwrap();
+        drop(first);
+        let store = Store::open_existing(&path).unwrap();
+        store.set_read(1, true, chrono::Utc::now()).unwrap();
+        let read_at: Option<String> = store
+            .conn()
+            .query_row("SELECT read_at FROM entry WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(read_at.is_some());
+    }
+
+    #[test]
+    fn query_only_open_cannot_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        let first = Store::open(&path).unwrap();
+        first.conn().execute_batch(TEST_FEED_AND_ENTRY).unwrap();
+        drop(first);
+        let store = Store::open_existing_query_only(&path).unwrap();
+        assert!(
+            store
+                .conn()
+                .execute("UPDATE entry SET read_at = '2026-10-02T00:00:00.000Z'", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn query_only_open_reads_a_wal_database_without_shm() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        let first = Store::open(&path).unwrap();
+        first.conn().execute_batch(TEST_FEED_AND_ENTRY).unwrap();
+        drop(first);
+        let shm = dir.path().join("ressac.sqlite-shm");
+        let _ = std::fs::remove_file(&shm);
+        assert!(!shm.exists());
+        let store = Store::open_existing_query_only(&path).unwrap();
+        let count: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM entry", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn query_only_open_sets_a_short_busy_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        drop(Store::open(&path).unwrap());
+        let store = Store::open_existing_query_only(&path).unwrap();
+        let timeout: i64 = store
+            .conn()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 250);
     }
 }
