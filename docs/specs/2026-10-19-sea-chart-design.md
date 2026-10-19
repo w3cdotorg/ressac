@@ -20,7 +20,7 @@ All taken while iterating on the mockup:
 - **Language:** English everywhere on the chart.
 - **Style:** Marine Le Breton's spirit: one ink, stippled shallows, depth lines, open water filled with short pen strokes that follow the wind offshore and run parallel to the coast near land.
 - **Two views:** "From the harbour" (default): distance from the port = time since the feed's last entry, on a stretched log scale whose edge is 6 months, with range rings at 1 day, 1 week, 1 month, 3 months, 6 months; bearing = theme sector. "By theme": one archipelago per theme, static.
-- **Feeds shown:** active feeds whose last entry is at most 6 months old (182 days). Buried feeds and feeds silent for longer are not on the chart. Feeds waiting for triage stay (they are active); feeds in the Silent rhythm group that published within 6 months stay too, drawn as small islets marked "ED" (existence doubtful).
+- **Feeds shown:** active feeds whose last entry is at most 6 months old (182 days). Buried feeds and feeds silent for longer are not on the chart. Feeds waiting for triage in the garden are left off too (Clément, 19/10: everything should be triaged); feeds in the Silent rhythm group that published within 6 months stay too, drawn as small islets marked "ED" (existence doubtful).
 - **Themes:** each feed has one theme; seas are themes (15 proposed: AI labs and tools, AI voices, Product and engineering, Education and EdTech, Tech Apple and geeks, Digital rights, World press, French press, Science and ideas, Language and words, Books letters and libraries, Art design and images, Cities and places, Comics humour and fandoms, Friends' journals). Proposed by Claude, editable.
 - **Territories:** feeds from one publisher (or a family such as Groupe Le Monde) share one landmass, each feed a headland; named in small capitals along the land. **Continents:** a whole theme as one landmass (four proposed: Land of Comics, Republic of Letters, Silicon Shores, Terra Libertas). Landmasses have invented coastlines (hull of the group, pushed out and frayed), not ridges.
 - **Islands:** size by rhythm group; an island is one feed; islands never merge.
@@ -33,7 +33,7 @@ All taken while iterating on the mockup:
 
 ## 2b. Calls made after the builder check (Claude's)
 
-- "Silent" in §2 means silent for more than 6 months; the 182-day rule is the only filter besides `state = 'active'`. The rhythm group comes from `v_cadence.effective_group`; undiagnosed feeds are `silent` and, when recent, show as ED islets.
+- "Silent" in §2 means silent for more than 6 months. Filters: `state = 'active'`, not waiting for triage (`v_garden_row.needs_triage = 0`), last entry within 182 days. The rhythm group comes from `v_cadence.effective_group`; undiagnosed feeds are `silent` and, when recent, show as ED islets.
 - Determinism, no-overlap and stability tests run on fixed inputs (a fixture with fixed `age_days`).
 - Change detection: the app's `AppState` already owns an `ExternalChangeMonitor` and notifies GRDB observers (`AppDatabase.notifyExternalChanges`). The plan adds a change counter on `AppState` bumped on external changes and on the app's own writes, which `ChartModel` observes. Selecting a feed from the chart sets `AppState.selection = .feed(id)` (the `Source` enum in `Data/Queries.swift`) and brings the main window forward.
 - `page` may be null; the popover then omits it.
@@ -97,7 +97,7 @@ CREATE TABLE territory_feed (
 
 - `themes()`, `set_feed_theme(feed_id, Option<theme key>)` (unknown key → error, buried feed allowed), `import_chart(&ChartImport) -> ChartImportReport` (one transaction: upsert themes by key; set themes of feeds matched by `xml_url` (also `xml_url_original`); replace territories with those in the file; report unmatched URLs and feeds left unthemed).
 - `chart_snapshot(now) -> ChartSnapshot`:
-  - feeds: active, last entry (`published_at`) within 182 days of `now`; for each: id, title, theme key (or null), folder path, effective rhythm group, `age_days` since the last entry, `unread_week` (unread, published in the last 7 days), `entries_week`, `activity` = Σ 2^(−age/3) over entries of the last 30 days (ages clamped at 0), `page`, and the five latest entries (id, title, url (http/https only, else null), published day, read);
+  - feeds: active, not waiting for triage, last entry (`published_at`) within 182 days of `now`; for each: id, title, theme key (or null), folder path, effective rhythm group, `age_days` since the last entry, `unread_week` (unread, published in the last 7 days), `entries_week`, `activity` = Σ 2^(−age/3) over entries of the last 30 days (ages clamped at 0), `page`, and the five latest entries (id, title, url (http/https only, else null), published day, read);
   - themes in `position` order with feed counts (only themes that have chart feeds), plus an implicit "UNCHARTED WATERS" group for unthemed feeds, placed last;
   - territories (kind, name, member ids in position order, only members on the chart, dropped when fewer than 2) and continents (name, theme key);
   - `surveyed_at` (now) and totals (feeds, unread this week).
