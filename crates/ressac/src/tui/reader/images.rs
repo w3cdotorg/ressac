@@ -292,12 +292,14 @@ pub fn font_from_window(columns: u16, rows: u16, width: u16, height: u16) -> Opt
 /// 500 ms. Stdin is closed so the child cannot read the keyboard.
 fn tmux_client_term() -> Option<String> {
     use std::process::{Command, Stdio};
-    let mut child = Command::new("tmux")
-        .args([
-            "display-message",
-            "-p",
-            "#{client_termname} #{client_termtype}",
-        ])
+    let mut command = Command::new("tmux");
+    command.args(["display-message", "-p"]);
+    // This pane's client, not whichever was active last, when several are attached.
+    if let Some(pane) = std::env::var_os("TMUX_PANE").filter(|p| !p.is_empty()) {
+        command.arg("-t").arg(pane);
+    }
+    let mut child = command
+        .arg("#{client_termname} #{client_termtype}")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

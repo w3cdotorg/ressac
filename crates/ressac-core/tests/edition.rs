@@ -463,3 +463,38 @@ async fn everything_a_production_shaped_build_fetches_is_inside_its_edition() {
         record.window_end
     );
 }
+
+#[tokio::test]
+async fn a_past_injected_day_still_contains_what_its_own_refresh_fetched() {
+    let server = MockServer::start().await;
+    let app = morning_app(&server, false).await;
+    // The clock says yesterday; the refresh stamps its entries with the real clock, later.
+    let now = Utc::now() - chrono::Duration::days(1);
+    let run_start = Utc::now();
+    let report = built(
+        app.build_edition(
+            EditionOptions::default(),
+            now,
+            &Utc,
+            &Recorder::default(),
+            go(),
+        )
+        .await
+        .unwrap(),
+    );
+    let record = app.store().latest_edition().unwrap().unwrap();
+    let latest = app
+        .store()
+        .latest_fetch_since(run_start)
+        .unwrap()
+        .expect("entries were fetched");
+    assert!(
+        latest <= record.window_end,
+        "{latest} after {}",
+        record.window_end
+    );
+    // The same four entries as with a machine-clock build: none was cut off by the window.
+    assert_eq!((report.entries, report.overflow), (4, 2));
+    // The due rule still lives on the injected day.
+    assert!(record.built_at >= now && record.built_at - now < chrono::Duration::minutes(5));
+}
