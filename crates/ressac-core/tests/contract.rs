@@ -159,7 +159,7 @@ fn reading_columns_and_views_are_stable() {
     let version: i64 = conn
         .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     assert_eq!(version, ressac_core::store::SCHEMA_VERSION);
 }
 
@@ -287,7 +287,7 @@ fn contract_fixture_covers_the_reading_cases() {
     let db = fixture();
     let int = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
     let text = |sql: &str| -> String { db.query_row(sql, [], |r| r.get(0)).unwrap() };
-    assert_eq!(int("SELECT version FROM schema_meta"), 4);
+    assert_eq!(int("SELECT version FROM schema_meta"), 5);
 
     // One FTS row per entry; the backlog rule on xkcd's first fill.
     assert_eq!(int("SELECT count(*) FROM entry"), 6);

@@ -8,7 +8,7 @@ import GRDB
 final class AppDatabase: Sendable {
     /// Schema version this build understands (`schema_meta.version`): v3 adds page numbers,
     /// v4 the rhythm groups and the morning edition.
-    static let knownSchemaVersion = 4
+    static let knownSchemaVersion = 5
 
     enum SchemaCheck: Equatable, Sendable {
         case missing
