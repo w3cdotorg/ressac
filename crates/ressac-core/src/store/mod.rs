@@ -117,10 +117,11 @@ impl Store {
             conn,
             path: Some(path.to_path_buf()),
         };
-        store.configure()?;
+        // Nothing below may alter the file before the schema is checked: the query-only
+        // handle never sets the journal mode, the writable one sets it only afterwards.
         if query_only {
-            store.conn.execute_batch("PRAGMA query_only = ON;")?;
             store.conn.busy_timeout(Duration::from_millis(250))?;
+            store.conn.execute_batch("PRAGMA query_only = ON;")?;
         }
         let found = store.schema_version()?;
         if found != SCHEMA_VERSION {
@@ -128,6 +129,11 @@ impl Store {
                 found,
                 expected: SCHEMA_VERSION,
             });
+        }
+        if query_only {
+            store.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        } else {
+            store.configure()?;
         }
         Ok(store)
     }
@@ -744,5 +750,49 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
             .unwrap();
         assert_eq!(timeout, 250);
+    }
+
+    fn journal_mode_of(conn: &Connection) -> String {
+        conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn query_only_open_leaves_journal_mode_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        drop(Store::open(&path).unwrap());
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(journal_mode_of(&raw), "wal");
+        raw.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))
+            .unwrap();
+        let store = Store::open_existing_query_only(&path).unwrap();
+        let count: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM entry", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(journal_mode_of(&raw), "delete");
+    }
+
+    #[test]
+    fn open_existing_does_not_touch_a_wrong_schema_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        drop(Store::open(&path).unwrap());
+        let raw = Connection::open(&path).unwrap();
+        raw.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))
+            .unwrap();
+        raw.execute("UPDATE schema_meta SET version = 3", [])
+            .unwrap();
+        assert!(matches!(
+            Store::open_existing(&path),
+            Err(Error::SchemaMismatch { found: 3, .. })
+        ));
+        assert!(matches!(
+            Store::open_existing_query_only(&path),
+            Err(Error::SchemaMismatch { found: 3, .. })
+        ));
+        assert_eq!(journal_mode_of(&raw), "delete");
     }
 }
