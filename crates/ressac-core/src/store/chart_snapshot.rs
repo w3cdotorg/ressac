@@ -105,14 +105,15 @@ impl Store {
         let activity_start = ts(now - Duration::days(ACTIVITY_DAYS));
 
         let mut stmt = conn.prepare(
-            "SELECT c.feed_id, c.title, t.key, c.folder_path, c.effective_group, c.page, \
-                    (SELECT MAX(e.published_at) FROM entry e WHERE e.feed_id = c.feed_id) AS last_at \
-             FROM v_cadence c \
-             JOIN v_garden_row g ON g.feed_id = c.feed_id \
-             JOIN feed f ON f.id = c.feed_id \
+            "SELECT f.id, f.title, t.key, fp.path, COALESCE(f.cadence_override, h.cadence_group), \
+                    f.page, \
+                    (SELECT MAX(e.published_at) FROM entry e WHERE e.feed_id = f.id) AS last_at \
+             FROM feed f \
+             LEFT JOIN feed_health h ON h.feed_id = f.id \
+             LEFT JOIN v_folder_path fp ON fp.folder_id = f.folder_id \
              LEFT JOIN theme t ON t.id = f.theme_id \
-             WHERE g.needs_triage = 0 AND last_at >= ?1 \
-             ORDER BY c.feed_id",
+             WHERE f.state = 'active' AND COALESCE(h.needs_triage, 0) = 0 AND last_at >= ?1 \
+             ORDER BY f.id",
         )?;
         let mut feeds: Vec<ChartFeed> = Vec::new();
         for row in stmt.query_map([&cutoff], |r| {
@@ -151,8 +152,7 @@ impl Store {
 
         // Week and activity figures come from the entries of the last 30 days.
         let mut stmt = conn.prepare(
-            "SELECT feed_id, published_at, read_at IS NULL FROM entry \
-             WHERE published_at >= ?1 AND feed_id IN (SELECT feed_id FROM v_cadence)",
+            "SELECT feed_id, published_at, read_at IS NULL FROM entry WHERE published_at >= ?1",
         )?;
         let mut activity = vec![0.0_f64; feeds.len()];
         for row in stmt.query_map([&activity_start], |r| {
@@ -494,6 +494,20 @@ mod tests {
         let snap = s.chart_snapshot(now()).unwrap();
         assert_eq!(ids(&snap), [1]);
         assert_eq!(snap.feeds[0].group, CadenceGroup::Silent);
+    }
+
+    #[test]
+    fn undiagnosed_feed_is_kept() {
+        let s = store_with_feeds(1);
+        add_feed(&s, 2, None, 2, None, "active", "daily");
+        s.conn()
+            .execute("DELETE FROM feed_health WHERE feed_id = 2", [])
+            .unwrap();
+        entry(&s, 1, 1, 24, false);
+        entry(&s, 2, 2, 24, false);
+        let snap = s.chart_snapshot(now()).unwrap();
+        assert_eq!(ids(&snap), [1, 2]);
+        assert_eq!(snap.feeds[1].group, CadenceGroup::Silent);
     }
 
     #[test]
