@@ -112,6 +112,7 @@ Base : construite depuis l'OPML Vienna (import puis check) dans un dossier tempo
 ### CI macOS
 
 - `xcode-27` (15/10/2026) : le job macOS passe sur cette image de préversion (macOS 27, Xcode 27.0) pour construire et tester l'appli à chaque envoi. Une étape compare les tests déclarés dans `RessacTests` aux tests exécutés et échoue si le compte est illisible. Le workflow a `permissions: contents: read` et `persist-credentials: false`, avec des délais de 30 minutes (`check`) et 60 minutes (`macos`). Si l'image pose problème, revenir à `runs-on: macos-latest`, une seule ligne de `ci.yml`.
+- **Releases** (19/10/2026) : `release.yml` se déclenche sur les étiquettes `v*.*.*`, refuse une étiquette qui ne correspond pas aux versions de `Cargo.toml` et de `project.yml`, construit l'appli Release (arm64) sur `xcode-27` sans repli possible, puis publie l'appli zippée par `ditto`, le binaire `ressac` et `SHA256SUMS` avec `gh release create --generate-notes`. Signature ad hoc, pas de notarisation (choix de Clément) : les notes de version expliquent `xattr -dr com.apple.quarantine`. Empaquetage essayé en local sur le build du 19/10 (signature intacte après décompression, sommes OK). Le job ne relance pas les tests : `ci.yml` tourne aussi sur l'envoi de l'étiquette.
 - `macos-latest` (11/10/2026) : Xcode 26.6 et SDK macOS 26.5, donc la construction et les tests de l'appli sont sautés, échec autorisé, job vert avec un avertissement (exécution 38126512109). L'appli n'est vérifiée qu'en local tant que GitHub n'a pas Xcode 27.
 
 ## Thème Antiope (sous-projet 4)

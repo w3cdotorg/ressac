@@ -92,6 +92,12 @@ cp -R "$TMPDIR/ressac-build/Build/Products/Release/Ressac.app" build/
 open build/Ressac.app
 ```
 
+**Releases.** Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`: it checks that the tag matches both `Cargo.toml` and `MARKETING_VERSION` in `apps/macos/project.yml`, builds the Release app on the `xcode-27` runner and publishes a GitHub Release with `Ressac-X.Y.Z-macos-arm64.zip` (the app), `ressac-X.Y.Z-macos-arm64.tar.gz` (the terminal binary) and `SHA256SUMS`. The builds are signed ad hoc and not notarized: after downloading, clear the quarantine flag (`xattr -dr com.apple.quarantine /Applications/Ressac.app`). A tag with a suffix (`v0.2.0-beta.1`) gives a pre-release.
+
+```sh
+git tag -a v0.1.0 -m "Ressac 0.1.0" && git push origin v0.1.0
+```
+
 Quit Ressac before replacing the build. To install it for every launch instead, copy `build/Ressac.app` to `/Applications/` (the commands below assume that location; with the local build, use `apps/macos/build/Ressac.app`).
 
 - **First run:** drop an OPML file on the window (or choose one, `⌘O`). A sheet shows what `ressac import --dry-run` found, then the app imports and fetches every feed.
