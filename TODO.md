@@ -82,7 +82,6 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 
 ### Bandeau tmux (sous-projet 5)
 
-- [ ] Vivier vide après un « tout marquer lu » : le 19/10 à 17:15, 1 615 articles récents ont été marqués lus d'un coup et il ne restait qu'un non-lu dans toute la base. Si c'est l'habitude, revoir le vivier (par exemple garder les articles marqués lus en masse).
 - [ ] Volume du journal : chaque appel en échec écrit un avertissement (environ 5 760 lignes par jour et par client si la base manque) ; passer en `debug!` les cas attendus ou limiter la cadence.
 - [ ] Erreurs de `try_lock` autres que « déjà pris » traitées comme un verrou pris (chemin de réimpression, sans gravité).
 - [ ] Titres faits seulement de caractères invisibles non blancs (U+200B) : ligne `Flux · ` apparemment vide ; caractères bidirectionnels (U+202E) et séparateurs de ligne Unicode non retirés (usurpation visuelle, pas d'injection) ; coupe par caractère et non par graphème (une séquence ZWJ ou VS16 peut déborder d'une ou deux colonnes).

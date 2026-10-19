@@ -254,7 +254,7 @@ Idée 13 du brainstorming du 19/10 sur d'autres présentations des flux (maquett
 
 ### Recette (19/10/2026)
 
-Base : copie de la vraie base par `.backup` en lecture seule, HOME temporaire pour ne jamais toucher au `ticker.json` réel. Constat de départ : il ne restait qu'un non-lu dans toute la base, 1 615 articles récents ayant été marqués lus d'un coup à 17:15 ; sur la copie seulement, ces articles ont été remis en non lus.
+Base : copie de la vraie base par `.backup` en lecture seule, HOME temporaire pour ne jamais toucher au `ticker.json` réel. Constat de départ : il ne restait qu'un non-lu dans toute la base, 1 615 articles récents ayant été marqués lus d'un coup à 17:15 ; sur la copie seulement, ces articles ont été remis en non lus. Clément : un grand ménage ponctuel des vieux articles, pas une habitude quotidienne ; le vivier reste tel quel.
 
 | # | Vérification (spec §9) | Résultat | Observations |
 |---|---|---|---|
