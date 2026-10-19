@@ -100,10 +100,14 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Un flux qui quitte la carte, ou qui change de thème, laisse les îles suivantes de sa mer remonter d'un cran (placement îlot par îlot, par ordre d'id).
 - [ ] Vue « By theme » : sur une mer pleine, l'espacement se resserre ; au-delà d'environ 230 flux, des îles peuvent se toucher.
 - [ ] Page : les rafales ne sont pas remises à zéro à la reconstruction (traits périmés pendant environ 3 s) ; une carte vide montre « By theme » enfoncé ; les erreurs de dessin ne vont que dans la console ; l'infobulle ne se retourne pas au bord ; le focus n'est pas rendu à la fermeture de la fenêtre contextuelle ; la police Cormorant italique 400 n'est pas chargée dans WebKit (pied de la fenêtre contextuelle seulement).
-- [ ] Appli : `hasReadingWindow` se fie au compte d'une table à références faibles (préférer `allObjects`) ; `showReadingWindow` prend une fenêtre quelconque ; le bloc de lancement est dupliqué entre `ChartWindow` et `RessacApp` ; aucun test de cycle de références ; « The main window says why » peut ne rien désigner.
+- [ ] Appli : `showReadingWindow` prend une fenêtre quelconque ; le bloc de lancement est dupliqué entre `ChartWindow` et `RessacApp` ; aucun test de cycle de références ; « The main window says why » peut ne rien désigner.
 - [ ] Appli : le `WindowGroup` principal a maintenant l'id `main` et peut oublier son cadre une fois (note de version).
 - [ ] CLI : `feed theme` sur une base vide sort en code 0 avant de vérifier la clé (comme `cadence`) ; les messages d'erreur de stderr reprennent tels quels clés, noms et chemins du fichier d'import (à assainir une fois, au puits stderr de `main.rs`).
 - [ ] Cœur : un territoire avec `continent` et `feeds` ignore `feeds` sans avertir ; `unthemed_feeds` compte aussi les flux enterrés ; instantané lu hors d'une transaction unique ; territoires regroupés par nom et non par id.
+- [ ] Un flux présent dans deux territoires ne prend que le placement du dernier.
+- [ ] Vue du port : le rabattement dans le cadre et la poussée hors du quai peuvent faire chevaucher des îles sur les marges.
+- [ ] Animation : la chaleur et la couleur de chaque île sont recalculées à chaque image.
+- [ ] Coût des rafraîchissements pendant une longue collecte : une reconstruction complète toutes les 2 s, à surveiller.
 - [ ] Tests à renforcer (détail dans le registre local `.superpowers/`, hors dépôt) : renommage et réordonnancement à la réimportation, rapport des URL inconnues en essai à blanc, précédence de `xml_url`, thème vide du test de migration v4 vers v5.
 
 ### Durcissement proposé, non fait

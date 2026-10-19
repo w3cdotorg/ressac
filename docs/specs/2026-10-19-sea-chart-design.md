@@ -97,7 +97,7 @@ CREATE TABLE territory_feed (
 
 - `themes()`, `set_feed_theme(feed_id, Option<theme key>)` (unknown key → error, buried feed allowed), `import_chart(&ChartImport) -> ChartImportReport` (one transaction: upsert themes by key; set themes of feeds matched by `xml_url` (also `xml_url_original`); replace territories with those in the file; report unmatched URLs and feeds left unthemed).
 - `chart_snapshot(now) -> ChartSnapshot`:
-  - feeds: active, not waiting for triage, last entry (`published_at`) within 182 days of `now`; for each: id, title, theme key (or null), folder path, effective rhythm group, `age_days` since the last entry, `unread_week` (unread, published in the last 7 days), `entries_week`, `activity` = Σ 2^(−age/3) over entries of the last 30 days (ages clamped at 0), `page`, and the five latest entries (id, title, url (http/https only, else null), published day, read);
+  - feeds: active, not waiting for triage, last entry (`published_at`) within 182 days of `now`; for each: id, title, theme key (or null), folder path, effective rhythm group, `age_days` since the last entry, `unread_week` (unread, published in the last 7 days), `entries_week`, `activity` = Σ 2^(−age/3) over entries of the last 30 days (ages clamped at 0), `page`, and the five latest entries (id, title, url (http/https only, else null), published day in the local time zone, read);
   - themes in `position` order with feed counts (only themes that have chart feeds), plus an implicit "UNCHARTED WATERS" group for unthemed feeds, placed last;
   - territories (kind, name, member ids in position order, only members on the chart, dropped when fewer than 2) and continents (name, theme key);
   - `surveyed_at` (now) and totals (feeds, unread this week).
@@ -106,7 +106,7 @@ CREATE TABLE territory_feed (
 ### CLI
 
 - `ressac chart --json`: prints the snapshot as one JSON document (the contract in §6), exit 0; without `--json` a short human summary (feeds per theme, territories). Database opened like every other command (it may migrate: the app calls it after its own launch check).
-- `ressac chart import <file.json>`: imports themes, feed themes and territories (§5 format below); prints the report; `--dry-run` reports without writing.
+- `ressac chart import <file.json>`: imports themes, feed themes and territories (§5 format below); prints the report (territories with fewer than 2 matched feeds listed apart and not counted); `--dry-run` reports what would be imported without writing. Theme keys may not be empty, `none` (any case) or start with `-` (exit 2).
 - `ressac feed theme <feed-id> <key|none>`: sets or clears a feed's theme.
 
 Import file:
@@ -139,7 +139,7 @@ Ported from the mockup, split in two classic scripts (no ES modules: they load f
 ## 8. The Sea Chart window (Swift)
 
 - A `Window("Sea Chart", id: "sea-chart")` scene opened with ⇧⌘M (View menu "Sea Chart"), resizable, full screen allowed, remembers its frame.
-- `ChartModel` (`@Observable`): runs `ressac chart --json` through the bundled executable (a plain run that captures stdout, not the event stream), decodes only `version` to check it is 1, and hands the raw JSON to the page. It reruns on window open and when the app sees a database change (its existing observation of external changes and its own writes), debounced to at most one run per 2 s.
+- `ChartModel` (`@Observable`): runs `ressac chart --json` through the bundled executable (a plain run that captures stdout, not the event stream), decodes only `version` to check it is 1, and hands the raw JSON to the page. It reruns on window open and when the app sees a database change (its existing observation of external changes and its own writes), debounced to at most one run per 2 s, and every 5 minutes while the window is open (ages and the survey time move with the clock). Terminal writes are polled for while the app is active or the chart window is visible on screen (its occlusion state), so a chart on a second display stays live behind another app.
 - `ChartWebView` (`NSViewRepresentable` around `WKWebView`): loads `index.html` with read access to the Chart folder; after load calls `Chart.load(json, prefs)` and later `Chart.update(json)`. A script message handler `ressac` receives `{type: "openFeed", id}` (bring the main window forward and select the feed), `{type: "openURL", url}` (http/https only, opened with `NSWorkspace`), `{type: "prefs", view, ink, animate}` (stored in `UserDefaults`). Any navigation away from the bundled page is cancelled.
 - Reduce Motion (`NSWorkspace.accessibilityDisplayShouldReduceMotion`) starts the page with animation off.
 - When `ressac chart` fails, the window shows a plain message and a Retry button.

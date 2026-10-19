@@ -276,8 +276,8 @@ Piste 10 du brainstorming du 19/10 sur d'autres présentations des flux (maquett
 ### Leçons des itérations de la maquette
 
 - **Étiquettes qui se chevauchent** : placement par priorité (port, continents, mers, territoires, flux du plus actif au moins actif avec huit emplacements, puis une taille réduite, puis un trait de rappel), un nom sans place n'apparaît qu'au survol.
-- **Îles qui fusionnent** : des îles voisines finissaient par se toucher ; rayon par rythme, une île par flux, jamais de fusion.
-- **Presqu'îles** : tirées d'une crête, elles inventaient des côtes absurdes ; remplacées par des côtes inventées : l'enveloppe du groupe, poussée vers l'extérieur et effilochée.
+- **Îles qui fusionnent** : la fusion venait de l'union douce des reliefs (Simon Willison s'était soudé aux blogs Google) ; désormais chaque île garde sa côte (le relief le plus haut l'emporte).
+- **Presqu'îles** : reliées par des crêtes, les terres ressemblaient à des péninsules ; Clément voulait des terres plus pleines, d'où les côtes inventées autour de l'enveloppe du groupe.
 - **Port trop encombré** : échelle de distance étirée (logarithme à bord de 6 mois) et îles réduites à 70 % dans cette vue.
 - **Coupure à six mois** : la carte ne montre que ce qui vit encore ; au-delà, un flux est hors de la mer (il reste dans le jardin).
 - **Flux en triage exclus** à la demande de Clément (aucun des 38 actuels ne serait sur la carte de toute façon).
@@ -291,6 +291,7 @@ Piste 10 du brainstorming du 19/10 sur d'autres présentations des flux (maquett
 - **Placement « By theme »** : pas de forces d3 mais un placement îlot par îlot (ordre d'id, emplacement libre le plus proche de la cible), sur une grille de 6 × 3 avec une case pour UNCHARTED WATERS. C'est ce qui rend vraie la promesse de stabilité (un nouveau venu ne déplace personne de plus de quelques unités) ; la vue du port garde les forces d3. Les îles évitent la rose des vents et le cartouche dans les deux vues. Contrepartie : un flux qui part laisse les suivants de sa mer remonter.
 - **Verrouillage de navigation du WKWebView** : toute navigation hors du paquet est annulée (clic de menu contextuel, bouton du milieu compris), seuls http et https sont ouverts, par `NSWorkspace` ; la CSP de la page est vérifiée dans le WKWebView du banc d'essai Swift, sans lancer l'appli ni envoyer de touches.
 - **Id du `WindowGroup` principal** : « main » ajouté pour ramener la fenêtre de lecture ; il peut faire oublier son cadre une fois.
+- **Carte en arrière-plan** : le moniteur ne sondait `data_version` que l'appli au premier plan, si bien que la carte, faite pour un second écran, restait figée pendant le travail dans d'autres applis. Il sonde aussi tant que la fenêtre de la carte est visible (état d'occultation), et la carte se relève toutes les 5 minutes.
 - **Polices** : Cormorant Garamond, Cormorant SC et IBM Plex Mono en `woff2` locaux (OFL, provenance dans `chart.css`) ; d3 7.9.0 embarqué avec sa licence ISC.
 
 ## Paysage existant (10/10/2026)
