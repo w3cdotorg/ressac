@@ -213,6 +213,34 @@ Verdict final : 7 vérifications sur 7 OK sur le build f1b1456. Les deux KO (3 e
 - **`sqlite3 -readonly` et les copies WAL** : comme en sous-projet 4, l'ouverture en lecture seule d'une copie `.backup` sans `-shm` ni `-wal` échoue ; le drapeau est retiré pour les copies et gardé pour la lecture de la vraie base. Dans le script, une apostrophe dans le message d'un `${VAR:?…}` casse l'analyse de zsh.
 - **Mineurs reportés** : voir `TODO.md`, section « Rythme et journal (sous-projet 3) ». Le détail des relectures est dans le registre local `.superpowers/`, hors dépôt.
 
+## Lecture dans le terminal (sous-projet 2b)
+
+### Recette manuelle (19/10/2026)
+
+Base : la vraie base (schéma 4). Lecteur : `ressac` en Release, lancé par Clément dans un volet tmux de Ghostty (tmux 3.8, `allow-passthrough on`) ; Claude n'a envoyé aucune frappe, il a lu des copies de la base avec un `recette.sh` jetable et tenu le journal.
+
+- Point de départ : 1785 non lus, 0 favori, une édition (celle du 16/10, 16:23), Journal lu 18/73.
+
+| # | Vérification (spec §10) | Résultat | Observations |
+|---|---|---|---|
+| 1 | Ouverture sur le Journal, fabrication si besoin | OK | édition 2 fabriquée au lancement (15:05:02) |
+| 2 | Lecture au clavier, liens `o` + numéro | OK | Journal lu 66/66, les entrées lues se retrouvent dans la liste des récentes |
+| 3 | Images dans le volet, `i` | KO puis OK | demi-blocs au premier essai ; vraies images en Kitty après correction (2aa435f), protocole détecté : Halfblocks, choisi : Kitty |
+| 4 | Volet étroit puis élargi | OK | remarque sur la colonne active (voir plus bas), corrigée (95d5f05) |
+| 5 | Antiope : 104, sous-pages, FIN DE L'EDITION, 105, 800, 100, 899 | OK | |
+| 6 | Appli et terminal ouverts ensemble | OK | lecture croisée appli et terminal |
+| 7 | Jardin : garder puis annuler | OK | `k` puis `u`, aucune décision nouvelle en vigueur |
+
+Verdict : 7 vérifications sur 7 OK. Deux remarques de Clément pendant la recette, corrigées sur son go puis revérifiées par lui sur le build ba88e5f (colonne active nette, vraies images dans Ghostty sous tmux).
+
+### Trouvailles
+
+- **Colonne active peu visible** (95d5f05) : à gauche et à droite on ne voyait pas quelle colonne avait le focus. Le défaut concerne le terminal seulement, l'appli macOS la montre bien (rectificatif de Clément). En Native, la colonne active a une bordure double accent et un titre en vidéo inverse, les autres sont atténuées ; en Antiope, la barre de sélection des colonnes inactives passe en blanc sur bleu.
+- **Images en demi-blocs sous tmux** (2aa435f) : `ratatui-image` 11.1.0 abandonne le protocole détecté quand aucune taille de police ne répond (ce qui arrive sous tmux). Cause trouvée grâce à la ligne de journal « image protocol » ajoutée pour l'occasion : `detected=Halfblocks`, `client_term=xterm-ghostty ghostty 1.3.1`, `chosen=Kitty`. Correction : sous tmux, repli sur `client_termname` (ghostty ou kitty donne Kitty, iterm ou wezterm donne iTerm2), interrogé avec `tmux display-message -t $TMUX_PANE`, seulement si la bibliothèque a rendu Halfblocks et que tmux est détecté. `RESSAC_IMAGES=kitty|iterm2|sixel|halfblocks|off` force le choix. Piège : sans cette ligne de journal, la cause restait invisible.
+- **Horloge de `build_edition`** (ba88e5f, 0c97389, fac2305) : un test dépendant de la date a explosé le 19/10 (`the_edition_s_day_is_the_injected_clock_s_not_the_machine_s`, jour injecté du 17/10). Cause dans le code de production : `window_end` et `built_at` valaient `Utc::now().max(now)`, donc une horloge injectée dans le passé produisait une édition datée de la machine. Désormais `built_at` (règle « une édition par matin ») est l'horloge de l'appelant plus la durée de l'appel, et `window_end` est le maximum de `built_at` et du dernier `fetched_at` écrit par ce rafraîchissement, de sorte que les articles que la fabrication vient de relever tombent toujours dans sa fenêtre. Deux tests : un build de forme production et un jour passé injecté dont le rafraîchissement date la machine (il échoue avec l'ancienne règle).
+- **Arbitrages du chantier** : une revue de sécurité (déni de service) a imposé un plafond de profondeur sur le HTML (au-delà de 64 niveaux, le sous-arbre est aplati sans récursion) et une largeur minimale pour l'habillage des listes et citations imbriquées. Les caractères de contrôle passent par `printable` dans la CLI ; dans le lecteur, `set_stringn` de ratatui écarte déjà tout graphème contenant un caractère de contrôle (C0 et C1, vérifié dans `ratatui-core` 0.1.1), ce n'est donc pas une injection, seulement de la défense en profondeur. Les chemins de restauration du terminal (sortie normale, erreur, panique) ont été corrigés à la relecture de la phase 5b. La mémoire des images est bornée en taille, et les échecs transitoires (réseau) se distinguent des permanents (refus, taille).
+- **Reportés** : voir `TODO.md`, section « Lecture dans le terminal (sous-projet 2b) ». Le détail des relectures est dans le registre local `.superpowers/`, hors dépôt.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
