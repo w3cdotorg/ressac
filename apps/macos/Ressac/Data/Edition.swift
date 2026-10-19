@@ -104,6 +104,15 @@ struct CadenceRow: RessacRecord, Identifiable {
     var id: Int64 { feedId }
 }
 
+/// One sea of the chart (`theme`), for the inspector's Theme menu.
+struct ThemeRow: RessacRecord, Identifiable {
+    var id: Int64
+    var key: String
+    var name: String
+    var seaName: String
+    var position: Int
+}
+
 /// When a morning edition is due: the day starts at 04:00 local time (spec §6, "When").
 enum EditionClock {
     static let hour = 4

@@ -256,6 +256,23 @@ struct Queries {
         .removeDuplicates()
     }
 
+    /// Every theme, in chart order (spec §9, the inspector's Theme menu).
+    static func themes() -> LiveQuery<[ThemeRow]> {
+        ValueObservation.tracking { db in
+            try ThemeRow.fetchAll(db, sql: "SELECT id, key, name, sea_name, position FROM theme ORDER BY position, id")
+        }
+        .removeDuplicates()
+    }
+
+    /// The theme key of every themed feed; unthemed feeds are absent.
+    static func feedThemeKeys() -> LiveQuery<[Int64: String]> {
+        ValueObservation.tracking { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT feed.id AS feed_id, theme.key AS key FROM feed JOIN theme ON theme.id = feed.theme_id")
+            return Dictionary(uniqueKeysWithValues: rows.map { ($0["feed_id"] as Int64, $0["key"] as String) })
+        }
+        .removeDuplicates()
+    }
+
     /// True while no edition was built at or after `dayStart` (see `EditionClock.dayStart`).
     /// The core repeats this check inside its write transaction.
     static func isEditionDue(dayStart: Date) -> @Sendable (Database) throws -> Bool {

@@ -590,6 +590,12 @@ enum PendingPanel: Equatable, Sendable {
         runs.start(.setCadence(feedId: feedId, group))
     }
 
+    /// The inspector's Theme menu (spec §9): a theme key, or nil for None. The core writes it.
+    @discardableResult
+    func setTheme(feedId: Int64, key: String?) -> Task<RunOutcome, Never> {
+        runs.start(.setTheme(feedId: feedId, key: key))
+    }
+
     func openSite(feedId: Int64) {
         let site = sidebar.feeds.first { $0.feedId == feedId }?.htmlUrl
         if let site, let url = URL(string: site) { openURL(url) }

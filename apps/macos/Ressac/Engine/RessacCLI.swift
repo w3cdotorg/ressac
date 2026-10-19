@@ -67,12 +67,17 @@ struct RunRequest: Sendable, Equatable {
         RunRequest(arguments: ["feed", "cadence", String(feedId), group?.rawValue ?? "auto"], kind: .short)
     }
 
+    /// Puts a feed on a sea (a theme key), or takes it off every sea with `nil` ("none").
+    static func setTheme(feedId: Int64, key: String?) -> RunRequest {
+        RunRequest(arguments: ["feed", "theme", String(feedId), key ?? "none"], kind: .short)
+    }
+
     /// Extraction failures are shown inline in the reader, never as a banner (spec §8).
     var showsFailureBanner: Bool { arguments.first != "extract" }
 
     /// True when `failure` is the store refusing something the app cannot foresee (exit 2): a
     /// garden decision or an undo (an address another active feed already uses), an edition
-    /// that is not due or cannot be built offline, an override on a feed buried meanwhile.
+    /// that is not due or cannot be built offline, an override on a feed buried meanwhile, a theme deleted meanwhile.
     /// From any other call, exit 2 means the app built a wrong command line (spec §8).
     func isRefusal(_ failure: RunFailure) -> Bool {
         failure.exitCode == 2 && Self.refusable.contains { arguments.starts(with: $0) }
@@ -80,6 +85,7 @@ struct RunRequest: Sendable, Equatable {
 
     private static let refusable: [[String]] = [
         ["garden", "decide"], ["garden", "undo"], ["edition", "build"], ["feed", "cadence"],
+        ["feed", "theme"],
     ]
 }
 
