@@ -207,7 +207,7 @@ actor RessacCLI {
         let output = stdout.fileHandleForReading
         let (data, stderrLine, exit) = await withTaskCancellationHandler {
             async let lastStderrLine = Self.lastLine(of: stderr.fileHandleForReading, log: log)
-            // A blocking read to EOF, off the cooperative pool.
+            // A blocking read to EOF: it holds one cooperative pool thread for the whole run.
             let data = await Task.detached { (try? output.readToEnd()) ?? Data() }.value
             var exit: (status: Int32, reason: Process.TerminationReason) = (0, .exit)
             for await status in exits { exit = status }

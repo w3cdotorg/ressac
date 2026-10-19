@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Synchronization
 import Testing
@@ -130,6 +131,21 @@ private func chart(version: Int) -> Result<Data, any Error> {
         #expect(runner.runs == 1)
     }
 
+    /// While the window is open the chart is surveyed again every `resurvey`, changes or not (distances
+    /// and the cartouche's time move with the clock); closing the window stops it.
+    @Test func following_resurveys_periodically_until_closed() async throws {
+        let runner = ScriptedChartRunner([chart(version: 1)])
+        let model = ChartModel(runner: runner, debounce: .milliseconds(50), resurvey: .milliseconds(100))
+        let tick = Tick()
+        let following = Task { await model.follow { tick.value } }
+        #expect(await eventually { runner.runs >= 3 })
+        following.cancel()
+        await following.value
+        let runs = runner.runs
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(runner.runs == runs)
+    }
+
     /// `cancel` drops a run under way: its result never reaches the phase.
     @Test func cancel_drops_a_running_refresh() async throws {
         let runner = SlowChartRunner()
@@ -215,5 +231,45 @@ final class SlowChartRunner: ChartRunner {
         let before = state.changeTick
         _ = await state.refresh(feedId: 1).value
         #expect(await eventually { state.changeTick > before })
+    }
+}
+
+/// What a `ChartVisibilityReader` reported, in order.
+@MainActor final class VisibilityReports {
+    var values: [Bool] = []
+}
+
+@MainActor @Suite struct ChartVisibilityTests {
+    private func window() -> NSWindow {
+        NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                 styleMask: [.titled], backing: .buffered, defer: true)
+    }
+
+    /// The reader reports its window's visibility on arrival, and "not on screen" when it leaves.
+    @Test func the_reader_reports_its_window_and_false_on_leaving() {
+        let reports = VisibilityReports()
+        let view = ChartVisibilityReader.WindowView { reports.values.append($0) }
+        let window = window()
+        window.contentView?.addSubview(view)
+        #expect(reports.values == [window.occlusionState.contains(.visible)])
+        view.removeFromSuperview()
+        #expect(reports.values.count == 2)
+        #expect(reports.values.last == false)
+        view.leave()  // already left: nothing more
+        #expect(reports.values.count == 2)
+    }
+
+    /// An occlusion change of its window is reported; another window's is not.
+    @Test func the_reader_follows_occlusion_changes_of_its_window_only() async throws {
+        let reports = VisibilityReports()
+        let view = ChartVisibilityReader.WindowView { reports.values.append($0) }
+        let window = window()
+        window.contentView?.addSubview(view)
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: self.window())
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        #expect(await eventually { reports.values.count == 2 })
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(reports.values.count == 2)
+        view.removeFromSuperview()
     }
 }

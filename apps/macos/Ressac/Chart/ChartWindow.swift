@@ -60,6 +60,8 @@ private struct ChartScreen: View {
         content
             // Cancelled when the window closes, which cancels the model's work too.
             .task { await model.follow { [state] in state.changeTick } }
+            // Keeps the chart live behind another app: the database is polled while it is on screen.
+            .background(ChartVisibilityReader { [state] in state.isChartOnScreen = $0 })
     }
 
     @ViewBuilder private var content: some View {
@@ -111,5 +113,66 @@ private struct ChartScreen: View {
     private static func pagePrefs() -> [String: Any] {
         ChartPrefs.load(from: .standard)
             .pageArgument(reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+    }
+}
+
+/// Tells `AppState` whether the Sea Chart's window is at least partly visible (its occlusion
+/// state), so that terminal writes are still polled for while the chart sits on a second display
+/// behind another app. Leaving the window (closing it) reports "not on screen".
+struct ChartVisibilityReader: NSViewRepresentable {
+    let onChange: @MainActor (Bool) -> Void
+
+    func makeNSView(context: Context) -> WindowView { WindowView(onChange: onChange) }
+
+    func updateNSView(_ view: WindowView, context: Context) {}
+
+    static func dismantleNSView(_ view: WindowView, coordinator: ()) {
+        view.leave()
+    }
+
+    final class WindowView: NSView {
+        private let onChange: @MainActor (Bool) -> Void
+        /// The window whose occlusion changes are followed, until `leave()`.
+        private weak var watched: NSWindow?
+        private var observer: (any NSObjectProtocol)?
+
+        init(onChange: @escaping @MainActor (Bool) -> Void) {
+            self.onChange = onChange
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            super.viewWillMove(toWindow: newWindow)
+            if newWindow !== window { leave() }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, window !== watched else { return }
+            watched = window
+            observer = NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.report() }
+            }
+            report()
+        }
+
+        private func report() {
+            guard let watched else { return }
+            onChange(watched.occlusionState.contains(.visible))
+        }
+
+        /// Stops following the window and reports "not on screen", once.
+        func leave() {
+            guard observer != nil else { return }
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            watched = nil
+            onChange(false)
+        }
     }
 }

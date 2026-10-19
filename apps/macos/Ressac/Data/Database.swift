@@ -7,7 +7,7 @@ import GRDB
 /// `ressac migrate` when `check(at:)` says so.
 final class AppDatabase: Sendable {
     /// Schema version this build understands (`schema_meta.version`): v3 adds page numbers,
-    /// v4 the rhythm groups and the morning edition.
+    /// v4 the rhythm groups and the morning edition, v5 the sea chart's themes and territories.
     static let knownSchemaVersion = 5
 
     enum SchemaCheck: Equatable, Sendable {

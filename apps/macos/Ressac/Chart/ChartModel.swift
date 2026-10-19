@@ -17,7 +17,8 @@ struct CLIChartRunner: ChartRunner {
 }
 
 /// Runs `ressac chart`, checks the document's `version`, and hands the raw JSON to the page
-/// (spec §8). Reruns on window open and on database changes, at most once per `debounce`.
+/// (spec §8). Reruns on window open, on database changes (at most once per `debounce`), and
+/// every `resurvey` while the window is open: ages and the cartouche's time move with the clock.
 @MainActor @Observable final class ChartModel {
     enum Phase: Equatable {
         case loading
@@ -35,16 +36,20 @@ struct CLIChartRunner: ChartRunner {
 
     @ObservationIgnored private let runner: any ChartRunner
     @ObservationIgnored private let debounce: Duration
+    @ObservationIgnored private let resurvey: Duration
     @ObservationIgnored private var run: Task<Void, Never>?
+    /// The periodic survey while the window is open.
+    @ObservationIgnored private var resurveys: Task<Void, Never>?
     @ObservationIgnored private var scheduled: Task<Void, Never>?
     /// A refresh was asked for while one was running: it reruns once that one ends.
     @ObservationIgnored private var rerunAfterRun = false
 
     private static let log = Logger(subsystem: "org.w3cdotorg.ressac", category: "chart")
 
-    init(runner: any ChartRunner, debounce: Duration = .seconds(2)) {
+    init(runner: any ChartRunner, debounce: Duration = .seconds(2), resurvey: Duration = .seconds(300)) {
         self.runner = runner
         self.debounce = debounce
+        self.resurvey = resurvey
     }
 
     /// Runs now (window open, Retry). Asked during a run, it follows that run.
@@ -77,11 +82,19 @@ struct CLIChartRunner: ChartRunner {
     }
 
     /// The window is open (spec §8): draws now, then notes each later change of `changes` (the
-    /// value at the call is not a change) until the calling task is cancelled, which happens when
-    /// the window closes; the scheduled and running work is then cancelled too.
+    /// value at the call is not a change) and surveys again every `resurvey`, until the calling
+    /// task is cancelled, which happens when the window closes; all the model's work then stops.
     func follow(_ changes: @escaping @MainActor @Sendable () -> Int) async {
         var seen = changes()
         refresh()
+        resurveys?.cancel()
+        resurveys = Task { [weak self, resurvey] in
+            while true {
+                try? await Task.sleep(for: resurvey)
+                guard !Task.isCancelled, let self else { return }
+                refresh()
+            }
+        }
         for await tick in Observations(changes) where tick != seen {
             seen = tick
             noteChange()
@@ -89,8 +102,11 @@ struct CLIChartRunner: ChartRunner {
         cancel()
     }
 
-    /// Drops the scheduled run and the running one; their results never reach `phase`.
+    /// Stops the periodic survey and drops the scheduled run and the running one; their results
+    /// never reach `phase`.
     func cancel() {
+        resurveys?.cancel()
+        resurveys = nil
         scheduled?.cancel()
         scheduled = nil
         run?.cancel()

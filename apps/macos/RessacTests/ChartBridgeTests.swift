@@ -256,7 +256,8 @@ private func privateDefaults() throws -> (UserDefaults, String) {
         }
 
         // Targets that would load if allowed (a bundled file, a blank page), and a web address: through a
-        // link (what "Open Link" in the context menu and a middle click do) and through a script.
+        // clicked link and through a script. The context menu's "Open Link" and a middle click go through the
+        // same navigation policy, but are not exercised here.
         for target in ["LICENSE-d3.txt", "about:blank", "https://example.invalid/"] {
             _ = await h.js(#"const a = document.createElement("a"); a.href = target; document.body.append(a); a.click()"#,
                            ["target": target])
