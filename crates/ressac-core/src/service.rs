@@ -704,6 +704,7 @@ impl Ressac {
         stop: Arc<AtomicBool>,
     ) -> Result<EditionOutcome> {
         let day = day_start(now.with_timezone(tz));
+        let started = std::time::Instant::now();
         if !opts.rebuild && !self.store.edition_due(day)? {
             return Ok(EditionOutcome::NotDue);
         }
@@ -730,7 +731,9 @@ impl Ressac {
         if summary.network_unreachable {
             return Ok(EditionOutcome::Offline);
         }
-        let end = Utc::now().max(now);
+        // The injected `now` plus the time the refresh took: the wall clock's reading when `now`
+        // is the wall clock, and still the caller's own time when it is injected.
+        let end = now + chrono::Duration::from_std(started.elapsed()).unwrap_or_default();
         let params = EditionParams {
             day_start: day,
             window_end: end,

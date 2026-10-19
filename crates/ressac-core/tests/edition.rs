@@ -231,10 +231,12 @@ async fn the_next_morning_starts_where_the_previous_edition_ended() {
     );
     let record = app.store().latest_edition().unwrap().unwrap();
     assert_eq!(record.window_start, first.window_end);
-    // Stored with millisecond precision; `tomorrow` carries nanoseconds.
-    assert_eq!(
-        record.window_end.timestamp_millis(),
-        tomorrow.timestamp_millis()
+    // The window ends at the injected clock plus the refresh's own duration (never the machine's
+    // clock); stored with millisecond precision, `tomorrow` carries nanoseconds.
+    let lag = record.window_end.timestamp_millis() - tomorrow.timestamp_millis();
+    assert!(
+        (0..5_000).contains(&lag),
+        "window_end is {lag} ms after tomorrow"
     );
     // The feeds were fetched minutes ago: nothing new, an empty edition, the window still moves.
     assert_eq!(second.entries, 0);
