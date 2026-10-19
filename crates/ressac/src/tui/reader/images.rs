@@ -13,9 +13,9 @@ use image::{DynamicImage, ImageReader, Limits, Rgb, RgbImage};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
 use ratatui::style::Color;
-use ratatui_image::Resize;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::{FontSize, Resize};
 
 use super::state::Event;
 
@@ -157,8 +157,17 @@ fn nearest_teletext(c: [u8; 3]) -> [u8; 3] {
 /// restore froze the keyboard under tmux (clappuccino, `app.rs`). An unwrapped DA1 request
 /// then answers that thread's read so it ends on its own instead of swallowing the first key
 /// (clappuccino, `preview.rs`). Warp announces Kitty but draws only iTerm2.
+///
+/// Under tmux the query often answers without a font size, and the library then drops the
+/// protocol it found: `decide_protocol` asks tmux for the outer terminal instead. The
+/// `RESSAC_IMAGES` variable (`kitty`, `iterm2`, `sixel`, `halfblocks`, `off`) wins over all of
+/// it. Every decision is logged.
 pub fn detect_picker() -> Picker {
-    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    let queried = Picker::from_query_stdio();
+    let mut picker = match &queried {
+        Ok(picker) => picker.clone(),
+        Err(_) => Picker::halfblocks(),
+    };
     let warp = std::env::var("TERM_PROGRAM").is_ok_and(|t| t == "WarpTerminal");
     if warp && picker.protocol_type() == ProtocolType::Kitty {
         picker.set_protocol_type(ProtocolType::Iterm2);
@@ -166,7 +175,131 @@ pub fn detect_picker() -> Picker {
     let mut out = std::io::stdout();
     let _ = out.write_all(b"\x1b[c");
     let _ = out.flush();
+
+    let is_tmux = picker.tmux_detected() || std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
+    let detected = picker.protocol_type();
+    let override_value = std::env::var("RESSAC_IMAGES").ok();
+    let window = ratatui::crossterm::terminal::window_size().ok();
+    let window_font = window.and_then(|w| font_from_window(w.columns, w.rows, w.width, w.height));
+    // Only worth a process when the answer can change the outcome.
+    let client_term = (is_tmux && detected == ProtocolType::Halfblocks && override_value.is_none())
+        .then(tmux_client_term)
+        .flatten();
+    let decision = decide_protocol(&ProtocolInputs {
+        detected,
+        is_tmux,
+        client_term: client_term.as_deref(),
+        env_override: override_value.as_deref(),
+    });
+    tracing::info!(
+        detected = ?detected,
+        font_size = ?(picker.font_size().width, picker.font_size().height),
+        window_font = ?window_font,
+        is_tmux,
+        client_term = ?client_term,
+        env_override = ?override_value,
+        query_error = ?queried.as_ref().err().map(ToString::to_string),
+        chosen = ?decision.protocol,
+        reason = decision.reason,
+        "image protocol"
+    );
+    if decision.protocol != detected {
+        let font = window_font.map_or_else(|| picker.font_size(), FontSize::from);
+        #[allow(deprecated)] // the only constructor taking a font size
+        let mut forced = Picker::from_fontsize(font);
+        forced.set_protocol_type(decision.protocol);
+        picker = forced;
+    }
     picker
+}
+
+/// What `decide_protocol` looks at; nothing here touches the terminal.
+pub struct ProtocolInputs<'a> {
+    /// What the capability query settled on (Halfblocks when it found nothing).
+    pub detected: ProtocolType,
+    pub is_tmux: bool,
+    /// tmux's `client_termname` and `client_termtype` of the outer terminal, lowercased.
+    pub client_term: Option<&'a str>,
+    /// The `RESSAC_IMAGES` value.
+    pub env_override: Option<&'a str>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProtocolDecision {
+    pub protocol: ProtocolType,
+    pub reason: &'static str,
+}
+
+/// The override wins; otherwise a detected real protocol stands; otherwise, only inside tmux,
+/// the outer terminal's name decides (Ghostty and Kitty speak Kitty, iTerm2 and WezTerm iTerm2).
+pub fn decide_protocol(inputs: &ProtocolInputs<'_>) -> ProtocolDecision {
+    let decision = |protocol, reason| ProtocolDecision { protocol, reason };
+    if let Some(value) = inputs.env_override {
+        let forced = match value.trim().to_ascii_lowercase().as_str() {
+            "kitty" => Some(ProtocolType::Kitty),
+            "iterm2" | "iterm" => Some(ProtocolType::Iterm2),
+            "sixel" => Some(ProtocolType::Sixel),
+            "halfblocks" | "off" => Some(ProtocolType::Halfblocks),
+            _ => None,
+        };
+        if let Some(protocol) = forced {
+            return decision(protocol, "RESSAC_IMAGES override");
+        }
+    }
+    if inputs.detected != ProtocolType::Halfblocks {
+        return decision(inputs.detected, "detected by the terminal query");
+    }
+    if !inputs.is_tmux {
+        return decision(ProtocolType::Halfblocks, "nothing detected");
+    }
+    let term = inputs.client_term.unwrap_or_default().to_ascii_lowercase();
+    if term.contains("ghostty") || term.contains("kitty") {
+        decision(ProtocolType::Kitty, "tmux outer terminal speaks Kitty")
+    } else if term.contains("iterm") || term.contains("wezterm") {
+        decision(ProtocolType::Iterm2, "tmux outer terminal speaks iTerm2")
+    } else {
+        decision(ProtocolType::Halfblocks, "tmux outer terminal unknown")
+    }
+}
+
+/// A cell size from the window's pixel size, `None` when the terminal reports no pixels.
+pub fn font_from_window(columns: u16, rows: u16, width: u16, height: u16) -> Option<(u16, u16)> {
+    let (w, h) = (width.checked_div(columns)?, height.checked_div(rows)?);
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// Asks tmux for the outer terminal of the current client; `None` on any failure or after
+/// 500 ms. Stdin is closed so the child cannot read the keyboard.
+fn tmux_client_term() -> Option<String> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "#{client_termname} #{client_termtype}",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) if status.success() => break,
+            Some(_) => return None,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
+    let text = text.trim().to_ascii_lowercase();
+    (!text.is_empty()).then_some(text)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,6 +694,86 @@ fn fetch_and_decode(
 
 #[cfg(test)]
 mod tests {
+
+    fn inputs<'a>(
+        detected: ProtocolType,
+        is_tmux: bool,
+        client_term: Option<&'a str>,
+        env_override: Option<&'a str>,
+    ) -> ProtocolInputs<'a> {
+        ProtocolInputs {
+            detected,
+            is_tmux,
+            client_term,
+            env_override,
+        }
+    }
+
+    #[test]
+    fn a_real_detected_protocol_stands() {
+        let d = decide_protocol(&inputs(
+            ProtocolType::Sixel,
+            true,
+            Some("xterm-ghostty"),
+            None,
+        ));
+        assert_eq!(d.protocol, ProtocolType::Sixel);
+    }
+
+    #[test]
+    fn under_tmux_the_outer_terminal_names_the_protocol() {
+        let under = |term| decide_protocol(&inputs(ProtocolType::Halfblocks, true, term, None));
+        assert_eq!(
+            under(Some("xterm-ghostty ghostty 1.2.0")).protocol,
+            ProtocolType::Kitty
+        );
+        assert_eq!(under(Some("xterm-kitty")).protocol, ProtocolType::Kitty);
+        assert_eq!(under(Some("iTerm2 3.5")).protocol, ProtocolType::Iterm2);
+        assert_eq!(under(Some("wezterm")).protocol, ProtocolType::Iterm2);
+        assert_eq!(
+            under(Some("xterm-256color")).protocol,
+            ProtocolType::Halfblocks
+        );
+        assert_eq!(under(None).protocol, ProtocolType::Halfblocks);
+    }
+
+    #[test]
+    fn outside_tmux_nothing_detected_stays_halfblocks() {
+        let d = decide_protocol(&inputs(
+            ProtocolType::Halfblocks,
+            false,
+            Some("ghostty"),
+            None,
+        ));
+        assert_eq!(d.protocol, ProtocolType::Halfblocks);
+    }
+
+    #[test]
+    fn the_override_wins_and_a_bad_value_is_ignored() {
+        let pick = |value| {
+            decide_protocol(&inputs(
+                ProtocolType::Kitty,
+                true,
+                Some("ghostty"),
+                Some(value),
+            ))
+            .protocol
+        };
+        assert_eq!(pick("iterm2"), ProtocolType::Iterm2);
+        assert_eq!(pick(" SIXEL "), ProtocolType::Sixel);
+        assert_eq!(pick("halfblocks"), ProtocolType::Halfblocks);
+        assert_eq!(pick("off"), ProtocolType::Halfblocks);
+        assert_eq!(pick("kitty"), ProtocolType::Kitty);
+        // Not a protocol: detection decides as if it were unset.
+        assert_eq!(pick("nonsense"), ProtocolType::Kitty);
+    }
+
+    #[test]
+    fn the_font_size_comes_from_the_window_pixels() {
+        assert_eq!(font_from_window(100, 50, 1000, 1000), Some((10, 20)));
+        assert_eq!(font_from_window(0, 50, 1000, 1000), None);
+        assert_eq!(font_from_window(100, 50, 0, 0), None);
+    }
     use super::*;
     use image::{DynamicImage, Rgb, RgbImage};
 
