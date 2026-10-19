@@ -122,11 +122,13 @@ Shown in the README and installed at acceptance (§9). The binary is the helper 
 ```tmux
 # Ressac ticker: a recent unread entry the Journal left out, every 15 s; click to open it.
 set -g status-right-length 160
-set -g status-right '#(/path/to/Ressac.app/Contents/Helpers/ressac ticker --tmux) "#{=21:pane_title}" %H:%M %d-%b-%y'
-bind -n MouseDown1Status if -F '#{m:rs*,#{mouse_status_range}}' \
-  "run-shell -b '/path/to/Ressac.app/Contents/Helpers/ressac ticker open #{mouse_status_range}'" \
+set -g status-right '#(/path/to/Ressac.app/Contents/Helpers/ressac ticker --tmux) "#{=21:#{q/h:pane_title}}" %H:%M %d-%b-%y'
+bind -n MouseDown1Status if -F '#{m/r:^rs[0-9]+$,#{mouse_status_range}}' \
+  "run-shell -b '/path/to/Ressac.app/Contents/Helpers/ressac ticker open #{q:mouse_status_range}'" \
   'switch-client -t ='
 ```
+
+The binding accepts only `rs` followed by digits (a regular expression) and passes the range quoted, and the pane title is escaped (`q/h`), so no program can add a clickable range or a style to the bar through its pane title.
 
 - These lines go **before** the plugin manager's `run 'tpack init'`: tmux-continuum prepends its save hook to `status-right` when it loads, so it must find the new value. Claude checks after reloading that `status-right` still starts with `continuum_save.sh`.
 - `switch-client -t =` is tmux's default `MouseDown1Status` action, kept for every click outside the ticker (clicks on window names are handled by their own ranges).
@@ -146,9 +148,9 @@ bind -n MouseDown1Status if -F '#{m:rs*,#{mouse_status_range}}' \
 
 With Clément, after the code is merged into a branch build:
 
-1. On a copy of the real database: `ressac ticker` called twenty times shows twenty entries, never the same feed twice in a row, none from an edition, none read.
+1. On a copy of the real database, with a temporary HOME holding `Library/Application Support/Ressac/` (so the live state is never touched): call `HOME=$T ressac --db <copy> ticker` once every 15 seconds, twenty times (about five minutes), and time one call (target well under 50 ms). Expected: twenty entries, never the same feed twice in a row when another feed has candidates, none from an edition, none read. (Twenty calls in a row would all fall in one 15-second slot and print the same entry by design; and `--db` alone would still read and write the live `~/Library/Application Support/Ressac/ticker.json`, since the state path derives from HOME.)
 2. Claude shows the `~/.tmux.conf` lines; with Clément's go, adds them before `run 'tpack init'`, reloads tmux and checks the continuum hook.
-3. Clément watches the bar for a minute: a new entry every 15 seconds, his pane title, time and date unchanged, clicks on windows still work.
+3. Clément watches the bar for a minute (two attached tmux clients can differ for a few seconds of each slot, their status timers not being aligned to the slots): a new entry every 15 seconds, his pane title, time and date unchanged, clicks on windows still work.
 4. Clément clicks a title: the browser opens it; the entry is read in the terminal reader (and in Ressac.app if open).
 5. Rollback is documented: removing the three lines restores the bar.
 
