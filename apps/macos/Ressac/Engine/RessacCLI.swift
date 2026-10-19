@@ -120,19 +120,7 @@ actor RessacCLI {
     /// otherwise. Lines that are not JSON objects are logged and skipped. Cancelling the
     /// consumer sends SIGINT, which the CLI treats as Ctrl-C.
     func run(_ request: RunRequest) -> AsyncThrowingStream<EngineEvent, any Error> {
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = ["--db", database.path, "--json"] + request.arguments
-        process.standardInput = FileHandle.nullDevice
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-        let (exits, exitSignal) = AsyncStream<(status: Int32, reason: Process.TerminationReason)>.makeStream()
-        process.terminationHandler = { process in
-            exitSignal.yield((process.terminationStatus, process.terminationReason))
-            exitSignal.finish()
-        }
+        let (process, stdout, stderr, exits) = makeProcess(arguments: request.arguments)
         let (events, continuation) = AsyncThrowingStream<EngineEvent, any Error>.makeStream()
         let log = Self.log
         let commandLine = request.arguments.joined(separator: " ")
@@ -173,6 +161,64 @@ actor RessacCLI {
             }
         }
         return events
+    }
+
+    /// A configured, not yet started `ressac --db … --json <arguments>`, with its pipes and
+    /// an exit stream the termination handler fills.
+    private func makeProcess(arguments: [String]) -> (
+        process: Process, stdout: Pipe, stderr: Pipe,
+        exits: AsyncStream<(status: Int32, reason: Process.TerminationReason)>
+    ) {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["--db", database.path, "--json"] + arguments
+        process.standardInput = FileHandle.nullDevice
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        let (exits, exitSignal) = AsyncStream<(status: Int32, reason: Process.TerminationReason)>.makeStream()
+        process.terminationHandler = { process in
+            exitSignal.yield((process.terminationStatus, process.terminationReason))
+            exitSignal.finish()
+        }
+        return (process, stdout, stderr, exits)
+    }
+
+    /// Runs a command that prints one document rather than events (`chart`) and returns its
+    /// whole stdout. Throws `RunFailure` on a non-zero exit, or a launch failure (127).
+    /// Cancelling the caller sends SIGINT.
+    func capture(_ arguments: [String]) async throws -> Data {
+        let (process, stdout, stderr, exits) = makeProcess(arguments: arguments)
+        let log = Self.log
+        let commandLine = arguments.joined(separator: " ")
+        do {
+            try process.run()
+        } catch {
+            log.error("cannot launch ressac \(commandLine, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            throw RunFailure(exitCode: 127, lastStderrLine: "Cannot launch ressac: \(error.localizedDescription)")
+        }
+        let output = stdout.fileHandleForReading
+        let (data, stderrLine, exit) = await withTaskCancellationHandler {
+            async let lastStderrLine = Self.lastLine(of: stderr.fileHandleForReading, log: log)
+            // A blocking read to EOF, off the cooperative pool.
+            let data = await Task.detached { (try? output.readToEnd()) ?? Data() }.value
+            var exit: (status: Int32, reason: Process.TerminationReason) = (0, .exit)
+            for await status in exits { exit = status }
+            return (data, await lastStderrLine, exit)
+        } onCancel: {
+            if process.isRunning { process.interrupt() }
+        }
+        switch (exit.reason, exit.status) {
+        case (.exit, 0):
+            return data
+        case (.uncaughtSignal, let signal):
+            log.error("ressac \(commandLine, privacy: .public) died from signal \(signal)")
+            throw RunFailure(exitCode: -signal, lastStderrLine: stderrLine)
+        case (_, let code):
+            log.error("ressac \(commandLine, privacy: .public) exited with \(code)")
+            throw RunFailure(exitCode: code, lastStderrLine: stderrLine)
+        }
     }
 
     /// Drains stderr (so the child never blocks on a full pipe), logs it, and keeps the last non-empty line.

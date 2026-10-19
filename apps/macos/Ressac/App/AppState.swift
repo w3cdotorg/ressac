@@ -112,6 +112,10 @@ enum PendingPanel: Equatable, Sendable {
     private(set) var fullTextNotice: String?
     /// Garden rows decided since the scope was entered, dimmed by the table.
     private(set) var decidedThisVisit: Set<Int64> = []
+    /// Bumped on every commit to the database, whoever made it: terminal writes (through
+    /// `ExternalChangeMonitor`), the app's own writes, and the ends and progress of its runs.
+    /// The Sea Chart watches it to redraw (spec §2b).
+    private(set) var changeTick = 0
 
     let database: AppDatabase
     let writes: Writes
@@ -141,6 +145,7 @@ enum PendingPanel: Equatable, Sendable {
     /// One Space at a time: a second press while the first runs is spent without effect.
     @ObservationIgnored private var isAdvancing = false
     @ObservationIgnored private var sidebarObservation: AnyDatabaseCancellable?
+    @ObservationIgnored private var changeObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var listObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var entryObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var fulltextObservation: AnyDatabaseCancellable?
@@ -168,7 +173,28 @@ enum PendingPanel: Equatable, Sendable {
             Task { try? await database.notifyExternalChanges() }
         }
         startSidebarObservation()
+        startChangeObservation()
         listDidChange()
+    }
+
+    /// The tables the chart reads. A value observation (like the sidebar's) is notified by
+    /// `notifyExternalChanges`, which external polls and finished runs call, as well as by the
+    /// app's own writes. It publishes without comparing values, so every commit counts, and
+    /// once on start. (A `DatabaseRegionObservation` is not used: its schema lookups fail with
+    /// a disk I/O error inside `notifyExternalChanges`'s lock-free transaction.)
+    private static let chartTables = ["entry", "feed", "feed_health", "theme", "territory", "territory_feed"]
+
+    private func startChangeObservation() {
+        changeObservation = ValueObservation.tracking { db in
+            for table in Self.chartTables {
+                _ = try Row.fetchOne(db, sql: "SELECT 1 FROM \(table) LIMIT 1")
+            }
+        }.start(
+            in: database.reader, scheduling: .immediate,
+            onError: { [weak self] error in
+                Task { @MainActor in self?.report(error) }
+            },
+            onChange: { [weak self] in self?.changeTick += 1 })
     }
 
     private func startSidebarObservation() {
