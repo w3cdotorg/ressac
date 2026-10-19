@@ -7,6 +7,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::error::{Error, Result};
 
+mod chart;
 mod decisions;
 mod edition;
 mod feeds;
@@ -17,6 +18,7 @@ pub mod pages;
 mod reading;
 mod ticker;
 
+pub use chart::{ChartImport, ChartImportReport, TerritoryDef, ThemeDef};
 pub use decisions::{DecisionRecord, FeedSnapshot};
 pub use edition::{EditionEntryRow, EditionOverflowRow, EditionParams, EditionRecord, EditionView};
 pub use feeds::{CadenceRow, FeedRow, FolderRow, ImportReport};
