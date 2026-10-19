@@ -231,11 +231,9 @@ async fn the_next_morning_starts_where_the_previous_edition_ended() {
     );
     let record = app.store().latest_edition().unwrap().unwrap();
     assert_eq!(record.window_start, first.window_end);
-    // Stored with millisecond precision; `tomorrow` carries nanoseconds.
-    assert_eq!(
-        record.window_end.timestamp_millis(),
-        tomorrow.timestamp_millis()
-    );
+    // Built by the injected clock (`tomorrow`, ahead of the machine's): the window ends there.
+    assert!(record.window_end.timestamp_millis() >= tomorrow.timestamp_millis());
+    assert_eq!(record.built_at, record.window_end);
     // The feeds were fetched minutes ago: nothing new, an empty edition, the window still moves.
     assert_eq!(second.entries, 0);
     assert!(app.edition_today().unwrap().unwrap().entries.is_empty());
@@ -434,4 +432,69 @@ async fn a_retry_right_after_an_offline_build_is_offline_again_then_builds() {
     );
     assert_eq!(report.entries, 4);
     assert_eq!(report.unreachable, 0);
+}
+
+#[tokio::test]
+async fn everything_a_production_shaped_build_fetches_is_inside_its_edition() {
+    let server = MockServer::start().await;
+    let app = morning_app(&server, false).await;
+    // As the TUI and the CLI do: the clock is read before the call, the refresh stamps later.
+    let now = Utc::now();
+    built(
+        app.build_edition(
+            EditionOptions::default(),
+            now,
+            &Utc,
+            &Recorder::default(),
+            go(),
+        )
+        .await
+        .unwrap(),
+    );
+    let record = app.store().latest_edition().unwrap().unwrap();
+    let latest = app
+        .store()
+        .latest_fetch_since(now)
+        .unwrap()
+        .expect("entries were fetched");
+    assert!(
+        latest <= record.window_end,
+        "{latest} after {}",
+        record.window_end
+    );
+}
+
+#[tokio::test]
+async fn a_past_injected_day_still_contains_what_its_own_refresh_fetched() {
+    let server = MockServer::start().await;
+    let app = morning_app(&server, false).await;
+    // The clock says yesterday; the refresh stamps its entries with the real clock, later.
+    let now = Utc::now() - chrono::Duration::days(1);
+    let run_start = Utc::now();
+    let report = built(
+        app.build_edition(
+            EditionOptions::default(),
+            now,
+            &Utc,
+            &Recorder::default(),
+            go(),
+        )
+        .await
+        .unwrap(),
+    );
+    let record = app.store().latest_edition().unwrap().unwrap();
+    let latest = app
+        .store()
+        .latest_fetch_since(run_start)
+        .unwrap()
+        .expect("entries were fetched");
+    assert!(
+        latest <= record.window_end,
+        "{latest} after {}",
+        record.window_end
+    );
+    // The same four entries as with a machine-clock build: none was cut off by the window.
+    assert_eq!((report.entries, report.overflow), (4, 2));
+    // The due rule still lives on the injected day.
+    assert!(record.built_at >= now && record.built_at - now < chrono::Duration::minutes(5));
 }

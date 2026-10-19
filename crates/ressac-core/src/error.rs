@@ -37,6 +37,9 @@ pub enum Error {
     /// Phase 2b's refusal; declared here because Phase 2b's five files are taken.
     #[error("An edition was already built this morning.")]
     EditionNotDue,
+    /// An image the terminal reader asked for and will show as a placeholder (spec §7).
+    #[error("Image refused: {0}")]
+    ImageRefused(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

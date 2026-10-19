@@ -7,6 +7,7 @@ Thème graphique rétro : **Antiope**, en hommage au télétexte français.
 ## Usage
 
 ```sh
+ressac                                  # read: the Journal first, then every source (ressac read is the same)
 ressac import ~/Documents/vienna.opml   # --dry-run to preview
 ressac check                           # fetch, diagnose, look up archives
 ressac garden                          # triage: k keep, r repair, b bury, u undo, ? help
@@ -29,11 +30,50 @@ ressac edition show                    # today's edition by section; --json for 
 ressac feed cadence 12 daily           # force a feed's rhythm group (daily, weekly, monthly, rare, silent) or auto
 ```
 
+Bare `ressac` opens the reader and no longer prints usage: scripts that need it call `ressac --help`. `--json` makes no sense for an interactive reader, so `ressac --json` and `ressac --json read` are refused (exit 2).
+
 Global flags: `--db <file>` (or `RESSAC_DB`), `--json`, `--ascii`, `-v`.
 Exit codes: `0` done, `1` error, `2` a refused request (an unknown id, nothing to repair, an address another active feed already uses, an edition already built this morning, no network to build one), `130` stopped by Ctrl-C.
 The database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs in `~/Library/Logs/Ressac/`.
 
 **Schema v4.** The Mac app migrates the shared database to schema v4 on first launch, after a backup next to it (`ressac.sqlite.bak-v3`, or the backup of whichever older version it found). v4 adds each feed's rhythm group, the per-feed override and the morning editions; v3 already gave every folder and feed a three-digit page number (`ressac page list`). A `ressac` built before v4 refuses the database ("database created by a newer Ressac"). Get a v4 CLI with `cargo install --path crates/ressac`, or use the app's own copy at `Ressac.app/Contents/Helpers/ressac`.
+
+## The terminal reader
+
+`ressac` with no subcommand (or `ressac read`) opens a keyboard reader on the same database as the Mac app; both can stay open, each sees the other's changes within a couple of seconds. It opens on the Journal and builds this morning's edition when it is due, as the app does. `ressac --json` is refused: the reader is interactive.
+
+**Adaptive columns.** Three when the pane is 120 columns or wider (sources, entries, reader), two from 80 (the sources open over the list with `h`), one below 80 (`Enter` goes down, `Esc` comes back). The focused column is framed in double accent with a reversed title.
+
+**Native keys**
+
+| Key | Action |
+|---|---|
+| `j` / `k` | next / previous entry (sources in the sources column) |
+| `Space` | scroll, then move to the next unread entry of the source |
+| `h` / `l`, arrows, `Tab` | change column |
+| `Enter` / `Esc` | go down / come back (one column) |
+| `m` / `s` | toggle read / starred |
+| `A` | mark everything in the source read |
+| `u` | all entries or unread only |
+| `/` | search (`Enter` apply, `Esc` cancel) |
+| `f` | full article |
+| `o`, then `1`-`9` | open the article, or a numbered link |
+| `i` | show or hide images |
+| `r` / `R` | refresh the source / everything |
+| `c` | a feed's rhythm group |
+| `t` | switch Native and Antiope |
+| `?` | help |
+| `q` | quit |
+
+On a garden page (800 to 802) the garden's keys apply: `k` keep, `r` repair, `b` bury, `u` undo, `o` site, `w` Wayback, `R` safe repairs.
+
+**Antiope keys.** The teletext look, as in the app: type a page number (`104` the Journal, `105` to `109` the rhythm groups, `800` to `802` the garden, `100` SOMMAIRE, `899` GUIDE), `⌫` corrects, `Esc` cancels; SUITE `Space` or `j`, RETOUR `k`, SOMMAIRE `S`, GUIDE `?`, RÉPÉTITION `r`. Images become teletext mosaics; `i` shows the original.
+
+**Images.** Shown inline when the terminal speaks a graphics protocol (Kitty, as Ghostty does, iTerm2 or Sixel; under tmux, `set -g allow-passthrough on`), as half-blocks otherwise, or as `[image: …]` when they cannot load or are turned off. Under tmux the outer terminal is read from the client's terminal name when the library finds no protocol. `RESSAC_IMAGES=kitty|iterm2|sixel|halfblocks|off` forces the choice (`off` shows alt text and never queries the terminal). The decision is logged as "image protocol".
+
+**Settings.** The look and the images switch are kept in `~/Library/Application Support/Ressac/terminal.json`.
+
+**Logs.** `~/Library/Logs/Ressac/` (with `-v`, tracing also goes to stderr, which garbles the alternate screen: prefer the log file).
 
 ## The Mac app
 

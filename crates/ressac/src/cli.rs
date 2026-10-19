@@ -26,8 +26,9 @@ pub struct Cli {
     /// Also write logs to stderr
     #[arg(short, long, global = true)]
     pub verbose: bool,
+    /// What to do; without one, `ressac` opens the reader
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -67,6 +68,8 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<GardenCommand>,
     },
+    /// Read your feeds in the terminal (the default when no command is given)
+    Read,
     /// Export active feeds (or the cemetery) as OPML
     Export {
         /// Write to this file instead of stdout
@@ -223,25 +226,28 @@ mod tests {
     #[test]
     fn bare_garden_still_opens_the_tui() {
         let bare = Cli::try_parse_from(["ressac", "garden"]).unwrap();
-        assert!(matches!(bare.command, Command::Garden { action: None }));
+        assert!(matches!(
+            bare.command,
+            Some(Command::Garden { action: None })
+        ));
         let decide =
             Cli::try_parse_from(["ressac", "--json", "garden", "decide", "3", "bury"]).unwrap();
         assert!(decide.json);
         assert!(matches!(
             decide.command,
-            Command::Garden {
+            Some(Command::Garden {
                 action: Some(GardenCommand::Decide {
                     feed_id: 3,
                     decision: DecisionArg::Bury
                 })
-            }
+            })
         ));
         let safe = Cli::try_parse_from(["ressac", "garden", "apply-safe"]).unwrap();
         assert!(matches!(
             safe.command,
-            Command::Garden {
+            Some(Command::Garden {
                 action: Some(GardenCommand::ApplySafe)
-            }
+            })
         ));
     }
 
@@ -250,7 +256,7 @@ mod tests {
         let cli = Cli::try_parse_from(["ressac", "fetch", "--feed", "1", "--feed", "4"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Fetch { ref feeds, folder: None, force: false } if *feeds == vec![1, 4]
+            Some(Command::Fetch { ref feeds, folder: None, force: false }) if *feeds == vec![1, 4]
         ));
         let conflict = Cli::try_parse_from(["ressac", "fetch", "--feed", "1", "--folder", "2"])
             .err()
@@ -263,13 +269,13 @@ mod tests {
         let set = Cli::try_parse_from(["ressac", "page", "set", "folder", "4", "450"]).unwrap();
         assert!(matches!(
             set.command,
-            Command::Page {
+            Some(Command::Page {
                 action: PageCommand::Set {
                     kind: PageKindArg::Folder,
                     id: 4,
                     page: 450
                 }
-            }
+            })
         ));
         for bad in [
             &["ressac", "page"][..],
@@ -279,5 +285,21 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn no_subcommand_and_read_both_open_the_reader() {
+        assert!(Cli::try_parse_from(["ressac"]).unwrap().command.is_none());
+        let flags =
+            Cli::try_parse_from(["ressac", "--db", "/tmp/x.sqlite", "--json", "-v"]).unwrap();
+        assert!(flags.command.is_none() && flags.json && flags.verbose);
+        assert_eq!(
+            flags.db.as_deref(),
+            Some(std::path::Path::new("/tmp/x.sqlite"))
+        );
+        assert!(matches!(
+            Cli::try_parse_from(["ressac", "read"]).unwrap().command,
+            Some(Command::Read)
+        ));
     }
 }

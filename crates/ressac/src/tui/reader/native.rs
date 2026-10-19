@@ -1,0 +1,1550 @@
+//! The Native look of the reader: sources, entries and the article, folded to the pane's width.
+//! Pure drawing: the state is read through `ReaderState::view`, nothing is mutated, and the
+//! article's measured height goes back to the loop as `ReaderMetrics`. Dates come from the
+//! state's local clock, never from the machine's.
+
+use chrono::{DateTime, FixedOffset, Utc};
+use ratatui::Frame;
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
+use ressac_core::store::{EntryDetail, EntryRow, ListFilter};
+
+use super::article::{BodyLook, draw_body};
+use super::html::MAX_TEXT_WIDTH;
+use super::images::{ImageStore, Variant};
+use super::journal::{self, JournalLine};
+use super::layout::{Column, LayoutClass, columns};
+use super::state::{RHYTHM_CHOICES, ReaderState, ReaderView, SourceLine, group_label};
+use crate::output::printable;
+
+pub const FETCH_PROGRESS_LABEL: &str = "Fetching feeds";
+pub const EXTRACT_PROGRESS_LABEL: &str = "Fetching the full article";
+pub const TOO_SMALL: &str = "Window too small";
+/// Ends the garden footer inside the reader: how to go back to the sources column. A no-break
+/// space keeps it whole when the footer wraps.
+const GARDEN_BACK_HINT: &str = "Esc\u{a0}sources";
+pub const LOADING: &str = "Loading…";
+pub const LOADING_IMAGE: &str = "[loading image…]";
+const HELP_HINT: &str = "? help";
+const EDITING_HINT: &str = "Enter apply  Esc cancel";
+const RHYTHM_HINT: &str = "↑↓ choose  ↵ set  esc close";
+
+/// Rows of the article header: the title; feed, author and date; the entry's state.
+const HEADER_ROWS: u16 = 3;
+
+/// What the loop gives back to the state after a draw (Space needs the article's height).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReaderMetrics {
+    /// Article rows (the numbered links list is part of them).
+    pub total_rows: usize,
+    /// Rows visible under the header.
+    pub viewport_rows: u16,
+    /// The article's first visible row as drawn: the requested scroll, moved off the inside of a
+    /// picture (a picture is never cut). `None` when no article body was drawn.
+    pub scroll: Option<usize>,
+}
+
+/// The progress line, shortened when the space is short: the edition's label becomes
+/// `Edition… n/N` (`journal::progress_text`); other labels keep their first word and an ellipsis.
+pub fn progress_text(label: &str, done: usize, total: usize, width: u16) -> String {
+    if label == journal::BUILDING {
+        return journal::progress_text(done, total, width);
+    }
+    let full = format!("{label} {done}/{total}");
+    if full.chars().count() <= usize::from(width) {
+        return full;
+    }
+    let first = label.split_whitespace().next().unwrap_or(label);
+    format!("{first}…")
+}
+
+const FOCUS: Style = Style::new().fg(Color::Cyan);
+const DIM: Style = Style::new().fg(Color::DarkGray);
+const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
+const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
+/// The focused column's title: the accent colour in reverse video, bold, so ←/→ is never a guess.
+const FOCUS_TITLE: Style = FOCUS.add_modifier(Modifier::REVERSED.union(Modifier::BOLD));
+
+/// A column's frame: the focused one has a double border in the accent colour and a reversed
+/// title; every other one a plain dim grey border and a dim title.
+fn frame_block(title: &str, focused: bool) -> Block<'static> {
+    let (border_type, border, title_style) = if focused {
+        (BorderType::Double, FOCUS, FOCUS_TITLE)
+    } else {
+        (BorderType::Plain, DIM, DIM)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(border_type)
+        .border_style(border)
+        .title(Span::styled(format!(" {title} "), title_style))
+}
+
+pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -> ReaderMetrics {
+    let view = state.view();
+    let area = frame.area();
+    if view.layout == LayoutClass::TooSmall {
+        let line = Rect {
+            y: area.y + area.height / 2,
+            height: area.height.min(1),
+            ..area
+        };
+        frame.render_widget(Paragraph::new(TOO_SMALL).alignment(Alignment::Center), line);
+        return ReaderMetrics::default();
+    }
+    let rects = columns(area, view.layout, view.focus, view.look);
+    render_top_line(frame, &view, rects.top);
+    let metrics = if state.garden_view().is_some() {
+        // A garden page takes the entries and reader columns, with its own footer for the bottom
+        // line: the keys it shows are the ones that work there (spec §5).
+        let area = match (rects.entries, rects.reader) {
+            (Some(entries), Some(reader)) => Some(entries.union(reader)),
+            (entries, reader) => entries.or(reader),
+        };
+        if let Some(mut area) = area {
+            // The rhythm line, dimmed, above the garden screen: its rows taken off the top, kept
+            // empty until the line arrives.
+            if let Some(line) = rhythm_text(&view) {
+                let (row, rest) = split_rhythm_row(area, line);
+                if view.rhythm_line.is_some() {
+                    frame.render_widget(rhythm_paragraph(line), row);
+                }
+                area = rest;
+            }
+            match state.garden() {
+                Some(garden) => {
+                    crate::tui::ui::render_in(frame, area, garden, Some(GARDEN_BACK_HINT))
+                }
+                None => frame.render_widget(Paragraph::new(Span::styled(LOADING, DIM)), area),
+            }
+        }
+        if view.rhythm.is_some() {
+            frame.render_widget(Paragraph::new(Span::styled(RHYTHM_HINT, DIM)), rects.bottom);
+        }
+        ReaderMetrics::default()
+    } else {
+        frame.render_widget(bottom_line(&view, rects.bottom.width), rects.bottom);
+        if let Some(rect) = rects.entries {
+            render_entries(frame, &view, rect, view.focus == Column::Entries);
+        }
+        match rects.reader {
+            Some(rect) => render_reader(frame, &view, images, rect, view.focus == Column::Reader),
+            None => ReaderMetrics::default(),
+        }
+    };
+    // Last: in the two-column class the sources slide over the entries.
+    if let Some(rect) = rects.sources {
+        frame.render_widget(Clear, rect);
+        render_sources(frame, &view, rect, view.focus == Column::Sources);
+    }
+    if view.help {
+        render_help(frame, area);
+    }
+    if let Some((choice, _)) = view.rhythm {
+        render_rhythm(frame, area, choice, view.rhythm_current);
+    }
+    metrics
+}
+
+fn render_top_line(frame: &mut Frame, view: &ReaderView<'_>, area: Rect) {
+    let left = if view.garden {
+        view.source_title.clone()
+    } else {
+        let filter = match view.filter {
+            ListFilter::All => "all",
+            ListFilter::Unread => "unread only",
+        };
+        let mut left = format!("{} · {} unread · {filter}", view.source_title, view.unread);
+        if let Some(text) = view.search {
+            left.push_str(&format!(" · /{}", printable(text)));
+        }
+        left
+    };
+    let right = match (view.progress, view.message) {
+        (Some((label, done, total)), _) => progress_text(label, done, total, area.width / 2),
+        (None, Some(message)) => printable(message).into_owned(),
+        (None, None) => String::new(),
+    };
+    // The right part gets what it measures (display cells, not chars), at most half the line.
+    let right = Line::styled(right, Style::new().fg(Color::Yellow));
+    let right_width = u16::try_from(right.width())
+        .unwrap_or(u16::MAX)
+        .min(area.width / 2);
+    let [left_area, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
+    frame.render_widget(Paragraph::new(Line::styled(left, BOLD)), left_area);
+    frame.render_widget(
+        Paragraph::new(right).alignment(Alignment::Right),
+        right_area,
+    );
+}
+
+/// The keys of the focused column, the last hint (`? help`) always kept.
+fn bottom_line(view: &ReaderView<'_>, width: u16) -> Paragraph<'static> {
+    if view.editing {
+        return Paragraph::new(Span::styled(EDITING_HINT, DIM));
+    }
+    if view.rhythm.is_some() {
+        return Paragraph::new(Span::styled(RHYTHM_HINT, DIM));
+    }
+    let retry = view.journal_mode && journal::offers_retry(view.journal_phase);
+    let hints: Vec<&str> = match view.focus {
+        Column::Sources => vec!["↑↓ source", "→ list", "r refresh", "t Antiope", "q quit"],
+        // On the Journal, `r` rebuilds the edition when it is offline or failed.
+        Column::Entries => retry
+            .then_some("r retry")
+            .into_iter()
+            .chain(["j/k entry", "Space next", "m read", "s star"])
+            .chain(["A all read", "u unread", "/ search"])
+            .collect(),
+        Column::Reader => vec![
+            "Space scroll",
+            "j/k entry",
+            "f full text",
+            "o open",
+            "i images",
+        ],
+    };
+    let mut line = String::new();
+    for hint in &hints {
+        let fits =
+            line.chars().count() + hint.chars().count() + 2 + HELP_HINT.len() <= usize::from(width);
+        if !fits {
+            break;
+        }
+        line.push_str(hint);
+        line.push_str("  ");
+    }
+    line.push_str(HELP_HINT);
+    Paragraph::new(Span::styled(line, DIM))
+}
+
+fn render_sources(frame: &mut Frame, view: &ReaderView<'_>, area: Rect, focused: bool) {
+    let items: Vec<ListItem> = view.source_lines.iter().map(source_item).collect();
+    let selected = view.source_lines.iter().position(|l| l.selected);
+    let mut list_state = ListState::default().with_selected(selected);
+    let list = List::new(items)
+        .block(frame_block("Sources", focused))
+        .highlight_style(SELECTED);
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn source_item(line: &SourceLine) -> ListItem<'static> {
+    if line.heading {
+        return ListItem::new(Line::styled(
+            line.label.clone(),
+            DIM.add_modifier(Modifier::BOLD),
+        ));
+    }
+    let indent = "  ".repeat(usize::from(line.depth));
+    let count = if line.unread > 0 {
+        format!(" {}", line.unread)
+    } else {
+        String::new()
+    };
+    ListItem::new(Line::from(vec![
+        Span::raw(format!("{indent}{}", line.label)),
+        Span::styled(count, DIM),
+    ]))
+}
+
+fn render_entries(frame: &mut Frame, view: &ReaderView<'_>, area: Rect, focused: bool) {
+    if view.journal_mode {
+        render_journal(frame, view, area, focused);
+        return;
+    }
+    let items: Vec<ListItem> = view
+        .entries
+        .iter()
+        .map(|row| entry_item(row, view.now_local))
+        .collect();
+    let mut list_state = ListState::default().with_selected(view.entry_cursor);
+    let block = frame_block(&view.source_title, focused);
+    // A feed source: its rhythm line under the header, inside the frame.
+    let Some(line) = rhythm_text(view) else {
+        let list = List::new(items).block(block).highlight_style(SELECTED);
+        frame.render_stateful_widget(list, area, &mut list_state);
+        return;
+    };
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let (row, rest) = split_rhythm_row(inner, line);
+    if view.rhythm_line.is_some() {
+        frame.render_widget(rhythm_paragraph(line), row);
+    }
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(SELECTED),
+        rest,
+        &mut list_state,
+    );
+}
+
+/// A typical rhythm line: it sizes the rows kept for the line until the real one arrives.
+const RHYTHM_SIZING: &str = "Rhythm: Weekly · median 10.5 d · last entry 10 h ago";
+
+/// The rhythm line to draw, or the sizing text while a feed is in view and its line is not here.
+fn rhythm_text<'a>(view: &'a ReaderView<'_>) -> Option<&'a str> {
+    view.rhythm_line
+        .as_deref()
+        .or(view.rhythm_reserved.then_some(RHYTHM_SIZING))
+}
+
+/// The rhythm line: dimmed, folded to its rows (the wording is ours, the numbers are computed).
+fn rhythm_paragraph(line: &str) -> Paragraph<'static> {
+    Paragraph::new(Span::styled(line.to_owned(), DIM)).wrap(Wrap { trim: true })
+}
+
+/// The rows the rhythm line takes off the top of `area` (it folds in a narrow column), and the
+/// rest.
+fn split_rhythm_row(area: Rect, line: &str) -> (Rect, Rect) {
+    let rows = line
+        .chars()
+        .count()
+        .div_ceil(usize::from(area.width).max(1))
+        .max(1);
+    let rows = u16::try_from(rows).unwrap_or(u16::MAX).min(area.height / 2);
+    let [row, rest] = Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(area);
+    (row, rest)
+}
+
+/// The Journal column (spec §6): the edition's header, then its sections, entries and overflow
+/// rows, or a placeholder in its place. Feed-supplied text goes through `printable`; the column
+/// clips what is too long.
+fn render_journal(frame: &mut Frame, view: &ReaderView<'_>, area: Rect, focused: bool) {
+    let block = frame_block(&view.source_title, focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut body = inner;
+    if let Some(edition) = view.journal {
+        // The header wraps in a narrow column (the unreachable count is the part worth keeping).
+        let header = Line::styled(
+            journal::journal_header(edition, view.now_local.offset()),
+            BOLD,
+        );
+        let rows = header
+            .width()
+            .div_ceil(usize::from(inner.width).max(1))
+            .max(1);
+        let [head, rest] = Layout::vertical([
+            Constraint::Length(u16::try_from(rows).unwrap_or(u16::MAX).min(inner.height)),
+            Constraint::Min(0),
+        ])
+        .areas(inner);
+        frame.render_widget(Paragraph::new(header).wrap(Wrap { trim: true }), head);
+        body = rest;
+    }
+    if let Some(text) = journal::placeholder(view.journal_phase, view.journal) {
+        render_placeholder(frame, view, body, &text);
+        return;
+    }
+    let Some(edition) = view.journal else {
+        return;
+    };
+    let mut items: Vec<ListItem> = view
+        .journal_lines
+        .iter()
+        .enumerate()
+        .map(|(at, line)| match *line {
+            JournalLine::Heading(section) => {
+                let title = Line::styled(journal::section_title(section), BOLD);
+                // A blank line before every heading but the first.
+                ListItem::new(if at == 0 {
+                    vec![title]
+                } else {
+                    vec![Line::raw(""), title]
+                })
+            }
+            JournalLine::Entry(i) => entry_item(&edition.items[i].row, view.now_local),
+            JournalLine::Overflow(o) => {
+                let more = &edition.overflow[o];
+                ListItem::new(Line::styled(
+                    format!(
+                        "  +{} more in {}",
+                        more.hidden_count,
+                        printable(&more.feed_title)
+                    ),
+                    DIM.add_modifier(Modifier::ITALIC),
+                ))
+            }
+        })
+        .collect();
+    if journal::is_finished(edition) {
+        items.push(ListItem::new(vec![
+            Line::raw(""),
+            Line::styled(journal::END_LINE, DIM),
+        ]));
+    }
+    let mut list_state = ListState::default().with_selected(view.journal_cursor);
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(SELECTED),
+        body,
+        &mut list_state,
+    );
+}
+
+/// What the Journal shows instead of the edition: dimmed, centred in the column, and the
+/// retry key when it helps.
+fn render_placeholder(frame: &mut Frame, view: &ReaderView<'_>, body: Rect, text: &str) {
+    let mut lines = vec![Line::styled(printable(text).into_owned(), DIM)];
+    if journal::offers_retry(view.journal_phase) {
+        lines.push(Line::styled("r retry", DIM));
+    }
+    // A long sentence wraps: count its rows so that the block stays centred.
+    let rows: usize = lines
+        .iter()
+        .map(|line| line.width().div_ceil(usize::from(body.width).max(1)).max(1))
+        .sum();
+    let [place] = Layout::vertical([Constraint::Length(
+        u16::try_from(rows).unwrap_or(u16::MAX).min(body.height),
+    )])
+    .flex(Flex::Center)
+    .areas(body);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        place,
+    );
+}
+
+fn entry_item(row: &EntryRow, now: DateTime<FixedOffset>) -> ListItem<'static> {
+    let mark = if row.is_read { " " } else { "●" };
+    let star = if row.is_starred { "★" } else { " " };
+    let title = printable(row.title.as_deref().unwrap_or("(untitled)")).into_owned();
+    let style = if row.is_read { DIM } else { BOLD };
+    ListItem::new(vec![
+        Line::from(vec![
+            Span::raw(format!("{mark}{star} ")),
+            Span::styled(title, style),
+        ]),
+        Line::styled(
+            format!(
+                "   {} · {}",
+                printable(&row.feed_title),
+                short_date(row.published_at, now)
+            ),
+            DIM,
+        ),
+    ])
+}
+
+/// `09:30` today, `Thu 15 Oct` this year, `15 Oct 2025` before; in the state's local offset.
+pub(super) fn short_date(at: DateTime<Utc>, now: DateTime<FixedOffset>) -> String {
+    let local = at.with_timezone(now.offset());
+    if local.date_naive() == now.date_naive() {
+        local.format("%H:%M").to_string()
+    } else if local.format("%Y").to_string() == now.format("%Y").to_string() {
+        local.format("%a %-d %b").to_string()
+    } else {
+        local.format("%-d %b %Y").to_string()
+    }
+}
+
+fn render_reader(
+    frame: &mut Frame,
+    view: &ReaderView<'_>,
+    images: &mut ImageStore,
+    area: Rect,
+    focused: bool,
+) -> ReaderMetrics {
+    let block = frame_block("Article", focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let (Some(entry), Some(article)) = (view.entry, view.article) else {
+        let text = if view.entry_cursor.is_some() {
+            "Loading…"
+        } else {
+            "No entry selected"
+        };
+        frame.render_widget(Paragraph::new(Span::styled(text, DIM)), inner);
+        return ReaderMetrics {
+            total_rows: 0,
+            viewport_rows: inner.height,
+            scroll: None,
+        };
+    };
+    let width = inner.width.min(MAX_TEXT_WIDTH);
+    let header = header_lines(entry, view);
+    let header_rows = u16::try_from(header.len())
+        .unwrap_or(HEADER_ROWS)
+        .min(inner.height);
+    let [header_area, body_area] =
+        Layout::vertical([Constraint::Length(header_rows), Constraint::Min(0)])
+            .flex(Flex::Start)
+            .areas(inner);
+    frame.render_widget(
+        Paragraph::new(header),
+        Rect {
+            width,
+            ..header_area
+        },
+    );
+    // `render_html` already ends the article with its numbered links list.
+    let body = draw_body(
+        frame,
+        Rect { width, ..body_area },
+        article,
+        view.images,
+        view.reader_scroll,
+        images,
+        &BodyLook {
+            variant: Variant::Native,
+            text_width: width,
+            image_width: width,
+            paint_line: &|line| line.clone(),
+            loading: Line::from(Span::styled(LOADING_IMAGE, DIM)),
+            after_image: &|_, _| {},
+        },
+    );
+    ReaderMetrics {
+        total_rows: body.total,
+        viewport_rows: body_area.height,
+        scroll: Some(body.scroll),
+    }
+}
+
+fn header_lines(entry: &EntryDetail, view: &ReaderView<'_>) -> Vec<Line<'static>> {
+    let row = &entry.row;
+    let title = printable(row.title.as_deref().unwrap_or("(untitled)")).into_owned();
+    let mut by = printable(&row.feed_title).into_owned();
+    if let Some(author) = row.author.as_deref() {
+        by.push_str(&format!(" · {}", printable(author)));
+    }
+    by.push_str(&format!(
+        " · {}",
+        short_date(row.published_at, view.now_local)
+    ));
+    let mut state = vec![if row.is_read { "read" } else { "unread" }];
+    if row.is_starred {
+        state.push("starred");
+    }
+    if view.show_fulltext {
+        state.push("full text");
+    }
+    let mut lines = vec![
+        Line::styled(title, BOLD),
+        Line::styled(by, DIM),
+        Line::styled(state.join(" · "), DIM),
+    ];
+    // A failed `f` stays visible: the extraction's own sentence, one line.
+    if let Some(error) = entry.fulltext_error.as_deref() {
+        lines.push(Line::styled(
+            printable(error).into_owned(),
+            Style::new().fg(Color::Red),
+        ));
+    }
+    lines
+}
+
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let [row] = Layout::vertical([Constraint::Length(height.min(area.height))])
+        .flex(Flex::Center)
+        .areas(area);
+    let [rect] = Layout::horizontal([Constraint::Length(width.min(area.width))])
+        .flex(Flex::Center)
+        .areas(row);
+    rect
+}
+
+const HELP: [&str; 13] = [
+    "j/k  next, previous entry",
+    "Space  scroll, then next unread",
+    "h/l  move between columns",
+    "m  read or unread   s  star",
+    "A  mark the list read",
+    "u  unread only   /  search",
+    "f  full text   o  open a link",
+    "c  rhythm of the feed",
+    "r  refresh   R  refresh all",
+    "i  images   t  Antiope",
+    "Esc  back   q  quit",
+    "",
+    "Any key closes this help.",
+];
+
+fn render_help(frame: &mut Frame, area: Rect) {
+    let rect = centered(area, 40, HELP.len() as u16 + 2);
+    frame.render_widget(Clear, rect);
+    let lines: Vec<Line> = HELP.iter().map(|text| Line::raw(*text)).collect();
+    frame.render_widget(Paragraph::new(lines).block(frame_block("Keys", true)), rect);
+}
+
+/// The override menu: the cursor in reverse video, the feed's current setting marked with `•`.
+fn render_rhythm(frame: &mut Frame, area: Rect, choice: usize, current: Option<usize>) {
+    let rect = centered(area, 24, RHYTHM_CHOICES.len() as u16 + 2);
+    frame.render_widget(Clear, rect);
+    let items: Vec<ListItem> = RHYTHM_CHOICES
+        .iter()
+        .enumerate()
+        .map(|(i, group)| {
+            let mark = if Some(i) == current { "•" } else { " " };
+            let name = group.map_or_else(|| "Auto".to_string(), group_label);
+            ListItem::new(format!("{mark} {name}"))
+        })
+        .collect();
+    let mut list_state = ListState::default().with_selected(Some(choice));
+    let list = List::new(items)
+        .block(frame_block("Rhythm", true))
+        .highlight_style(SELECTED);
+    frame.render_stateful_widget(list, rect, &mut list_state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::reader::images::ImageState;
+    use crate::tui::reader::layout::Look;
+    use crate::tui::reader::settings::TerminalSettings;
+    use crate::tui::reader::state::GardenView;
+    use crate::tui::reader::state::{Event, JobOutcome};
+    use chrono::{FixedOffset, TimeZone, Utc};
+    use image::{DynamicImage, Rgb, RgbImage};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui_image::picker::Picker;
+    use ressac_core::edition::Section;
+    use ressac_core::garden::GardenRow;
+    use ressac_core::model::CadenceGroup;
+    use ressac_core::store::{
+        EditionOverflowRow, EditionRecord, EntryPage, JournalItem, JournalView, Source,
+        SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot,
+    };
+    use std::collections::BTreeMap;
+
+    const PHOTO: &str = "https://example.com/photo.jpg";
+    const WITH_IMAGE: &str = "<p>Avant.</p><img src=\"https://example.com/photo.jpg\" \
+        alt=\"Le port\"><p>Après.</p>";
+
+    const ARTICLE: &str = "<h2>Le jardin</h2><p>Un <b>long</b> texte avec un \
+        <a href=\"https://example.com/a\">premier lien</a> et un \
+        <a href=\"https://example.com/b\">second</a>.</p><ul><li>un</li><li>deux</li></ul>";
+
+    fn row(id: i64, title: &str, read: bool) -> EntryRow {
+        EntryRow {
+            entry_id: id,
+            feed_id: 3,
+            feed_title: "Courrier international".into(),
+            title: Some(title.into()),
+            author: Some("Anne".into()),
+            url: Some(format!("https://example.com/{id}")),
+            published_at: Utc.with_ymd_and_hms(2026, 10, 16, 6, 30, 0).unwrap(),
+            is_read: read,
+            is_starred: id == 12,
+            has_fulltext: false,
+        }
+    }
+
+    fn snapshot() -> SourcesSnapshot {
+        let cadence: BTreeMap<_, _> = CadenceGroup::ALL.iter().map(|g| (*g, 0)).collect();
+        SourcesSnapshot {
+            counts: SourceCounts {
+                journal: 2,
+                unread: 3,
+                today: 3,
+                starred: 1,
+                needs_triage: 1,
+                cadence,
+            },
+            tree: vec![SourceNode {
+                kind: SourceNodeKind::Folder {
+                    id: 1,
+                    name: "Infos".into(),
+                },
+                page: Some(400),
+                unread: 3,
+                children: vec![SourceNode {
+                    kind: SourceNodeKind::Feed {
+                        id: 3,
+                        title: "Courrier international".into(),
+                    },
+                    page: Some(401),
+                    unread: 3,
+                    children: vec![],
+                }],
+            }],
+        }
+    }
+
+    fn detail_for(row: EntryRow, error: Option<&str>) -> EntryDetail {
+        EntryDetail {
+            row,
+            summary_html: None,
+            content_html: Some(ARTICLE.into()),
+            fulltext_html: None,
+            fulltext_error: error.map(str::to_string),
+            prefer_full_text: false,
+        }
+    }
+
+    /// The Unread list of `rows`, with the first one open in the reader.
+    fn state(width: u16, height: u16, rows: Vec<EntryRow>) -> ReaderState {
+        let mut s = ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            width,
+            height,
+        );
+        s.on_event(Event::Sources(snapshot()));
+        s.on_event(Event::Tick {
+            now: Utc.with_ymd_and_hms(2026, 10, 16, 7, 0, 0).unwrap(),
+            local: FixedOffset::east_opt(7200)
+                .unwrap()
+                .with_ymd_and_hms(2026, 10, 16, 9, 0, 0)
+                .unwrap(),
+        });
+        s.go_to(Source::Unread);
+        let unread = rows.iter().filter(|r| !r.is_read).count();
+        s.on_event(Event::Entries {
+            source: Source::Unread,
+            page: EntryPage {
+                total: rows.len(),
+                unread,
+                rows,
+                next: None,
+            },
+            appended: false,
+            request: s.request,
+        });
+        if s.selected_entry().is_none() {
+            s.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        let open = s.entries[s.view().entry_cursor.expect("an entry is selected")].clone();
+        s.on_event(Event::Entry(Box::new(detail_for(open, None))));
+        s
+    }
+
+    fn terminal(width: u16, height: u16) -> Terminal<TestBackend> {
+        Terminal::new(TestBackend::new(width, height)).unwrap()
+    }
+
+    fn draw(s: &ReaderState, width: u16, height: u16) -> String {
+        draw_with(s, &mut ImageStore::new(Picker::halfblocks()), width, height)
+    }
+
+    fn draw_with(s: &ReaderState, images: &mut ImageStore, width: u16, height: u16) -> String {
+        let mut terminal = terminal(width, height);
+        terminal
+            .draw(|f| {
+                render(f, s, images);
+            })
+            .unwrap();
+        terminal.backend().to_string()
+    }
+
+    fn rows() -> Vec<EntryRow> {
+        vec![
+            row(11, "Le jardin des flux", false),
+            row(12, "Un deuxième article", false),
+            row(13, "Lu hier", true),
+        ]
+    }
+
+    #[test]
+    fn native_three_columns() {
+        insta::assert_snapshot!(draw(&state(140, 30, rows()), 140, 30));
+    }
+
+    #[test]
+    fn native_two_columns() {
+        insta::assert_snapshot!(draw(&state(100, 30, rows()), 100, 30));
+    }
+
+    #[test]
+    fn native_one_column() {
+        let mut s = state(70, 30, rows());
+        s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        insta::assert_snapshot!(draw(&s, 70, 30));
+    }
+
+    #[test]
+    fn native_window_too_small() {
+        let s = state(30, 8, rows());
+        let out = draw(&s, 30, 8);
+        assert!(out.contains(TOO_SMALL), "{out}");
+    }
+
+    #[test]
+    fn the_sources_slide_over_the_entries_in_two_columns() {
+        let mut s = state(100, 30, rows());
+        s.on_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        s.on_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        let out = draw(&s, 100, 30);
+        assert!(out.contains("Sources"), "{out}");
+        assert!(out.contains("Courrier international"), "{out}");
+    }
+
+    /// Review Focus 1: an OSC title-setting sequence, BEL, CSI (U+009B), an emoji and CJK.
+    #[test]
+    fn escape_sequences_and_wide_titles_stay_inside_their_column() {
+        let hostile = "Café ☕ 東京 \u{1b}]0;pwned\u{7} \u{9b}31m fin";
+        for (width, height) in [(100u16, 20u16), (70, 20)] {
+            let s = state(
+                width,
+                height,
+                vec![row(11, hostile, false), row(12, "Autre", false)],
+            );
+            let mut terminal = terminal(width, height);
+            terminal
+                .draw(|f| {
+                    render(f, &s, &mut ImageStore::new(Picker::halfblocks()));
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let out = terminal.backend().to_string();
+            assert!(
+                !out.chars()
+                    .any(|c| c == '\u{1b}' || c == '\u{7}' || c == '\u{9b}'),
+                "{out:?}"
+            );
+            assert!(
+                out.contains('\u{FFFD}'),
+                "controls are shown as U+FFFD: {out}"
+            );
+            assert!(out.contains("東京"), "{out}");
+            // The entries column is the first 40 cells (the whole width when narrow): its right
+            // border is intact on every body row, so nothing spilled past the edge.
+            let edge = if width < 80 { width - 1 } else { 39 };
+            for y in 1..height - 1 {
+                let symbol = buffer[(edge, y)].symbol();
+                assert!(
+                    matches!(symbol, "│" | "┐" | "┘" | "║" | "╗" | "╝"),
+                    "row {y} spills past the column: {symbol:?}\n{out}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn progress_text_shortens_the_edition_label_when_needed() {
+        assert_eq!(
+            progress_text(journal::BUILDING, 34, 156, 60),
+            "Building this morning's edition… 34/156"
+        );
+        assert_eq!(
+            progress_text(journal::BUILDING, 34, 156, 30),
+            "Edition… 34/156"
+        );
+        assert_eq!(
+            progress_text(FETCH_PROGRESS_LABEL, 3, 9, 40),
+            "Fetching feeds 3/9"
+        );
+        assert_eq!(progress_text(FETCH_PROGRESS_LABEL, 3, 9, 10), "Fetching…");
+    }
+
+    #[test]
+    fn the_progress_line_replaces_the_message_on_the_top_line() {
+        let mut s = state(140, 30, rows());
+        s.on_event(Event::Progress {
+            label: journal::BUILDING.into(),
+            done: 34,
+            total: 156,
+        });
+        let out = draw(&s, 140, 30);
+        assert!(
+            out.lines()
+                .next()
+                .unwrap()
+                .contains("Building this morning's edition… 34/156"),
+            "{out}"
+        );
+        s.on_event(Event::JobDone(JobOutcome::Refreshed));
+        assert!(!draw(&s, 140, 30).contains("34/156"));
+    }
+
+    fn last_line(out: &str) -> &str {
+        out.lines().last().unwrap().trim_matches('"').trim_end()
+    }
+
+    #[test]
+    fn the_bottom_line_keeps_help_when_the_hints_do_not_fit() {
+        let s = state(140, 30, rows());
+        assert!(last_line(&draw(&s, 140, 30)).ends_with("/ search  ? help"));
+        let narrow = draw(&s, 40, 30);
+        let line = last_line(&narrow);
+        assert!(
+            line.ends_with("? help") && line.starts_with("j/k entry"),
+            "{line}"
+        );
+        assert!(line.chars().count() <= 40, "{line}");
+    }
+
+    #[test]
+    fn the_bottom_line_says_how_to_end_a_search_or_a_link_choice() {
+        let mut s = state(140, 30, rows());
+        s.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert_eq!(last_line(&draw(&s, 140, 30)), "Enter apply  Esc cancel");
+        s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        s.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(last_line(&draw(&s, 140, 30)), "Enter apply  Esc cancel");
+    }
+
+    #[test]
+    fn the_article_is_wrapped_to_72_columns_at_most() {
+        let s = state(140, 30, rows());
+        let mut terminal = terminal(140, 30);
+        let mut metrics = None;
+        terminal
+            .draw(|f| {
+                metrics = Some(render(f, &s, &mut ImageStore::new(Picker::halfblocks())));
+            })
+            .unwrap();
+        let metrics = metrics.unwrap();
+        assert!(metrics.total_rows > 0);
+        assert!(metrics.viewport_rows > 0 && metrics.viewport_rows < 30);
+        let out = terminal.backend().to_string();
+        assert!(out.contains("premier lien[1]"), "{out}");
+        assert!(out.contains("[2] https://example.com/b"), "{out}");
+    }
+
+    #[test]
+    fn dates_follow_the_states_local_offset() {
+        // 06:30 UTC on the 16th is 08:30 in the state's +02:00 zone.
+        let out = draw(&state(140, 30, rows()), 140, 30);
+        assert!(out.contains("08:30"), "{out}");
+        assert!(!out.contains("06:30"), "{out}");
+    }
+
+    #[test]
+    fn a_failed_extraction_is_visible_in_the_reader() {
+        let mut s = state(140, 30, rows());
+        let open = s.entries[0].clone();
+        s.on_event(Event::Entry(Box::new(detail_for(
+            open,
+            Some("Could not extract the article: HTTP 403"),
+        ))));
+        let out = draw(&s, 140, 30);
+        assert!(
+            out.contains("Could not extract the article: HTTP 403"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_help_and_the_rhythm_menu_are_drawn() {
+        let mut s = state(140, 30, rows());
+        s.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(draw(&s, 140, 30).contains("Any key closes this help."));
+        s.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        s.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let out = draw(&s, 140, 30);
+        assert!(out.contains("Auto") && out.contains("Silent"), "{out}");
+    }
+
+    /// The first entry open on an article with one photo; `images_on` is the `i` setting.
+    fn image_state(width: u16, height: u16, images_on: bool) -> ReaderState {
+        let mut s = state(width, height, rows());
+        s.settings.images = images_on;
+        let open = s.entries[0].clone();
+        s.on_event(Event::Entry(Box::new(EntryDetail {
+            content_html: Some(WITH_IMAGE.into()),
+            ..detail_for(open, None)
+        })));
+        s
+    }
+
+    fn photo() -> DynamicImage {
+        // Rows of different colours: a uniform picture would draw as blank cells with a background.
+        DynamicImage::ImageRgb8(RgbImage::from_fn(400, 300, |_, y| {
+            Rgb([(y % 256) as u8, 120, 255 - (y % 256) as u8])
+        }))
+    }
+
+    #[test]
+    fn an_image_not_loaded_yet_is_wanted_and_shows_loading() {
+        let s = image_state(140, 30, true);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        let out = draw_with(&s, &mut images, 140, 30);
+        assert!(out.contains(LOADING_IMAGE), "{out}");
+        assert_eq!(images.take_wanted(), vec![PHOTO.to_string()]);
+    }
+
+    #[test]
+    fn a_ready_image_is_drawn_in_half_blocks_without_a_protocol() {
+        let s = image_state(140, 30, true);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        images.ingest(PHOTO, photo());
+        let out = draw_with(&s, &mut images, 140, 30);
+        assert!(
+            out.contains('▀') || out.contains('▄'),
+            "half-blocks drawn: {out}"
+        );
+        assert!(!out.contains(LOADING_IMAGE));
+        assert!(images.rows_for(PHOTO, Variant::Native, 72, 13) <= 13);
+    }
+
+    #[test]
+    fn a_failed_image_or_images_off_show_the_alt_text() {
+        let s = image_state(140, 30, true);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        images.fail(PHOTO);
+        assert!(draw_with(&s, &mut images, 140, 30).contains("[image: Le port]"));
+
+        let off = image_state(140, 30, false);
+        let mut fresh = ImageStore::new(Picker::halfblocks());
+        assert!(draw_with(&off, &mut fresh, 140, 30).contains("[image: Le port]"));
+        assert!(
+            fresh.take_wanted().is_empty(),
+            "images off: nothing is fetched"
+        );
+        assert_eq!(fresh.state_of(PHOTO), ImageState::Absent);
+
+        let mut disabled = ImageStore::disabled();
+        let out = draw_with(&s, &mut disabled, 140, 30);
+        assert!(
+            out.contains("[image: Le port]") && !out.contains(LOADING_IMAGE),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_image_far_below_the_viewport_is_not_wanted_yet() {
+        let filler = "<p>Ligne de remplissage.</p>".repeat(120);
+        let html = format!("{filler}<img src=\"{PHOTO}\" alt=\"Loin\">");
+        let mut s = state(140, 30, rows());
+        let open = s.entries[0].clone();
+        s.on_event(Event::Entry(Box::new(EntryDetail {
+            content_html: Some(html),
+            ..detail_for(open, None)
+        })));
+        let mut images = ImageStore::new(Picker::halfblocks());
+        draw_with(&s, &mut images, 140, 30);
+        assert!(images.take_wanted().is_empty(), "lazy loading");
+    }
+
+    #[test]
+    fn a_scroll_inside_a_picture_is_moved_to_its_top_so_no_band_shows() {
+        let before = "<p>Ligne de remplissage.</p>".repeat(20);
+        let after = "<p>Suite de l'article.</p>".repeat(40);
+        let html = format!("{before}<img src=\"{PHOTO}\" alt=\"Le port\">{after}");
+        let mut s = state(140, 30, rows());
+        let open = s.entries[0].clone();
+        s.on_event(Event::Entry(Box::new(EntryDetail {
+            content_html: Some(html),
+            ..detail_for(open, None)
+        })));
+        let mut images = ImageStore::new(Picker::halfblocks());
+        images.ingest(PHOTO, photo());
+        let draw_at = |s: &ReaderState, images: &mut ImageStore| {
+            let mut terminal = terminal(140, 30);
+            let mut metrics = None;
+            terminal
+                .draw(|f| metrics = Some(render(f, s, images)))
+                .unwrap();
+            (metrics.unwrap(), terminal.backend().to_string())
+        };
+        let top = s.article.as_ref().unwrap().images[0].line;
+        s.scroll = top;
+        let (aligned, _) = draw_at(&s, &mut images);
+        let rows = aligned.total_rows + 1 - s.article.as_ref().unwrap().lines.len();
+        assert!(rows >= 3, "the picture takes {rows} rows");
+        assert_eq!(aligned.scroll, Some(top));
+        for inside in top + 1..top + rows {
+            s.scroll = inside;
+            let (m, out) = draw_at(&s, &mut images);
+            assert_eq!(m.scroll, Some(top), "scroll {inside} is inside the picture");
+            assert!(out.contains('▀') || out.contains('▄'), "{out}");
+        }
+        // The last page: no room to go back, the picture ends the move forward instead.
+        let max = aligned.total_rows - usize::from(aligned.viewport_rows);
+        assert!(max > top + rows, "the picture is not on the last page");
+    }
+
+    #[test]
+    fn native_reader_with_an_image() {
+        let s = image_state(140, 30, true);
+        let mut images = ImageStore::new(Picker::halfblocks());
+        images.ingest(PHOTO, photo());
+        insta::assert_snapshot!(draw_with(&s, &mut images, 140, 30));
+    }
+
+    fn journal_item(
+        id: i64,
+        feed: i64,
+        feed_title: &str,
+        title: &str,
+        section: Section,
+        read: bool,
+    ) -> JournalItem {
+        JournalItem {
+            row: EntryRow {
+                feed_id: feed,
+                feed_title: feed_title.into(),
+                ..row(id, title, read)
+            },
+            section,
+            rank: id as u32,
+        }
+    }
+
+    /// Front: one entry; Week: two of Actualitté with 12 more hidden, then one of Le Monde;
+    /// Wire: one with control characters in its title.
+    fn sample_journal(read: bool, unreachable: u32) -> JournalView {
+        JournalView {
+            edition: EditionRecord {
+                id: 1,
+                built_at: Utc.with_ymd_and_hms(2026, 10, 16, 6, 10, 0).unwrap(),
+                window_start: Utc.with_ymd_and_hms(2026, 10, 15, 6, 10, 0).unwrap(),
+                window_end: Utc.with_ymd_and_hms(2026, 10, 16, 6, 10, 0).unwrap(),
+                unreachable,
+            },
+            items: vec![
+                journal_item(
+                    1,
+                    3,
+                    "Le Monde diplomatique",
+                    "Le mois en cartes",
+                    Section::Front,
+                    read,
+                ),
+                journal_item(
+                    2,
+                    7,
+                    "Actualitté",
+                    "Un roman de la rentrée",
+                    Section::Week,
+                    read,
+                ),
+                journal_item(3, 7, "Actualitté", "Le prix du livre", Section::Week, read),
+                journal_item(
+                    4,
+                    8,
+                    "Le Monde",
+                    "Une analyse de la semaine",
+                    Section::Week,
+                    read,
+                ),
+                journal_item(
+                    5,
+                    9,
+                    "Les Échos",
+                    "Bourse\u{1b}]0;x\u{7} du jour",
+                    Section::Wire,
+                    read,
+                ),
+            ],
+            overflow: vec![EditionOverflowRow {
+                section: Section::Week,
+                feed_id: 7,
+                feed_title: "Actualitté".into(),
+                page: Some(403),
+                hidden_count: 12,
+            }],
+        }
+    }
+
+    fn journal_state(read: bool, unreachable: u32) -> ReaderState {
+        let mut s = ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            140,
+            30,
+        );
+        let local = FixedOffset::east_opt(7200)
+            .unwrap()
+            .with_ymd_and_hms(2026, 10, 16, 8, 0, 0)
+            .unwrap();
+        s.start(local.with_timezone(&Utc), local);
+        s.on_event(Event::Sources(snapshot()));
+        s.on_event(Event::JobDone(JobOutcome::EditionNotDue));
+        let view = sample_journal(read, unreachable);
+        let rows: Vec<EntryRow> = view.items.iter().map(|i| i.row.clone()).collect();
+        s.on_event(Event::Journal(Some(view)));
+        s.on_event(Event::Entries {
+            source: Source::Journal,
+            page: EntryPage {
+                total: rows.len(),
+                unread: rows.iter().filter(|r| !r.is_read).count(),
+                rows,
+                next: None,
+            },
+            appended: false,
+            request: s.request,
+        });
+        let open = s.entries[0].clone();
+        s.on_event(Event::Entry(Box::new(detail_for(open, None))));
+        s
+    }
+
+    #[test]
+    fn journal_wide() {
+        insta::assert_snapshot!(draw(&journal_state(false, 3), 140, 30));
+    }
+
+    #[test]
+    fn journal_the_cursor_rests_on_an_overflow_row() {
+        let mut s = journal_state(false, 0);
+        for _ in 0..3 {
+            s.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        insta::assert_snapshot!(draw(&s, 140, 30));
+    }
+
+    #[test]
+    fn journal_finished_shows_the_end_line() {
+        let out = draw(&journal_state(true, 0), 140, 30);
+        assert!(out.contains("That's the edition."), "{out}");
+        insta::assert_snapshot!(out);
+        assert!(!draw(&journal_state(false, 0), 140, 30).contains("That's the edition."));
+    }
+
+    #[test]
+    fn journal_header_counts_the_entries_and_the_unreachable_feeds() {
+        let out = draw(&journal_state(false, 1), 140, 30);
+        // The 40-cell column wraps the header: the count of unreachable feeds is kept.
+        assert!(
+            out.contains("Friday 16 October · 5 entries · 0 read"),
+            "{out}"
+        );
+        assert!(out.contains("· 1 feed unreachable"), "{out}");
+        let three = draw(&journal_state(false, 3), 140, 30);
+        assert!(three.contains("· 3 feeds unreachable"), "{three}");
+    }
+
+    #[test]
+    fn journal_building_progress_on_the_top_line() {
+        let mut s = journal_state(false, 0);
+        s.on_event(Event::Progress {
+            label: journal::BUILDING.into(),
+            done: 34,
+            total: 156,
+        });
+        let wide = draw(&s, 140, 30);
+        assert!(
+            wide.lines()
+                .next()
+                .unwrap()
+                .contains("Building this morning's edition… 34/156"),
+            "{wide}"
+        );
+        let narrow = draw(&s, 70, 30);
+        assert!(
+            narrow.lines().next().unwrap().contains("Edition… 34/156"),
+            "{narrow}"
+        );
+        // Before the refresh reports its total there is no count to show.
+        s.on_event(Event::Progress {
+            label: journal::BUILDING.into(),
+            done: 0,
+            total: 0,
+        });
+        let first = draw(&s, 140, 30);
+        assert!(!first.lines().next().unwrap().contains("0/0"), "{first}");
+        assert!(
+            draw(&s, 50, 30)
+                .lines()
+                .next()
+                .unwrap()
+                .contains("Edition…")
+        );
+    }
+
+    #[test]
+    fn journal_placeholders() {
+        let mut s = ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            100,
+            20,
+        );
+        s.on_event(Event::Journal(None));
+        let none = draw(&s, 100, 20);
+        assert!(none.contains("No edition yet"), "{none}");
+        assert!(!none.contains("r retry"), "nothing to retry: {none}");
+        s.on_event(Event::JobDone(JobOutcome::EditionOffline));
+        let offline = draw(&s, 100, 20);
+        assert!(offline.contains("Offline: no edition yet"), "{offline}");
+        assert!(offline.contains("r retry"), "{offline}");
+        s.on_event(Event::JobDone(JobOutcome::EditionFailed(
+            "disk \u{1b}full".into(),
+        )));
+        let failed = draw(&s, 100, 20);
+        assert!(
+            failed.contains("disk \u{FFFD}full") && failed.contains("r retry"),
+            "{failed}"
+        );
+        s.on_event(Event::JobDone(JobOutcome::EditionBuilt));
+        let mut empty = sample_journal(false, 0);
+        empty.items.clear();
+        empty.overflow.clear();
+        s.on_event(Event::Journal(Some(empty)));
+        assert!(draw(&s, 100, 20).contains("Nothing new this morning."));
+    }
+
+    #[test]
+    fn journal_retry_is_on_the_bottom_line_only_when_offered() {
+        let mut s = journal_state(false, 0);
+        assert!(!last_line(&draw(&s, 140, 30)).contains("r retry"));
+        s.on_event(Event::JobDone(JobOutcome::EditionOffline));
+        assert!(last_line(&draw(&s, 140, 30)).contains("r retry"));
+    }
+
+    #[test]
+    fn journal_a_filter_shows_the_plain_list() {
+        let mut s = journal_state(false, 0);
+        s.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        let out = draw(&s, 140, 30);
+        assert!(
+            !out.contains("Front Page") && !out.contains("more in"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn journal_escape_sequences_never_reach_the_terminal() {
+        let out = draw(&journal_state(false, 0), 140, 30);
+        assert!(!out.contains('\u{1b}') && !out.contains('\u{7}') && !out.contains('\u{9b}'));
+        assert!(out.contains("Bourse\u{FFFD}]0;x\u{FFFD} du jour"), "{out}");
+    }
+
+    fn garden_state(
+        width: u16,
+        height: u16,
+        view: GardenView,
+        rows: Vec<GardenRow>,
+    ) -> ReaderState {
+        let mut s = ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            width,
+            height,
+        );
+        s.on_event(Event::Sources(snapshot()));
+        s.open_garden(view);
+        s.on_event(Event::GardenRows(rows));
+        s
+    }
+
+    fn cadence(feed_id: i64, effective: CadenceGroup, is_override: bool) -> Event {
+        Event::Cadence(crate::tui::reader::rhythm::RhythmInfo {
+            feed_id,
+            effective,
+            computed: CadenceGroup::Rare,
+            is_override,
+            median_days: Some(1.5),
+            last_entry_at: Some(Utc.with_ymd_and_hms(2026, 10, 16, 5, 0, 0).unwrap()),
+        })
+    }
+
+    fn at_nine(s: &mut ReaderState) {
+        s.on_event(Event::Tick {
+            now: Utc.with_ymd_and_hms(2026, 10, 16, 7, 0, 0).unwrap(),
+            local: FixedOffset::east_opt(7200)
+                .unwrap()
+                .with_ymd_and_hms(2026, 10, 16, 9, 0, 0)
+                .unwrap(),
+        });
+    }
+
+    #[test]
+    fn garden_rhythm_line_and_menu() {
+        let mut s = garden_state(
+            140,
+            30,
+            GardenView::NeedsTriage,
+            crate::tui::state::sample_rows(),
+        );
+        at_nine(&mut s);
+        let feed = s.garden().unwrap().selected_row().unwrap().feed_id;
+        assert!(
+            !draw(&s, 140, 30).contains("Rhythm:"),
+            "nothing before the info arrives"
+        );
+        s.on_event(cadence(feed, CadenceGroup::Weekly, true));
+        let line = draw(&s, 140, 30);
+        assert!(
+            line.contains("Rhythm: Weekly · median 1.5 d · last entry 2 h ago (set by you)"),
+            "{line}"
+        );
+        s.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let menu = draw(&s, 140, 30);
+        assert!(menu.contains("• Weekly") && menu.contains("↑↓ choose  ↵ set  esc close"));
+        insta::assert_snapshot!(menu);
+    }
+
+    /// The screen row of the first line holding `needle`.
+    fn row_of(screen: &str, needle: &str) -> usize {
+        screen
+            .lines()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {screen}"))
+    }
+
+    #[test]
+    fn the_garden_does_not_jump_when_the_rhythm_line_arrives() {
+        let mut s = garden_state(
+            140,
+            30,
+            GardenView::NeedsTriage,
+            crate::tui::state::sample_rows(),
+        );
+        at_nine(&mut s);
+        let title = s.garden().unwrap().selected_row().unwrap().title.clone();
+        let feed = s.garden().unwrap().selected_row().unwrap().feed_id;
+        let before = draw(&s, 140, 30);
+        assert!(!before.contains("Rhythm:"));
+        s.on_event(cadence(feed, CadenceGroup::Weekly, true));
+        let after = draw(&s, 140, 30);
+        assert!(after.contains("Rhythm:"));
+        assert_eq!(row_of(&before, &title), row_of(&after, &title));
+    }
+
+    #[test]
+    fn a_feed_source_does_not_jump_when_the_rhythm_line_arrives() {
+        let mut s = state(140, 30, rows());
+        s.go_to(Source::Feed(3));
+        s.on_event(Event::Entries {
+            source: Source::Feed(3),
+            page: ressac_core::store::EntryPage {
+                rows: rows(),
+                total: 3,
+                unread: 2,
+                next: None,
+            },
+            appended: false,
+            request: s.request,
+        });
+        let before = draw(&s, 140, 30);
+        s.on_event(cadence(3, CadenceGroup::Daily, false));
+        let after = draw(&s, 140, 30);
+        assert!(after.contains("Rhythm: Daily"), "{after}");
+        assert_eq!(
+            row_of(&before, "Un deuxième article"),
+            row_of(&after, "Un deuxième article")
+        );
+    }
+
+    #[test]
+    fn a_feed_source_shows_its_rhythm_under_the_header() {
+        let mut s = state(140, 30, rows());
+        s.go_to(Source::Feed(3));
+        s.on_event(cadence(3, CadenceGroup::Daily, false));
+        let out = draw(&s, 140, 30);
+        // The 40-cell column folds the line onto a second row.
+        assert!(out.contains("Rhythm: Daily · median 1.5 d · last"), "{out}");
+        assert!(out.contains("entry 2 h ago"), "{out}");
+        assert!(!out.contains("(set by you)"));
+    }
+
+    #[test]
+    fn garden_destination_wide() {
+        let s = garden_state(
+            140,
+            30,
+            GardenView::NeedsTriage,
+            crate::tui::state::sample_rows(),
+        );
+        let out = draw(&s, 140, 30);
+        assert!(out.contains("Bibliobsession 2.0"));
+        assert!(
+            out.contains("k keep"),
+            "the bottom line shows the garden's keys"
+        );
+        assert!(out.contains("Needs triage"), "the top line names the page");
+        assert!(out.contains(GARDEN_BACK_HINT), "the way back is said");
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn garden_destination_narrow_is_one_column() {
+        let s = garden_state(
+            70,
+            24,
+            GardenView::Cemetery,
+            crate::tui::state::sample_rows_with_buried(),
+        );
+        insta::assert_snapshot!(draw(&s, 70, 24));
+    }
+
+    #[test]
+    fn a_garden_page_waits_for_its_rows() {
+        let mut s = ReaderState::new(
+            TerminalSettings {
+                look: Look::Native,
+                images: true,
+            },
+            100,
+            24,
+        );
+        s.open_garden(GardenView::AllFeeds);
+        let out = draw(&s, 100, 24);
+        assert!(out.contains(LOADING));
+        assert!(out.contains("All feeds"));
+    }
+
+    #[test]
+    fn the_garden_s_message_shows_in_its_footer() {
+        let mut s = garden_state(
+            140,
+            30,
+            GardenView::AllFeeds,
+            crate::tui::state::sample_rows(),
+        );
+        s.on_event(Event::GardenMessage(Some("Restored Re/code.".into())));
+        let out = draw(&s, 140, 30);
+        assert!(out.contains("Restored Re/code."));
+        assert!(!out.contains("k keep"));
+    }
+
+    #[test]
+    fn the_sources_column_lists_the_garden_pages_and_highlights_the_open_one() {
+        let s = garden_state(
+            140,
+            30,
+            GardenView::Cemetery,
+            crate::tui::state::sample_rows_with_buried(),
+        );
+        let out = draw(&s, 140, 30);
+        for title in ["Garden", "Needs triage", "All feeds", "Cemetery"] {
+            assert!(out.contains(title), "{title}");
+        }
+        assert_eq!(
+            s.view()
+                .source_lines
+                .iter()
+                .find(|l| l.selected)
+                .map(|l| l.label.as_str()),
+            Some("Cemetery")
+        );
+    }
+
+    #[test]
+    fn the_focused_column_is_framed_in_double_accent_with_a_reversed_title() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::Widget;
+        let draw = |focused: bool| {
+            let area = Rect::new(0, 0, 12, 3);
+            let mut buffer = Buffer::empty(area);
+            frame_block("Sources", focused).render(area, &mut buffer);
+            buffer
+        };
+        let (on, off) = (draw(true), draw(false));
+        assert_eq!(on[(0, 0)].symbol(), "╔");
+        assert_eq!(off[(0, 0)].symbol(), "┌");
+        assert_eq!(on[(0, 0)].fg, Color::Cyan);
+        assert_eq!(off[(0, 0)].fg, Color::DarkGray);
+        // The title text starts after the corner and one space.
+        let (title_on, title_off) = (&on[(2, 0)], &off[(2, 0)]);
+        assert_eq!(title_on.symbol(), "S");
+        assert_eq!(title_on.fg, Color::Cyan);
+        assert!(
+            title_on
+                .modifier
+                .contains(Modifier::REVERSED | Modifier::BOLD)
+        );
+        assert_eq!(title_off.fg, Color::DarkGray);
+        assert!(!title_off.modifier.contains(Modifier::REVERSED));
+    }
+}

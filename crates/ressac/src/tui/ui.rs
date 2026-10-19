@@ -9,22 +9,34 @@ use ressac_core::garden::{GardenRow, safe_repairs};
 use ressac_core::model::Status;
 use ressac_core::store::AttemptRecord;
 
-use crate::output::glyph;
+use crate::output::{glyph, printable};
 use crate::tui::state::{GardenState, Mode};
 
-fn keys_hint(repairs: usize) -> String {
-    format!(
+fn keys_hint(repairs: usize, back_hint: Option<&str>) -> String {
+    let mut hint = format!(
         "k keep  r repair  b bury  ↵ details  o site  w wayback  u undo  f filter  R safe repairs ({repairs})  ? help  q quit"
-    )
+    );
+    if let Some(back) = back_hint {
+        hint.push_str("  ");
+        hint.push_str(back);
+    }
+    hint
 }
 
 pub fn render(frame: &mut Frame, state: &GardenState) {
+    render_in(frame, frame.area(), state, None);
+}
+
+/// The garden inside `area` (the whole frame for `ressac garden`, the reader's columns for
+/// the garden destinations). Popups are centred on `area`. `back_hint` ends the footer's keys
+/// (the reader says how to go back to its sources; `ressac garden` has nowhere to go back to).
+pub fn render_in(frame: &mut Frame, area: Rect, state: &GardenState, back_hint: Option<&str>) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(2),
     ])
-    .areas(frame.area());
+    .areas(area);
     frame.render_widget(Paragraph::new(header_line(state)), header);
     if state.mode == Mode::Detail {
         render_detail(frame, state, body);
@@ -36,16 +48,16 @@ pub fn render(frame: &mut Frame, state: &GardenState) {
         render_detail(frame, state, detail);
     }
     let footer_text = match &state.message {
-        Some(msg) => Line::from(msg.clone()).bold(),
-        None => Line::from(keys_hint(state.safe_repair_count())).dim(),
+        Some(msg) => Line::from(printable(msg).into_owned()).bold(),
+        None => Line::from(keys_hint(state.safe_repair_count(), back_hint)).dim(),
     };
     frame.render_widget(
         Paragraph::new(footer_text).wrap(Wrap { trim: true }),
         footer,
     );
     match state.mode {
-        Mode::ConfirmRepairs => popup(frame, " Apply safe repairs ", confirm_lines(state)),
-        Mode::Help => popup(frame, " Help ", help_lines()),
+        Mode::ConfirmRepairs => popup(frame, area, " Apply safe repairs ", confirm_lines(state)),
+        Mode::Help => popup(frame, area, " Help ", help_lines()),
         Mode::Queue | Mode::Detail => {}
     }
 }
@@ -89,14 +101,14 @@ fn render_list(frame: &mut Frame, state: &GardenState, area: Rect) {
             } else {
                 r.diagnosis
                     .as_ref()
-                    .map(|d| d.evidence.clue.clone())
+                    .map(|d| printable(&d.evidence.clue).into_owned())
                     .unwrap_or_default()
             };
             let item = ListItem::new(format!(
                 "{} {} {} {}",
                 glyph(r.status(), state.ascii),
-                truncate(&r.title, title_width),
-                truncate(&r.top_folder, 6),
+                truncate(&printable(&r.title), title_width),
+                truncate(&printable(&r.top_folder), 6),
                 clue
             ));
             if r.buried { item.dim() } else { item }
@@ -135,7 +147,7 @@ fn render_detail(frame: &mut Frame, state: &GardenState, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(detail_lines(row, state.ascii, state.mode == Mode::Detail))
-            .block(Block::bordered().title(format!(" {} ", row.title)))
+            .block(Block::bordered().title(format!(" {} ", printable(&row.title))))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -153,7 +165,7 @@ fn detail_lines(row: &GardenRow, ascii: bool, expanded: bool) -> Vec<Line<'stati
     }
     lines.push(Line::from(vec![
         Span::raw(head).bold(),
-        Span::raw(format!("   {}", row.folder_path)),
+        Span::raw(format!("   {}", printable(&row.folder_path))),
     ]));
     if row.buried {
         let on = row
@@ -164,12 +176,12 @@ fn detail_lines(row: &GardenRow, ascii: bool, expanded: bool) -> Vec<Line<'stati
         lines.push(Line::from(format!("Buried{on}. Press k to restore it.")).bold());
     }
     if let Some(d) = &row.diagnosis {
-        lines.push(Line::from(d.reason.clone()));
+        lines.push(Line::from(printable(&d.reason).into_owned()));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(format!("Feed  {}", row.xml_url)));
+    lines.push(Line::from(format!("Feed  {}", printable(&row.xml_url))));
     if let Some(site) = &row.html_url {
-        lines.push(Line::from(format!("Site  {site}")));
+        lines.push(Line::from(format!("Site  {}", printable(site))));
     }
     if let Some(d) = row
         .diagnosis
@@ -182,21 +194,19 @@ fn detail_lines(row: &GardenRow, ascii: bool, expanded: bool) -> Vec<Line<'stati
             d.evidence
                 .bullets
                 .iter()
-                .map(|b| Line::from(format!(" • {b}"))),
+                .map(|b| Line::from(format!(" • {}", printable(b)))),
         );
     }
     if !row.recent.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from("Last entries").bold());
-        lines.extend(
-            row.recent
-                .iter()
-                .map(|(at, title)| Line::from(format!(" {}  {title}", at.format("%Y-%m-%d")))),
-        );
+        lines.extend(row.recent.iter().map(|(at, title)| {
+            Line::from(format!(" {}  {}", at.format("%Y-%m-%d"), printable(title)))
+        }));
     }
     lines.push(Line::from(""));
     if let Some(w) = &row.wayback_url {
-        lines.push(Line::from(format!("Wayback   {w}  [w]")));
+        lines.push(Line::from(format!("Wayback   {}  [w]", printable(w))));
     }
     if let Some(action) = row.action().filter(|_| !row.buried) {
         lines.push(Line::from(format!("Proposed  {}", action.label())));
@@ -226,7 +236,7 @@ fn fetch_history_lines(row: &GardenRow) -> Vec<Line<'static>> {
             latest
                 .redirect_chain
                 .iter()
-                .map(|hop| Line::from(format!(" {} → {}", hop.status, hop.url))),
+                .map(|hop| Line::from(format!(" {} → {}", hop.status, printable(&hop.url)))),
         );
     }
     if !row.attempts.is_empty() {
@@ -236,7 +246,7 @@ fn fetch_history_lines(row: &GardenRow) -> Vec<Line<'static>> {
             Line::from(format!(
                 " {}  {}",
                 a.at.format("%Y-%m-%d %H:%M"),
-                attempt_outcome(a)
+                printable(&attempt_outcome(a))
             ))
         }));
     }
@@ -244,7 +254,7 @@ fn fetch_history_lines(row: &GardenRow) -> Vec<Line<'static>> {
 }
 
 /// `HTTP 200 · 14 entries`, `HTTP 304 · not modified`, or the error label.
-fn attempt_outcome(a: &AttemptRecord) -> String {
+pub(crate) fn attempt_outcome(a: &AttemptRecord) -> String {
     let mut out = match (&a.error, a.http_status) {
         (Some(e), _) => e.label(),
         (None, Some(code)) => format!("HTTP {code}"),
@@ -275,7 +285,11 @@ fn confirm_lines(state: &GardenState) -> Vec<Line<'static>> {
             .iter()
             .find(|r| r.feed_id == *feed_id)
             .map_or("", |r| r.title.as_str());
-        lines.push(Line::from(format!(" {title}: {}", action.label())));
+        lines.push(Line::from(format!(
+            " {}: {}",
+            printable(title),
+            action.label()
+        )));
     }
     if repairs.len() > 8 {
         lines.push(Line::from(format!(" … and {} more", repairs.len() - 8)));
@@ -302,11 +316,11 @@ fn help_lines() -> Vec<Line<'static>> {
     .collect()
 }
 
-fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'static>>) {
+fn popup(frame: &mut Frame, within: Rect, title: &str, lines: Vec<Line<'static>>) {
     let height = (lines.len() as u16).saturating_add(2);
     let [vertical] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
-        .areas(frame.area());
+        .areas(within);
     let [area] = Layout::horizontal([Constraint::Percentage(70)])
         .flex(Flex::Center)
         .areas(vertical);
@@ -398,5 +412,92 @@ mod tests {
         let mut rows = sample_rows();
         rows.retain(|r| !r.needs_triage());
         insta::assert_snapshot!(draw(&GardenState::new(rows, false), 80, 12));
+    }
+
+    #[test]
+    fn render_in_draws_the_garden_inside_an_area_only() {
+        let state = GardenState::new(sample_rows(), false);
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal
+            .draw(|frame| render_in(frame, Rect::new(30, 2, 110, 20), &state, None))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        for y in 0..24 {
+            for x in 0..30 {
+                assert_eq!(buffer[(x, y)].symbol(), " ", "({x},{y})");
+            }
+        }
+        for x in 0..140 {
+            assert_eq!(buffer[(x, 0)].symbol(), " ");
+        }
+        let text: String = (2..22)
+            .map(|y| {
+                (30..140)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(text.contains("Bibliobsession 2.0"));
+    }
+
+    #[test]
+    fn the_back_hint_ends_the_footer_only_when_given() {
+        let state = GardenState::new(sample_rows(), false);
+        let draw_in = |hint: Option<&str>| {
+            let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+            terminal
+                .draw(|f| render_in(f, f.area(), &state, hint))
+                .unwrap();
+            terminal.backend().to_string()
+        };
+        assert!(draw_in(Some("Esc sources")).contains("q quit  Esc sources"));
+        assert!(!draw_in(None).contains("Esc sources"));
+        assert!(!draw(&state, 140, 24).contains("Esc sources"));
+    }
+
+    #[test]
+    fn feed_text_with_control_characters_never_reaches_the_buffer() {
+        let mut rows = sample_rows();
+        rows[0].title = "Bad\u{1b}]0;x\u{7} \u{9b}31m feed".into();
+        rows[0].xml_url = "https://x.example/\u{1b}[2J".into();
+        let mut s = GardenState::new(rows, false);
+        s.message = Some("note\u{1b}[31m".into());
+        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        terminal.draw(|f| render(f, &s)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut all = String::new();
+        for cell in buffer.content() {
+            assert!(!cell.symbol().chars().any(char::is_control), "{cell:?}");
+            all.push_str(cell.symbol());
+        }
+        assert!(all.contains('\u{FFFD}'));
+        let text = draw(&s, 110, 24);
+        assert!(!text.contains('\u{1b}') && !text.contains('\u{9b}'));
+    }
+
+    #[test]
+    fn popups_stay_inside_the_area() {
+        let mut state = GardenState::new(sample_rows(), false);
+        press(&mut state, KeyCode::Char('?'));
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal
+            .draw(|frame| render_in(frame, Rect::new(30, 2, 110, 20), &state, None))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        for y in 0..24 {
+            for x in 0..30 {
+                assert_eq!(buffer[(x, y)].symbol(), " ");
+            }
+        }
+        let text: String = (2..22)
+            .map(|y| {
+                (30..140)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(text.contains("Help"));
     }
 }

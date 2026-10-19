@@ -154,6 +154,18 @@ impl Store {
         )?)
     }
 
+    /// The latest `fetched_at` stamped at or after `since`: what a refresh that began then wrote.
+    pub fn latest_fetch_since(&self, since: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
+        let latest: Option<String> = self.conn().query_row(
+            "SELECT MAX(fetched_at) FROM entry WHERE fetched_at >= ?1",
+            [ts(since)],
+            |r| r.get(0),
+        )?;
+        Ok(latest
+            .map(|text| parse_ts(&text).ok_or_else(|| bad_timestamp(0)))
+            .transpose()?)
+    }
+
     /// Active feeds only, `fetched_at` in `(window_start, window_end]`, unread,
     /// `published_at >= window_start − BACKLOG_GUARD_DAYS`, effective group not Silent.
     pub fn edition_candidates(

@@ -1,0 +1,1179 @@
+//! Images in the reader: protocol detection, guarded fetch, bounded decoding, a small cache,
+//! and the eight-colour quantisation Antiope draws with.
+
+use std::collections::VecDeque;
+use std::io::{Cursor, Write};
+use std::panic::AssertUnwindSafe;
+use std::path::Path;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use image::{DynamicImage, ImageReader, Limits, Rgb, RgbImage};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Rect, Size};
+use ratatui::style::Color;
+use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::{FontSize, Resize};
+
+use super::state::Event;
+
+pub const TELETEXT: [[u8; 3]; 8] = [
+    [0, 0, 0],
+    [255, 0, 0],
+    [0, 255, 0],
+    [255, 255, 0],
+    [0, 0, 255],
+    [255, 0, 255],
+    [0, 255, 255],
+    [255, 255, 255],
+];
+pub const MAX_DECODED_SIDE: u32 = 4096;
+pub const CACHE_SIZE: usize = 32;
+pub const MAX_IN_FLIGHT: usize = 4;
+/// Images are scaled down to fit this square before anything keeps them: memory is bounded by
+/// pixels, not only by the cache's count (the reader never draws more than half its height).
+pub const MAX_KEPT_SIDE: u32 = 1600;
+/// Antiope's half-blocks need few pixels: the teletext copy starts from a thumbnail.
+const TELETEXT_SIDE: u32 = 320;
+/// Failed images remembered (and refused ones waiting to be retried); oldest forgotten first.
+const MAX_FAILED: usize = 256;
+/// A transient failure (busy database, timeout, offline) is asked again after this long.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
+const MAX_ALLOC: u64 = 128 * 1024 * 1024;
+
+/// Scales down to fit `side` × `side`, keeping the aspect; never up.
+fn fit_within(image: DynamicImage, side: u32) -> DynamicImage {
+    if image.width() > side || image.height() > side {
+        image.thumbnail(side, side)
+    } else {
+        image
+    }
+}
+
+/// An image ready for the store, built in the fetch thread: the picture within the size cap
+/// and a small copy the teletext variant is derived from, when that variant is first asked for.
+pub struct Prepared {
+    kept: DynamicImage,
+    small: DynamicImage,
+}
+
+pub fn prepare(image: DynamicImage) -> Prepared {
+    let kept = fit_within(image, MAX_KEPT_SIDE);
+    let small = fit_within(kept.clone(), TELETEXT_SIDE);
+    Prepared { kept, small }
+}
+
+/// Why a fetch ended without an image.
+struct Failure {
+    /// Permanent: asking again gives the same answer (not an image, too large, refused address,
+    /// undecodable, HTTP 4xx). Otherwise it is worth another try later.
+    permanent: bool,
+    why: String,
+}
+
+/// `fetch_image`'s refusals are sentences (phase 2); the ones that cannot change are permanent.
+fn is_permanent(error: &ressac_core::Error) -> bool {
+    let ressac_core::Error::ImageRefused(why) = error else {
+        return false; // the database, the runtime: nothing about the image itself
+    };
+    match why.as_str() {
+        "not a web address"
+        | "local or private address"
+        | "larger than 10 MB"
+        | "not an image"
+        | "response too large" => true,
+        other => {
+            other.strip_prefix("HTTP 4").is_some() && !matches!(other, "HTTP 408" | "HTTP 429")
+        }
+    }
+}
+
+/// Decodes with hard limits: the header's size is checked before any pixel buffer exists.
+pub fn decode_limited(bytes: &[u8]) -> Result<DynamicImage, String> {
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_DECODED_SIDE);
+    limits.max_image_height = Some(MAX_DECODED_SIDE);
+    limits.max_alloc = Some(MAX_ALLOC);
+    reader.limits(limits);
+    reader.decode().map_err(|e| e.to_string())
+}
+
+/// Every pixel becomes the nearest of the eight teletext colours; transparency becomes black.
+pub fn quantise_teletext(img: &DynamicImage) -> DynamicImage {
+    let rgba = img.to_rgba8();
+    let mut out = RgbImage::new(rgba.width(), rgba.height());
+    for (x, y, p) in rgba.enumerate_pixels() {
+        let [r, g, b, a] = p.0;
+        let px = if a < 128 {
+            [0, 0, 0]
+        } else {
+            nearest_teletext([r, g, b])
+        };
+        out.put_pixel(x, y, Rgb(px));
+    }
+    DynamicImage::ImageRgb8(out)
+}
+
+/// Snaps every colour of the cells of `area` to the nearest of the eight teletext colours.
+/// Half-block encoding resizes with a smoothing filter, so a quantised source still leaves
+/// in-between colours at the edges of its regions; Antiope's mosaics run this after drawing.
+pub fn snap_to_teletext(buffer: &mut Buffer, area: Rect) {
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let Some(cell) = buffer.cell_mut((x, y)) else {
+                continue;
+            };
+            for colour in [&mut cell.fg, &mut cell.bg] {
+                if let Color::Rgb(r, g, b) = *colour {
+                    let [r, g, b] = nearest_teletext([r, g, b]);
+                    *colour = Color::Rgb(r, g, b);
+                }
+            }
+        }
+    }
+}
+
+fn nearest_teletext(c: [u8; 3]) -> [u8; 3] {
+    let dist = |t: &[u8; 3]| -> i32 {
+        t.iter()
+            .zip(c)
+            .map(|(a, b)| (i32::from(*a) - i32::from(b)).pow(2))
+            .sum()
+    };
+    *TELETEXT
+        .iter()
+        .min_by_key(|t| dist(t))
+        .expect("eight colours")
+}
+
+/// The reader's image store: none at all with `RESSAC_IMAGES=off` (alt-text placeholders, no
+/// terminal query), else one built on `detect_picker`. Call it after `ratatui::try_init()`.
+pub fn open_store() -> ImageStore {
+    if images_are_off(std::env::var("RESSAC_IMAGES").ok().as_deref()) {
+        tracing::info!("images off (RESSAC_IMAGES=off)");
+        ImageStore::disabled()
+    } else {
+        ImageStore::new(detect_picker())
+    }
+}
+
+fn images_are_off(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case("off"))
+}
+
+/// Asks the terminal which graphics protocol it speaks. Call it only after
+/// `ratatui::try_init()`: the query leaves a thread that snapshots the terminal mode and
+/// restores it when its stdin read unblocks; before init that mode is line mode, and its late
+/// restore froze the keyboard under tmux (clappuccino, `app.rs`). An unwrapped DA1 request
+/// then answers that thread's read so it ends on its own instead of swallowing the first key
+/// (clappuccino, `preview.rs`). Warp announces Kitty but draws only iTerm2.
+///
+/// Under tmux the query often answers without a font size, and the library then drops the
+/// protocol it found: `decide_protocol` asks tmux for the outer terminal instead. The
+/// `RESSAC_IMAGES` variable (`kitty`, `iterm2`, `sixel`, `halfblocks`) wins over all of
+/// it; `off` is handled by `open_store`: no images at all. Every decision is logged.
+pub fn detect_picker() -> Picker {
+    let queried = Picker::from_query_stdio();
+    let mut picker = match &queried {
+        Ok(picker) => picker.clone(),
+        Err(_) => Picker::halfblocks(),
+    };
+    let warp = std::env::var("TERM_PROGRAM").is_ok_and(|t| t == "WarpTerminal");
+    if warp && picker.protocol_type() == ProtocolType::Kitty {
+        picker.set_protocol_type(ProtocolType::Iterm2);
+    }
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x1b[c");
+    let _ = out.flush();
+
+    // The library's own verdict only: the forced picker below takes its `is_tmux` from the same
+    // check, so a guess from `TMUX` alone would emit unwrapped sequences (a blank image).
+    let is_tmux = picker.tmux_detected();
+    if !is_tmux && std::env::var_os("TMUX").is_some_and(|v| !v.is_empty()) {
+        tracing::warn!("TMUX is set but the image library does not detect tmux: no tmux guess");
+    }
+    let detected = picker.protocol_type();
+    let override_value = std::env::var("RESSAC_IMAGES").ok();
+    let window = ratatui::crossterm::terminal::window_size().ok();
+    let window_font = window.and_then(|w| font_from_window(w.columns, w.rows, w.width, w.height));
+    // Only worth a process when the answer can change the outcome.
+    let client_term = (is_tmux && detected == ProtocolType::Halfblocks && override_value.is_none())
+        .then(tmux_client_term)
+        .flatten();
+    let decision = decide_protocol(&ProtocolInputs {
+        detected,
+        is_tmux,
+        client_term: client_term.as_deref(),
+        env_override: override_value.as_deref(),
+    });
+    tracing::info!(
+        detected = ?detected,
+        font_size = ?(picker.font_size().width, picker.font_size().height),
+        window_font = ?window_font,
+        is_tmux,
+        client_term = ?client_term,
+        env_override = ?override_value,
+        query_error = ?queried.as_ref().err().map(ToString::to_string),
+        chosen = ?decision.protocol,
+        reason = decision.reason,
+        "image protocol"
+    );
+    if decision.protocol != detected {
+        let font = window_font.map_or_else(|| picker.font_size(), FontSize::from);
+        #[allow(deprecated)] // the only constructor taking a font size
+        let mut forced = Picker::from_fontsize(font);
+        forced.set_protocol_type(decision.protocol);
+        picker = forced;
+    }
+    picker
+}
+
+/// What `decide_protocol` looks at; nothing here touches the terminal.
+pub struct ProtocolInputs<'a> {
+    /// What the capability query settled on (Halfblocks when it found nothing).
+    pub detected: ProtocolType,
+    pub is_tmux: bool,
+    /// tmux's `client_termname` and `client_termtype` of the outer terminal, lowercased.
+    pub client_term: Option<&'a str>,
+    /// The `RESSAC_IMAGES` value.
+    pub env_override: Option<&'a str>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProtocolDecision {
+    pub protocol: ProtocolType,
+    pub reason: &'static str,
+}
+
+/// The override wins; otherwise a detected real protocol stands; otherwise, only inside tmux,
+/// the outer terminal's name decides (Ghostty and Kitty speak Kitty, iTerm2 and WezTerm iTerm2).
+pub fn decide_protocol(inputs: &ProtocolInputs<'_>) -> ProtocolDecision {
+    let decision = |protocol, reason| ProtocolDecision { protocol, reason };
+    if let Some(value) = inputs.env_override {
+        let forced = match value.trim().to_ascii_lowercase().as_str() {
+            "kitty" => Some(ProtocolType::Kitty),
+            "iterm2" | "iterm" => Some(ProtocolType::Iterm2),
+            "sixel" => Some(ProtocolType::Sixel),
+            "halfblocks" => Some(ProtocolType::Halfblocks),
+            _ => None,
+        };
+        if let Some(protocol) = forced {
+            return decision(protocol, "RESSAC_IMAGES override");
+        }
+    }
+    if inputs.detected != ProtocolType::Halfblocks {
+        return decision(inputs.detected, "detected by the terminal query");
+    }
+    if !inputs.is_tmux {
+        return decision(ProtocolType::Halfblocks, "nothing detected");
+    }
+    let term = inputs.client_term.unwrap_or_default().to_ascii_lowercase();
+    if term.contains("ghostty") || term.contains("kitty") {
+        decision(ProtocolType::Kitty, "tmux outer terminal speaks Kitty")
+    } else if term.contains("iterm") || term.contains("wezterm") {
+        decision(ProtocolType::Iterm2, "tmux outer terminal speaks iTerm2")
+    } else {
+        decision(ProtocolType::Halfblocks, "tmux outer terminal unknown")
+    }
+}
+
+/// A cell size from the window's pixel size, `None` when the terminal reports no pixels.
+pub fn font_from_window(columns: u16, rows: u16, width: u16, height: u16) -> Option<(u16, u16)> {
+    let (w, h) = (width.checked_div(columns)?, height.checked_div(rows)?);
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// Asks tmux for the outer terminal of the current client; `None` on any failure or after
+/// 500 ms. Stdin is closed so the child cannot read the keyboard.
+fn tmux_client_term() -> Option<String> {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new("tmux");
+    command.args(["display-message", "-p"]);
+    // This pane's client, not whichever was active last, when several are attached.
+    if let Some(pane) = std::env::var_os("TMUX_PANE").filter(|p| !p.is_empty()) {
+        command.arg("-t").arg(pane);
+    }
+    let mut child = command
+        .arg("#{client_termname} #{client_termtype}")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) if status.success() => break,
+            Some(_) => return None,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
+    let text = text.trim().to_ascii_lowercase();
+    (!text.is_empty()).then_some(text)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Variant {
+    Native,
+    Teletext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageState {
+    Absent,
+    Loading,
+    Ready,
+    Failed,
+}
+
+enum Slot {
+    Loading,
+    Ready {
+        native: Box<StatefulProtocol>,
+        /// The source of the teletext copy; the copy itself is built on first use.
+        small: DynamicImage,
+        teletext: Option<Box<StatefulProtocol>>,
+    },
+    Failed,
+    /// A transient failure: shown as failed until `until`, then asked again.
+    Retry {
+        until: Instant,
+    },
+}
+
+impl Slot {
+    fn is_ready(&self) -> bool {
+        matches!(self, Slot::Ready { .. })
+    }
+
+    fn is_failed(&self) -> bool {
+        matches!(self, Slot::Failed | Slot::Retry { .. })
+    }
+}
+
+/// What a fetch worker sends back.
+struct Fetched {
+    url: String,
+    result: Result<Prepared, Failure>,
+}
+
+pub struct ImageStore {
+    /// `false` for `disabled()`: nothing is fetched and every image stays its alt text.
+    enabled: bool,
+    picker: Picker,
+    teletext: Picker,
+    /// Least recently used first; only `Ready` slots count towards `CACHE_SIZE`, and the failed
+    /// ones towards `MAX_FAILED`.
+    slots: Vec<(String, Slot)>,
+    wanted: Vec<String>,
+    queue: VecDeque<String>,
+    in_flight: usize,
+    retry_after: Duration,
+    /// The workers, started with the first fetch: each opens one connection and one runtime
+    /// and keeps them for every image it fetches.
+    jobs: Option<Sender<String>>,
+    tx: Sender<Fetched>,
+    rx: Receiver<Fetched>,
+}
+
+impl ImageStore {
+    pub fn new(picker: Picker) -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            enabled: true,
+            picker,
+            teletext: Picker::halfblocks(),
+            slots: Vec::new(),
+            wanted: Vec::new(),
+            queue: VecDeque::new(),
+            in_flight: 0,
+            retry_after: RETRY_AFTER,
+            jobs: None,
+            tx,
+            rx,
+        }
+    }
+
+    /// No picker, no fetch: every image stays `[image: alt text]` (`RESSAC_IMAGES=off`, tests).
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::new(Picker::halfblocks())
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn position(&self, url: &str) -> Option<usize> {
+        self.slots.iter().position(|(u, _)| u == url)
+    }
+
+    /// Replaces whatever the slot of `url` was and makes it the most recent.
+    fn set_slot(&mut self, url: &str, slot: Slot) {
+        if let Some(i) = self.position(url) {
+            self.slots.remove(i);
+        }
+        self.slots.push((url.to_owned(), slot));
+        self.evict();
+    }
+
+    pub fn state_of(&self, url: &str) -> ImageState {
+        match self.position(url).map(|i| &self.slots[i].1) {
+            None => ImageState::Absent,
+            Some(Slot::Loading) => ImageState::Loading,
+            Some(Slot::Ready { .. }) => ImageState::Ready,
+            Some(Slot::Failed) => ImageState::Failed,
+            Some(Slot::Retry { until }) if Instant::now() >= *until => ImageState::Absent,
+            Some(Slot::Retry { .. }) => ImageState::Failed,
+        }
+    }
+
+    /// The renderer's request for an image near the viewport, every frame: absent images only.
+    pub fn want(&mut self, url: &str) {
+        if self.enabled
+            && self.state_of(url) == ImageState::Absent
+            && !self.wanted.iter().any(|w| w == url)
+        {
+            self.wanted.push(url.to_owned());
+        }
+    }
+
+    pub fn take_wanted(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.wanted)
+    }
+
+    pub fn mark_loading(&mut self, url: &str) {
+        self.set_slot(url, Slot::Loading);
+    }
+
+    #[cfg(test)]
+    pub fn in_flight(&self) -> usize {
+        self.in_flight
+    }
+
+    #[cfg(test)]
+    pub fn queued(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Starts what the last frame wanted, at most `MAX_IN_FLIGHT` at a time. The queue is
+    /// replaced by this frame's list, so images of an article the reader left do not delay the
+    /// ones on screen.
+    pub fn start_wanted(&mut self, db: &Path) {
+        self.queue = self.take_wanted().into();
+        self.start_queued(db);
+    }
+
+    fn start_queued(&mut self, db: &Path) {
+        while self.in_flight < MAX_IN_FLIGHT {
+            let Some(url) = self.queue.pop_front() else {
+                break;
+            };
+            self.fetch(db, url);
+        }
+    }
+
+    /// One fetch on a worker (its own connection, decoded and resized there). Not a long job:
+    /// it never touches the loop's job queue. When `MAX_IN_FLIGHT` are running it waits.
+    pub fn fetch(&mut self, db: &Path, url: String) {
+        if !self.enabled || self.state_of(&url) != ImageState::Absent {
+            return;
+        }
+        if self.in_flight >= MAX_IN_FLIGHT {
+            if !self.queue.contains(&url) {
+                self.queue.push_back(url);
+            }
+            return;
+        }
+        let sent = self
+            .workers(db)
+            .is_some_and(|jobs| jobs.send(url.clone()).is_ok());
+        if sent {
+            self.mark_loading(&url);
+            self.in_flight += 1;
+        } else {
+            // No thread could be started: soft, and asked again later.
+            tracing::warn!("image {url}: no fetch worker");
+            self.retry_later(&url);
+        }
+    }
+
+    /// The job channel, starting the workers on first use. `None` when no thread could start.
+    fn workers(&mut self, db: &Path) -> Option<&Sender<String>> {
+        if self.jobs.is_none() {
+            let (jobs, queue) = mpsc::channel::<String>();
+            let queue = Arc::new(Mutex::new(queue));
+            let mut started = 0;
+            for _ in 0..MAX_IN_FLIGHT {
+                let (queue, tx, db) = (Arc::clone(&queue), self.tx.clone(), db.to_path_buf());
+                let spawned = std::thread::Builder::new()
+                    .name("ressac-image".into())
+                    .spawn(move || worker(&db, &queue, &tx));
+                started += usize::from(spawned.is_ok());
+            }
+            if started > 0 {
+                self.jobs = Some(jobs);
+            }
+        }
+        self.jobs.as_ref()
+    }
+
+    /// The fetches that ended since the last call, as state events; the queue moves on.
+    pub fn drain(&mut self, db: &Path) -> Vec<Event> {
+        let mut events = Vec::new();
+        while let Ok(Fetched { url, result }) = self.rx.try_recv() {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            match result {
+                Ok(prepared) => {
+                    self.keep(&url, prepared);
+                    events.push(Event::ImageReady { url });
+                }
+                Err(Failure { permanent, why }) => {
+                    tracing::debug!("image {url}: {why} (permanent: {permanent})");
+                    if permanent {
+                        self.fail(&url);
+                    } else {
+                        self.retry_later(&url);
+                    }
+                    events.push(Event::ImageFailed { url });
+                }
+            }
+        }
+        self.start_queued(db);
+        events
+    }
+
+    /// Keeps an image decoded elsewhere (the workers send `Prepared` ones): tests.
+    #[cfg(test)]
+    pub fn ingest(&mut self, url: &str, image: DynamicImage) {
+        self.keep(url, prepare(image));
+    }
+
+    fn keep(&mut self, url: &str, Prepared { kept, small }: Prepared) {
+        let native = Box::new(self.picker.new_resize_protocol(kept));
+        self.set_slot(
+            url,
+            Slot::Ready {
+                native,
+                small,
+                teletext: None,
+            },
+        );
+    }
+
+    pub fn fail(&mut self, url: &str) {
+        self.set_slot(url, Slot::Failed);
+    }
+
+    /// A failure that may pass: the image is asked again after `retry_after`.
+    fn retry_later(&mut self, url: &str) {
+        let until = Instant::now() + self.retry_after;
+        self.set_slot(url, Slot::Retry { until });
+    }
+
+    fn evict(&mut self) {
+        for (limit, kind) in [
+            (CACHE_SIZE, Slot::is_ready as fn(&Slot) -> bool),
+            (MAX_FAILED, Slot::is_failed),
+        ] {
+            while self.slots.iter().filter(|(_, s)| kind(s)).count() > limit {
+                let oldest = self
+                    .slots
+                    .iter()
+                    .position(|(_, s)| kind(s))
+                    .expect("over the cap, so one matches");
+                self.slots.remove(oldest);
+            }
+        }
+    }
+
+    /// The protocol to draw; touching it makes the image the most recently used. The teletext
+    /// copy is quantised the first time it is asked for.
+    pub fn protocol(&mut self, url: &str, variant: Variant) -> Option<&mut StatefulProtocol> {
+        let i = self.position(url)?;
+        let slot = self.slots.remove(i);
+        self.slots.push(slot);
+        let Self {
+            slots,
+            teletext: picker,
+            ..
+        } = self;
+        match &mut slots.last_mut().expect("just pushed").1 {
+            Slot::Ready {
+                native,
+                small,
+                teletext,
+            } => Some(match variant {
+                Variant::Native => native,
+                Variant::Teletext => teletext.get_or_insert_with(|| {
+                    Box::new(picker.new_resize_protocol(quantise_teletext(small)))
+                }),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Rows the image takes in a column `width` cells wide, at most `max_rows`; 1 for the
+    /// placeholder line of an image that is not ready.
+    pub fn rows_for(&self, url: &str, variant: Variant, width: u16, max_rows: u16) -> u16 {
+        let Some(i) = self.position(url) else {
+            return 1;
+        };
+        let available = Size::new(width, max_rows.max(1));
+        let size = match (&self.slots[i].1, variant) {
+            (Slot::Ready { native, .. }, Variant::Native) => {
+                native.size_for(Resize::Fit(None), available)
+            }
+            (
+                Slot::Ready {
+                    teletext: Some(teletext),
+                    ..
+                },
+                Variant::Teletext,
+            ) => teletext.size_for(Resize::Fit(None), available),
+            (Slot::Ready { small, .. }, Variant::Teletext) => {
+                Resize::Fit(None).size_for(small, self.teletext.font_size(), available)
+            }
+            _ => return 1,
+        };
+        size.height.clamp(1, max_rows.max(1))
+    }
+}
+
+/// A fetch worker: one connection and one runtime for all its images.
+fn worker(db: &Path, jobs: &Mutex<Receiver<String>>, results: &Sender<Fetched>) {
+    let mut session: Option<(ressac_core::service::Ressac, tokio::runtime::Runtime)> = None;
+    loop {
+        let url = {
+            let jobs = jobs.lock().unwrap_or_else(PoisonError::into_inner);
+            match jobs.recv() {
+                Ok(url) => url,
+                Err(_) => return, // the store is gone
+            }
+        };
+        // A decoder panic on a hostile file must still answer, and restart the session.
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            fetch_and_decode(db, &mut session, &url)
+        }))
+        .unwrap_or_else(|_| {
+            session = None;
+            Err(Failure {
+                permanent: true,
+                why: "the image could not be decoded".into(),
+            })
+        });
+        if results.send(Fetched { url, result }).is_err() {
+            return;
+        }
+    }
+}
+
+fn fetch_and_decode(
+    db: &Path,
+    session: &mut Option<(ressac_core::service::Ressac, tokio::runtime::Runtime)>,
+    url: &str,
+) -> Result<Prepared, Failure> {
+    let transient = |why: String| Failure {
+        permanent: false,
+        why,
+    };
+    if session.is_none() {
+        let app = crate::commands::open(db).map_err(|e| transient(format!("{e:#}")))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| transient(e.to_string()))?;
+        *session = Some((app, runtime));
+    }
+    let (app, runtime) = session.as_ref().expect("just opened");
+    let bytes = runtime
+        .block_on(app.fetch_image(url))
+        .map_err(|e| Failure {
+            permanent: is_permanent(&e),
+            why: e.to_string(),
+        })?;
+    let image = decode_limited(&bytes).map_err(|why| Failure {
+        permanent: true,
+        why,
+    })?;
+    Ok(prepare(image))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inputs<'a>(
+        detected: ProtocolType,
+        is_tmux: bool,
+        client_term: Option<&'a str>,
+        env_override: Option<&'a str>,
+    ) -> ProtocolInputs<'a> {
+        ProtocolInputs {
+            detected,
+            is_tmux,
+            client_term,
+            env_override,
+        }
+    }
+
+    #[test]
+    fn a_real_detected_protocol_stands() {
+        let d = decide_protocol(&inputs(
+            ProtocolType::Sixel,
+            true,
+            Some("xterm-ghostty"),
+            None,
+        ));
+        assert_eq!(d.protocol, ProtocolType::Sixel);
+    }
+
+    #[test]
+    fn under_tmux_the_outer_terminal_names_the_protocol() {
+        let under = |term| decide_protocol(&inputs(ProtocolType::Halfblocks, true, term, None));
+        assert_eq!(
+            under(Some("xterm-ghostty ghostty 1.2.0")).protocol,
+            ProtocolType::Kitty
+        );
+        assert_eq!(under(Some("xterm-kitty")).protocol, ProtocolType::Kitty);
+        assert_eq!(under(Some("iTerm2 3.5")).protocol, ProtocolType::Iterm2);
+        assert_eq!(under(Some("wezterm")).protocol, ProtocolType::Iterm2);
+        assert_eq!(
+            under(Some("xterm-256color")).protocol,
+            ProtocolType::Halfblocks
+        );
+        assert_eq!(under(None).protocol, ProtocolType::Halfblocks);
+    }
+
+    #[test]
+    fn outside_tmux_nothing_detected_stays_halfblocks() {
+        let d = decide_protocol(&inputs(
+            ProtocolType::Halfblocks,
+            false,
+            Some("ghostty"),
+            None,
+        ));
+        assert_eq!(d.protocol, ProtocolType::Halfblocks);
+    }
+
+    #[test]
+    fn the_override_wins_and_a_bad_value_is_ignored() {
+        let pick = |value| {
+            decide_protocol(&inputs(
+                ProtocolType::Kitty,
+                true,
+                Some("ghostty"),
+                Some(value),
+            ))
+            .protocol
+        };
+        assert_eq!(pick("iterm2"), ProtocolType::Iterm2);
+        assert_eq!(pick(" SIXEL "), ProtocolType::Sixel);
+        assert_eq!(pick("halfblocks"), ProtocolType::Halfblocks);
+        // `off` is not a protocol: `open_store` turns images off before any decision.
+        assert_eq!(pick("off"), ProtocolType::Kitty);
+        assert_eq!(pick("kitty"), ProtocolType::Kitty);
+        // Not a protocol: detection decides as if it were unset.
+        assert_eq!(pick("nonsense"), ProtocolType::Kitty);
+    }
+
+    #[test]
+    fn only_off_turns_images_off() {
+        assert!(images_are_off(Some(" OFF ")));
+        assert!(!images_are_off(Some("halfblocks")));
+        assert!(!images_are_off(None));
+    }
+
+    #[test]
+    fn the_font_size_comes_from_the_window_pixels() {
+        assert_eq!(font_from_window(100, 50, 1000, 1000), Some((10, 20)));
+        assert_eq!(font_from_window(0, 50, 1000, 1000), None);
+        assert_eq!(font_from_window(100, 50, 0, 0), None);
+    }
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// A PNG whose header announces `width` × `height` and has no pixel data: a decoder that
+    /// trusted the header would try to allocate it.
+    fn png_header_only(width: u32, height: u32) -> Vec<u8> {
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend(width.to_be_bytes());
+        ihdr.extend(height.to_be_bytes());
+        ihdr.extend([8, 6, 0, 0, 0]); // 8-bit RGBA, no interlace
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend(13u32.to_be_bytes());
+        png.extend(&ihdr);
+        png.extend(crc32(&ihdr).to_be_bytes());
+        png.extend(0u32.to_be_bytes());
+        png.extend(b"IEND");
+        png.extend(crc32(b"IEND").to_be_bytes());
+        png
+    }
+
+    fn png(width: u32, height: u32, colour: [u8; 3]) -> Vec<u8> {
+        let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(width, height, Rgb(colour)));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn a_small_png_decodes() {
+        let img = decode_limited(&png(40, 30, [10, 200, 30])).unwrap();
+        assert_eq!((img.width(), img.height()), (40, 30));
+    }
+
+    #[test]
+    fn an_image_announcing_twenty_thousand_pixels_a_side_is_refused() {
+        // Review Focus 4: refused from its header, without allocating 1.6 GB.
+        let err = decode_limited(&png_header_only(20_000, 20_000)).unwrap_err();
+        assert!(err.to_lowercase().contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn an_html_body_is_not_an_image() {
+        assert!(decode_limited(b"<!doctype html><title>Moved</title>").is_err());
+    }
+
+    #[test]
+    fn quantisation_maps_every_pixel_to_a_teletext_colour() {
+        let mut src = RgbImage::new(4, 1);
+        src.put_pixel(0, 0, Rgb([250, 10, 10])); // red
+        src.put_pixel(1, 0, Rgb([20, 30, 200])); // blue
+        src.put_pixel(2, 0, Rgb([240, 240, 30])); // yellow
+        src.put_pixel(3, 0, Rgb([128, 128, 128])); // grey: the nearest of the eight
+        let out = quantise_teletext(&DynamicImage::ImageRgb8(src)).to_rgb8();
+        assert_eq!(out.get_pixel(0, 0).0, [255, 0, 0]);
+        assert_eq!(out.get_pixel(1, 0).0, [0, 0, 255]);
+        assert_eq!(out.get_pixel(2, 0).0, [255, 255, 0]);
+        assert!(TELETEXT.contains(&out.get_pixel(3, 0).0));
+        for p in out.pixels() {
+            assert!(TELETEXT.contains(&p.0), "{:?}", p.0);
+        }
+    }
+
+    #[test]
+    fn snapping_leaves_only_teletext_colours_in_the_cells() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buffer[(0, 0)]
+            .set_fg(Color::Rgb(223, 0, 32))
+            .set_bg(Color::Rgb(30, 40, 250));
+        buffer[(1, 0)]
+            .set_fg(Color::Rgb(200, 200, 30))
+            .set_bg(Color::Reset);
+        buffer[(2, 0)].set_fg(Color::Rgb(10, 10, 10));
+        snap_to_teletext(&mut buffer, Rect::new(0, 0, 2, 1));
+        assert_eq!(buffer[(0, 0)].fg, Color::Rgb(255, 0, 0));
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(0, 0, 255));
+        assert_eq!(buffer[(1, 0)].fg, Color::Rgb(255, 255, 0));
+        assert_eq!(
+            buffer[(1, 0)].bg,
+            Color::Reset,
+            "not a colour of an image: left alone"
+        );
+        assert_eq!(
+            buffer[(2, 0)].fg,
+            Color::Rgb(10, 10, 10),
+            "outside the area"
+        );
+    }
+
+    #[test]
+    fn transparent_pixels_become_black() {
+        let src = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 255, 255, 0]));
+        let out = quantise_teletext(&DynamicImage::ImageRgba8(src)).to_rgb8();
+        assert!(out.pixels().all(|p| p.0 == [0, 0, 0]));
+    }
+
+    fn store() -> ImageStore {
+        ImageStore::new(Picker::halfblocks())
+    }
+
+    fn photo() -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(400, 300, Rgb([200, 120, 40])))
+    }
+
+    #[test]
+    fn a_wanted_image_is_loading_then_ready() {
+        let mut s = store();
+        s.want("https://example.com/a.jpg");
+        s.want("https://example.com/a.jpg");
+        assert_eq!(
+            s.take_wanted(),
+            vec!["https://example.com/a.jpg".to_string()],
+            "asked once"
+        );
+        s.mark_loading("https://example.com/a.jpg");
+        assert_eq!(s.state_of("https://example.com/a.jpg"), ImageState::Loading);
+        s.ingest("https://example.com/a.jpg", photo());
+        assert_eq!(s.state_of("https://example.com/a.jpg"), ImageState::Ready);
+        assert!(
+            s.protocol("https://example.com/a.jpg", Variant::Native)
+                .is_some()
+        );
+        assert!(
+            s.protocol("https://example.com/a.jpg", Variant::Teletext)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_failed_image_is_not_asked_again() {
+        let mut s = store();
+        s.fail("https://example.com/x.png");
+        s.want("https://example.com/x.png");
+        assert!(s.take_wanted().is_empty());
+        assert_eq!(s.state_of("https://example.com/x.png"), ImageState::Failed);
+    }
+
+    #[test]
+    fn the_cache_keeps_the_thirty_two_most_recent_images() {
+        let mut s = store();
+        for i in 0..40 {
+            s.ingest(
+                &format!("https://example.com/{i}.png"),
+                DynamicImage::new_rgb8(8, 8),
+            );
+        }
+        assert_eq!(
+            s.state_of("https://example.com/0.png"),
+            ImageState::Absent,
+            "evicted"
+        );
+        assert_eq!(s.state_of("https://example.com/39.png"), ImageState::Ready);
+        // Using an image keeps it.
+        s.protocol("https://example.com/8.png", Variant::Native);
+        s.ingest("https://example.com/40.png", DynamicImage::new_rgb8(8, 8));
+        assert_eq!(s.state_of("https://example.com/8.png"), ImageState::Ready);
+        assert_eq!(s.state_of("https://example.com/9.png"), ImageState::Absent);
+    }
+
+    #[test]
+    fn an_image_takes_at_most_the_rows_it_is_allowed() {
+        let mut s = store();
+        s.ingest("https://example.com/a.jpg", photo());
+        let rows = s.rows_for("https://example.com/a.jpg", Variant::Native, 60, 10);
+        assert!((1..=10).contains(&rows), "{rows}");
+        assert_eq!(
+            s.rows_for("https://example.com/none.jpg", Variant::Native, 60, 10),
+            1,
+            "placeholder line"
+        );
+    }
+
+    #[test]
+    fn fetches_are_limited_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("r.sqlite");
+        ressac_core::service::Ressac::open(&db).unwrap();
+        let mut s = store();
+        for i in 0..6 {
+            s.want(&format!("http://127.0.0.1:9/{i}.png"));
+        }
+        s.start_wanted(&db);
+        assert_eq!(s.in_flight(), MAX_IN_FLIGHT);
+        assert_eq!(s.queued(), 2);
+    }
+
+    #[test]
+    fn a_disabled_store_fetches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("r.sqlite");
+        let mut s = ImageStore::disabled();
+        s.want("https://example.com/a.jpg");
+        s.fetch(&db, "https://example.com/a.jpg".into());
+        assert!(s.take_wanted().is_empty() && s.in_flight() == 0);
+        assert_eq!(s.state_of("https://example.com/a.jpg"), ImageState::Absent);
+    }
+
+    fn dummy_db() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("r.sqlite");
+        ressac_core::service::Ressac::open(&db).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn a_tall_image_is_kept_within_the_size_cap() {
+        let tall = DynamicImage::ImageRgb8(RgbImage::new(1600, 4000));
+        let p = prepare(tall);
+        assert!(p.kept.width() <= MAX_KEPT_SIDE && p.kept.height() <= MAX_KEPT_SIDE);
+        assert_eq!(p.kept.height(), 1600, "scaled to fit, aspect kept");
+        assert!(p.small.width() <= 320 && p.small.height() <= 320);
+        let small = DynamicImage::new_rgb8(40, 30);
+        assert_eq!(
+            (prepare(small).kept.width(), 40),
+            (40, 40),
+            "never scaled up"
+        );
+    }
+
+    #[test]
+    fn the_teletext_copy_is_built_only_when_asked_for() {
+        let mut s = store();
+        s.ingest("https://example.com/a.jpg", photo());
+        let url = "https://example.com/a.jpg";
+        let i = s.position(url).unwrap();
+        assert!(matches!(&s.slots[i].1, Slot::Ready { teletext: None, .. }));
+        assert!(s.rows_for(url, Variant::Teletext, 40, 10) >= 1);
+        assert!(
+            matches!(&s.slots[i].1, Slot::Ready { teletext: None, .. }),
+            "sizing builds nothing"
+        );
+        s.protocol(url, Variant::Native);
+        assert!(matches!(
+            &s.slots[s.position(url).unwrap()].1,
+            Slot::Ready { teletext: None, .. }
+        ));
+        s.protocol(url, Variant::Teletext);
+        assert!(matches!(
+            &s.slots[s.position(url).unwrap()].1,
+            Slot::Ready {
+                teletext: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn only_permanent_refusals_are_final() {
+        use ressac_core::Error;
+        let refused = |why: &str| is_permanent(&Error::ImageRefused(why.into()));
+        for why in [
+            "not a web address",
+            "local or private address",
+            "larger than 10 MB",
+            "not an image",
+            "HTTP 404",
+            "HTTP 410",
+        ] {
+            assert!(refused(why), "{why}");
+        }
+        for why in [
+            "timed out",
+            "Dns",
+            "Connect",
+            "HTTP 503",
+            "HTTP 429",
+            "HTTP 408",
+        ] {
+            assert!(!refused(why), "{why}");
+        }
+        assert!(!is_permanent(&Error::EditionNotDue), "not about the image");
+    }
+
+    fn ended(s: &mut ImageStore, url: &str, permanent: bool) {
+        s.mark_loading(url);
+        s.in_flight = 1;
+        s.tx.send(Fetched {
+            url: url.into(),
+            result: Err(Failure {
+                permanent,
+                why: "x".into(),
+            }),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_transient_failure_is_asked_again_and_a_permanent_one_is_not() {
+        let (_dir, db) = dummy_db();
+        let (a, b) = ("https://example.com/a.png", "https://example.com/b.png");
+        let mut s = store();
+        s.retry_after = Duration::ZERO;
+        ended(&mut s, a, false);
+        ended(&mut s, b, true);
+        let events = s.drain(&db);
+        assert_eq!(events.len(), 2);
+        assert_eq!(s.state_of(a), ImageState::Absent, "retry due");
+        assert_eq!(s.state_of(b), ImageState::Failed);
+        s.want(a);
+        s.want(b);
+        assert_eq!(s.take_wanted(), vec![a.to_string()]);
+
+        let mut waiting = store();
+        ended(&mut waiting, a, false);
+        waiting.drain(&db);
+        assert_eq!(
+            waiting.state_of(a),
+            ImageState::Failed,
+            "alt text while it waits"
+        );
+        waiting.want(a);
+        assert!(waiting.take_wanted().is_empty(), "not before the delay");
+    }
+
+    #[test]
+    fn failed_images_are_capped() {
+        let mut s = store();
+        for i in 0..300 {
+            s.fail(&format!("https://example.com/{i}.png"));
+        }
+        assert_eq!(s.state_of("https://example.com/0.png"), ImageState::Absent);
+        assert_eq!(
+            s.state_of("https://example.com/299.png"),
+            ImageState::Failed
+        );
+        assert_eq!(s.slots.len(), MAX_FAILED);
+    }
+
+    #[test]
+    fn the_queue_follows_the_current_frame() {
+        let (_dir, db) = dummy_db();
+        let mut s = store();
+        for i in 0..6 {
+            s.want(&format!("http://127.0.0.1:9/old{i}.png"));
+        }
+        s.start_wanted(&db);
+        assert_eq!((s.in_flight(), s.queued()), (MAX_IN_FLIGHT, 2));
+        s.want("http://127.0.0.1:9/new.png");
+        s.start_wanted(&db);
+        assert_eq!(
+            s.queued(),
+            1,
+            "the old queue is replaced by the new frame's list"
+        );
+        assert_eq!(
+            s.queue.front().map(String::as_str),
+            Some("http://127.0.0.1:9/new.png")
+        );
+    }
+
+    #[test]
+    fn fetch_waits_when_the_workers_are_all_busy() {
+        let (_dir, db) = dummy_db();
+        let mut s = store();
+        for i in 0..5 {
+            s.fetch(&db, format!("http://127.0.0.1:9/{i}.png"));
+        }
+        assert_eq!((s.in_flight(), s.queued()), (MAX_IN_FLIGHT, 1));
+    }
+}

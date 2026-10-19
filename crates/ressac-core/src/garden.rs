@@ -96,7 +96,7 @@ pub fn load_rows(store: &Store) -> Result<Vec<GardenRow>> {
             .unwrap_or_default()
             .to_string();
         let recent = store
-            .entries(f.id, RECENT_ENTRIES)?
+            .recent_entries(f.id, RECENT_ENTRIES)?
             .into_iter()
             .map(|e| {
                 (

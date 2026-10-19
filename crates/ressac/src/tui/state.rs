@@ -22,6 +22,10 @@ pub enum Filter {
     Queue,
     Status(Status),
     Folder(String),
+    /// Every active feed (the reader's "All feeds").
+    All,
+    /// The buried feeds (the reader's "Cemetery").
+    Cemetery,
 }
 
 impl Filter {
@@ -30,6 +34,8 @@ impl Filter {
             Filter::Queue => "to triage".to_string(),
             Filter::Status(s) => s.as_str().to_string(),
             Filter::Folder(f) => format!("folder {f}"),
+            Filter::All => "all feeds".to_string(),
+            Filter::Cemetery => "cemetery".to_string(),
         }
     }
 
@@ -38,6 +44,8 @@ impl Filter {
             Filter::Queue => row.needs_triage(),
             Filter::Status(s) => row.status() == *s,
             Filter::Folder(f) => &row.top_folder == f,
+            Filter::All => !row.buried,
+            Filter::Cemetery => row.buried,
         }
     }
 }
@@ -66,18 +74,28 @@ pub struct GardenState {
 
 impl GardenState {
     pub fn new(rows: Vec<GardenRow>, ascii: bool) -> Self {
+        Self::with_filter(rows, ascii, Filter::Queue)
+    }
+
+    /// A garden opened on another filter than the queue (the reader's garden destinations).
+    /// The "run `ressac check` first" hint belongs to the queue only: it explains why there is
+    /// nothing to triage, which is no news on the lists of every feed or of the buried ones.
+    pub fn with_filter(rows: Vec<GardenRow>, ascii: bool, filter: Filter) -> Self {
         let mut state = GardenState {
             rows,
             visible: Vec::new(),
             selected: 0,
             mode: Mode::Queue,
-            filter: Filter::Queue,
+            filter,
             message: None,
             ascii,
         };
         state.refilter();
         let mut active = state.rows.iter().filter(|r| !r.buried).peekable();
-        if active.peek().is_some() && active.all(|r| r.status() == Status::Unchecked) {
+        if state.filter == Filter::Queue
+            && active.peek().is_some()
+            && active.all(|r| r.status() == Status::Unchecked)
+        {
             state.message = Some(CHECK_FIRST.into());
         }
         state
@@ -506,6 +524,27 @@ mod tests {
     }
 
     #[test]
+    fn the_check_first_hint_belongs_to_the_queue_only() {
+        let unchecked = || {
+            let mut rows = sample_rows_with_buried();
+            for r in &mut rows {
+                r.diagnosis = None;
+            }
+            rows
+        };
+        for filter in [
+            Filter::All,
+            Filter::Cemetery,
+            Filter::Folder("Biblis".into()),
+        ] {
+            let s = GardenState::with_filter(unchecked(), false, filter.clone());
+            assert_eq!(s.message, None, "{filter:?}");
+        }
+        let queue = GardenState::with_filter(unchecked(), false, Filter::Queue);
+        assert_eq!(queue.message.as_deref(), Some(CHECK_FIRST));
+    }
+
+    #[test]
     fn navigation_is_clamped() {
         let mut s = state();
         s.on_key(key(KeyCode::Up));
@@ -557,6 +596,40 @@ mod tests {
             s.on_key(key(KeyCode::Char('o'))),
             Command::Open("https://feed2.example.org/".into())
         );
+    }
+
+    #[test]
+    fn all_feeds_lists_the_active_feeds_and_the_cemetery_the_buried_ones() {
+        let all = GardenState::with_filter(sample_rows_with_buried(), false, Filter::All);
+        assert!(all.visible.iter().all(|&i| !all.rows[i].buried));
+        assert_eq!(
+            all.visible.len(),
+            all.rows.iter().filter(|r| !r.buried).count()
+        );
+        assert_eq!(all.filter.label(), "all feeds");
+
+        let cemetery = GardenState::with_filter(sample_rows_with_buried(), false, Filter::Cemetery);
+        assert_eq!(
+            cemetery
+                .visible
+                .iter()
+                .map(|&i| cemetery.rows[i].feed_id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(cemetery.filter.label(), "cemetery");
+    }
+
+    #[test]
+    fn f_from_all_feeds_starts_the_usual_cycle() {
+        let mut s = GardenState::with_filter(sample_rows(), false, Filter::All);
+        s.on_key(key(KeyCode::Char('f')));
+        assert_eq!(s.filter, Filter::Queue);
+    }
+
+    #[test]
+    fn new_still_opens_on_the_queue() {
+        assert_eq!(GardenState::new(sample_rows(), false).filter, Filter::Queue);
     }
 
     #[test]

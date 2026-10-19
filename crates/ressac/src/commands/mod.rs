@@ -56,7 +56,7 @@ pub fn usage(message: impl Into<String>) -> anyhow::Error {
     UsageError(message.into()).into()
 }
 
-fn open(db: &Path) -> anyhow::Result<Ressac> {
+pub(crate) fn open(db: &Path) -> anyhow::Result<Ressac> {
     let app = Ressac::open(db).with_context(|| format!("cannot open database {}", db.display()))?;
     // Test hook: the CLI tests serve article pages from a local mock server. Debug builds
     // only: a release binary never lifts the private-address guard.
@@ -64,6 +64,25 @@ fn open(db: &Path) -> anyhow::Result<Ressac> {
         return Ok(app.allow_private_articles()?);
     }
     Ok(app)
+}
+
+/// `ressac` and `ressac read`: the terminal reader on the database, until `q`. It is
+/// interactive and has no machine-readable form, so `--json` is a usage error.
+pub fn read(g: &Globals) -> anyhow::Result<ExitCode> {
+    if g.json {
+        return Err(usage(
+            "The reader is interactive and has no --json output; use a command, e.g. \"ressac fetch --json\".",
+        ));
+    }
+    let Some(app) = open_with_feeds(&g.db)? else {
+        return Ok(ExitCode::SUCCESS);
+    };
+    crate::tui::reader::run(
+        &app,
+        &g.db,
+        &crate::tui::reader::settings::TerminalSettings::default_path(),
+    )?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Opens the database for a command that needs feeds. With none (or no database yet),

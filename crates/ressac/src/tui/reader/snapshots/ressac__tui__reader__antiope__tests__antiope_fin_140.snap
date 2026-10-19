@@ -1,0 +1,38 @@
+---
+source: crates/ressac/src/tui/reader/antiope.rs
+expression: terminal.backend().to_string()
+---
+"P104 RESSAC                                                                                                              FRI 16 OCT 18:33:12"
+"100 Index             ▐ FRI 16 OCT         0/5 READ▐                                                                                        "
+"101 Unread           3▐ 2 FEEDS UNREACHABLE        ▐                                    FIN DE L'EDITION                                    "
+"102 Today            3▐                            ▐                                                                                        "
+"103 Starred          1▐ FRONT PAGE                1▐                                                                                        "
+"104 Journal          2▐● À la une                  ▐                                                                                        "
+"105 Daily             ▐                            ▐                                                                                        "
+"106 Weekly            ▐ THIS WEEK                 3▐                                                                                        "
+"107 Monthly           ▐● Un article de la semaine  ▐                                                                                        "
+"108 Rare              ▐● Un autre article          ▐                                                                                        "
+"109 Silent            ▐  +12 MORE IN CAFÉ ☕ PÉDAGO▐                                                                                        " Hidden by multi-width symbols: [(43, " ")]
+"800 Needs triage     1▐● Café ☕ pédago · édition  ▐                                                                                        " Hidden by multi-width symbols: [(31, " ")]
+"801 All feeds         ▐                            ▐                                                                                        "
+"802 Cemetery          ▐ THE WIRE                  1▐                                                                                        "
+"899 Guide             ▐● Le fil                    ▐                                                                                        "
+"110 Daring Fireball   ▐  +2 MORE IN ACTUALITTÉ     ▐                                                                                        "
+"400 INFOS            3▐                            ▐                                                                                        "
+"403  Actualitté       ▐                            ▐                                                                                        "
+"412  Courrier intern 3▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+"                      ▐                            ▐                                                                                        "
+" SOMMAIRE   SUITE   RETOUR   GUIDE   RÉPÉTITION   J NEXT · K PREVIOUS · M READ                                                              "
