@@ -171,45 +171,98 @@
   // By theme, islands settle one at a time in the order their feeds joined Ressac (by id), each on the free
   // spot nearest its target among the islands already settled. A newcomer therefore finds room without
   // pushing anyone, where a global force layout would reshuffle a crowded sea whenever one island lands in it.
+  // When the full water round an island no longer fits anywhere, islands settle closer, down to the least
+  // the chart allows (centres 0.82 × (r1 + r2) apart); past that, on the spot where they overlap least.
+  const CLEARANCES = [room, n => n.r + 4, n => n.r * .82];
   function settle(nodes) {
-    const settled = [];
+    // Water only shrinks as islands settle, so once no island of radius r fits at a clearance, no later island
+    // of radius r or more can: those skip straight to the next clearance.
+    const settled = [], full = CLEARANCES.map(() => Infinity);
     nodes.slice().sort((a, b) => a.id - b.id).forEach(n => {
-      [n.x, n.y] = nearestFree(n, settled);
+      let spot = null;
+      for (let level = 0; level < CLEARANCES.length && !spot; level++) {
+        if (n.r >= full[level]) continue;
+        spot = nearestFree(n, settled, CLEARANCES[level]);
+        if (!spot) full[level] = n.r;
+      }
+      [n.x, n.y] = spot || leastCrowded(n, settled, CLEARANCES[CLEARANCES.length - 1]);
       settled.push(n);
     });
   }
-  // The point nearest the target outside every settled island's water (one disc each) and inside the chart:
-  // it is the target itself, or lies on a disc's edge (the target's projection, two discs' crossing, or a
-  // disc meeting the chart's margin), or on the margin. Candidates are tried nearest first, within a reach
-  // that doubles until one is free.
-  function nearestFree(n, settled) {
-    const [tx, ty] = inBounds(n.tx, n.ty), X0 = 80, X1 = W - 80, Y0 = 80, Y1 = H - 110;
-    const discs = KEEP_CLEAR.map(k => ({x: k.x, y: k.y, r: room(n) + k.r}))
-      .concat(settled.map(m => ({x: m.x, y: m.y, r: room(n) + room(m)})));
-    const free = ([x, y]) => x >= X0 - 1e-9 && x <= X1 + 1e-9 && y >= Y0 - 1e-9 && y <= Y1 + 1e-9 &&
-      discs.every(c => Math.hypot(x - c.x, y - c.y) >= c.r - 1e-6);
-    if (free([tx, ty])) return [tx, ty];
-    const margin = [[tx, Y0], [tx, Y1], [X0, ty], [X1, ty], [X0, Y0], [X0, Y1], [X1, Y0], [X1, Y1]];
-    for (let reach = 150; reach < 4 * W; reach *= 2) {
-      const near = discs.filter(c => Math.hypot(tx - c.x, ty - c.y) - c.r <= reach), points = margin.slice();
-      near.forEach((c, i) => {
-        const d = Math.hypot(tx - c.x, ty - c.y), a = d > 1e-9 ? Math.atan2(ty - c.y, tx - c.x) : (n.seed % 360) * Math.PI / 180;
-        points.push([c.x + Math.cos(a) * c.r, c.y + Math.sin(a) * c.r]);
-        for (const x of [X0, X1]) { const h = c.r * c.r - (x - c.x) ** 2; if (h >= 0) points.push([x, c.y - Math.sqrt(h)], [x, c.y + Math.sqrt(h)]); }
-        for (const y of [Y0, Y1]) { const h = c.r * c.r - (y - c.y) ** 2; if (h >= 0) points.push([c.x - Math.sqrt(h), y], [c.x + Math.sqrt(h), y]); }
-        for (let j = i + 1; j < near.length; j++) {
-          const e = near[j], dx = e.x - c.x, dy = e.y - c.y, dd = Math.hypot(dx, dy);
-          if (dd < 1e-9 || dd > c.r + e.r || dd < Math.abs(c.r - e.r)) continue;
-          const along = (c.r * c.r - e.r * e.r + dd * dd) / (2 * dd), h = Math.sqrt(Math.max(0, c.r * c.r - along * along));
-          const mx = c.x + dx * along / dd, my = c.y + dy * along / dd;
-          points.push([mx - dy * h / dd, my + dx * h / dd], [mx + dy * h / dd, my - dx * h / dd]);
+  const X0 = 80, X1 = W - 80, Y0 = 80, Y1 = H - 110; // where island centres may lie (as inBounds)
+  // The water a settling island must keep from each settled one and from the compass and cartouche, as discs
+  // round them, filed in a grid of cells as wide as the largest disc so a point is checked against its
+  // neighbours only.
+  function obstacles(n, settled, gap) {
+    const keep = Math.max(gap(n), n.r + 4);
+    const list = KEEP_CLEAR.map(k => ({x: k.x, y: k.y, r: keep + k.r}))
+      .concat(settled.map(m => ({x: m.x, y: m.y, r: gap(n) + gap(m)})));
+    const size = Math.max(1, ...list.map(c => c.r)), cols = Math.ceil(W / size) + 1, rows = Math.ceil(H / size) + 1;
+    const cells = Array.from({length: cols * rows}, () => []);
+    const col = x => Math.min(cols - 1, Math.max(0, Math.floor(x / size))), row = y => Math.min(rows - 1, Math.max(0, Math.floor(y / size)));
+    list.forEach(c => cells[row(c.y) * cols + col(c.x)].push(c));
+    // true as soon as `test` holds for a disc filed within `span` cells of (x, y)
+    const some = (x, y, span, test) => {
+      const cx = col(x), cy = row(y);
+      for (let j = Math.max(0, cy - span); j <= Math.min(rows - 1, cy + span); j++) {
+        for (let i = Math.max(0, cx - span); i <= Math.min(cols - 1, cx + span); i++) {
+          for (const c of cells[j * cols + i]) if (test(c)) return true;
         }
+      }
+      return false;
+    };
+    return {list, some};
+  }
+  // The points where the nearest free spot can lie: the target's projection on a disc's edge, two discs'
+  // crossings, a disc meeting the margin, or the margin itself, all within `reach` of the target.
+  function spots(n, discs, tx, ty, reach) {
+    const points = [[tx, ty], [tx, Y0], [tx, Y1], [X0, ty], [X1, ty], [X0, Y0], [X0, Y1], [X1, Y0], [X1, Y1]];
+    const near = new Set(discs.list.filter(c => Math.hypot(tx - c.x, ty - c.y) - c.r <= reach));
+    near.forEach(c => {
+      const d = Math.hypot(tx - c.x, ty - c.y), a = d > 1e-9 ? Math.atan2(ty - c.y, tx - c.x) : (n.seed % 360) * Math.PI / 180;
+      points.push([c.x + Math.cos(a) * c.r, c.y + Math.sin(a) * c.r]);
+      for (const x of [X0, X1]) { const h = c.r * c.r - (x - c.x) ** 2; if (h >= 0) points.push([x, c.y - Math.sqrt(h)], [x, c.y + Math.sqrt(h)]); }
+      for (const y of [Y0, Y1]) { const h = c.r * c.r - (y - c.y) ** 2; if (h >= 0) points.push([c.x - Math.sqrt(h), y], [c.x + Math.sqrt(h), y]); }
+      discs.some(c.x, c.y, 2, e => { // two discs that cross lie within two cells of each other
+        if (e === c || !near.has(e) || e.x < c.x || (e.x === c.x && e.y <= c.y)) return false; // each pair once
+        const dx = e.x - c.x, dy = e.y - c.y, dd = Math.hypot(dx, dy);
+        if (dd < 1e-9 || dd > c.r + e.r || dd < Math.abs(c.r - e.r)) return false;
+        const along = (c.r * c.r - e.r * e.r + dd * dd) / (2 * dd), h = Math.sqrt(Math.max(0, c.r * c.r - along * along));
+        const mx = c.x + dx * along / dd, my = c.y + dy * along / dd;
+        points.push([mx - dy * h / dd, my + dx * h / dd], [mx + dy * h / dd, my - dx * h / dd]);
+        return false;
       });
-      const found = points.map(p => [Math.hypot(p[0] - tx, p[1] - ty), p]).filter(([d]) => d <= reach)
-        .sort((a, b) => a[0] - b[0]).find(([, p]) => free(p));
+    });
+    return points.map(p => [Math.hypot(p[0] - tx, p[1] - ty), p]).filter(([d]) => d <= reach).sort((a, b) => a[0] - b[0]);
+  }
+  const inChart = ([x, y]) => x >= X0 - 1e-9 && x <= X1 + 1e-9 && y >= Y0 - 1e-9 && y <= Y1 + 1e-9;
+  // The point nearest the target that keeps `gap` of water from every settled island, inside the chart;
+  // candidates are tried nearest first, within a reach that doubles until one is free. Null when none is.
+  function nearestFree(n, settled, gap) {
+    const [tx, ty] = inBounds(n.tx, n.ty), discs = obstacles(n, settled, gap);
+    const free = p => inChart(p) && !discs.some(p[0], p[1], 1, c => Math.hypot(p[0] - c.x, p[1] - c.y) < c.r - 1e-6);
+    if (free([tx, ty])) return [tx, ty];
+    for (let reach = 150; ; reach *= 2) {
+      const found = spots(n, discs, tx, ty, reach).find(([, p]) => free(p));
       if (found) return found[1];
+      if (reach >= 2 * Math.hypot(W, H)) return null;
     }
-    return [tx, ty]; // a chart with no water left: cannot happen with a hundred islands
+  }
+  // No water left at all: the candidate spot where the island overlaps its neighbours least.
+  function leastCrowded(n, settled, gap) {
+    const [tx, ty] = inBounds(n.tx, n.ty), discs = obstacles(n, settled, gap);
+    const overlap = p => {
+      let worst = 0;
+      discs.some(p[0], p[1], 1, c => { worst = Math.max(worst, (c.r - Math.hypot(p[0] - c.x, p[1] - c.y)) / c.r); return false; });
+      return worst;
+    };
+    let best = [tx, ty], least = overlap(best);
+    spots(n, discs, tx, ty, Infinity).forEach(([, p]) => {
+      if (!inChart(p)) return;
+      const o = overlap(p);
+      if (o < least - 1e-9) { best = p; least = o; }
+    });
+    return best;
   }
 
   // ---------- territories ----------

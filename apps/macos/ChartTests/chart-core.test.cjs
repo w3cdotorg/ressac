@@ -59,6 +59,21 @@ test("islands_never_overlap", () => {
   }
 });
 
+test("crowded_seas_still_never_overlap", () => {
+  // two and a half times today's feeds, mostly daily (the largest islands): water runs out at full clearance
+  const data = fixture(), keys = data.themes.map(t => t.key).concat([null]);
+  data.feeds = Array.from({length: 250}, (_, i) =>
+    newFeed(i + 1, `Crowd Feed ${i + 1}`, keys[i % 7 === 0 ? 0 : i % keys.length], i % 5 === 4 ? "weekly" : "daily"));
+  data.territories = []; data.continents = [];
+  const nodes = core.place(data, "themes");
+  let worst = Infinity;
+  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+    const a = nodes[i], b = nodes[j];
+    worst = Math.min(worst, Math.hypot(a.x - b.x, a.y - b.y) / (a.r + b.r));
+  }
+  assert.ok(worst >= 0.8, `two islands are only ${worst.toFixed(2)} × (r1 + r2) apart`);
+});
+
 test("islands_keep_clear_of_the_compass_and_cartouche", () => {
   const gap = (n, b) => Math.hypot(Math.max(b[0] - n.x, 0, n.x - b[2]), Math.max(b[1] - n.y, 0, n.y - b[3]));
   for (const view of VIEWS) {
