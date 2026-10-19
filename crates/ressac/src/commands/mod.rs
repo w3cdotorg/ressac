@@ -5,6 +5,7 @@ pub mod edition;
 pub mod feed;
 pub mod garden;
 pub mod network;
+pub mod ticker;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

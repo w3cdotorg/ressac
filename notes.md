@@ -242,6 +242,25 @@ Verdict : 7 vérifications sur 7 OK. Deux remarques de Clément pendant la recet
 - **Arbitrages du chantier** : une revue de sécurité (déni de service) a imposé un plafond de profondeur sur le HTML (au-delà de 64 niveaux, le sous-arbre est aplati sans récursion) et une largeur minimale pour l'habillage des listes et citations imbriquées. Les caractères de contrôle passent par `printable` dans la CLI ; dans le lecteur, `set_stringn` de ratatui écarte déjà tout graphème contenant un caractère de contrôle (C0 et C1, vérifié dans `ratatui-core` 0.1.1), ce n'est donc pas une injection, seulement de la défense en profondeur. Les chemins de restauration du terminal (sortie normale, erreur, panique) ont été corrigés à la relecture de la phase 5b. La mémoire des images est bornée en taille, et les échecs transitoires (réseau) se distinguent des permanents (refus, taille).
 - **Reportés** : voir `TODO.md`, section « Lecture dans le terminal (sous-projet 2b) ». Le détail des relectures est dans le registre local `.superpowers/`, hors dépôt.
 
+## Bandeau tmux (sous-projet 5)
+
+Idée 13 du brainstorming du 19/10 sur d'autres présentations des flux (maquettes : artefact claude.ai « Ressac au large »). But : la sérendipité, voir passer de temps en temps un article laissé de côté. Spec `docs/specs/2026-10-19-tmux-ticker-design.md`, plan `docs/plans/2026-10-19-tmux-ticker.md`, exécution en sous-agents (une relecture par tâche, relecture finale Opus).
+
+- **Clic** : un lien OSC 8 (`#[link=…]`) dans la barre ne s'ouvre pas avec `mouse on`, essayé le 19/10 dans un serveur tmux isolé ; une zone `#[range=user|…]` et une liaison `MouseDown1Status` fonctionnent d'un simple clic.
+- **Injection** (relecture finale) : la première version de la liaison acceptait toute zone commençant par `rs` et passait l'argument sans guillemets à `run-shell`, donc à `sh`. Un titre de volet (`#{pane_title}`, modifiable par n'importe quel programme d'un volet) pouvait porter une zone `rs;commande`. Corrigé avant toute installation : expression régulière `^rs[0-9]+$`, `#{q:…}`, et titre du volet échappé par `q/h`. Vérifié sur un serveur tmux isolé.
+- **Lenteur** : `NOT EXISTS` sur `edition_entry` parcourait la table pour chaque article (355 à 404 ms sur un an d'éditions simulé) ; `NOT IN` ramène à 6 ms, et un test vérifie le plan de requête.
+- **Silence** : `run-shell` affiche dans le volet actif toute sortie et tout code non nul, d'où la règle « rien sur stdout ni stderr, code 0 » pour les deux commandes ; `init_logging` paniquait si `~/Library/Logs/Ressac` n'était pas inscriptible (code 101), corrigé.
+- **WAL** : un écrivain ne bloque jamais un lecteur en mode WAL, donc les tests de « base occupée » prévus au plan ne pouvaient pas échouer ; l'ouverture en lecture seule n'utilise pas `SQLITE_OPEN_READ_ONLY` (erreur 14 sans fichier `-shm`) mais `query_only` et une attente de 250 ms, sans jamais toucher au mode de journal.
+
+### Recette (19/10/2026)
+
+Base : copie de la vraie base par `.backup` en lecture seule, HOME temporaire pour ne jamais toucher au `ticker.json` réel. Constat de départ : il ne restait qu'un non-lu dans toute la base, 1 615 articles récents ayant été marqués lus d'un coup à 17:15 ; sur la copie seulement, ces articles ont été remis en non lus. Clément : un grand ménage ponctuel des vieux articles, pas une habitude quotidienne ; le vivier reste tel quel.
+
+| # | Vérification (spec §9) | Résultat | Observations |
+|---|---|---|---|
+| 1 | Vingt appels espacés de 15 s sur la copie | OK | 20 articles distincts de 19 flux, jamais deux fois le même flux de suite, tous non lus, récents et hors édition ; 10 à 40 ms par appel (0,5 s pour le tout premier, à froid) |
+| 2 | Lignes ajoutées à `~/.tmux.conf` | Fait par Clément | Appli locale recompilée depuis la branche (ancienne gardée dans le scratchpad de la session) |
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).

@@ -17,6 +17,7 @@ ratatui.workspace = true
 ratatui-image.workspace = true
 scraper.workspace = true
 ressac-core = { path = "../ressac-core" }
+unicode-width.workspace = true
 url.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -27,6 +28,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 wiremock.workspace = true

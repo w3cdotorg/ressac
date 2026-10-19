@@ -3,6 +3,7 @@
 mod cli;
 mod commands;
 mod output;
+mod ticker;
 mod tui;
 
 use std::path::PathBuf;
@@ -10,9 +11,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use chrono::Utc;
 use clap::Parser;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, TickerCommand};
 use commands::{Globals, INTERRUPTED, USAGE, UsageError};
 
 #[tokio::main]
@@ -87,16 +89,48 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Page { action } => commands::page(&g, action, &mut out),
         Command::Edition { action } => commands::edition::edition(&g, action, &mut out).await,
         Command::Feed { action } => commands::feed::feed(&g, action, &mut out),
+        Command::Ticker {
+            tmux,
+            width,
+            action: None,
+        } => commands::ticker::show(
+            &g,
+            &ticker::state_file::default_path(),
+            tmux,
+            width,
+            Utc::now(),
+            &mut out,
+        ),
+        Command::Ticker {
+            action: Some(TickerCommand::Open { token }),
+            ..
+        } => commands::ticker::open(&g, &token, Utc::now(), open_in_browser),
     }
+}
+
+/// Opens a URL in the default browser; `RESSAC_NO_BROWSER=1` only logs it (tests).
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    if std::env::var_os("RESSAC_NO_BROWSER").is_some_and(|v| v == "1") {
+        tracing::info!("RESSAC_NO_BROWSER: not opening {url}");
+        return Ok(());
+    }
+    open::that(url)
 }
 
 /// Daily-rotated log file in ~/Library/Logs/Ressac, mirrored to stderr with `-v`.
 fn init_logging(verbose: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_appender::rolling::{RollingFileAppender, Rotation};
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let dir = PathBuf::from(std::env::var_os("HOME")?).join("Library/Logs/Ressac");
     std::fs::create_dir_all(&dir).ok()?;
-    let (writer, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::daily(dir, "ressac.log"));
+    // `rolling::daily` panics when the directory is not writable; a status-bar helper must
+    // never print that, so no file logging in that case.
+    let appender = RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("ressac.log")
+        .build(dir)
+        .ok()?;
+    let (writer, guard) = tracing_appender::non_blocking(appender);
     let file_layer = fmt::layer().with_writer(writer).with_ansi(false);
     let stderr_layer = verbose.then(|| fmt::layer().with_writer(std::io::stderr));
     tracing_subscriber::registry()

@@ -1258,3 +1258,43 @@ fn help_lists_read_and_says_bare_ressac_opens_it() {
         "{help}"
     );
 }
+
+#[test]
+fn ticker_on_a_missing_database_prints_an_empty_line() {
+    let home = tempfile::tempdir().unwrap();
+    let out = ressac(home.path(), &["ticker", "--tmux"]);
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "\n");
+    assert_eq!(stderr(&out), "");
+    assert!(!home.path().join("db.sqlite").exists());
+}
+
+#[test]
+fn ticker_open_is_silent() {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ressac"))
+        .args(["--db", home.path().join("db.sqlite").to_str().unwrap()])
+        .args(["ticker", "open", "rs1"])
+        .env("HOME", home.path())
+        .env("RESSAC_NO_BROWSER", "1")
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "");
+    assert_eq!(stderr(&out), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn ticker_survives_an_unwritable_log_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let logs = home.path().join("Library/Logs/Ressac");
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = ressac(home.path(), &["ticker", "--tmux"]);
+    std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    assert_eq!(stdout(&out), "\n");
+    assert_eq!(stderr(&out), "");
+}

@@ -96,6 +96,26 @@ pub enum Command {
         #[command(subcommand)]
         action: FeedCommand,
     },
+    /// Print one unread headline for the tmux status bar (called every 15 s by tmux)
+    Ticker {
+        /// Wrap the line in tmux style markup, with a click range
+        #[arg(long)]
+        tmux: bool,
+        /// Maximum width of the line, in terminal columns
+        #[arg(long, default_value_t = crate::ticker::DEFAULT_WIDTH)]
+        width: usize,
+        #[command(subcommand)]
+        action: Option<TickerCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TickerCommand {
+    /// Mark the clicked entry read and open it in the browser
+    Open {
+        /// The click token from the ticker line (rs followed by the entry id)
+        token: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -301,5 +321,30 @@ mod tests {
             Cli::try_parse_from(["ressac", "read"]).unwrap().command,
             Some(Command::Read)
         ));
+    }
+
+    #[test]
+    fn ticker_parses_its_flags_and_the_open_token() {
+        match Cli::try_parse_from(["ressac", "ticker", "--tmux"])
+            .unwrap()
+            .command
+        {
+            Some(Command::Ticker {
+                tmux: true,
+                width: 70,
+                action: None,
+            }) => {}
+            _ => panic!("ticker --tmux"),
+        }
+        match Cli::try_parse_from(["ressac", "ticker", "open", "rs12"])
+            .unwrap()
+            .command
+        {
+            Some(Command::Ticker {
+                action: Some(TickerCommand::Open { token }),
+                ..
+            }) => assert_eq!(token, "rs12"),
+            _ => panic!("ticker open"),
+        }
     }
 }

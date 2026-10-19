@@ -75,6 +75,23 @@ On a garden page (800 to 802) the garden's keys apply: `k` keep, `r` repair, `b`
 
 **Logs.** `~/Library/Logs/Ressac/` (with `-v`, tracing also goes to stderr, which garbles the alternate screen: prefer the log file).
 
+## The tmux ticker
+
+`ressac ticker --tmux` prints one line for tmux's status bar: a recent unread entry (published in the last 7 days) that no Journal edition showed, such as what the edition's caps left out or what arrived after it. Each call shows another feed, at random, without repeating an entry before every other one has been shown; one entry is kept per 15-second slot, so several tmux clients agree. A click on the line marks the entry read and opens it in your browser. Ressac.app does not need to run. The line is empty when there is nothing to show or when the database cannot be read; both commands stay silent and exit 0, and failures go to the log.
+
+Add these lines to `~/.tmux.conf`, before your plugin manager's `run` line (tmux-continuum, for one, prepends its save hook to `status-right` when it loads), with the path of the app you run (here the local build):
+
+```tmux
+# Ressac ticker: a recent unread entry the Journal left out, every 15 s; click to open it.
+set -g status-right-length 160
+set -g status-right '#(/path/to/Ressac.app/Contents/Helpers/ressac ticker --tmux) "#{=21:#{q/h:pane_title}}" %H:%M %d-%b-%y'
+bind -n MouseDown1Status if -F '#{m/r:^rs[0-9]+$,#{mouse_status_range}}' \
+  "run-shell -b '/path/to/Ressac.app/Contents/Helpers/ressac ticker open #{q:mouse_status_range}'" \
+  'switch-client -t ='
+```
+
+The binding only accepts the ticker's own click ranges (`rs` and digits) and passes them quoted; the pane title is escaped so that no program can add a clickable range or a style to the bar through it. `status-interval` stays at tmux's default, 15 seconds. Without `--tmux`, `ressac ticker` prints plain text (`Feed · Title`) for other bars; `--width` caps it (70 columns by default). The rotation is kept in `~/Library/Application Support/Ressac/ticker.json`. To remove the ticker, delete these lines and run `tmux source-file ~/.tmux.conf`.
+
 ## The Mac app
 
 `Ressac.app` (macOS 27) reads the same database as the terminal and runs its own copy of `ressac`, bundled at `Ressac.app/Contents/Helpers/ressac`, for everything that fetches or decides. Reading state (read, starred) is written by the app directly; the garden's decisions go through `ressac garden decide`, so the terminal garden sees them, and `u` / `⌘Z` undo in either place.
