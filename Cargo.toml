@@ -34,6 +34,7 @@ tokio = { version = "1.53.2", features = ["full"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+unicode-width = "0.2.2"
 url = "2.5.8"
 whatlang = "0.18.0"
 wiremock = "0.6.5"
