@@ -26,8 +26,13 @@ targets:
       - path: Ressac
         excludes:
           - "Resources/Fonts"
+          - "Resources/Chart"
           - "Resources/AppIcon.svg"
       - path: Ressac/Resources/Fonts
+        type: folder
+        buildPhase: resources
+      # The sea chart page, one folder in the bundle: the web view reads it with one file-URL grant.
+      - path: Ressac/Resources/Chart
         type: folder
         buildPhase: resources
     info:

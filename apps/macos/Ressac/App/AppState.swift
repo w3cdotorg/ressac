@@ -286,6 +286,18 @@ enum PendingPanel: Equatable, Sendable {
         readingWindowIsKey = readingWindows.allObjects.contains { $0.isKeyWindow }
     }
 
+    /// A reading window is open (the Sea Chart opens one to show a feed when none is).
+    var hasReadingWindow: Bool { readingWindows.count > 0 }
+
+    /// Brings a reading window to the front, the main one first (the Sea Chart's "open this feed", spec §8).
+    func showReadingWindow() {
+        let windows = readingWindows.allObjects
+        guard let window = windows.first(where: \.isMainWindow) ?? windows.first else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate()
+    }
+
     var sidebarTree: [SidebarNode] { SidebarNode.tree(from: sidebar) }
 
     var emptyListMessage: String {

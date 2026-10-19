@@ -37,7 +37,8 @@ enum RunOutcome: Equatable, Sendable {
     /// observations refetch what the subprocess wrote.
     @ObservationIgnored var onDatabaseChange: (@MainActor () -> Void)?
 
-    @ObservationIgnored private let cli: RessacCLI
+    /// The helper the runs go through; the Sea Chart captures `ressac chart` with it too.
+    @ObservationIgnored let cli: RessacCLI
     @ObservationIgnored private var shortTail: Task<RunOutcome, Never>?
     @ObservationIgnored private var lastChangeNotice = ContinuousClock.now
     @ObservationIgnored private var bannerSetDuringRun = false

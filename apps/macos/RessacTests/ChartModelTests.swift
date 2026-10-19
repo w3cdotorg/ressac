@@ -92,6 +92,76 @@ private func chart(version: Int) -> Result<Data, any Error> {
         #expect(await eventually { model.lastRefreshError == "boom" })
         #expect(model.phase == .ready(json: #"{"version":1,"feeds":[]}"#))
     }
+
+    /// A change counter the tests move by hand (`AppState.changeTick` in the app).
+    @MainActor @Observable final class Tick {
+        var value = 1
+    }
+
+    /// The window draws on open, then once per later change; the value present at open is not a change.
+    @Test func following_draws_on_open_then_on_later_changes() async throws {
+        let runner = ScriptedChartRunner([chart(version: 1)])
+        let model = ChartModel(runner: runner, debounce: .milliseconds(50))
+        let tick = Tick()
+        let following = Task { await model.follow { tick.value } }
+        defer { following.cancel() }
+        #expect(await eventually { runner.runs == 1 })
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(runner.runs == 1)
+        tick.value += 1
+        #expect(await eventually { runner.runs == 2 })
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(runner.runs == 2)
+    }
+
+    /// Closing the window (cancelling the follow) cancels the scheduled run and stops following.
+    @Test func closing_cancels_pending_work() async throws {
+        let runner = ScriptedChartRunner([chart(version: 1)])
+        let model = ChartModel(runner: runner, debounce: .milliseconds(150))
+        let tick = Tick()
+        let following = Task { await model.follow { tick.value } }
+        #expect(await eventually { runner.runs == 1 })
+        tick.value += 1
+        try await Task.sleep(for: .milliseconds(30))
+        following.cancel()
+        await following.value
+        tick.value += 1
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(runner.runs == 1)
+    }
+
+    /// `cancel` drops a run under way: its result never reaches the phase.
+    @Test func cancel_drops_a_running_refresh() async throws {
+        let runner = SlowChartRunner()
+        let model = ChartModel(runner: runner, debounce: .milliseconds(50))
+        model.refresh()
+        try await Task.sleep(for: .milliseconds(50))
+        model.cancel()
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(model.phase == .loading)
+    }
+
+    /// Wired to the real counter: a write to the database redraws the chart.
+    @Test func following_app_state_redraws_on_database_writes() async throws {
+        let (state, test, _) = try makeState()
+        let id = try test.entry(feed: 1)
+        try await state.database.notifyExternalChanges()
+        let runner = ScriptedChartRunner([chart(version: 1)])
+        let model = ChartModel(runner: runner, debounce: .milliseconds(50))
+        let following = Task { await model.follow { state.changeTick } }
+        defer { following.cancel() }
+        #expect(await eventually { runner.runs == 1 })
+        try await state.writes.setRead([id], read: true, at: Date())
+        #expect(await eventually { runner.runs == 2 })
+    }
+}
+
+/// Answers after 200 ms, or throws `CancellationError` when cancelled first.
+final class SlowChartRunner: ChartRunner {
+    func chartJSON() async throws -> Data {
+        try await Task.sleep(for: .milliseconds(200))
+        return Data(#"{"version":1,"feeds":[]}"#.utf8)
+    }
 }
 
 @Suite struct RessacCLICaptureTests {

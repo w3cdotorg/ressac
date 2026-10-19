@@ -11,6 +11,7 @@ struct RessacCommands: Commands {
         CommandGroup(after: .toolbar) {
             UnreadOnlyMenuItem(state: state)
             TextSizeMenuItems()
+            SeaChartMenuItem()
         }
         CommandMenu("Go") { GoMenuItems(state: state) }
         CommandMenu("Article") { ArticleMenuItems(state: state) }
@@ -95,6 +96,17 @@ private struct TextSizeMenuItems: View {
             .keyboardShortcut("-")
         Button("Actual Size") { ReaderStyle.resize(.actualSize, appearance: appearance, in: .standard) }
             .keyboardShortcut("0")
+        Divider()
+    }
+}
+
+/// View ▸ Sea Chart (spec §8): opens the chart's window, or brings it forward.
+private struct SeaChartMenuItem: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Sea Chart") { openWindow(id: ChartWindow.id) }
+            .keyboardShortcut("m", modifiers: [.command, .shift])
         Divider()
     }
 }

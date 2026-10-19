@@ -55,6 +55,7 @@ struct CLIChartRunner: ChartRunner {
         }
         run = Task {
             await load()
+            guard !Task.isCancelled else { return }
             run = nil
             if rerunAfterRun {
                 rerunAfterRun = false
@@ -75,9 +76,32 @@ struct CLIChartRunner: ChartRunner {
         }
     }
 
+    /// The window is open (spec §8): draws now, then notes each later change of `changes` (the
+    /// value at the call is not a change) until the calling task is cancelled, which happens when
+    /// the window closes; the scheduled and running work is then cancelled too.
+    func follow(_ changes: @escaping @MainActor @Sendable () -> Int) async {
+        var seen = changes()
+        refresh()
+        for await tick in Observations(changes) where tick != seen {
+            seen = tick
+            noteChange()
+        }
+        cancel()
+    }
+
+    /// Drops the scheduled run and the running one; their results never reach `phase`.
+    func cancel() {
+        scheduled?.cancel()
+        scheduled = nil
+        run?.cancel()
+        run = nil
+        rerunAfterRun = false
+    }
+
     private func load() async {
         do {
             let data = try await runner.chartJSON()
+            guard !Task.isCancelled else { return }
             let version = try JSONDecoder().decode(Versioned.self, from: data).version
             guard version == Self.supportedVersion else {
                 throw ChartError.unsupportedVersion(version)
@@ -85,6 +109,7 @@ struct CLIChartRunner: ChartRunner {
             lastRefreshError = nil
             phase = .ready(json: String(decoding: data, as: UTF8.self))
         } catch {
+            guard !Task.isCancelled else { return }
             let message = Self.message(for: error)
             Self.log.error("chart refresh failed: \(message, privacy: .public)")
             lastRefreshError = message
