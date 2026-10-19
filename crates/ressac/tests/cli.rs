@@ -1298,3 +1298,245 @@ fn ticker_survives_an_unwritable_log_directory() {
     assert_eq!(stdout(&out), "\n");
     assert_eq!(stderr(&out), "");
 }
+
+/// A database imported from the OPML fixture, with themes, a territory, a continent and an
+/// unthemed feed on the chart. Feed #5 (Girl on the Couch) is the unthemed one.
+fn chart_home() -> tempfile::TempDir {
+    use chrono::{Duration, SecondsFormat, Utc};
+    use ressac_core::store::{ChartImport, TerritoryDef, ThemeDef};
+
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let store = Store::open(&home.path().join("db.sqlite")).unwrap();
+    let theme = |key: &str, name: &str, sea: &str| ThemeDef {
+        key: key.into(),
+        name: name.into(),
+        sea: sea.into(),
+    };
+    let xkcd = "https://www.xkcd.com/rss.xml";
+    let orange = "https://orange.example.org/feed/";
+    let drenka = "http://orange-drenka.example.net/feeds/posts/default?alt=rss";
+    let girl = "http://girl.example.org/rss";
+    let import = ChartImport {
+        themes: vec![
+            theme("labs", "AI labs and tools", "SEA OF THE LABS"),
+            theme("web", "Web and comics", "WEB SEA"),
+        ],
+        feeds: [(xkcd, "web"), (orange, "labs"), (drenka, "labs")]
+            .into_iter()
+            .map(|(u, k)| (u.to_owned(), k.to_owned()))
+            .collect(),
+        territories: vec![
+            TerritoryDef {
+                name: "ORANGE COAST".into(),
+                feeds: vec![orange.into(), drenka.into()],
+                continent: None,
+            },
+            TerritoryDef {
+                name: "WEB CONTINENT".into(),
+                feeds: vec![],
+                continent: Some("web".into()),
+            },
+        ],
+    };
+    store.import_chart(&import, false).unwrap();
+    let conn = rusqlite::Connection::open(home.path().join("db.sqlite")).unwrap();
+    let now = Utc::now();
+    for (n, (url, hours)) in [(xkcd, 30), (orange, 40), (drenka, 90), (girl, 200)]
+        .into_iter()
+        .enumerate()
+    {
+        let id: i64 = conn
+            .query_row("SELECT id FROM feed WHERE xml_url = ?1", [url], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let at = (now - Duration::hours(hours)).to_rfc3339_opts(SecondsFormat::Millis, true);
+        conn.execute(
+            "INSERT INTO entry (id, feed_id, guid, title, published_at, fetched_at, summary_html) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, '')",
+            rusqlite::params![n as i64 + 1, id, format!("g{n}"), format!("Entry {n}"), at],
+        )
+        .unwrap();
+    }
+    home
+}
+
+/// The snapshot with its clock-dependent fields replaced, pretty-printed for insta.
+fn redacted_chart(snapshot: &Value) -> String {
+    let mut v = snapshot.clone();
+    v["surveyed_at"] = json!("[time]");
+    for feed in v["feeds"].as_array_mut().unwrap() {
+        for key in ["age_days", "activity"] {
+            assert!(feed[key].is_number(), "{key}: {feed}");
+            feed[key] = json!("[number]");
+        }
+        for entry in feed["entries"].as_array_mut().unwrap() {
+            entry["day"] = json!("[date]");
+        }
+    }
+    serde_json::to_string_pretty(&v).unwrap()
+}
+
+#[test]
+fn chart_json_snapshot() {
+    let home = chart_home();
+    let out = ressac(home.path(), &["--json", "chart"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    assert_eq!(text.lines().count(), 1, "exactly one JSON line: {text:?}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["version"], 1);
+    assert!(v["surveyed_at"].as_str().unwrap().ends_with('Z'));
+    insta::assert_snapshot!(redacted_chart(&v));
+}
+
+#[test]
+fn chart_human_summary() {
+    let home = chart_home();
+    let out = ressac(home.path(), &["chart"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "Sea chart: 4 feeds, 3 unread this week", "{text}");
+    for expected in [
+        "SEA OF THE LABS (2)",
+        "WEB SEA (1)",
+        "UNCHARTED WATERS (1)",
+        "ORANGE COAST: Orange Drenka, Orange-Drenka",
+    ] {
+        assert!(text.contains(expected), "{expected:?} in {text}");
+    }
+    let pos = |s: &str| text.find(s).unwrap();
+    assert!(pos("SEA OF THE LABS") < pos("WEB SEA") && pos("WEB SEA") < pos("UNCHARTED WATERS"));
+    assert!(pos("UNCHARTED WATERS") < pos("Territories"), "{text}");
+}
+
+#[test]
+fn chart_on_a_missing_database_is_empty_and_creates_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let out = ressac(home.path(), &["--json", "chart"]);
+    assert!(out.status.success(), "{out:?}");
+    let v: Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    assert_eq!(v["feeds"], json!([]));
+    assert_eq!(v["totals"], json!({"feeds": 0, "unread_week": 0}));
+    assert!(!home.path().join("db.sqlite").exists());
+}
+
+fn chart_import_file(home: &Path) -> std::path::PathBuf {
+    let file = home.join("chart.json");
+    std::fs::write(
+        &file,
+        json!({
+            "themes": [{"key": "labs", "name": "AI labs", "sea": "SEA OF THE LABS"}],
+            "feeds": {"https://orange.example.org/feed/": "labs",
+                      "https://nowhere.example.org/rss": "labs"},
+            "territories": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    file
+}
+
+#[test]
+fn chart_import_reports_and_dry_run_writes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let file = chart_import_file(home.path());
+    let file = file.to_str().unwrap();
+    let themed = |home: &Path| -> Option<String> {
+        let conn = rusqlite::Connection::open(home.join("db.sqlite")).unwrap();
+        conn.query_row(
+            "SELECT t.key FROM feed f JOIN theme t ON t.id = f.theme_id WHERE f.xml_url = ?1",
+            ["https://orange.example.org/feed/"],
+            |r| r.get(0),
+        )
+        .ok()
+    };
+
+    let dry = ressac(
+        home.path(),
+        &["--json", "chart", "import", file, "--dry-run"],
+    );
+    assert!(dry.status.success(), "{dry:?}");
+    let report = json_lines(&dry).remove(0);
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["themes"], 1);
+    assert_eq!(report["feeds_themed"], 1);
+    assert_eq!(
+        report["unmatched_urls"],
+        json!(["https://nowhere.example.org/rss"])
+    );
+    assert_eq!(themed(home.path()), None, "dry run wrote a theme");
+
+    let human = ressac(home.path(), &["chart", "import", file]);
+    assert!(human.status.success(), "{human:?}");
+    let text = stdout(&human);
+    assert!(text.contains("1 feed(s) themed"), "{text}");
+    assert!(text.contains("https://nowhere.example.org/rss"), "{text}");
+    assert_eq!(themed(home.path()).as_deref(), Some("labs"));
+
+    let real = ressac(home.path(), &["--json", "chart", "import", file]);
+    assert_eq!(json_lines(&real)[0]["dry_run"], false);
+}
+
+#[test]
+fn chart_import_rejects_a_malformed_file() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let file = home.path().join("bad.json");
+    std::fs::write(&file, "{not json").unwrap();
+    let out = ressac(home.path(), &["chart", "import", file.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        stderr(&out).contains("bad.json is not a chart import file"),
+        "{out:?}"
+    );
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn feed_theme_sets_and_clears() {
+    let home = chart_home();
+    let set = ressac(home.path(), &["feed", "theme", "5", "labs"]);
+    assert!(set.status.success(), "{set:?}");
+    assert_eq!(stdout(&set), "#5 theme labs\n");
+    let snap: Value =
+        serde_json::from_str(stdout(&ressac(home.path(), &["--json", "chart"])).trim()).unwrap();
+    let girl = snap["feeds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == 5)
+        .unwrap();
+    assert_eq!(girl["theme"], "labs");
+
+    let cleared = ressac(home.path(), &["--json", "feed", "theme", "5", "none"]);
+    assert!(cleared.status.success(), "{cleared:?}");
+    assert_eq!(
+        json_lines(&cleared),
+        [json!({"event": "theme", "feed_id": 5, "theme": null})]
+    );
+    assert_eq!(
+        stdout(&ressac(home.path(), &["feed", "theme", "5", "none"])),
+        "#5 no theme\n"
+    );
+}
+
+#[test]
+fn feed_theme_unknown_key_exits_2() {
+    let home = chart_home();
+    for (args, message) in [
+        (
+            &["feed", "theme", "5", "atlantis"][..],
+            "No theme \"atlantis\".\n",
+        ),
+        (&["--json", "feed", "theme", "99", "labs"], "No feed #99.\n"),
+    ] {
+        let out = ressac(home.path(), args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert_eq!(stderr(&out), message, "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+}

@@ -1,9 +1,9 @@
-//! `ressac feed cadence`: force a feed's rhythm group, or give it back to the core.
+//! `ressac feed cadence` and `ressac feed theme`: a feed's rhythm group and its sea.
 
 use std::io::Write;
 use std::process::ExitCode;
 
-use ressac_core::model::CadenceGroup;
+use ressac_core::model::{CadenceGroup, FeedId};
 use ressac_core::store::CadenceRow;
 
 use super::{Globals, open_with_feeds, usage};
@@ -18,15 +18,42 @@ pub fn feed(g: &Globals, action: FeedCommand, out: &mut impl Write) -> anyhow::R
         FeedCommand::Cadence { feed_id, group } => {
             let row = app
                 .set_cadence(feed_id, group.group())
-                .map_err(cadence_error)?;
+                .map_err(refusal_error)?;
             if g.json {
                 writeln!(out, "{}", cadence_json(&row))?;
             } else {
                 writeln!(out, "{}", cadence_text(&row))?;
             }
         }
+        FeedCommand::Theme { feed_id, key } => {
+            let theme = (key != NO_THEME).then_some(key.as_str());
+            app.store()
+                .set_feed_theme(feed_id, theme)
+                .map_err(refusal_error)?;
+            if g.json {
+                writeln!(out, "{}", theme_json(feed_id, theme))?;
+            } else {
+                writeln!(out, "{}", theme_text(feed_id, theme))?;
+            }
+        }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The key that clears a feed's theme.
+const NO_THEME: &str = "none";
+
+/// `#12 theme ai-labs` or `#12 no theme`.
+fn theme_text(feed_id: FeedId, theme: Option<&str>) -> String {
+    match theme {
+        Some(key) => format!("#{feed_id} theme {key}"),
+        None => format!("#{feed_id} no theme"),
+    }
+}
+
+/// The `theme` event: the feed and its theme key, null when cleared.
+fn theme_json(feed_id: FeedId, theme: Option<&str>) -> serde_json::Value {
+    serde_json::json!({"event": "theme", "feed_id": feed_id, "theme": theme})
 }
 
 /// The sidebar's names for the five groups (spec §8).
@@ -65,11 +92,14 @@ pub fn cadence_json(row: &CadenceRow) -> serde_json::Value {
     })
 }
 
-/// An unknown or buried feed is a usage error (exit 2); anything else stays fatal (exit 1).
-fn cadence_error(e: ressac_core::Error) -> anyhow::Error {
+/// An unknown or buried feed, or an unknown theme, is a usage error (exit 2); anything else
+/// stays fatal (exit 1).
+fn refusal_error(e: ressac_core::Error) -> anyhow::Error {
     use ressac_core::Error;
     match e {
-        Error::UnknownFeed(_) | Error::FeedBuried(_) => usage(e.to_string()),
+        Error::UnknownFeed(_) | Error::FeedBuried(_) | Error::UnknownTheme(_) => {
+            usage(e.to_string())
+        }
         other => other.into(),
     }
 }
@@ -117,6 +147,16 @@ mod tests {
     }
 
     #[test]
+    fn theme_lines_name_the_key_or_say_none() {
+        assert_eq!(theme_text(12, Some("labs")), "#12 theme labs");
+        assert_eq!(theme_text(12, None), "#12 no theme");
+        assert_eq!(
+            theme_json(12, None),
+            json!({"event": "theme", "feed_id": 12, "theme": null})
+        );
+    }
+
+    #[test]
     fn auto_clears_and_the_others_force() {
         assert_eq!(CadenceArg::Auto.group(), None);
         assert_eq!(CadenceArg::Rare.group(), Some(CadenceGroup::Rare));
@@ -124,18 +164,22 @@ mod tests {
     }
 
     #[test]
-    fn cadence_refusals_are_usage_errors_and_others_stay_fatal() {
+    fn refusals_are_usage_errors_and_others_stay_fatal() {
         use ressac_core::Error;
-        for refusal in [Error::UnknownFeed(99), Error::FeedBuried(2)] {
+        for refusal in [
+            Error::UnknownFeed(99),
+            Error::FeedBuried(2),
+            Error::UnknownTheme("x".into()),
+        ] {
             let text = refusal.to_string();
-            let e = cadence_error(refusal);
+            let e = refusal_error(refusal);
             assert_eq!(
                 e.downcast_ref::<crate::commands::UsageError>()
                     .map(ToString::to_string),
                 Some(text)
             );
         }
-        let fatal = cadence_error(Error::Invalid("disk".into()));
+        let fatal = refusal_error(Error::Invalid("disk".into()));
         assert!(
             fatal
                 .downcast_ref::<crate::commands::UsageError>()

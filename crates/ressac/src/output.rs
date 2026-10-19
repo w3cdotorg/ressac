@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use indicatif::{ProgressBar, ProgressStyle};
 use ressac_core::model::{Decision, FeedId, Status};
 use ressac_core::service::{Event, EventSink, FULL_ARTICLES, Summary};
-use ressac_core::store::ImportReport;
 use ressac_core::store::pages::PageRow;
+use ressac_core::store::{ChartImportReport, ChartSnapshot, ImportReport};
 
 /// Order of the `check` summary grid (three per line).
 const SUMMARY_ORDER: [Status; 9] = [
@@ -265,6 +265,80 @@ pub fn import_text(r: &ImportReport, dry_run: bool) -> String {
             "\n{} feed(s) already present.",
             r.skipped_existing
         ));
+    }
+    out
+}
+
+/// The chart's name for feeds that have no theme.
+const UNCHARTED: &str = "UNCHARTED WATERS";
+
+/// `ressac chart` without `--json`: feeds per sea, then the territories.
+pub fn chart_text(snap: &ChartSnapshot) -> String {
+    let mut out = format!(
+        "Sea chart: {} feeds, {} unread this week\n",
+        snap.totals.feeds, snap.totals.unread_week
+    );
+    let mut seas: Vec<(&str, Option<&str>)> = snap
+        .themes
+        .iter()
+        .map(|t| (t.sea.as_str(), Some(t.key.as_str())))
+        .collect();
+    if snap.feeds.iter().any(|f| f.theme.is_none()) {
+        seas.push((UNCHARTED, None));
+    }
+    for (sea, key) in seas {
+        let feeds: Vec<_> = snap
+            .feeds
+            .iter()
+            .filter(|f| f.theme.as_deref() == key)
+            .collect();
+        out.push_str(&format!("\n{sea} ({})\n", feeds.len()));
+        for f in feeds {
+            out.push_str(&format!("  #{} {}\n", f.id, f.title));
+        }
+    }
+    if !snap.territories.is_empty() {
+        out.push_str("\nTerritories\n");
+        for t in &snap.territories {
+            let titles: Vec<&str> = t
+                .feeds
+                .iter()
+                .filter_map(|id| snap.feeds.iter().find(|f| f.id == *id))
+                .map(|f| f.title.as_str())
+                .collect();
+            out.push_str(&format!("  {}: {}\n", t.name, titles.join(", ")));
+        }
+    }
+    out
+}
+
+/// `ressac chart import`: what the file did, or on a dry run would do.
+pub fn chart_import_text(r: &ChartImportReport, dry_run: bool) -> String {
+    let mut out = String::new();
+    if dry_run {
+        out.push_str("Dry run: nothing written.\n");
+    }
+    out.push_str(&format!(
+        "Imported {} theme(s), {} feed(s) themed, {} territories.",
+        r.themes, r.feeds_themed, r.territories
+    ));
+    if r.unthemed_feeds > 0 {
+        out.push_str(&format!(
+            "\n{} feed(s) left without a theme.",
+            r.unthemed_feeds
+        ));
+    }
+    if !r.unknown_theme_keys.is_empty() {
+        out.push_str(&format!(
+            "\nUnknown theme keys: {}.",
+            r.unknown_theme_keys.join(", ")
+        ));
+    }
+    if !r.unmatched_urls.is_empty() {
+        out.push_str(&format!("\n{} unmatched URL(s):", r.unmatched_urls.len()));
+        for url in &r.unmatched_urls {
+            out.push_str(&format!("\n  {url}"));
+        }
     }
     out
 }

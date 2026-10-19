@@ -1,0 +1,127 @@
+---
+source: crates/ressac/tests/cli.rs
+expression: redacted_chart(&v)
+---
+{
+  "continents": [
+    {
+      "name": "WEB CONTINENT",
+      "theme": "web"
+    }
+  ],
+  "feeds": [
+    {
+      "activity": "[number]",
+      "age_days": "[number]",
+      "entries": [
+        {
+          "day": "[date]",
+          "id": 1,
+          "read": false,
+          "title": "Entry 0",
+          "url": null
+        }
+      ],
+      "entries_week": 1,
+      "folder": "Blogs",
+      "group": "silent",
+      "id": 1,
+      "page": 201,
+      "theme": "web",
+      "title": "xkcd.com",
+      "unread_week": 1
+    },
+    {
+      "activity": "[number]",
+      "age_days": "[number]",
+      "entries": [
+        {
+          "day": "[date]",
+          "id": 2,
+          "read": false,
+          "title": "Entry 1",
+          "url": null
+        }
+      ],
+      "entries_week": 1,
+      "folder": "Blogs / potes",
+      "group": "silent",
+      "id": 2,
+      "page": 203,
+      "theme": "labs",
+      "title": "Orange Drenka",
+      "unread_week": 1
+    },
+    {
+      "activity": "[number]",
+      "age_days": "[number]",
+      "entries": [
+        {
+          "day": "[date]",
+          "id": 3,
+          "read": false,
+          "title": "Entry 2",
+          "url": null
+        }
+      ],
+      "entries_week": 1,
+      "folder": "Blogs / potes",
+      "group": "silent",
+      "id": 3,
+      "page": 204,
+      "theme": "labs",
+      "title": "Orange-Drenka",
+      "unread_week": 1
+    },
+    {
+      "activity": "[number]",
+      "age_days": "[number]",
+      "entries": [
+        {
+          "day": "[date]",
+          "id": 4,
+          "read": false,
+          "title": "Entry 3",
+          "url": null
+        }
+      ],
+      "entries_week": 0,
+      "folder": "Blogs",
+      "group": "silent",
+      "id": 5,
+      "page": 206,
+      "theme": null,
+      "title": "Girl on the Couch",
+      "unread_week": 0
+    }
+  ],
+  "surveyed_at": "[time]",
+  "territories": [
+    {
+      "feeds": [
+        2,
+        3
+      ],
+      "name": "ORANGE COAST"
+    }
+  ],
+  "themes": [
+    {
+      "count": 2,
+      "key": "labs",
+      "name": "AI labs and tools",
+      "sea": "SEA OF THE LABS"
+    },
+    {
+      "count": 1,
+      "key": "web",
+      "name": "Web and comics",
+      "sea": "WEB SEA"
+    }
+  ],
+  "totals": {
+    "feeds": 4,
+    "unread_week": 3
+  },
+  "version": 1
+}

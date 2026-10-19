@@ -75,6 +75,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     };
     match command {
         Command::Import { file, dry_run } => commands::import(&g, &file, dry_run, &mut out),
+        Command::Chart { action } => commands::chart::chart(&g, action, &mut out),
         Command::Fetch {
             force,
             feeds,
