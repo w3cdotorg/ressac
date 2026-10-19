@@ -46,7 +46,7 @@ const NO_THEME: &str = "none";
 /// `#12 theme ai-labs` or `#12 no theme`.
 fn theme_text(feed_id: FeedId, theme: Option<&str>) -> String {
     match theme {
-        Some(key) => format!("#{feed_id} theme {key}"),
+        Some(key) => format!("#{feed_id} theme {}", crate::output::printable(key)),
         None => format!("#{feed_id} no theme"),
     }
 }
@@ -154,6 +154,11 @@ mod tests {
             theme_json(12, None),
             json!({"event": "theme", "feed_id": 12, "theme": null})
         );
+    }
+
+    #[test]
+    fn theme_text_neutralises_controls() {
+        assert_eq!(theme_text(1, Some("a\u{1b}[31m")), "#1 theme a\u{FFFD}[31m");
     }
 
     #[test]

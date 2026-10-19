@@ -278,13 +278,13 @@ pub fn chart_text(snap: &ChartSnapshot) -> String {
         "Sea chart: {} feeds, {} unread this week\n",
         snap.totals.feeds, snap.totals.unread_week
     );
-    let mut seas: Vec<(&str, Option<&str>)> = snap
+    let mut seas: Vec<(std::borrow::Cow<str>, Option<&str>)> = snap
         .themes
         .iter()
-        .map(|t| (t.sea.as_str(), Some(t.key.as_str())))
+        .map(|t| (printable(&t.sea), Some(t.key.as_str())))
         .collect();
     if snap.feeds.iter().any(|f| f.theme.is_none()) {
-        seas.push((UNCHARTED, None));
+        seas.push((UNCHARTED.into(), None));
     }
     for (sea, key) in seas {
         let feeds: Vec<_> = snap
@@ -294,19 +294,23 @@ pub fn chart_text(snap: &ChartSnapshot) -> String {
             .collect();
         out.push_str(&format!("\n{sea} ({})\n", feeds.len()));
         for f in feeds {
-            out.push_str(&format!("  #{} {}\n", f.id, f.title));
+            out.push_str(&format!("  #{} {}\n", f.id, printable(&f.title)));
         }
     }
     if !snap.territories.is_empty() {
         out.push_str("\nTerritories\n");
         for t in &snap.territories {
-            let titles: Vec<&str> = t
+            let titles: Vec<std::borrow::Cow<str>> = t
                 .feeds
                 .iter()
                 .filter_map(|id| snap.feeds.iter().find(|f| f.id == *id))
-                .map(|f| f.title.as_str())
+                .map(|f| printable(&f.title))
                 .collect();
-            out.push_str(&format!("  {}: {}\n", t.name, titles.join(", ")));
+            out.push_str(&format!(
+                "  {}: {}\n",
+                printable(&t.name),
+                titles.join(", ")
+            ));
         }
     }
     out
@@ -331,13 +335,17 @@ pub fn chart_import_text(r: &ChartImportReport, dry_run: bool) -> String {
     if !r.unknown_theme_keys.is_empty() {
         out.push_str(&format!(
             "\nUnknown theme keys: {}.",
-            r.unknown_theme_keys.join(", ")
+            r.unknown_theme_keys
+                .iter()
+                .map(|k| printable(k))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     if !r.unmatched_urls.is_empty() {
         out.push_str(&format!("\n{} unmatched URL(s):", r.unmatched_urls.len()));
         for url in &r.unmatched_urls {
-            out.push_str(&format!("\n  {url}"));
+            out.push_str(&format!("\n  {}", printable(url)));
         }
     }
     out
@@ -381,6 +389,74 @@ pub fn summary_text(s: &Summary, ascii: bool) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn chart_text_neutralises_controls() {
+        use ressac_core::model::CadenceGroup;
+        use ressac_core::store::{ChartFeed, ChartTerritory, ChartTheme, ChartTotals};
+        let evil = "Evil\u{1b}[31m\nTitle";
+        let snap = ChartSnapshot {
+            version: 1,
+            surveyed_at: "2026-10-19T12:00:00Z".into(),
+            totals: ChartTotals {
+                feeds: 2,
+                unread_week: 0,
+            },
+            themes: vec![ChartTheme {
+                key: "t".into(),
+                name: "T".into(),
+                sea: "SEA\u{1b}[2J".into(),
+                count: 2,
+            }],
+            feeds: [1, 2]
+                .map(|id| ChartFeed {
+                    id,
+                    title: evil.into(),
+                    theme: Some("t".into()),
+                    folder: None,
+                    group: CadenceGroup::Daily,
+                    age_days: 0.0,
+                    unread_week: 0,
+                    entries_week: 0,
+                    activity: 0.0,
+                    page: None,
+                    entries: vec![],
+                })
+                .into(),
+            territories: vec![ChartTerritory {
+                name: "COAST\u{1b}[31m\nX".into(),
+                feeds: vec![1, 2],
+            }],
+            continents: vec![],
+        };
+        let text = chart_text(&snap);
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(
+            text.contains("  #1 Evil\u{FFFD}[31m\u{FFFD}Title\n"),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("COAST\u{FFFD}[31m\u{FFFD}X: Evil"),
+            "{text:?}"
+        );
+        assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+    }
+
+    #[test]
+    fn chart_import_text_neutralises_controls() {
+        let r = ChartImportReport {
+            unmatched_urls: vec!["https://x.example/\u{1b}]0;pwn\u{7}".into()],
+            unknown_theme_keys: vec!["k\u{1b}[31m".into()],
+            ..Default::default()
+        };
+        let text = chart_import_text(&r, true);
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+        assert!(text.contains("https://x.example/\u{FFFD}]0;pwn\u{FFFD}"));
+        assert!(text.contains("k\u{FFFD}[31m"));
+    }
 
     #[test]
     fn glyphs_have_an_ascii_fallback() {
