@@ -323,9 +323,23 @@ pub fn chart_import_text(r: &ChartImportReport, dry_run: bool) -> String {
         out.push_str("Dry run: nothing written.\n");
     }
     out.push_str(&format!(
-        "Imported {} theme(s), {} feed(s) themed, {} territories.",
-        r.themes, r.feeds_themed, r.territories
+        "{} {} theme(s), {} feed(s) themed, {} territories.",
+        if dry_run { "Would import" } else { "Imported" },
+        r.themes,
+        r.feeds_themed,
+        r.territories
     ));
+    if !r.territories_too_small.is_empty() {
+        out.push_str(&format!(
+            "\n{} territories with fewer than 2 matched feeds, left off the chart: {}.",
+            r.territories_too_small.len(),
+            r.territories_too_small
+                .iter()
+                .map(|name| printable(name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     if r.unthemed_feeds > 0 {
         out.push_str(&format!(
             "\n{} feed(s) left without a theme.",
@@ -443,10 +457,40 @@ mod tests {
     }
 
     #[test]
+    fn chart_import_text_says_would_on_a_dry_run_and_names_small_territories() {
+        let r = ChartImportReport {
+            themes: 2,
+            feeds_themed: 3,
+            territories: 1,
+            territories_too_small: vec!["LONE".into(), "EMPTY".into()],
+            ..Default::default()
+        };
+        let real = chart_import_text(&r, false);
+        assert!(
+            real.starts_with("Imported 2 theme(s), 3 feed(s) themed, 1 territories."),
+            "{real}"
+        );
+        assert!(
+            real.contains(
+                "\n2 territories with fewer than 2 matched feeds, left off the chart: LONE, EMPTY."
+            ),
+            "{real}"
+        );
+        let dry = chart_import_text(&r, true);
+        assert!(
+            dry.starts_with(
+                "Dry run: nothing written.\nWould import 2 theme(s), 3 feed(s) themed, 1 territories."
+            ),
+            "{dry}"
+        );
+    }
+
+    #[test]
     fn chart_import_text_neutralises_controls() {
         let r = ChartImportReport {
             unmatched_urls: vec!["https://x.example/\u{1b}]0;pwn\u{7}".into()],
             unknown_theme_keys: vec!["k\u{1b}[31m".into()],
+            territories_too_small: vec!["T\u{1b}[2J".into()],
             ..Default::default()
         };
         let text = chart_import_text(&r, true);
@@ -456,6 +500,7 @@ mod tests {
         );
         assert!(text.contains("https://x.example/\u{FFFD}]0;pwn\u{FFFD}"));
         assert!(text.contains("k\u{FFFD}[31m"));
+        assert!(text.contains("T\u{FFFD}[2J"));
     }
 
     #[test]

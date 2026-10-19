@@ -1497,6 +1497,22 @@ fn chart_import_rejects_a_malformed_file() {
 }
 
 #[test]
+fn chart_import_refuses_a_reserved_theme_key() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let file = home.path().join("none.json");
+    std::fs::write(
+        &file,
+        json!({"themes": [{"key": "None", "name": "Nothing", "sea": "NO SEA"}]}).to_string(),
+    )
+    .unwrap();
+    let out = ressac(home.path(), &["chart", "import", file.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert_eq!(stderr(&out), "Theme key \"None\" is reserved.\n");
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
 fn feed_theme_sets_and_clears() {
     let home = chart_home();
     let set = ressac(home.path(), &["feed", "theme", "5", "labs"]);

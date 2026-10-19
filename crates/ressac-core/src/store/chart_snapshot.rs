@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Local, TimeZone, Utc};
 use rusqlite::params;
 use serde::Serialize;
 
@@ -86,6 +86,18 @@ fn round3(x: f64) -> f64 {
 
 fn days_between(later: DateTime<Utc>, earlier: DateTime<Utc>) -> f64 {
     (later - earlier).num_milliseconds() as f64 / 86_400_000.0
+}
+
+/// The calendar day of `published` in `zone`: the page shows it as a date where the chart is
+/// read, so the snapshot takes the local zone (`chrono::Local`). An unreadable timestamp keeps
+/// its first ten characters.
+fn entry_day<Tz: TimeZone>(published: &str, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    parse_ts(published)
+        .map(|d| d.with_timezone(zone).format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| published.chars().take(10).collect())
 }
 
 fn http_url(url: Option<String>) -> Option<String> {
@@ -197,9 +209,7 @@ impl Store {
                     id,
                     title: title.unwrap_or_default(),
                     url: http_url(url),
-                    day: parse_ts(&published)
-                        .map(|d| d.format("%Y-%m-%d").to_string())
-                        .unwrap_or_else(|| published.chars().take(10).collect()),
+                    day: entry_day(&published, &Local),
                     read,
                 });
             }
@@ -364,6 +374,22 @@ mod tests {
         assert_eq!(snap.feeds[0].unread_week, 2);
         assert_eq!(snap.totals.unread_week, 2);
         assert_eq!(snap.feeds[0].age_days, 1.0);
+    }
+
+    #[test]
+    fn entry_day_is_the_calendar_day_where_the_chart_is_read() {
+        use chrono::FixedOffset;
+        let late = "2026-10-18T23:30:00.000Z";
+        let paris = FixedOffset::east_opt(2 * 3600).unwrap();
+        let new_york = FixedOffset::west_opt(4 * 3600).unwrap();
+        assert_eq!(entry_day(late, &paris), "2026-10-19");
+        assert_eq!(entry_day(late, &new_york), "2026-10-18");
+        assert_eq!(
+            entry_day("2026-10-18T02:00:00.000Z", &new_york),
+            "2026-10-17"
+        );
+        // An unreadable timestamp keeps its first ten characters.
+        assert_eq!(entry_day("2026-10-18 garbled", &paris), "2026-10-18");
     }
 
     #[test]

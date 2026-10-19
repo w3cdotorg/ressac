@@ -1,6 +1,7 @@
 -- Ressac schema v5: themes and territories for the sea chart (sub-project 6).
--- The core writes every column and table below; the apps read the chart through
--- `ressac chart --json`, never through these tables.
+-- Only the core writes these tables and `feed.theme_id`. The apps draw the chart from
+-- `ressac chart --json`; the macOS app also reads `theme` and `feed.theme_id` directly
+-- (the inspector's Theme menu), a contract that `tests/contract.rs` pins.
 CREATE TABLE theme (
   id       INTEGER PRIMARY KEY,
   key      TEXT NOT NULL UNIQUE,      -- stable identifier, e.g. 'ai-labs'

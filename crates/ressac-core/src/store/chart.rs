@@ -42,10 +42,28 @@ pub struct ChartImport {
 pub struct ChartImportReport {
     pub themes: usize,
     pub feeds_themed: usize,
+    /// Territories (not continents) imported: those with at least two matched feeds.
     pub territories: usize,
+    /// Territories stored with fewer than two matched feeds, which the chart leaves off.
+    pub territories_too_small: Vec<String>,
     pub unmatched_urls: Vec<String>,
     pub unknown_theme_keys: Vec<String>,
     pub unthemed_feeds: usize,
+}
+
+/// A key `ressac feed theme FEED KEY` can name: not empty, not `none` in any letter case (the
+/// word that clears a feed's theme there), and not starting with `-` (it would read as an option).
+fn check_theme_key(key: &str) -> Result<()> {
+    let problem = if key.is_empty() {
+        "is empty"
+    } else if key.eq_ignore_ascii_case("none") {
+        "is reserved"
+    } else if key.starts_with('-') {
+        "starts with \"-\""
+    } else {
+        return Ok(());
+    };
+    Err(Error::Invalid(format!("Theme key \"{key}\" {problem}.")))
 }
 
 impl Store {
@@ -91,6 +109,7 @@ impl Store {
     pub fn import_chart(&self, import: &ChartImport, dry_run: bool) -> Result<ChartImportReport> {
         let mut seen = HashSet::new();
         for t in &import.themes {
+            check_theme_key(&t.key)?;
             if !seen.insert(t.key.as_str()) {
                 return Err(Error::Invalid(format!(
                     "Theme \"{}\" appears twice.",
@@ -194,6 +213,7 @@ impl Store {
                     [&def.name],
                 )?;
                 let territory_id = tx.last_insert_rowid();
+                // Counts the feeds added: a URL listed twice adds its feed once.
                 let mut position = 0_i64;
                 for url in &def.feeds {
                     let Some(&feed_id) = feeds_by_url.get(url) else {
@@ -206,6 +226,11 @@ impl Store {
                         params![territory_id, feed_id, position],
                     )?;
                     position += added as i64;
+                }
+                // The chart draws a territory around two feeds or more (spec §5).
+                if position < 2 {
+                    report.territories_too_small.push(def.name.clone());
+                    continue;
                 }
             }
             report.territories += 1;
@@ -464,6 +489,47 @@ mod tests {
         assert_eq!(report.unknown_theme_keys, ["ghost"]);
         assert_eq!(report.territories, 0);
         assert_eq!(count(&s, "territory"), 0);
+    }
+
+    #[test]
+    fn reserved_and_flag_like_theme_keys_are_refused() {
+        let s = store_with_feeds(0);
+        for key in ["", "none", "None", "NONE", "-x", "--labs"] {
+            let err = s
+                .import_chart(&import(&[key], &[], vec![]), false)
+                .unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{key:?}: {err:?}");
+        }
+        assert_eq!(count(&s, "theme"), 0);
+        s.import_chart(&import(&["nonesuch", "a-b"], &[], vec![]), false)
+            .unwrap();
+        assert_eq!(count(&s, "theme"), 2);
+    }
+
+    #[test]
+    fn territories_with_fewer_than_two_matched_feeds_are_reported() {
+        let s = store_with_feeds(3);
+        let report = s
+            .import_chart(
+                &import(
+                    &["a"],
+                    &[],
+                    vec![
+                        territory("PAIR", &[url(1), url(2)]),
+                        territory("LONE", &[url(3), "https://ghost.example.org/x".into()]),
+                        territory("EMPTY", &[]),
+                        TerritoryDef {
+                            name: "ALL A".into(),
+                            feeds: vec![],
+                            continent: Some("a".into()),
+                        },
+                    ],
+                ),
+                false,
+            )
+            .unwrap();
+        assert_eq!(report.territories, 2, "PAIR and the continent");
+        assert_eq!(report.territories_too_small, ["LONE", "EMPTY"]);
     }
 
     #[test]
