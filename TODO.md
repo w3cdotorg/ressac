@@ -12,6 +12,7 @@ Prochaines étapes de Ressac, au 16/10/2026. Le détail des décisions passées 
 
 ## Sous-projets suivants
 
+- [ ] **Ajouter un flux (bloquant).** Aujourd'hui, un flux n'entre que par l'import OPML. Il faut un « Add feed » dans l'appli et dans le terminal, qui accepte soit l'URL d'un flux (RSS, Atom, JSON Feed), soit l'adresse d'un site, avec détection du flux (`discover::alternate_feeds` lit déjà les `<link rel="alternate">` d'une page, pour les réparations du jardin) et un choix quand la page en annonce plusieurs. Demandé par Clément le 19/10/2026.
 - [x] **5 : le bandeau tmux.** Fait le 19/10/2026 sur la branche `tmux-ticker` ; recette et trouvailles dans `notes.md`.
 - [x] **2b : la lecture dans le terminal.** Fait le 19/10/2026 sur la branche `terminal-reading` ; recette et trouvailles dans `notes.md`.
 - [x] **3 : rythme et journal du matin.** Fait le 16/10/2026 sur la branche `cadence-edition` ; recette et trouvailles dans `notes.md`.
