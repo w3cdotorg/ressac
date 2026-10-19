@@ -12,6 +12,7 @@ Prochaines étapes de Ressac, au 16/10/2026. Le détail des décisions passées 
 
 ## Sous-projets suivants
 
+- [x] **5 : le bandeau tmux.** Fait le 19/10/2026 sur la branche `tmux-ticker` ; recette et trouvailles dans `notes.md`.
 - [x] **2b : la lecture dans le terminal.** Fait le 19/10/2026 sur la branche `terminal-reading` ; recette et trouvailles dans `notes.md`.
 - [x] **3 : rythme et journal du matin.** Fait le 16/10/2026 sur la branche `cadence-edition` ; recette et trouvailles dans `notes.md`.
 - [x] **4 : thème Antiope (appli Mac).** Fait le 15/10/2026 sur la branche `antiope` ; recette et trouvailles dans `notes.md`.
@@ -78,6 +79,16 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Antiope : mosaïques séparées ; synchroniser le look du terminal avec l'Apparence de l'appli ; une crate séparée pour le lecteur si les temps de compilation augmentent.
 - [ ] À signaler en amont : `ratatui-image` 11.1.0 abandonne le protocole détecté quand aucune taille de police ne répond (sous tmux), et son constructeur avec police (`Picker::from_fontsize`) est déprécié.
 - [ ] Mineurs des relectures (détail dans le registre local `.superpowers/`, hors dépôt) : un champ invalide efface tout `terminal.json`, la ligne de rythme du jardin fait sauter une rangée à l'arrivée, une entrée lue par une écriture propre reste dans Non lus jusqu'au prochain rechargement complet (comme l'appli).
+
+### Bandeau tmux (sous-projet 5)
+
+- [ ] Vivier vide après un « tout marquer lu » : le 19/10 à 17:15, 1 615 articles récents ont été marqués lus d'un coup et il ne restait qu'un non-lu dans toute la base. Si c'est l'habitude, revoir le vivier (par exemple garder les articles marqués lus en masse).
+- [ ] Volume du journal : chaque appel en échec écrit un avertissement (environ 5 760 lignes par jour et par client si la base manque) ; passer en `debug!` les cas attendus ou limiter la cadence.
+- [ ] Erreurs de `try_lock` autres que « déjà pris » traitées comme un verrou pris (chemin de réimpression, sans gravité).
+- [ ] Titres faits seulement de caractères invisibles non blancs (U+200B) : ligne `Flux · ` apparemment vide ; caractères bidirectionnels (U+202E) et séparateurs de ligne Unicode non retirés (usurpation visuelle, pas d'injection) ; coupe par caractère et non par graphème (une séquence ZWJ ou VS16 peut déborder d'une ou deux colonnes).
+- [ ] La connexion en lecture seule peut faire un point de contrôle du WAL en se fermant si elle est la dernière (pages déjà validées, aucune écriture logique) ; `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE` le supprimerait.
+- [ ] Deux clients tmux attachés peuvent montrer deux articles différents pendant quelques secondes de chaque tranche (leurs minuteries ne sont pas alignées sur les tranches).
+- [ ] Mineurs des relectures (registre local, hors dépôt) : `path.exists()` vrai pour un dossier, pas de test du plafond de 2 000 lignes, recherches linéaires dans `shown`, quelques tests à renforcer.
 
 ### Durcissement proposé, non fait
 
