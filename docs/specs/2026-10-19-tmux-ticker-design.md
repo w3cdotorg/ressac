@@ -53,7 +53,8 @@ An entry is in the pool when all of these hold:
 2. it is unread (`read_at IS NULL`);
 3. `published_at` is within the last 7 days of `now` (Claude's call: `published_at` rather than `fetched_at`, so that a feed imported or repaired today does not flood the pool with old entries; `published_at` already falls back to the fetch time when a feed gives no date);
 4. it appears in no edition at all (`NOT EXISTS (SELECT 1 FROM edition_entry WHERE entry_id = e.id)`), not only today's, since past editions were shown too;
-5. it has a URL with an `http` or `https` scheme.
+5. it has a URL with an `http` or `https` scheme;
+6. it has a non-blank title (Claude's call: a line with only a feed name tells nothing).
 
 The query returns `entry_id`, `feed_id`, `feed_title`, `title`, `url`, `published_at`. No limit is needed for correctness; the builder may cap it (e.g. 2 000 rows, newest first) for speed. It must stay well under 50 ms on the real database (≈ 66 entries per edition, a few thousand recent entries).
 
@@ -83,13 +84,12 @@ The database path is resolved as for every other command (`--db`, then `RESSAC_D
 
 Called by the tmux binding with the clicked range's argument.
 
-1. Parse `<token>`: `rs` followed by digits, otherwise exit 2 without doing anything.
-2. Open the store with `Store::open_existing`: if the file is missing or the schema version is not `SCHEMA_VERSION`, stop with exit 1. A click in the status bar must never create a database or trigger a migration (Claude's call; migrating stays the app's and the other commands' job).
-3. Read the entry. If it is gone, or its URL is not `http`/`https`, stop with exit 1.
+1. Parse `<token>`: `rs` followed by digits, otherwise stop.
+2. Open the store with `Store::open_existing`: if the file is missing or the schema version is not `SCHEMA_VERSION`, stop. A click in the status bar must never create a database or trigger a migration (Claude's call; migrating stays the app's and the other commands' job).
+3. Read the entry. If it is gone, or its URL is not `http`/`https`, stop.
 4. Mark it read (`set_read(entry_id, true, now)`), then open its URL with the `open` crate (already a dependency of the reader). Marking first means a failure to open the browser still leaves a consistent state, and the next ticker call skips the entry.
-5. Exit 0.
 
-Errors go to the log, not to stderr: `run-shell -b` would otherwise print them into the active pane.
+It prints nothing and exits 0 in every case, "stop" included; each stop is logged with its reason. `run-shell` shows a command's output and a non-zero exit status in the active pane, so anything else would pop up in Clément's work (Claude's call, after reading tmux's manual).
 
 ## 6. Selection and rotation
 
@@ -139,7 +139,7 @@ bind -n MouseDown1Status if -F '#{m:rs*,#{mouse_status_range}}' \
 - **Selection:** with a seeded generator: no repeat within a cycle; a new cycle after exhaustion; never the same feed twice in a row when another feed has candidates; with one feed of 40 entries and one of 1, the small feed appears in about half the picks over a cycle's first rounds (statistical bound on a fixed seed, not a flaky test).
 - **Formatting:** `#` doubled, control characters removed, width by display columns with a CJK title and an emoji, `…` cut, the 15-byte range limit.
 - **State file:** round trip, pruning, a corrupt file read as empty; two calls in the same slot print the same entry; a call in the same slot after `current` was read picks a new one; a held lock leads to a reprint without a write.
-- **CLI:** `ressac ticker` on a missing database prints an empty line and exits 0; `ticker open` with a bad token exits 2; with a valid one marks the entry read in a temporary database (the browser call is behind a trait or a flag so the test does not open a browser).
+- **CLI:** `ressac ticker` on a missing database prints an empty line and exits 0; `ticker open` with a bad token, an unknown entry or a missing database prints nothing, exits 0 and changes nothing; with a valid one it marks the entry read in a temporary database (the browser call is behind a trait or a flag so the test does not open a browser).
 - Never against the real database.
 
 ## 9. Acceptance
