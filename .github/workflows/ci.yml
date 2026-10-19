@@ -19,6 +19,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Test the sea chart page
+        run: node --test apps/macos/ChartTests/
   macos:
     name: macOS app
     runs-on: xcode-27

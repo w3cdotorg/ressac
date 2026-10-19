@@ -13,6 +13,7 @@ Prochaines étapes de Ressac, au 16/10/2026. Le détail des décisions passées 
 ## Sous-projets suivants
 
 - [ ] **Ajouter un flux (bloquant).** Aujourd'hui, un flux n'entre que par l'import OPML. Il faut un « Add feed » dans l'appli et dans le terminal, qui accepte soit l'URL d'un flux (RSS, Atom, JSON Feed), soit l'adresse d'un site, avec détection du flux (`discover::alternate_feeds` lit déjà les `<link rel="alternate">` d'une page, pour les réparations du jardin) et un choix quand la page en annonce plusieurs. Demandé par Clément le 19/10/2026.
+- [x] **6 : la carte marine.** Code fait le 19/10/2026 sur la branche `sea-chart` (spec `docs/specs/2026-10-19-sea-chart-design.md`) ; recette en attente (import de l'amorce dans la vraie base, remplacement de l'appli, essai des quatre encres) ; trouvailles dans `notes.md`.
 - [x] **5 : le bandeau tmux.** Fait le 19/10/2026 sur la branche `tmux-ticker` ; recette et trouvailles dans `notes.md`.
 - [x] **2b : la lecture dans le terminal.** Fait le 19/10/2026 sur la branche `terminal-reading` ; recette et trouvailles dans `notes.md`.
 - [x] **3 : rythme et journal du matin.** Fait le 16/10/2026 sur la branche `cadence-edition` ; recette et trouvailles dans `notes.md`.
@@ -89,6 +90,21 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] La connexion en lecture seule peut faire un point de contrôle du WAL en se fermant si elle est la dernière (pages déjà validées, aucune écriture logique) ; `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE` le supprimerait.
 - [ ] Deux clients tmux attachés peuvent montrer deux articles différents pendant quelques secondes de chaque tranche (leurs minuteries ne sont pas alignées sur les tranches).
 - [ ] Mineurs des relectures (registre local, hors dépôt) : `path.exists()` vrai pour un dossier, pas de test du plafond de 2 000 lignes, recherches linéaires dans `shown`, quelques tests à renforcer.
+
+### Carte marine (sous-projet 6)
+
+- [ ] Éditeur de territoires dans l'appli (aujourd'hui : `ressac chart import` seulement).
+- [ ] Proposition de thème à l'« Add feed » (dépend du chantier « Ajouter un flux »).
+- [ ] Étiquettes courbes le long des côtes.
+- [ ] Positions mémorisées pour la vue du port (elle dérive chaque jour par construction).
+- [ ] Un flux qui quitte la carte, ou qui change de thème, laisse les îles suivantes de sa mer remonter d'un cran (placement îlot par îlot, par ordre d'id).
+- [ ] Vue « By theme » : sur une mer pleine, l'espacement se resserre ; au-delà d'environ 230 flux, des îles peuvent se toucher.
+- [ ] Page : les rafales ne sont pas remises à zéro à la reconstruction (traits périmés pendant environ 3 s) ; une carte vide montre « By theme » enfoncé ; les erreurs de dessin ne vont que dans la console ; l'infobulle ne se retourne pas au bord ; le focus n'est pas rendu à la fermeture de la fenêtre contextuelle ; la police Cormorant italique 400 n'est pas chargée dans WebKit (pied de la fenêtre contextuelle seulement).
+- [ ] Appli : `hasReadingWindow` se fie au compte d'une table à références faibles (préférer `allObjects`) ; `showReadingWindow` prend une fenêtre quelconque ; le bloc de lancement est dupliqué entre `ChartWindow` et `RessacApp` ; aucun test de cycle de références ; « The main window says why » peut ne rien désigner.
+- [ ] Appli : le `WindowGroup` principal a maintenant l'id `main` et peut oublier son cadre une fois (note de version).
+- [ ] CLI : `feed theme` sur une base vide sort en code 0 avant de vérifier la clé (comme `cadence`) ; les messages d'erreur de stderr reprennent tels quels clés, noms et chemins du fichier d'import (à assainir une fois, au puits stderr de `main.rs`).
+- [ ] Cœur : un territoire avec `continent` et `feeds` ignore `feeds` sans avertir ; `unthemed_feeds` compte aussi les flux enterrés ; instantané lu hors d'une transaction unique ; territoires regroupés par nom et non par id.
+- [ ] Tests à renforcer (détail dans le registre local `.superpowers/`, hors dépôt) : renommage et réordonnancement à la réimportation, rapport des URL inconnues en essai à blanc, précédence de `xml_url`, thème vide du test de migration v4 vers v5.
 
 ### Durcissement proposé, non fait
 
