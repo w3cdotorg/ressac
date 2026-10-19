@@ -1,0 +1,104 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*.*.*"
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    name: Build and publish
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check that the tag matches the versions
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo=$(awk -F'"' '/^\[workspace.package\]/ { p = 1 } p && /^version *=/ { print $2; exit }' Cargo.toml)
+          app=$(awk -F'"' '/MARKETING_VERSION:/ { print $2; exit }' apps/macos/project.yml)
+          echo "Tag $tag, Cargo $cargo, app $app."
+          if [ "$tag" != "$cargo" ] || [ "$tag" != "$app" ]; then
+            echo "::error title=Version mismatch::Tag v$tag, Cargo.toml $cargo, project.yml MARKETING_VERSION $app. Bump both before tagging."
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+      # Unlike ci.yml, a release never falls back: without Xcode 27 there is nothing to publish.
+      - name: Select Xcode 27
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=27
+          major() { xcodebuild -version | awk 'NR == 1 { split($2, v, "."); print v[1] }'; }
+          if [ "$(major)" -lt "$required" ]; then
+            candidate=$(ls -d /Applications/Xcode_"$required"*.app 2>/dev/null | sort -V | tail -n 1 || true)
+            if [ -n "$candidate" ]; then
+              sudo xcode-select -s "$candidate/Contents/Developer"
+            fi
+          fi
+          sdk=$(xcrun --sdk macosx --show-sdk-version)
+          if [ "$(major)" -lt "$required" ] || [ "${sdk%%.*}" -lt "$required" ]; then
+            echo "::error title=Xcode $required missing::$(xcodebuild -version | head -n 1) with the macOS $sdk SDK; the app needs Xcode $required."
+            exit 1
+          fi
+      # rustup directly rather than a third-party action: this job can write to the repository.
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate the Xcode project
+        working-directory: apps/macos
+        run: xcodegen generate
+      - name: Build the app
+        working-directory: apps/macos
+        run: xcodebuild -project Ressac.xcodeproj -scheme Ressac -configuration Release -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/build" ARCHS=arm64 build
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/build/Build/Products/Release/Ressac.app"
+          out="$RUNNER_TEMP/dist"
+          mkdir -p "$out"
+          codesign --verify --deep "$app"
+          "$app/Contents/Helpers/ressac" --version
+          # ditto keeps the bundle's symlinks, extended attributes and ad-hoc signatures.
+          ditto -c -k --keepParent "$app" "$out/Ressac-$VERSION-macos-arm64.zip"
+          tar -czf "$out/ressac-$VERSION-macos-arm64.tar.gz" -C "$app/Contents/Helpers" ressac
+          (cd "$out" && shasum -a 256 ./*.zip ./*.tar.gz | sed "s|  ./|  |" > SHA256SUMS)
+          cat "$out/SHA256SUMS"
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/notes.md" <<'EOF'
+          **Unsigned build.** Ressac is signed ad hoc, not with a Developer ID, and not notarized. macOS 27 on Apple silicon only.
+
+          - **App:** unzip `Ressac-…-macos-arm64.zip`, move `Ressac.app` to `/Applications/`, then clear the quarantine flag once: `xattr -dr com.apple.quarantine /Applications/Ressac.app` (or open it, then allow it under System Settings ▸ Privacy & Security).
+          - **Terminal:** `ressac-…-macos-arm64.tar.gz` holds the same `ressac` binary the app embeds; `tar -xzf` it somewhere on your `PATH` and run `xattr -d com.apple.quarantine ressac`.
+          - `SHA256SUMS` lists both archives' checksums.
+          EOF
+          prerelease=""
+          case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Ressac $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --generate-notes \
+            $prerelease \
+            "$RUNNER_TEMP"/dist/*.zip "$RUNNER_TEMP"/dist/*.tar.gz "$RUNNER_TEMP"/dist/SHA256SUMS
