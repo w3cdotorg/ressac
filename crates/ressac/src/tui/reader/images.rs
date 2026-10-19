@@ -151,6 +151,21 @@ fn nearest_teletext(c: [u8; 3]) -> [u8; 3] {
         .expect("eight colours")
 }
 
+/// The reader's image store: none at all with `RESSAC_IMAGES=off` (alt-text placeholders, no
+/// terminal query), else one built on `detect_picker`. Call it after `ratatui::try_init()`.
+pub fn open_store() -> ImageStore {
+    if images_are_off(std::env::var("RESSAC_IMAGES").ok().as_deref()) {
+        tracing::info!("images off (RESSAC_IMAGES=off)");
+        ImageStore::disabled()
+    } else {
+        ImageStore::new(detect_picker())
+    }
+}
+
+fn images_are_off(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case("off"))
+}
+
 /// Asks the terminal which graphics protocol it speaks. Call it only after
 /// `ratatui::try_init()`: the query leaves a thread that snapshots the terminal mode and
 /// restores it when its stdin read unblocks; before init that mode is line mode, and its late
@@ -160,8 +175,8 @@ fn nearest_teletext(c: [u8; 3]) -> [u8; 3] {
 ///
 /// Under tmux the query often answers without a font size, and the library then drops the
 /// protocol it found: `decide_protocol` asks tmux for the outer terminal instead. The
-/// `RESSAC_IMAGES` variable (`kitty`, `iterm2`, `sixel`, `halfblocks`, `off`) wins over all of
-/// it. Every decision is logged.
+/// `RESSAC_IMAGES` variable (`kitty`, `iterm2`, `sixel`, `halfblocks`) wins over all of
+/// it; `off` is handled by `open_store`: no images at all. Every decision is logged.
 pub fn detect_picker() -> Picker {
     let queried = Picker::from_query_stdio();
     let mut picker = match &queried {
@@ -176,7 +191,12 @@ pub fn detect_picker() -> Picker {
     let _ = out.write_all(b"\x1b[c");
     let _ = out.flush();
 
-    let is_tmux = picker.tmux_detected() || std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
+    // The library's own verdict only: the forced picker below takes its `is_tmux` from the same
+    // check, so a guess from `TMUX` alone would emit unwrapped sequences (a blank image).
+    let is_tmux = picker.tmux_detected();
+    if !is_tmux && std::env::var_os("TMUX").is_some_and(|v| !v.is_empty()) {
+        tracing::warn!("TMUX is set but the image library does not detect tmux: no tmux guess");
+    }
     let detected = picker.protocol_type();
     let override_value = std::env::var("RESSAC_IMAGES").ok();
     let window = ratatui::crossterm::terminal::window_size().ok();
@@ -239,7 +259,7 @@ pub fn decide_protocol(inputs: &ProtocolInputs<'_>) -> ProtocolDecision {
             "kitty" => Some(ProtocolType::Kitty),
             "iterm2" | "iterm" => Some(ProtocolType::Iterm2),
             "sixel" => Some(ProtocolType::Sixel),
-            "halfblocks" | "off" => Some(ProtocolType::Halfblocks),
+            "halfblocks" => Some(ProtocolType::Halfblocks),
             _ => None,
         };
         if let Some(protocol) = forced {
@@ -384,8 +404,7 @@ impl ImageStore {
         }
     }
 
-    /// No picker, no fetch: every image stays `[image: alt text]` (rendering tests).
-    #[cfg(test)]
+    /// No picker, no fetch: every image stays `[image: alt text]` (`RESSAC_IMAGES=off`, tests).
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -694,6 +713,7 @@ fn fetch_and_decode(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     fn inputs<'a>(
         detected: ProtocolType,
@@ -762,10 +782,18 @@ mod tests {
         assert_eq!(pick("iterm2"), ProtocolType::Iterm2);
         assert_eq!(pick(" SIXEL "), ProtocolType::Sixel);
         assert_eq!(pick("halfblocks"), ProtocolType::Halfblocks);
-        assert_eq!(pick("off"), ProtocolType::Halfblocks);
+        // `off` is not a protocol: `open_store` turns images off before any decision.
+        assert_eq!(pick("off"), ProtocolType::Kitty);
         assert_eq!(pick("kitty"), ProtocolType::Kitty);
         // Not a protocol: detection decides as if it were unset.
         assert_eq!(pick("nonsense"), ProtocolType::Kitty);
+    }
+
+    #[test]
+    fn only_off_turns_images_off() {
+        assert!(images_are_off(Some(" OFF ")));
+        assert!(!images_are_off(Some("halfblocks")));
+        assert!(!images_are_off(None));
     }
 
     #[test]
@@ -774,7 +802,6 @@ mod tests {
         assert_eq!(font_from_window(0, 50, 1000, 1000), None);
         assert_eq!(font_from_window(100, 50, 0, 0), None);
     }
-    use super::*;
     use image::{DynamicImage, Rgb, RgbImage};
 
     fn crc32(bytes: &[u8]) -> u32 {

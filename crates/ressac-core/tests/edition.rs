@@ -231,13 +231,9 @@ async fn the_next_morning_starts_where_the_previous_edition_ended() {
     );
     let record = app.store().latest_edition().unwrap().unwrap();
     assert_eq!(record.window_start, first.window_end);
-    // The window ends at the injected clock plus the refresh's own duration (never the machine's
-    // clock); stored with millisecond precision, `tomorrow` carries nanoseconds.
-    let lag = record.window_end.timestamp_millis() - tomorrow.timestamp_millis();
-    assert!(
-        (0..5_000).contains(&lag),
-        "window_end is {lag} ms after tomorrow"
-    );
+    // Built by the injected clock (`tomorrow`, ahead of the machine's): the window ends there.
+    assert!(record.window_end.timestamp_millis() >= tomorrow.timestamp_millis());
+    assert_eq!(record.built_at, record.window_end);
     // The feeds were fetched minutes ago: nothing new, an empty edition, the window still moves.
     assert_eq!(second.entries, 0);
     assert!(app.edition_today().unwrap().unwrap().entries.is_empty());
@@ -436,4 +432,34 @@ async fn a_retry_right_after_an_offline_build_is_offline_again_then_builds() {
     );
     assert_eq!(report.entries, 4);
     assert_eq!(report.unreachable, 0);
+}
+
+#[tokio::test]
+async fn everything_a_production_shaped_build_fetches_is_inside_its_edition() {
+    let server = MockServer::start().await;
+    let app = morning_app(&server, false).await;
+    // As the TUI and the CLI do: the clock is read before the call, the refresh stamps later.
+    let now = Utc::now();
+    built(
+        app.build_edition(
+            EditionOptions::default(),
+            now,
+            &Utc,
+            &Recorder::default(),
+            go(),
+        )
+        .await
+        .unwrap(),
+    );
+    let record = app.store().latest_edition().unwrap().unwrap();
+    let latest = app
+        .store()
+        .latest_fetch_since(now)
+        .unwrap()
+        .expect("entries were fetched");
+    assert!(
+        latest <= record.window_end,
+        "{latest} after {}",
+        record.window_end
+    );
 }

@@ -693,8 +693,10 @@ impl Ressac {
 
     /// The morning edition (spec §6): due check (skipped with `rebuild`), a refresh of the due
     /// feeds, then one transaction that composes and stores the edition. `now` and `tz` decide
-    /// the day (04:00 local); the window ends at the later of `now` and the real clock after
-    /// the refresh, since the refresh stamps `fetched_at` with the real clock.
+    /// the day (04:00 local). `built_at`, which the due rule reads, is `now` plus the time the
+    /// call took (the caller's clock, so a past injected day never meets today's date). The
+    /// window ends at the later of that and the latest `fetched_at` this refresh wrote (the
+    /// refresh stamps with the real clock), so everything the build fetched is inside it.
     pub async fn build_edition(
         &self,
         opts: EditionOptions,
@@ -705,6 +707,7 @@ impl Ressac {
     ) -> Result<EditionOutcome> {
         let day = day_start(now.with_timezone(tz));
         let started = std::time::Instant::now();
+        let run_start = Utc::now();
         if !opts.rebuild && !self.store.edition_due(day)? {
             return Ok(EditionOutcome::NotDue);
         }
@@ -731,13 +734,15 @@ impl Ressac {
         if summary.network_unreachable {
             return Ok(EditionOutcome::Offline);
         }
-        // The injected `now` plus the time the refresh took: the wall clock's reading when `now`
-        // is the wall clock, and still the caller's own time when it is injected.
-        let end = now + chrono::Duration::from_std(started.elapsed()).unwrap_or_default();
+        let built_at = now + chrono::Duration::from_std(started.elapsed()).unwrap_or_default();
+        let end = self
+            .store
+            .latest_fetch_since(run_start)?
+            .map_or(built_at, |fetched| fetched.max(built_at));
         let params = EditionParams {
             day_start: day,
             window_end: end,
-            built_at: end,
+            built_at,
             caps: opts.caps,
             unreachable: counter.failed.load(Ordering::Relaxed),
             rebuild: opts.rebuild,

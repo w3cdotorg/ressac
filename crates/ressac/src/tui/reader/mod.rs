@@ -504,7 +504,7 @@ pub fn run(app: &Ressac, db: &Path, settings_path: &Path) -> anyhow::Result<()> 
         let size = terminal.size()?;
         let mut state = ReaderState::new(settings, size.width, size.height);
         // After the init, never before it: see `images::detect_picker`.
-        let mut images = images::ImageStore::new(images::detect_picker());
+        let mut images = images::open_store();
         event_loop(
             &mut terminal,
             app,
