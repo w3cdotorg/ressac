@@ -651,6 +651,24 @@ fn paint(frame: &mut Frame, area: Rect, mut lines: Vec<Line<'static>>) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// Which column ←/→ moved to: in the focused column the selected row keeps its black-on-cyan or
+/// black-on-white bar; in the others it is left as a white-on-blue mark that still shows the
+/// place (the page in view, the open entry) without claiming the keys. Blue only fills here,
+/// it never colours text.
+fn focus_cue(mut lines: Vec<Line<'static>>, focused: bool) -> Vec<Line<'static>> {
+    if focused {
+        return lines;
+    }
+    let bars = [Some(Tt::Cyan.color()), Some(Tt::White.color())];
+    let black = Some(Tt::Black.color());
+    for span in lines.iter_mut().flat_map(|line| line.spans.iter_mut()) {
+        if span.style.fg == black && bars.contains(&span.style.bg) {
+            span.style = span.style.fg(Tt::White.color()).bg(Tt::Blue.color());
+        }
+    }
+    lines
+}
+
 /// The `▐` separator, one cell wide, blue on black, the column's height.
 fn separator(frame: &mut Frame, column: Rect) {
     let x = column.x + column.width;
@@ -1373,7 +1391,7 @@ pub fn render_at(
     // The entries and the reader first: in the two-column class the index slides over them.
     if let Some(r) = rects.entries {
         let lines = entries_page(state, &view, rects.reader.is_none(), r);
-        paint(frame, r, lines);
+        paint(frame, r, focus_cue(lines, view.focus == Column::Entries));
         if rects.reader.is_some() {
             separator(frame, r);
         }
@@ -1392,7 +1410,7 @@ pub fn render_at(
             .map(|(i, row)| index_line(row, usize::from(r.width), selected == Some(i), false))
             .collect();
         let shown = window(&lines, selected, usize::from(r.height)).to_vec();
-        paint(frame, r, shown);
+        paint(frame, r, focus_cue(shown, view.focus == Column::Sources));
         separator(frame, r);
     }
     if let Some((choice, _)) = view.rhythm {
@@ -2089,8 +2107,47 @@ mod tests {
     }
 
     #[test]
+    fn the_focused_column_alone_keeps_its_selection_bar() {
+        let on_row = |terminal: &Terminal<TestBackend>, x: u16, prefix: &str| {
+            let y = (1..29)
+                .find(|y| {
+                    let cells: String = (x..x + 4)
+                        .map(|x| terminal.backend().buffer()[(x, *y)].symbol().to_string())
+                        .collect();
+                    cells == prefix
+                })
+                .expect("the row is listed");
+            terminal.backend().buffer()[(x, y)].clone()
+        };
+        let mut state = reading_state(140, 30, rows());
+        for (focus, index_bg, index_fg) in [
+            (Column::Sources, Tt::Cyan, Tt::Black),
+            (Column::Entries, Tt::Blue, Tt::White),
+            (Column::Reader, Tt::Blue, Tt::White),
+        ] {
+            state.set_focus(focus);
+            let cell = on_row(&draw_terminal(&state, 140, 30), 0, "412 ");
+            assert_eq!(cell.bg, index_bg.color(), "{focus:?}");
+            assert_eq!(cell.fg, index_fg.color(), "{focus:?}");
+        }
+    }
+
+    #[test]
+    fn focus_cue_only_recolours_selection_bars_of_unfocused_columns() {
+        let bar = entry_line(Some("Titre"), true, false, 12, true);
+        let plain = entry_line(Some("Titre"), true, false, 12, false);
+        let kept = focus_cue(vec![bar.clone(), plain.clone()], true);
+        assert_eq!(kept, vec![bar.clone(), plain.clone()]);
+        let rest = focus_cue(vec![bar, plain.clone()], false);
+        assert_eq!(rest[0].spans[1].style.bg, Some(Tt::Blue.color()));
+        assert_eq!(rest[0].spans[1].style.fg, Some(Tt::White.color()));
+        assert_eq!(rest[1], plain);
+    }
+
+    #[test]
     fn the_index_follows_the_source_and_the_separators_are_blue_blocks() {
-        let state = reading_state(140, 30, rows());
+        let mut state = reading_state(140, 30, rows());
+        state.set_focus(Column::Sources);
         let terminal = draw_terminal(&state, 140, 30);
         let buffer = terminal.backend().buffer();
         // The selected page (412) is black on cyan; the separators sit at 22 and 51.

@@ -8,7 +8,9 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 use ressac_core::store::{EntryDetail, EntryRow, ListFilter};
 
 use super::article::{BodyLook, draw_body};
@@ -64,12 +66,22 @@ const FOCUS: Style = Style::new().fg(Color::Cyan);
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
 const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
+/// The focused column's title: the accent colour in reverse video, bold, so ←/→ is never a guess.
+const FOCUS_TITLE: Style = FOCUS.add_modifier(Modifier::REVERSED.union(Modifier::BOLD));
 
+/// A column's frame: the focused one has a double border in the accent colour and a reversed
+/// title; every other one a plain dim grey border and a dim title.
 fn frame_block(title: &str, focused: bool) -> Block<'static> {
+    let (border_type, border, title_style) = if focused {
+        (BorderType::Double, FOCUS, FOCUS_TITLE)
+    } else {
+        (BorderType::Plain, DIM, DIM)
+    };
     Block::default()
         .borders(Borders::ALL)
-        .border_style(if focused { FOCUS } else { DIM })
-        .title(Span::raw(format!(" {title} ")))
+        .border_type(border_type)
+        .border_style(border)
+        .title(Span::styled(format!(" {title} "), title_style))
 }
 
 pub fn render(frame: &mut Frame, state: &ReaderState, images: &mut ImageStore) -> ReaderMetrics {
@@ -802,7 +814,7 @@ mod tests {
             for y in 1..height - 1 {
                 let symbol = buffer[(edge, y)].symbol();
                 assert!(
-                    matches!(symbol, "│" | "┐" | "┘"),
+                    matches!(symbol, "│" | "┐" | "┘" | "║" | "╗" | "╝"),
                     "row {y} spills past the column: {symbol:?}\n{out}"
                 );
             }
@@ -1506,5 +1518,33 @@ mod tests {
                 .map(|l| l.label.as_str()),
             Some("Cemetery")
         );
+    }
+
+    #[test]
+    fn the_focused_column_is_framed_in_double_accent_with_a_reversed_title() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::Widget;
+        let draw = |focused: bool| {
+            let area = Rect::new(0, 0, 12, 3);
+            let mut buffer = Buffer::empty(area);
+            frame_block("Sources", focused).render(area, &mut buffer);
+            buffer
+        };
+        let (on, off) = (draw(true), draw(false));
+        assert_eq!(on[(0, 0)].symbol(), "╔");
+        assert_eq!(off[(0, 0)].symbol(), "┌");
+        assert_eq!(on[(0, 0)].fg, Color::Cyan);
+        assert_eq!(off[(0, 0)].fg, Color::DarkGray);
+        // The title text starts after the corner and one space.
+        let (title_on, title_off) = (&on[(2, 0)], &off[(2, 0)]);
+        assert_eq!(title_on.symbol(), "S");
+        assert_eq!(title_on.fg, Color::Cyan);
+        assert!(
+            title_on
+                .modifier
+                .contains(Modifier::REVERSED | Modifier::BOLD)
+        );
+        assert_eq!(title_off.fg, Color::DarkGray);
+        assert!(!title_off.modifier.contains(Modifier::REVERSED));
     }
 }
