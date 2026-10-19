@@ -4,5 +4,5 @@ mod line;
 mod pick;
 pub mod state_file;
 
-pub use line::{DEFAULT_WIDTH, line, parse_token};
+pub use line::{DEFAULT_WIDTH, has_visible_title, line, parse_token};
 pub use pick::{Rng, TickerState, next, slot};

@@ -1283,3 +1283,18 @@ fn ticker_open_is_silent() {
     assert_eq!(stdout(&out), "");
     assert_eq!(stderr(&out), "");
 }
+
+#[cfg(unix)]
+#[test]
+fn ticker_survives_an_unwritable_log_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let logs = home.path().join("Library/Logs/Ressac");
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = ressac(home.path(), &["ticker", "--tmux"]);
+    std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    assert_eq!(stdout(&out), "\n");
+    assert_eq!(stderr(&out), "");
+}

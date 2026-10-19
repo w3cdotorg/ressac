@@ -119,11 +119,18 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
 
 /// Daily-rotated log file in ~/Library/Logs/Ressac, mirrored to stderr with `-v`.
 fn init_logging(verbose: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_appender::rolling::{RollingFileAppender, Rotation};
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let dir = PathBuf::from(std::env::var_os("HOME")?).join("Library/Logs/Ressac");
     std::fs::create_dir_all(&dir).ok()?;
-    let (writer, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::daily(dir, "ressac.log"));
+    // `rolling::daily` panics when the directory is not writable; a status-bar helper must
+    // never print that, so no file logging in that case.
+    let appender = RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("ressac.log")
+        .build(dir)
+        .ok()?;
+    let (writer, guard) = tracing_appender::non_blocking(appender);
     let file_layer = fmt::layer().with_writer(writer).with_ansi(false);
     let stderr_layer = verbose.then(|| fmt::layer().with_writer(std::io::stderr));
     tracing_subscriber::registry()

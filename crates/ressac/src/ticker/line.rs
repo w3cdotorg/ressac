@@ -36,6 +36,12 @@ pub fn line(entry: &TickerEntry, width: usize, tmux: bool) -> String {
     out
 }
 
+/// Whether the title still shows something once control characters and Unicode whitespace
+/// (tabs, newlines, NBSP: SQLite's `trim` only strips spaces) are removed.
+pub fn has_visible_title(entry: &TickerEntry) -> bool {
+    !strip_controls(&entry.title).trim().is_empty()
+}
+
 /// The tmux range argument that identifies an entry: `rs{id}`.
 pub fn token(entry_id: i64) -> String {
     format!("rs{entry_id}")
@@ -115,6 +121,16 @@ mod tests {
             })
             .collect::<String>()
             .replace("##", "#")
+    }
+
+    #[test]
+    fn a_title_blank_after_cleaning_is_not_visible() {
+        for blank in ["", "   ", "\t\n", "\u{a0}", "\u{7}\u{200b}\u{2003}"] {
+            // U+200B is not whitespace for `trim`: only the ones that are must be rejected.
+            let visible = has_visible_title(&entry(1, "Feed", blank));
+            assert_eq!(visible, blank.contains('\u{200b}'), "{blank:?}");
+        }
+        assert!(has_visible_title(&entry(1, "Feed", " a ")));
     }
 
     #[test]

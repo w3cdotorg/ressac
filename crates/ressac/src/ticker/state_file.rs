@@ -32,23 +32,23 @@ pub fn save(path: &Path, state: &TickerState) -> io::Result<()> {
 }
 
 /// Takes `ticker.json.lock`, polling every 20 ms for at most `wait`. The lock lasts as long as
-/// the returned file. `None` when someone else holds it, or when the directory is missing
-/// (this never creates it).
-pub fn lock(path: &Path, wait: Duration) -> Option<File> {
+/// the returned file. `Ok(None)` when someone else still holds it after the wait; `Err` when
+/// the lock file cannot be opened or created, e.g. the directory is missing (this never
+/// creates it).
+pub fn lock(path: &Path, wait: Duration) -> io::Result<Option<File>> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(sibling(path, ".lock"))
-        .ok()?;
+        .open(sibling(path, ".lock"))?;
     let deadline = Instant::now() + wait;
     loop {
         match file.try_lock() {
-            Ok(()) => return Some(file),
+            Ok(()) => return Ok(Some(file)),
             Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                 std::thread::sleep(POLL);
             }
-            Err(_) => return None,
+            Err(_) => return Ok(None),
         }
     }
 }
@@ -103,17 +103,19 @@ mod tests {
     fn lock_is_exclusive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ticker.json");
-        let first = lock(&path, Duration::from_millis(50)).expect("first lock");
-        assert!(lock(&path, Duration::from_millis(50)).is_none());
+        let first = lock(&path, Duration::from_millis(50)).unwrap();
+        assert!(first.is_some());
+        assert!(lock(&path, Duration::from_millis(50)).unwrap().is_none());
         drop(first);
-        assert!(lock(&path, Duration::from_millis(50)).is_some());
+        assert!(lock(&path, Duration::from_millis(50)).unwrap().is_some());
     }
 
     #[test]
     fn lock_in_a_missing_directory_creates_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("missing");
-        assert!(lock(&sub.join("ticker.json"), Duration::from_millis(50)).is_none());
+        let err = lock(&sub.join("ticker.json"), Duration::from_millis(50)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert!(!sub.exists());
     }
 }

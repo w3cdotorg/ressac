@@ -42,9 +42,22 @@ fn pick(
     width: usize,
     now: DateTime<Utc>,
 ) -> anyhow::Result<String> {
-    let guard = state_file::lock(state_path, LOCK_WAIT);
+    let guard = match state_file::lock(state_path, LOCK_WAIT) {
+        Ok(guard) => guard,
+        Err(e) => {
+            // No state directory is the normal case when Ressac never ran: not worth a warning.
+            let missing = e.kind() == std::io::ErrorKind::NotFound;
+            if missing {
+                tracing::debug!("ticker: no state directory, printing nothing: {e}");
+            } else {
+                tracing::warn!("ticker: cannot open the state lock, printing nothing: {e}");
+            }
+            return Ok(String::new());
+        }
+    };
     let store = Store::open_existing_query_only(&g.db)?;
-    let pool = store.ticker_pool(now)?;
+    let mut pool = store.ticker_pool(now)?;
+    pool.retain(ticker::has_visible_title);
     let state = state_file::load(state_path);
 
     if guard.is_none() {
@@ -94,7 +107,10 @@ fn open_entry(
     let entry = store
         .ticker_entry(id)?
         .with_context(|| format!("entry {id} cannot be opened"))?;
-    store.set_read(id, true, now)?;
+    if let Err(e) = store.set_read(id, true, now) {
+        // Spec §5 marks before opening, but a failed mark must not swallow the click.
+        tracing::warn!("ticker open {token}: cannot mark entry {id} read: {e}");
+    }
     opener(&entry.url).with_context(|| format!("cannot open {}", entry.url))
 }
 
@@ -186,7 +202,9 @@ mod tests {
         let f = fixture();
         let first = show_at(&f, "2026-10-19T12:00:01Z");
         let saved = std::fs::read(&f.state).unwrap();
-        let _held = state_file::lock(&f.state, Duration::from_millis(50)).unwrap();
+        let _held = state_file::lock(&f.state, Duration::from_millis(50))
+            .unwrap()
+            .unwrap();
         let started = std::time::Instant::now();
         let second = show_at(&f, "2026-10-19T12:00:40Z");
         assert!(started.elapsed() < Duration::from_secs(1));
@@ -276,6 +294,65 @@ mod tests {
         .unwrap();
         assert_eq!(code, ExitCode::SUCCESS);
         assert!(read_at(&f, 1).is_some());
+    }
+
+    #[test]
+    fn open_on_an_unknown_entry_changes_nothing() {
+        let f = fixture();
+        let called = RefCell::new(false);
+        let code = open(&f.g, "rs999", at(NOW), |_| {
+            *called.borrow_mut() = true;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(!*called.borrow());
+        assert!((1..=3).all(|id| read_at(&f, id).is_none()));
+    }
+
+    #[test]
+    fn open_still_opens_when_marking_read_fails() {
+        let f = fixture();
+        Connection::open(&f.g.db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER no_update BEFORE UPDATE ON entry \
+                 BEGIN SELECT RAISE(ABORT, 'read-only'); END;",
+            )
+            .unwrap();
+        let opened = RefCell::new(Vec::new());
+        let code = open(&f.g, "rs2", at(NOW), |url| {
+            opened.borrow_mut().push(url.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(*opened.borrow(), ["https://example.org/2"]);
+        assert!(read_at(&f, 2).is_none());
+    }
+
+    #[test]
+    fn titles_blank_after_cleaning_never_reach_the_bar() {
+        let f = fixture();
+        let conn = Connection::open(&f.g.db).unwrap();
+        conn.execute_batch(
+            "UPDATE entry SET title = char(9, 10) WHERE id = 1; \
+             UPDATE entry SET title = char(160) WHERE id = 2; \
+             UPDATE entry SET title = 'Visible' WHERE id = 3;",
+        )
+        .unwrap();
+        drop(conn);
+        for now in [
+            "2026-10-19T12:00:01Z",
+            "2026-10-19T12:00:16Z",
+            "2026-10-19T12:00:31Z",
+        ] {
+            let line = show_at(&f, now);
+            assert!(
+                line.contains("Feed 2") && line.contains(" · Visible"),
+                "{line}"
+            );
+        }
     }
 
     #[test]
