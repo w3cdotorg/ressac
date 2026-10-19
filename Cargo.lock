@@ -3228,6 +3228,7 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "ressac-core",
+ "rusqlite",
  "scraper",
  "serde",
  "serde_json",
