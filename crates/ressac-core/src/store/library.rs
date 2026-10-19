@@ -632,11 +632,11 @@ impl Store {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use rusqlite::params;
 
-    pub(super) fn at(s: &str) -> DateTime<Utc> {
+    pub(in crate::store) fn at(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
     }
 
@@ -661,7 +661,7 @@ mod tests {
     }
 
     /// A feed with its folder, position, page, state and stored rhythm group.
-    pub(super) fn add_feed(
+    pub(in crate::store) fn add_feed(
         s: &Store,
         id: i64,
         folder: Option<i64>,
@@ -695,7 +695,7 @@ mod tests {
     }
 
     /// An entry with its title, publication time, read and starred state, indexed for search.
-    pub(super) fn add_entry(
+    pub(in crate::store) fn add_entry(
         s: &Store,
         id: i64,
         feed: i64,
@@ -732,7 +732,7 @@ mod tests {
     }
 
     /// The latest edition: `items` as (entry, section, rank), `overflow` as (feed, section, hidden).
-    pub(super) fn add_edition(
+    pub(in crate::store) fn add_edition(
         s: &Store,
         id: i64,
         items: &[(i64, &str, u32)],

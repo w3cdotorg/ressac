@@ -15,6 +15,7 @@ mod health;
 mod library;
 pub mod pages;
 mod reading;
+mod ticker;
 
 pub use decisions::{DecisionRecord, FeedSnapshot};
 pub use edition::{EditionEntryRow, EditionOverflowRow, EditionParams, EditionRecord, EditionView};
@@ -27,6 +28,7 @@ pub use library::{
     fts_query,
 };
 pub use reading::{FulltextRow, plain_text};
+pub use ticker::{TICKER_WINDOW_DAYS, TickerEntry};
 
 /// Highest schema version this binary knows.
 pub const SCHEMA_VERSION: i64 = 4;
