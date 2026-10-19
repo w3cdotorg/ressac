@@ -1,5 +1,5 @@
 // Tests of the chart page's pure helpers (popover, tooltip, prefs, survey time, drawing commands), run with
-// `node --test apps/macos/ChartTests/`. The page itself is checked by eye in preview.html.
+// `node --test 'apps/macos/ChartTests/*.test.cjs'`. The page itself is checked by eye in preview.html.
 "use strict";
 process.env.TZ = "Europe/Paris"; // the cartouche shows local time: pin it before any Date is made
 const test = require("node:test");
@@ -138,7 +138,7 @@ test("popover_lists_entries_first_then_facts", () => {
   assert.ok(facts.startsWith(theme.name), facts);
   assert.ok(facts.includes(`folder ${node.feed.folder}`), facts);
   assert.ok(facts.includes(`page ${node.feed.page}`), facts);
-  assert.ok(facts.includes(`${node.unread} unread`), facts);
+  assert.ok(facts.includes(`${node.unread} unread this week`), facts);
 
   byClass(pop, "pop-title").dispatch("click", {});
   assert.deepEqual(opened, [node.id]);

@@ -1,4 +1,4 @@
-// Tests of the chart's pure core (layout, coasts, labels, heat), run with `node --test apps/macos/ChartTests/`.
+// Tests of the chart's pure core (layout, coasts, labels, heat), run with `node --test 'apps/macos/ChartTests/*.test.cjs'`.
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -120,6 +120,20 @@ test("labels_never_overlap", () => {
       for (let j = i + 1; j < placements.length; j++) {
         assert.ok(!meet(b, placements[j].box), `${view}: "${p.text}" (${p.kind}) overlaps "${placements[j].text}" (${placements[j].kind})`);
       }
+    }
+  }
+});
+
+test("feed_names_are_placed_busiest_first", () => {
+  // busiest by activity, then unread this week, then rhythm (spec §2): placements come out in that order
+  const rank = {daily: 0, weekly: 1, monthly: 2, rare: 3, silent: 4};
+  const before = (a, b) => (b.activity - a.activity) || (b.unread - a.unread) || (rank[a.group] - rank[b.group]);
+  for (const view of VIEWS) {
+    const data = fixture(), nodes = core.place(data, view), node = byId(nodes);
+    const named = core.labels(nodes, data, view, measure).filter(p => p.kind === "feed" || p.kind === "ed").map(p => node.get(p.id));
+    assert.ok(named.length > 10, view);
+    for (let i = 1; i < named.length; i++) {
+      assert.ok(before(named[i - 1], named[i]) <= 0, `${view}: ${named[i - 1].title} placed before busier ${named[i].title}`);
     }
   }
 });

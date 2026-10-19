@@ -73,7 +73,7 @@
   function facts(node, data) {
     const feed = node.feed || {}, theme = data.themes.find(t => t.key === node.theme);
     return [theme ? theme.name : core.UNCHARTED.name, feed.folder ? `folder ${feed.folder}` : null,
-      GROUP[node.group] || node.group, since(node.age), `${node.unread} unread`, feed.page != null ? `page ${feed.page}` : null]
+      GROUP[node.group] || node.group, since(node.age), `${node.unread} unread this week`, feed.page != null ? `page ${feed.page}` : null]
       .filter(Boolean).join(" · ");
   }
 

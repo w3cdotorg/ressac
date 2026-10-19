@@ -450,11 +450,12 @@
       }
     });
 
-    // feed names, busiest first: eight spots round the island, then a smaller size, then further out on a
-    // leader line; silent feeds get "ED" (existence doubtful) instead of a name
+    // feed names, busiest first (activity, then unread this week, then rhythm): eight spots round the island,
+    // then a smaller size, then further out on a leader line; silent feeds get "ED" (existence doubtful)
     const rank = {daily: 0, weekly: 1, monthly: 2, rare: 3, silent: 4};
     const order = n => rank[n.group] ?? 4;
-    nodes.slice().sort((a, b) => (b.unread - a.unread) || (order(a) - order(b))).forEach(n => {
+    const busier = (a, b) => (b.activity - a.activity) || (b.unread - a.unread) || (order(a) - order(b));
+    nodes.slice().sort(busier).forEach(n => {
       if (n.group === "silent") {
         const f = font(9, FONTS.mono), y = n.y + n.r * .9 + 9, b = box(n.x, y, measure("ED", f), 9);
         if (!hit(b) && !overIsland(b, n)) put({kind: "ed", id: n.id, text: "ED", x: n.x, y, size: 9, font: f, box: b});
