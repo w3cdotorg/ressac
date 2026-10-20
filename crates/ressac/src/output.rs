@@ -389,7 +389,6 @@ pub fn chart_text(snap: &ChartSnapshot) -> String {
     out
 }
 
-/// `ressac chart import`: what the file did, or on a dry run would do.
 /// What `ressac chart export --output` wrote, and where.
 pub fn chart_export_text(chart: &ChartImport, file: &std::path::Path) -> String {
     format!(
@@ -412,6 +411,7 @@ pub fn chart_export_unaddressable(ids: &[FeedId]) -> String {
     )
 }
 
+/// `ressac chart import`: what the file did, or on a dry run would do.
 pub fn chart_import_text(r: &ChartImportReport, dry_run: bool) -> String {
     let mut out = String::new();
     if dry_run {

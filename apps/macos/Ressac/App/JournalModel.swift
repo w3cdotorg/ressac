@@ -62,7 +62,9 @@ import Observation
     /// becomes active and at the 04:00 rollover; a call while another one runs does nothing.
     /// After a failed or offline build it waits 15 minutes; `retry()` does not.
     func checkAndBuild() async {
-        if let notBefore = automaticRetryNotBefore, clock() < notBefore { return }
+        // A window longer than the delay means the clock moved backwards: it has expired.
+        if let notBefore = automaticRetryNotBefore, clock() < notBefore,
+           notBefore.timeIntervalSince(clock()) <= Self.automaticRetryDelay { return }
         await checkAndBuildNow()
     }
 
@@ -74,6 +76,7 @@ import Observation
         do {
             guard try await database.reader.read(Queries.isEditionDue(dayStart: dayStart)) else {
                 phase = .idle
+                automaticRetryNotBefore = nil
                 return
             }
         } catch {

@@ -30,9 +30,86 @@ pub struct ParsedEntry {
 /// Decodes the HTML entities a title still holds after the XML parser: some feeds encode
 /// titles twice (`&amp;#39;` in the XML), so the parser leaves `&#39;`. One pass, never more;
 /// text without an entity comes back as it is. The only place titles are decoded: every
-/// title entering the store (parsed feeds, OPML) goes through here.
+/// title entering the store (parsed feeds, OPML) goes through here. Numeric references to
+/// the C1 controls (`&#146;`) become their windows-1252 characters, as browsers read them;
+/// a control character that is literally in the text stays one (the output neutralises it).
 pub(crate) fn decode_title_entities(title: &str) -> String {
-    html_escape::decode_html_entities(title).into_owned()
+    html_escape::decode_html_entities(&windows_1252_references(title)).into_owned()
+}
+
+/// `title` with each numeric reference to U+0080..=U+009F replaced by the windows-1252
+/// character it stands for (the five undefined ones, and every other reference, are kept for
+/// the entity decoder).
+fn windows_1252_references(title: &str) -> std::borrow::Cow<'_, str> {
+    // The 32 characters of 0x80..=0x9F in windows-1252; `None` where it defines none.
+    const TABLE: [Option<char>; 32] = [
+        Some('€'),
+        None,
+        Some('‚'),
+        Some('ƒ'),
+        Some('„'),
+        Some('…'),
+        Some('†'),
+        Some('‡'),
+        Some('ˆ'),
+        Some('‰'),
+        Some('Š'),
+        Some('‹'),
+        Some('Œ'),
+        None,
+        Some('Ž'),
+        None,
+        None,
+        Some('‘'),
+        Some('’'),
+        Some('“'),
+        Some('”'),
+        Some('•'),
+        Some('–'),
+        Some('—'),
+        Some('˜'),
+        Some('™'),
+        Some('š'),
+        Some('›'),
+        Some('œ'),
+        None,
+        Some('ž'),
+        Some('Ÿ'),
+    ];
+    if !title.contains("&#") {
+        return title.into();
+    }
+    let mut out = String::with_capacity(title.len());
+    let mut rest = title;
+    while let Some(at) = rest.find("&#") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 2..];
+        let (digits, radix) = match after.strip_prefix(['x', 'X']) {
+            Some(hex) => (hex, 16),
+            None => (after, 10),
+        };
+        let len = digits
+            .find(|c: char| !c.is_digit(radix))
+            .unwrap_or(digits.len());
+        let mapped = digits[len..]
+            .starts_with(';')
+            .then(|| u32::from_str_radix(&digits[..len], radix).ok())
+            .flatten()
+            .filter(|n| (0x80..=0x9F).contains(n))
+            .and_then(|n| TABLE[n as usize - 0x80]);
+        match mapped {
+            Some(c) => {
+                out.push(c);
+                rest = &digits[len + 1..];
+            }
+            None => {
+                out.push_str("&#");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.into()
 }
 
 const HTML_SNIFF_BYTES: usize = 512;
@@ -691,6 +768,21 @@ mod tests {
         assert_eq!(decode_title_entities("&amp;#39;"), "&#39;");
         assert_eq!(decode_title_entities("plain & text"), "plain & text");
         assert_eq!(decode_title_entities("&notanentity; &"), "&notanentity; &");
+    }
+
+    #[test]
+    fn decode_title_entities_maps_c1_references_to_windows_1252() {
+        assert_eq!(decode_title_entities("l&#146;a"), "l\u{2019}a");
+        assert_eq!(decode_title_entities("l&amp;#146;a"), "l&#146;a");
+        assert_eq!(
+            decode_title_entities("&#150; &#133; &#128;"),
+            "\u{2013} \u{2026} \u{20ac}"
+        );
+        // Undefined in windows-1252: left as they are.
+        assert_eq!(
+            decode_title_entities("&#129;&#141;&#143;&#144;&#157;"),
+            "\u{81}\u{8d}\u{8f}\u{90}\u{9d}"
+        );
     }
 
     #[test]

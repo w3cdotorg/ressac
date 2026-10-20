@@ -277,6 +277,41 @@ actor SleepLog {
         #expect(try builds(stub) == 3)
     }
 
+    @Test func finding_the_edition_not_due_clears_the_window() async throws {
+        let (state, test, stub) = try makeState(stub: editionStub)
+        defer { withExtendedLifetime(test) {} }
+        try test.execute("DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;")
+        let clock = TestClock("2026-10-16T07:30:00.000Z")
+        let journal = JournalModel(database: state.database, coordinator: state.runs,
+                                   clock: { clock.now }, calendar: .paris)
+        try flag(stub, "fail")
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 1)
+        try seedEdition(test, builtAt: "2026-10-16T07:31:00.000Z")  // built elsewhere meanwhile
+        clock.advance(minutes: 2)
+        await journal.retry()  // not due: nothing built, and the window goes
+        #expect(journal.phase == .idle)
+        #expect(try builds(stub) == 1)
+        try test.execute("DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;")
+        clock.advance(minutes: 1)  // 3 minutes after the failure: the window would still hold
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 2)
+    }
+
+    @Test func a_clock_moved_backwards_expires_the_window() async throws {
+        let (state, test, stub) = try makeState(stub: editionStub)
+        defer { withExtendedLifetime(test) {} }
+        try test.execute("DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;")
+        let clock = TestClock("2026-10-16T07:30:00.000Z")
+        let journal = JournalModel(database: state.database, coordinator: state.runs,
+                                   clock: { clock.now }, calendar: .paris)
+        try flag(stub, "fail")
+        await journal.checkAndBuild()
+        clock.advance(minutes: -60)  // the clock is an hour behind the failure
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 2)
+    }
+
     @Test func a_build_turned_away_by_another_long_run_stays_due() async throws {
         let (journal, state, test, stub) = try makeJournal()
         defer { withExtendedLifetime(test) {} }  // the temporary database goes with it

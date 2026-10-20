@@ -92,8 +92,12 @@ fn export(g: &Globals, output: Option<&Path>, out: &mut impl Write) -> anyhow::R
     text.push('\n');
     match output {
         Some(file) => {
-            std::fs::write(file, &text)
-                .with_context(|| format!("cannot write {}", file.display()))?;
+            write_replacing(file, &text).with_context(|| {
+                format!(
+                    "cannot write {}",
+                    output::printable(&file.display().to_string())
+                )
+            })?;
             writeln!(out, "{}", output::chart_export_text(&export.chart, file))?;
         }
         None => write!(out, "{text}")?,
@@ -107,6 +111,23 @@ fn export(g: &Globals, output: Option<&Path>, out: &mut impl Write) -> anyhow::R
     Ok(ExitCode::SUCCESS)
 }
 
+/// Writes `text` to a temporary file beside `file`, then renames it over `file`: a failed
+/// write leaves the old file whole instead of a truncated backup.
+fn write_replacing(file: &Path, text: &str) -> std::io::Result<()> {
+    let name = file
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file name"))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = file.with_file_name(tmp_name);
+    let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, file));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// The report's counts and lists, with whether it was a dry run.
 fn report_json(report: &ChartImportReport, dry_run: bool) -> serde_json::Value {
     let mut v = serde_json::to_value(report).expect("the report serializes");
@@ -117,6 +138,24 @@ fn report_json(report: &ChartImportReport, dry_run: bool) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_replacing_replaces_and_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("seas.json");
+        std::fs::write(&file, "old").unwrap();
+        write_replacing(&file, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn write_replacing_failure_keeps_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("missing-dir").join("seas.json");
+        assert!(write_replacing(&file, "x").is_err());
+        assert!(!file.exists());
+    }
 
     #[test]
     fn report_json_carries_the_dry_run_flag() {
