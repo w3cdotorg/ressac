@@ -160,7 +160,7 @@ Ported from the mockup, split in two classic scripts (no ES modules: they load f
 ## 11. Acceptance (with Clément, after the code is complete — not part of the automated run)
 
 1. Generate the seed import file from the mockup's `themes.py` (feed ids → `xml_url`), dry-run it against a copy of the real database, then import it into the real database with Clément's go.
-2. Rebuild the app (with Clément's go, Ressac quit); open the Sea Chart, check both views and the four inks, hover, popover, entry links, click → main window.
+2. Rebuild the app (with Clément's go, Ressac quit); open the Sea Chart, check both views and both inks, hover, popover, entry links, click → main window.
 3. Change a feed's theme in the garden inspector: the chart redraws within a few seconds, the island moves to its new sea.
 4. Full screen on the second display; animation toggle; Reduce Motion.
 
