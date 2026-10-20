@@ -208,7 +208,7 @@ fn verdict(
             err.clue(),
             upgrade,
         );
-        if unconfirmed_gone(ev) {
+        if awaits_confirmation(ev) {
             v.bullets.push(
                 "It worked on the fetch before; the next fetch will tell if it is gone.".into(),
             );
@@ -343,22 +343,23 @@ fn is_definitive_off_site(err: &ErrorKind, target: &str) -> bool {
     }
 }
 
-/// Whether the last meaningful attempt is a 404/410 right after one that worked. A whole
-/// host can answer that way for a few hours (YouTube, 20/10/2026), so the next fetch has
-/// to confirm it before the feed is Dead.
-fn unconfirmed_gone(ev: &FeedEvidence) -> bool {
+/// Whether the last meaningful attempt is a 404/410 or NXDOMAIN right after one that
+/// worked. A whole host can answer 404 for a few hours (YouTube, 20/10/2026), and one
+/// host's DNS can fail without tripping the network guard, so the next fetch has to
+/// confirm it before the feed is Dead.
+fn awaits_confirmation(ev: &FeedEvidence) -> bool {
     let mut meaningful = ev.attempts.iter().filter(|a| !a.network_suspect);
     matches!(
         meaningful.next().and_then(|a| a.error.as_ref()),
-        Some(ErrorKind::Http(404 | 410))
+        Some(ErrorKind::Http(404 | 410) | ErrorKind::Dns)
     ) && meaningful.next().is_some_and(|a| a.error.is_none())
 }
 
-/// Dead rule (spec §7): 404/410 on the last meaningful attempt, unless the one before
-/// worked; NXDOMAIN; a redirect to another site that serves no feed; or a long enough
-/// streak of failures.
+/// Dead rule (spec §7): 404/410 or NXDOMAIN on the last meaningful attempt, unless the one
+/// before worked; a redirect to another site that serves no feed; or a long enough streak
+/// of failures.
 pub fn dead_reason(ev: &FeedEvidence) -> Option<DeadReason> {
-    if unconfirmed_gone(ev) {
+    if awaits_confirmation(ev) {
         return None;
     }
     let meaningful: Vec<&AttemptRecord> =
@@ -610,8 +611,34 @@ mod tests {
         }
     }
 
+    /// Same wait for a domain that stops resolving: one host's DNS can fail for a few
+    /// hours without tripping the network guard, which needs most of the run to fail.
     #[test]
-    fn unconfirmed_gone_skips_network_suspects_and_adopts_nothing() {
+    fn unresolvable_right_after_a_working_fetch_waits_for_confirmation() {
+        let d = diagnose(&ev(vec![failed(0, ErrorKind::Dns), ok(1)], vec![entry(3)]));
+        assert_eq!(d.status, Status::Ailing);
+        assert_eq!(d.evidence.clue, "DNS");
+        assert_eq!(d.action, None);
+        assert_eq!(
+            d.evidence.bullets.last().unwrap(),
+            "It worked on the fetch before; the next fetch will tell if it is gone."
+        );
+        let confirmed = diagnose(&ev(
+            vec![failed(0, ErrorKind::Dns), failed(1, ErrorKind::Dns), ok(2)],
+            vec![entry(3)],
+        ));
+        assert_eq!(confirmed.status, Status::Dead);
+        assert_eq!(confirmed.reason, "The domain no longer resolves.");
+        let first = diagnose(&ev(vec![failed(0, ErrorKind::Dns)], vec![]));
+        assert_eq!(
+            first.status,
+            Status::Dead,
+            "a first fetch has nothing to wait for"
+        );
+    }
+
+    #[test]
+    fn awaiting_confirmation_skips_network_suspects_and_adopts_nothing() {
         let mut suspect = failed(1, ErrorKind::Dns);
         suspect.network_suspect = true;
         let mut e = ev(
