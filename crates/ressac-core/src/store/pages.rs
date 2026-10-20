@@ -169,6 +169,91 @@ fn is_hundred(page: u16) -> bool {
     page.is_multiple_of(100) && (200..=700).contains(&page)
 }
 
+/// The range a root folder's contents take: the rest of its hundred. A root folder without
+/// a hundred of its own (overflow, or renumbered by hand) has none.
+fn contents_range(folder_page: Option<u16>) -> Option<RangeInclusive<u16>> {
+    folder_page
+        .filter(|p| is_hundred(*p))
+        .map(|h| h + 1..=h + 99)
+}
+
+/// Where a feed's page comes from, by the rules of `assign_missing`.
+enum Home {
+    /// The root feeds' 110–199, or a root folder's hundred.
+    Range(RangeInclusive<u16>),
+    /// The overflow pool: a root folder without a hundred and everything inside it.
+    Pool,
+}
+
+impl Home {
+    /// A page that already belongs to the home, so a move there keeps it. The pool has no
+    /// home of its own to keep a page in: a feed entering it always takes a pool number.
+    fn holds(&self, page: u16) -> bool {
+        matches!(self, Home::Range(range) if range.contains(&page))
+    }
+
+    fn lowest_free(&self, used: &BTreeSet<u16>) -> Option<u16> {
+        match self {
+            Home::Range(range) => lowest_free(used, range.clone()),
+            Home::Pool => pool_next(used),
+        }
+    }
+}
+
+/// Every number held by a folder or a feed (buried and merged feeds included).
+fn used_pages(conn: &Connection) -> Result<BTreeSet<u16>> {
+    let mut stmt = conn.prepare(
+        "SELECT page FROM folder WHERE page IS NOT NULL UNION SELECT page FROM feed WHERE page IS NOT NULL",
+    )?;
+    let pages = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<BTreeSet<u16>>>()?;
+    Ok(pages)
+}
+
+/// The home of the feeds of `folder` (`None` = the root): a subfolder's feeds use the range
+/// of its root folder. Refuses an unknown folder.
+fn home_of(conn: &Connection, folder: Option<i64>) -> Result<Home> {
+    let Some(mut id) = folder else {
+        return Ok(Home::Range(ROOT_FEEDS));
+    };
+    loop {
+        let row: Option<(Option<i64>, Option<u16>)> = conn
+            .query_row(
+                "SELECT parent_id, page FROM folder WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((parent, page)) = row else {
+            return Err(Error::UnknownFolder(id));
+        };
+        match parent {
+            Some(parent) => id = parent,
+            None => return Ok(contents_range(page).map_or(Home::Pool, Home::Range)),
+        }
+    }
+}
+
+/// The page a feed holds after moving into `folder` (`None` = the root): the one it holds
+/// when that is already in the new home, else the lowest free page of the home, else (home
+/// full) the one it holds. Reads only; the caller writes.
+pub(crate) fn page_after_move(
+    conn: &Connection,
+    current: Option<u16>,
+    folder: Option<i64>,
+) -> Result<Option<u16>> {
+    let home = home_of(conn, folder)?;
+    if current.is_some_and(|page| home.holds(page)) {
+        return Ok(current);
+    }
+    let mut used = used_pages(conn)?;
+    if let Some(page) = current {
+        used.remove(&page); // free as soon as the feed leaves it
+    }
+    Ok(home.lowest_free(&used).or(current))
+}
+
 /// What one pass of `assign_missing` has decided so far.
 struct Assignment {
     used: BTreeSet<u16>,
@@ -233,7 +318,7 @@ pub fn assign_missing(conn: &Connection) -> Result<usize> {
                     (root_folders < ROOT_HUNDREDS).then(|| (root_folders as u16 + 2) * 100);
                 root_folders += 1;
                 let page = pass.place(node, hundred.map(|h| h..=h));
-                let home = page.filter(|p| is_hundred(*p)).map(|h| h + 1..=h + 99);
+                let home = contents_range(page);
                 let mut inside = Vec::new();
                 tree.descendants(node.id, &mut inside);
                 for child in inside {

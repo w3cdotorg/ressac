@@ -17,6 +17,15 @@ struct Summary: Decodable, Sendable, Equatable {
     }
 }
 
+/// The part of the core's `added` event the app shows: the new feed, the theme it took
+/// (nil when it sails the uncharted waters) and the sibling it was matched with, if any.
+struct AddedFeed: Sendable, Equatable {
+    var id: Int64
+    var title: String
+    var theme: String?
+    var like: String?
+}
+
 /// One NDJSON line printed by `ressac --json` (the core's `service::Event`,
 /// `#[serde(tag = "event", rename_all = "snake_case")]`).
 enum EngineEvent: Decodable, Sendable, Equatable {
@@ -34,13 +43,15 @@ enum EngineEvent: Decodable, Sendable, Equatable {
     case edition(id: Int64, entries: Int, overflow: Int, unreachable: Int)
     /// `feed cadence`: the feed's effective group and whether Clément set it.
     case cadence(feedId: Int64, group: String, isOverride: Bool)
+    /// `add`: the feed that was inserted (the fetch events come before it).
+    case added(AddedFeed)
     /// A JSON object this build does not know (for example the `import --json` report,
     /// which has no `event` key). Holds the raw line.
     case unknown(String)
 
     private enum CodingKeys: String, CodingKey {
         case event, total, title, error, failed, attempted, what, found, summary, ok, decision
-        case id, entries, overflow, unreachable, group
+        case id, entries, overflow, unreachable, group, theme, like
         case feedId = "feed_id"
         case entryId = "entry_id"
         case isOverride = "override"
@@ -85,6 +96,11 @@ enum EngineEvent: Decodable, Sendable, Equatable {
             self = .cadence(
                 feedId: try c.decode(Int64.self, forKey: .feedId), group: try c.decode(String.self, forKey: .group),
                 isOverride: try c.decode(Bool.self, forKey: .isOverride))
+        case "added":
+            self = .added(AddedFeed(
+                id: try c.decode(Int64.self, forKey: .id), title: try c.decode(String.self, forKey: .title),
+                theme: try c.decodeIfPresent(String.self, forKey: .theme),
+                like: try c.decodeIfPresent(String.self, forKey: .like)))
         default:
             throw UnknownTag()
         }

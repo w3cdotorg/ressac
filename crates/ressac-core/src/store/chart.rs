@@ -2,12 +2,13 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::Store;
 use crate::error::{Error, Result};
 use crate::model::FeedId;
+use crate::url_key::host_key;
 
 /// A theme as written in the import file: a stable key, a display name and the sea's name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +67,116 @@ fn check_theme_key(key: &str) -> Result<()> {
     Err(Error::Invalid(format!("Theme key \"{key}\" {problem}.")))
 }
 
+/// Active feeds on the same site as `host` (a `host_key`, compared with the host of each
+/// feed's `html_url`, else `xml_url`), by feed id, each with its theme id.
+pub(super) fn siblings_by_host(
+    conn: &Connection,
+    host: &str,
+) -> Result<Vec<(FeedId, Option<i64>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, theme_id, COALESCE(html_url, xml_url) FROM feed \
+         WHERE state = 'active' ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, FeedId>(0)?,
+            r.get::<_, Option<i64>>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut siblings = Vec::new();
+    for row in rows {
+        let (id, theme_id, url) = row?;
+        if host_key(&url).as_deref() == Some(host) {
+            siblings.push((id, theme_id));
+        }
+    }
+    Ok(siblings)
+}
+
+/// The theme most siblings share; a tie goes to the theme of the lowest feed id. Returns
+/// that theme id and the lowest-id sibling holding it. `None` when no sibling has a theme.
+pub(super) fn majority_theme(siblings: &[(FeedId, Option<i64>)]) -> Option<(i64, FeedId)> {
+    let mut tally: Vec<(i64, FeedId, usize)> = Vec::new();
+    // `siblings` is ordered by feed id, so the first sighting is the lowest id.
+    for &(id, theme) in siblings {
+        let Some(theme) = theme else { continue };
+        match tally.iter_mut().find(|t| t.0 == theme) {
+            Some(t) => t.2 += 1,
+            None => tally.push((theme, id, 1)),
+        }
+    }
+    // `max_by_key` keeps the last maximum, so rank ties by the lower id explicitly.
+    tally
+        .into_iter()
+        .max_by_key(|&(_, first, count)| (count, std::cmp::Reverse(first)))
+        .map(|(theme, first, _)| (theme, first))
+}
+
+/// Appends `feed` to the lowest-id territory (never a continent) any of `siblings` belongs
+/// to, after its feeds; returns that territory's name. `None` when no sibling is in one.
+pub(super) fn join_sibling_territory(
+    conn: &Connection,
+    siblings: &[(FeedId, Option<i64>)],
+    feed: FeedId,
+) -> Result<Option<String>> {
+    let mut found: Option<(i64, String)> = None;
+    for &(sibling, _) in siblings {
+        let row: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT t.id, t.name FROM territory_feed tf JOIN territory t ON t.id = tf.territory_id \
+                 WHERE tf.feed_id = ?1 AND t.kind = 'territory' ORDER BY t.id LIMIT 1",
+                [sibling],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some(row) = row
+            && found.as_ref().is_none_or(|f| row.0 < f.0)
+        {
+            found = Some(row);
+        }
+    }
+    let Some((territory, name)) = found else {
+        return Ok(None);
+    };
+    conn.execute(
+        "INSERT INTO territory_feed (territory_id, feed_id, position) VALUES (?1, ?2, \
+         (SELECT COALESCE(max(position) + 1, 0) FROM territory_feed WHERE territory_id = ?1))",
+        params![territory, feed],
+    )?;
+    Ok(Some(name))
+}
+
+/// The id and definition of the theme `given` names (see `Store::resolve_theme`).
+pub(super) fn resolve_theme_in(conn: &Connection, given: &str) -> Result<(i64, ThemeDef)> {
+    let mut stmt =
+        conn.prepare("SELECT id, key, name, sea_name FROM theme ORDER BY position, id")?;
+    let all = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                ThemeDef {
+                    key: r.get(1)?,
+                    name: r.get(2)?,
+                    sea: r.get(3)?,
+                },
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let wanted = given.trim().to_lowercase();
+    let found = all.iter().position(|(_, t)| t.key == given).or_else(|| {
+        all.iter()
+            .position(|(_, t)| t.name.trim().to_lowercase() == wanted)
+    });
+    match found {
+        Some(i) => Ok(all.into_iter().nth(i).expect("index from position")),
+        None => Err(Error::UnknownTheme {
+            given: given.to_owned(),
+            keys: all.into_iter().map(|(_, t)| t.key).collect(),
+        }),
+    }
+}
+
 impl Store {
     /// Themes in `position` order.
     pub fn themes(&self) -> Result<Vec<ThemeDef>> {
@@ -82,17 +193,18 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Sets a feed's theme, or clears it with `None`. Buried feeds are allowed.
-    pub fn set_feed_theme(&self, feed: FeedId, key: Option<&str>) -> Result<()> {
-        let theme_id = match key {
-            Some(key) => Some(
-                self.conn()
-                    .query_row("SELECT id FROM theme WHERE key = ?1", [key], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                    .optional()?
-                    .ok_or_else(|| Error::UnknownTheme(key.to_owned()))?,
-            ),
+    /// The theme `given` names: its key exactly, else its name compared case-insensitively
+    /// after trimming. `UnknownTheme` (listing the valid keys) when neither matches. Every
+    /// place that turns typed text into a theme goes through here.
+    pub fn resolve_theme(&self, given: &str) -> Result<ThemeDef> {
+        resolve_theme_in(self.conn(), given).map(|(_, def)| def)
+    }
+
+    /// Sets a feed's theme, given by key or name, or clears it with `None`. Buried feeds
+    /// are allowed.
+    pub fn set_feed_theme(&self, feed: FeedId, given: Option<&str>) -> Result<()> {
+        let theme_id = match given {
+            Some(given) => Some(resolve_theme_in(self.conn(), given)?.0),
             None => None,
         };
         let changed = self.conn().execute(
@@ -341,10 +453,13 @@ mod tests {
         let s = store_with_feeds(1);
         let err = s.set_feed_theme(1, Some("nope")).unwrap_err();
         assert!(
-            matches!(&err, Error::UnknownTheme(k) if k == "nope"),
+            matches!(&err, Error::UnknownTheme { given, .. } if given == "nope"),
             "{err:?}"
         );
-        assert_eq!(err.to_string(), "No theme \"nope\".");
+        assert_eq!(
+            err.to_string(),
+            "No theme \"nope\". No themes yet: import them with ressac chart import."
+        );
         let err = s.set_feed_theme(99, None).unwrap_err();
         assert!(matches!(err, Error::UnknownFeed(99)), "{err:?}");
     }

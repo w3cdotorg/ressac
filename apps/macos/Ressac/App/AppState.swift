@@ -61,6 +61,11 @@ enum PendingPanel: Equatable, Sendable {
     case importOPML, exportOPML
 }
 
+/// Sheets the window presents (File ▸ Add Feed…).
+enum PendingSheet: Equatable, Sendable {
+    case addFeed
+}
+
 /// The window's state and every command the menus and keys trigger (spec §7). Views
 /// stay thin: they read this object and call its methods.
 @MainActor @Observable final class AppState {
@@ -89,6 +94,9 @@ enum PendingPanel: Equatable, Sendable {
     /// The feed selected in the Garden table; garden commands act on it.
     var selectedFeedId: Int64?
     var pendingPanel: PendingPanel?
+    var pendingSheet: PendingSheet?
+    /// What the last added feed took ("In Tech, like Daring Fireball."), shown under the window for a few seconds.
+    var addFeedNote: String?
 
     // MARK: Data
 
@@ -608,6 +616,46 @@ enum PendingPanel: Equatable, Sendable {
     @discardableResult
     func setTheme(feedId: Int64, key: String?) -> Task<RunOutcome, Never> {
         runs.start(.setTheme(feedId: feedId, key: key))
+    }
+
+    /// A drag of a feed onto a folder (nil: the "Feeds" header, the top level). Returns whether the drop was taken.
+    @discardableResult
+    func dropFeeds(_ items: [String], onto folder: Int64?) -> Bool {
+        guard let feedId = FeedDrop.feedId(in: items), let feed = sidebar.feeds.first(where: { $0.feedId == feedId }),
+              case let .move(target) = FeedDrop.decide(currentFolder: feed.folderId, dropFolder: folder)
+        else { return false }
+        moveFeed(feedId, to: target)
+        return true
+    }
+
+    /// Runs `ressac feed move`; the core renumbers the page. The sidebar reloads through the file
+    /// monitor. The selection is keyed by feed id, which a move does not change, and is never blank
+    /// (it is not optional), so there is nothing to restore and a source picked meanwhile is kept.
+    @discardableResult
+    func moveFeed(_ feedId: Int64, to folder: Int64?) -> Task<RunOutcome, Never> {
+        runs.start(.moveFeed(id: feedId, folder: folder))
+    }
+
+    /// Runs `ressac add` (spec add-feed §7). On success the new feed is selected and `addFeedNote`
+    /// says where it landed; the caller closes the sheet. Failures come back as the run's failure.
+    func addFeed(address: String, theme: String?) async -> Result<AddedFeed, RunFailure> {
+        var added: AddedFeed?
+        let outcome = await runs.perform(.addFeed(address: address, theme: theme)) { event in
+            if case let .added(feed) = event { added = feed }
+        }
+        switch outcome {
+        case .succeeded:
+            guard let added else {
+                return .failure(RunFailure(exitCode: 1, lastStderrLine: "ressac did not report the added feed."))
+            }
+            selection = .feed(added.id)
+            addFeedNote = AddFeedNote.text(for: added)
+            return .success(added)
+        case .refused:
+            return .failure(RunFailure(exitCode: 2, lastStderrLine: "A refresh is running. Try again when it ends."))
+        case let .failed(failure):
+            return .failure(failure)
+        }
     }
 
     func openSite(feedId: Int64) {

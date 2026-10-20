@@ -68,7 +68,7 @@ enum RunOutcome: Equatable, Sendable {
         switch request.kind {
         case .long:
             guard !isLongRunActive else {
-                Self.log.info("refused \(request.arguments.joined(separator: " "), privacy: .public): a long run is active")
+                Self.log.info("refused \(LogRedaction.redact(request.arguments.joined(separator: " ")), privacy: .public): a long run is active")
                 return Task { .refused }
             }
             isLongRunActive = true
@@ -117,9 +117,9 @@ enum RunOutcome: Equatable, Sendable {
         case let .failed(failure):
             let refused = request.isRefusal(failure)
             if refused {
-                Self.log.error("ressac refused \(request.arguments.joined(separator: " "), privacy: .public): \(failure.message, privacy: .public)")
+                Self.log.error("ressac refused \(LogRedaction.redact(request.arguments.joined(separator: " ")), privacy: .public): \(LogRedaction.redact(failure.message), privacy: .public)")
             } else if failure.exitCode == 2 {
-                Self.log.fault("usage error from ressac \(request.arguments.joined(separator: " "), privacy: .public)")
+                Self.log.fault("usage error from ressac \(LogRedaction.redact(request.arguments.joined(separator: " ")), privacy: .public)")
             }
             if request.showsFailureBanner {
                 // A refusal's sentence says it all: the log holds nothing more.
@@ -144,14 +144,14 @@ enum RunOutcome: Equatable, Sendable {
                 message: "The network looks unreachable: \(failed) of \(attempted) feeds could not connect.",
                 showLog: false)
             bannerSetDuringRun = true
-        case .waybackDone, .finished, .decided, .undone, .edition, .cadence, .unknown:
+        case .waybackDone, .finished, .decided, .undone, .edition, .cadence, .added, .unknown:
             break
         }
     }
 
     private func noteChange(after event: EngineEvent) {
         switch event {
-        case .feedDone, .extracted, .decided, .undone, .finished, .edition, .cadence:
+        case .feedDone, .extracted, .decided, .undone, .finished, .edition, .cadence, .added:
             if ContinuousClock.now - lastChangeNotice >= .seconds(1) {
                 lastChangeNotice = .now
                 onDatabaseChange?()

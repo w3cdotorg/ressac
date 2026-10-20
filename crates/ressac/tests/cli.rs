@@ -1400,8 +1400,8 @@ fn chart_human_summary() {
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], "Sea chart: 4 feeds, 3 unread this week", "{text}");
     for expected in [
-        "SEA OF THE LABS (2)",
-        "WEB SEA (1)",
+        "SEA OF THE LABS [labs] (2)",
+        "WEB SEA [web] (1)",
         "UNCHARTED WATERS (1)",
         "ORANGE COAST: Orange Drenka, Orange-Drenka",
     ] {
@@ -1541,16 +1541,432 @@ fn feed_theme_sets_and_clears() {
 }
 
 #[test]
+fn feed_theme_accepts_the_theme_name_in_any_case() {
+    let home = chart_home();
+    for given in ["labs", "ai LABS and tools", "  AI labs and tools "] {
+        let out = ressac(home.path(), &["feed", "theme", "5", given]);
+        assert!(out.status.success(), "{given:?}: {out:?}");
+        assert_eq!(stdout(&out), "#5 theme labs\n", "{given:?}");
+    }
+}
+
+#[test]
+fn feed_theme_without_any_theme_says_how_to_import_them() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let out = ressac(home.path(), &["feed", "theme", "5", "atlantis"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert_eq!(
+        stderr(&out),
+        "No theme \"atlantis\". No themes yet: import them with ressac chart import.\n"
+    );
+}
+
+#[test]
 fn feed_theme_unknown_key_exits_2() {
     let home = chart_home();
     for (args, message) in [
         (
             &["feed", "theme", "5", "atlantis"][..],
-            "No theme \"atlantis\".\n",
+            "No theme \"atlantis\". Themes: labs, web\n",
         ),
         (&["--json", "feed", "theme", "99", "labs"], "No feed #99.\n"),
     ] {
         let out = ressac(home.path(), args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert_eq!(stderr(&out), message, "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+}
+
+/// `ressac` with the production private-address guard back on.
+fn ressac_guarded(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_ressac"))
+        .args(["--db", home.join("db.sqlite").to_str().unwrap()])
+        .args(args)
+        .env("HOME", home)
+        .env_remove("RESSAC_ALLOW_PRIVATE_ARTICLES")
+        .output()
+        .expect("binary runs")
+}
+
+async fn serve(server: &MockServer, at: &str, body: String, content_type: &str) {
+    Mock::given(method("GET"))
+        .and(path(at))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, content_type))
+        .mount(server)
+        .await;
+}
+
+/// `reading_home` plus what `add` needs: feed A (#1) is in the theme "labs" and the
+/// territory "ORANGE COAST", `/new.xml` is a feed, `/site` announces it, `/bare` announces
+/// nothing.
+async fn add_home(server: &MockServer) -> tempfile::TempDir {
+    let home = reading_home(server).await;
+    let base = server.uri();
+    // The feed names the mock server as its site, as a real one names its own.
+    let new_feed = channel(
+        "New Feed",
+        "<item><guid>n1</guid><title>First</title></item>",
+    )
+    .replace("http://e.org/", &format!("{base}/"));
+    serve(server, "/new.xml", new_feed, "application/rss+xml").await;
+    serve(
+        server,
+        "/site",
+        format!(
+            r#"<html><head><link rel="alternate" type="application/rss+xml" href="{base}/new.xml"></head><body>hi</body></html>"#
+        ),
+        "text/html",
+    )
+    .await;
+    serve(
+        server,
+        "/bare",
+        "<html><head></head><body>nothing</body></html>".into(),
+        "text/html",
+    )
+    .await;
+    let file = home.path().join("chart.json");
+    std::fs::write(
+        &file,
+        json!({
+            "themes": [{"key": "labs", "name": "AI labs", "sea": "SEA OF THE LABS"}],
+            "feeds": {format!("{base}/a.xml"): "labs"},
+            "territories": [{"name": "ORANGE COAST", "feeds": [format!("{base}/a.xml")]}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = ressac_async(home.path(), &["chart", "import", file.to_str().unwrap()]).await;
+    assert!(out.status.success(), "{out:?}");
+    home
+}
+
+#[tokio::test]
+async fn add_prints_the_feed_and_its_theme() {
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    let out = ressac_async(home.path(), &["add", &format!("{}/new.xml", server.uri())]).await;
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text}");
+    assert!(
+        lines[0].starts_with("Added #5 New Feed (page ") && lines[0].ends_with(')'),
+        "{text}"
+    );
+    assert_eq!(lines[1], "Theme: AI labs (same site as A)");
+    assert_eq!(lines[2], "Territory: ORANGE COAST");
+}
+
+#[tokio::test]
+async fn add_through_a_site_with_a_chosen_theme_or_none() {
+    let server = MockServer::start().await;
+    let home = reading_home(&server).await;
+    let base = server.uri();
+    serve(
+        &server,
+        "/new.xml",
+        channel("New Feed", ""),
+        "application/rss+xml",
+    )
+    .await;
+    serve(
+        &server,
+        "/site",
+        format!(
+            r#"<html><head><link rel="alternate" type="application/rss+xml" href="{base}/new.xml"></head></html>"#
+        ),
+        "text/html",
+    )
+    .await;
+    let chart = home.path().join("chart.json");
+    std::fs::write(
+        &chart,
+        json!({"themes": [{"key": "labs", "name": "AI labs", "sea": "SEA"}],
+               "feeds": {}, "territories": []})
+        .to_string(),
+    )
+    .unwrap();
+    assert!(
+        ressac_async(home.path(), &["chart", "import", chart.to_str().unwrap()])
+            .await
+            .status
+            .success()
+    );
+    let chosen = ressac_async(
+        home.path(),
+        &["add", &format!("{base}/site"), "--theme", "labs"],
+    )
+    .await;
+    assert!(chosen.status.success(), "{chosen:?}");
+    let text = stdout(&chosen);
+    assert!(text.starts_with("Added #5 New Feed (page "), "{text}");
+    assert!(text.ends_with("\nTheme: AI labs (chosen)\n"), "{text}");
+
+    // The same feed without a theme and no themed sibling: none.
+    let home2 = reading_home(&server).await;
+    let none = ressac_async(home2.path(), &["add", &format!("{base}/new.xml")]).await;
+    assert!(none.status.success(), "{none:?}");
+    assert!(
+        stdout(&none).ends_with("\nTheme: none (Uncharted waters)\n"),
+        "{}",
+        stdout(&none)
+    );
+}
+
+#[tokio::test]
+async fn add_json_ends_with_added() {
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    let base = server.uri();
+    let out = ressac_async(home.path(), &["--json", "add", &format!("{base}/site")]).await;
+    assert!(out.status.success(), "{out:?}");
+    let lines = json_lines(&out);
+    assert_eq!(lines.first().unwrap()["event"], "started");
+    assert!(lines.iter().any(|l| l["event"] == "feed_done"));
+    let added = lines.last().unwrap();
+    assert_eq!(added["event"], "added");
+    assert_eq!(added["id"], 5);
+    assert_eq!(added["title"], "New Feed");
+    assert_eq!(added["xml_url"], format!("{base}/new.xml"));
+    assert!(added["page"].as_u64().unwrap() >= 110);
+    assert_eq!(added["theme"], "AI labs");
+    assert_eq!(added["territory"], "ORANGE COAST");
+    assert_eq!(added["discovered"], true);
+    assert_eq!(added["like"], "A");
+    assert!(added.get("theme_source").is_none());
+    assert_eq!(
+        lines.iter().filter(|l| l["event"] == "added").count(),
+        1,
+        "{lines:?}"
+    );
+
+    // A feed with no themed sibling: null theme, territory and like.
+    let server2 = MockServer::start().await;
+    serve(
+        &server2,
+        "/f.xml",
+        channel("Lone", ""),
+        "application/rss+xml",
+    )
+    .await;
+    let home2 = tempfile::tempdir().unwrap();
+    let lone = ressac_async(
+        home2.path(),
+        &["--json", "add", &format!("{}/f.xml", server2.uri())],
+    )
+    .await;
+    assert!(lone.status.success(), "{lone:?}");
+    let added = json_lines(&lone).pop().unwrap();
+    assert_eq!(added["event"], "added");
+    assert_eq!(added["discovered"], false);
+    for key in ["theme", "territory", "like"] {
+        assert!(added[key].is_null(), "{key}: {added}");
+    }
+}
+
+#[tokio::test]
+async fn add_refusals_exit_2() {
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    let base = server.uri();
+    let bury = ressac_async(home.path(), &["garden", "decide", "2", "bury"]).await;
+    assert!(bury.status.success(), "{bury:?}");
+    for (args, message) in [
+        (
+            vec![format!("{base}/bare")],
+            "This page announces no feed.\n",
+        ),
+        (vec![format!("{base}/a.xml")], "Already followed: A.\n"),
+        (
+            vec![format!("{base}/b.xml")],
+            "Already in the Cemetery: B.\n",
+        ),
+        (vec!["   ".to_owned()], "Enter a web address.\n"),
+        (
+            vec!["ftp://example.org/feed".to_owned()],
+            "Enter a web address.\n",
+        ),
+        (
+            vec![
+                format!("{base}/new.xml"),
+                "--theme".to_owned(),
+                "atlantis".to_owned(),
+            ],
+            "No theme \"atlantis\". Themes: labs\n",
+        ),
+    ] {
+        let mut full = vec!["add".to_owned()];
+        full.extend(args);
+        let refs: Vec<&str> = full.iter().map(String::as_str).collect();
+        let out = ressac_async(home.path(), &refs).await;
+        assert_eq!(out.status.code(), Some(2), "{refs:?}: {out:?}");
+        assert_eq!(stderr(&out), message, "{refs:?}");
+        assert!(out.stdout.is_empty(), "{refs:?}");
+    }
+    // Nothing was written by the refusals.
+    let store = Store::open(&home.path().join("db.sqlite")).unwrap();
+    assert_eq!(store.feeds().unwrap().len(), 4);
+
+    // The production guard refuses a private address.
+    let home2 = home.path().to_path_buf();
+    let private = tokio::task::spawn_blocking(move || {
+        ressac_guarded(&home2, &["add", "http://127.0.0.1:9/feed"])
+    })
+    .await
+    .unwrap();
+    assert_eq!(private.status.code(), Some(2), "{private:?}");
+    assert_eq!(
+        stderr(&private),
+        "Ressac only follows public web addresses.\n"
+    );
+}
+
+#[test]
+fn add_network_failure_exits_1() {
+    let home = tempfile::tempdir().unwrap();
+    // Nothing listens on port 1.
+    let out = ressac(home.path(), &["add", "http://127.0.0.1:1/feed"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr(&out).starts_with("error: Could not reach http://127.0.0.1:1/feed: "),
+        "{}",
+        stderr(&out)
+    );
+    assert!(out.stdout.is_empty());
+}
+
+#[tokio::test]
+async fn add_neutralises_controls() {
+    let server = MockServer::start().await;
+    serve(
+        &server,
+        "/f.xml",
+        channel("Evil \u{9b}31m title", ""),
+        "application/rss+xml",
+    )
+    .await;
+    let home = tempfile::tempdir().unwrap();
+    let url = format!("{}/f.xml", server.uri());
+    let out = ressac_async(home.path(), &["add", &url]).await;
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    assert!(
+        text.starts_with("Added #1 Evil \u{FFFD}31m title (page "),
+        "{text}"
+    );
+    assert!(!text.contains('\u{9b}'));
+
+    // The duplicate refusal names the stored title, and an unknown theme its key.
+    serve(
+        &server,
+        "/h.xml",
+        channel("Plain", ""),
+        "application/rss+xml",
+    )
+    .await;
+    let dup = ressac_async(home.path(), &["add", &url]).await;
+    assert_eq!(dup.status.code(), Some(2), "{dup:?}");
+    assert_eq!(stderr(&dup), "Already followed: Evil \u{FFFD}31m title.\n");
+    let theme = ressac_async(
+        home.path(),
+        &[
+            "add",
+            &format!("{}/h.xml", server.uri()),
+            "--theme",
+            "a\u{1b}[31m",
+        ],
+    )
+    .await;
+    assert_eq!(theme.status.code(), Some(2), "{theme:?}");
+    assert_eq!(
+        stderr(&theme),
+        "No theme \"a\u{FFFD}[31m\". No themes yet: import them with ressac chart import.\n"
+    );
+}
+
+#[tokio::test]
+async fn feed_move_prints_page_change() {
+    let server = MockServer::start().await;
+    let home = reading_home(&server).await;
+    let out = ressac_async(home.path(), &["feed", "move", "4", "1"]).await;
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    assert!(
+        text.starts_with("Moved #4 D to News (page ") && text.contains(" \u{2192} "),
+        "{text}"
+    );
+    let store = Store::open(&home.path().join("db.sqlite")).unwrap();
+    assert_eq!(
+        store
+            .feeds()
+            .unwrap()
+            .iter()
+            .find(|f| f.id == 4)
+            .unwrap()
+            .folder_id,
+        Some(1)
+    );
+
+    let again = ressac_async(home.path(), &["feed", "move", "4", "1"]).await;
+    assert!(again.status.success(), "{again:?}");
+    assert_eq!(stdout(&again), "#4 D is already in News.\n");
+
+    let json = ressac_async(home.path(), &["--json", "feed", "move", "4", "2"]).await;
+    let lines = json_lines(&json);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["event"], "moved");
+    assert_eq!(lines[0]["feed_id"], 4);
+    assert_eq!(lines[0]["from"], 1);
+    assert_eq!(lines[0]["to"], 2);
+    assert_eq!(lines[0]["changed"], true);
+}
+
+#[tokio::test]
+async fn feed_move_root() {
+    let server = MockServer::start().await;
+    let home = reading_home(&server).await;
+    let out = ressac_async(home.path(), &["feed", "move", "3", "root"]).await;
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    assert!(text.starts_with("Moved #3 C to the root (page "), "{text}");
+    let page: u16 = text
+        .trim_end()
+        .trim_end_matches(')')
+        .rsplit(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((110..=199).contains(&page), "{text}");
+    let store = Store::open(&home.path().join("db.sqlite")).unwrap();
+    assert_eq!(
+        store
+            .feeds()
+            .unwrap()
+            .iter()
+            .find(|f| f.id == 3)
+            .unwrap()
+            .folder_id,
+        None
+    );
+}
+
+#[tokio::test]
+async fn feed_move_unknown_exit_2() {
+    let server = MockServer::start().await;
+    let home = reading_home(&server).await;
+    for (args, message) in [
+        (&["feed", "move", "99", "1"][..], "No feed #99.\n"),
+        (&["feed", "move", "4", "99"], "No folder #99.\n"),
+        (
+            &["feed", "move", "4", "banana"],
+            "Give a folder id or \"root\", not \"banana\".\n",
+        ),
+    ] {
+        let out = ressac_async(home.path(), args).await;
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
         assert_eq!(stderr(&out), message, "{args:?}");
         assert!(out.stdout.is_empty(), "{args:?}");

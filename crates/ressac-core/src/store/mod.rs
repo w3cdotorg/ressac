@@ -25,7 +25,9 @@ pub use chart_snapshot::{
 };
 pub use decisions::{DecisionRecord, FeedSnapshot};
 pub use edition::{EditionEntryRow, EditionOverflowRow, EditionParams, EditionRecord, EditionView};
-pub use feeds::{CadenceRow, FeedRow, FolderRow, ImportReport};
+pub use feeds::{
+    CadenceRow, FeedRow, FolderRow, ImportReport, Inserted, Moved, NewFeed, ThemeSource,
+};
 pub use fetch::{AttemptRecord, BACKLOG_DAYS, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
 pub use health::TriageFacts;
 pub use library::{

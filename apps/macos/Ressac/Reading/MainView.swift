@@ -106,10 +106,16 @@ struct SidebarView: View {
                 Label("Today", systemImage: "sun.max").badge(state.sidebar.today).tag(Source.today)
                 Label("Starred", systemImage: "star").badge(state.sidebar.starred).tag(Source.starred)
             }
-            Section("Feeds") {
+            Section {
                 OutlineGroup(state.sidebarTree, children: \.children) { node in
                     SidebarRow(node: node, state: state).tag(node.source)
                 }
+            } header: {
+                // Dropping a feed on the header takes it out of its folder.
+                Text("Feeds")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .dropDestination(for: String.self) { items, _ in state.dropFeeds(items, onto: nil) }
             }
             Section("Rhythm") {
                 // Silent stays listed at zero: it is where feeds that stopped publishing end up.
@@ -136,8 +142,9 @@ struct SidebarRow: View {
 
     var body: some View {
         switch node.kind {
-        case .folder:
+        case let .folder(folder):
             Label(node.title, systemImage: "folder").badge(node.unread)
+                .dropDestination(for: String.self) { items, _ in state.dropFeeds(items, onto: folder.folderId) }
         case let .feed(feed):
             HStack(spacing: 6) {
                 Text(feed.title).lineLimit(1)
@@ -146,6 +153,7 @@ struct SidebarRow: View {
                 }
             }
             .badge(feed.unread)
+            .draggable(FeedDrop.payload(feedId: feed.feedId))
             .contextMenu {
                 Button("Refresh") { state.refresh(feedId: feed.feedId) }.disabled(!state.canRefresh)
                 Toggle("Always Fetch Full Article", isOn: Binding(

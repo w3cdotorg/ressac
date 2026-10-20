@@ -9,6 +9,7 @@ Thème graphique rétro : **Antiope**, en hommage au télétexte français.
 ```sh
 ressac                                  # read: the Journal first, then every source (ressac read is the same)
 ressac import ~/Documents/vienna.opml   # --dry-run to preview
+ressac add https://example.org/        # a feed or a site address; add --theme <key or name> to choose its sea
 ressac check                           # fetch, diagnose, look up archives
 ressac garden                          # triage: k keep, r repair, b bury, u undo, ? help
 ressac export -o clean.opml            # --cemetery for buried feeds
@@ -30,14 +31,15 @@ ressac edition show                    # today's edition by section; --json for 
 ressac feed cadence 12 daily           # force a feed's rhythm group (daily, weekly, monthly, rare, silent) or auto
 ressac chart                           # the sea chart's data as a summary; --json for one JSON line
 ressac chart import seas.json          # themes, feed themes and territories; --dry-run to preview
-ressac feed theme 12 ai-labs           # put a feed in a theme (a sea), or take it out with none
+ressac feed theme 12 ai-labs           # put a feed in a theme (a sea; its key or name), or take it out with none
+ressac feed move 12 3                  # move a feed into folder 3, or back to the top level with root
 ressac ticker --tmux                   # one unread entry for tmux's status bar (see The tmux ticker)
 ```
 
 Bare `ressac` opens the reader and no longer prints usage: scripts that need it call `ressac --help`. `--json` makes no sense for an interactive reader, so `ressac --json` and `ressac --json read` are refused (exit 2).
 
 Global flags: `--db <file>` (or `RESSAC_DB`), `--json`, `--ascii`, `-v`.
-Exit codes: `0` done, `1` error, `2` a refused request (an unknown id, nothing to repair, an address another active feed already uses, an edition already built this morning, no network to build one), `130` stopped by Ctrl-C.
+Exit codes: `0` done, `1` error, `2` a refused request (an unknown id, nothing to repair, an address another active feed already uses or the Cemetery holds, an invalid address, a private or local address, a page that announces no feed, an unknown theme, an edition already built this morning, no network to build one), `130` stopped by Ctrl-C.
 The database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs in `~/Library/Logs/Ressac/`.
 
 **Schema v4.** The Mac app migrates the shared database to schema v4 on first launch, after a backup next to it (`ressac.sqlite.bak-v3`, or the backup of whichever older version it found). v4 adds each feed's rhythm group, the per-feed override and the morning editions; v3 already gave every folder and feed a three-digit page number (`ressac page list`). A `ressac` built before v4 refuses the database ("database created by a newer Ressac"). Get a v4 CLI with `cargo install --path crates/ressac`, or use the app's own copy at `Ressac.app/Contents/Helpers/ressac`.
@@ -134,6 +136,7 @@ Quit Ressac before replacing the build. To install it for every launch instead, 
 - **Settings (`⌘,`):** appearance (Native or Antiope, see below), article font (SF Pro, New York, Charter, Newsreader, Atkinson Hyperlegible Next), text size (`⌘+` / `⌘−` / `⌘0` in the View menu), line width (three widths or exactly 40 columns), database location, logs.
 - **Unread only (`⌥⌘U`):** View ▸ Show Unread Only filters the entry list to unread entries, in both looks. In Antiope the `ENTRIES  ALL/UNREAD` column title is a clickable toggle for the same setting.
 - **Sea Chart (`⇧⌘M`):** View ▸ Sea Chart opens the chart window, described below.
+- **Adding feeds:** File ▸ Add Feed… (`⌘N`) opens the "Add a Feed" sheet: paste a feed address or a site address (the field is prefilled when the clipboard holds a web address) and optionally pick a Theme. For a page, Ressac takes the first feed it announces. The new feed lands at the bottom of the feeds outside any folder, is fetched at once and selected; a note says where it landed ("In <theme>, like <title>." when it took the theme of a feed from the same site). Errors (no feed announced, already followed, already in the Cemetery) stay in the sheet. To file it, drag a feed in the sidebar onto a folder, or onto the "Feeds" header to bring it back to the top level (Native look; the Antiope look shows the new page numbers but has no drag and drop; File ▸ Add Feed… (`⌘N`) works in both looks). A moved feed takes the lowest free Antiope page of its new home's range (and keeps its page when that range is full). The terminal does the same with `ressac add` and `ressac feed move`; both the app and the CLI log feed addresses without userinfo, query or fragment, since those can carry tokens.
 - **Another database for one launch:** `open -n --env RESSAC_DB=/path/to/other.sqlite /Applications/Ressac.app` (`RESSAC_DB` also sets the terminal's database).
 
 Newsreader and Atkinson Hyperlegible Next are bundled under the SIL Open Font License 1.1; their licences ship next to them in `Ressac.app/Contents/Resources/Fonts/`.
@@ -146,7 +149,8 @@ View ▸ Sea Chart (`⇧⌘M`) opens a window that draws your living feeds as an
 - **Two views** (toolbar). *From the harbour*: the distance from Ressac Harbour is the time since the feed's last entry (rings at 1 day, 1 week, 1 month, 3 months and 6 months), the bearing is its theme. *By theme*: one archipelago per theme, static; adding a feed hardly moves the others, but a feed that leaves a sea (new theme, buried, quiet for 6 months) lets the islands placed after it in that sea move up.
 - **Inks** (toolbar): Blue ink (default), White on black. A toggle stops the animation; Reduce Motion starts it off.
 - **Reading.** Hover an island for its unread and entry counts. Click it for a popover with its five latest entries (click one to open it in your browser), its theme, folder, rhythm and last entry; click its title to select the feed in the main window.
-- **Themes and territories.** Each feed has at most one theme (a sea). Feeds without one sit in UNCHARTED WATERS. A *territory* groups the feeds of one publisher on a shared landmass; a *continent* turns a whole theme into one landmass. Set a feed's theme from the garden inspector's Theme pop-up, or with `ressac feed theme <feed-id> <key|none>` (exit 2 for an unknown key). Territories and the list of themes come from `ressac chart import`.
+- **Themes and territories.** Each feed has at most one theme (a sea). Feeds without one sit in UNCHARTED WATERS. A *territory* groups the feeds of one publisher on a shared landmass; a *continent* turns a whole theme into one landmass. Set a feed's theme from the garden inspector's Theme pop-up, or with `ressac feed theme <feed-id> <theme|none>`, where a theme is its key or its name, in any case (exit 2 for an unknown one, with the valid keys listed). Territories and the list of themes come from `ressac chart import`.
+- **Adding a feed.** `ressac add <address>` (or File ▸ Add Feed…) gives the new feed the theme most feeds from the same site share (same host, `www.` ignored), and puts it in that feed's territory (never a continent). `--theme <key or name>` (or the sheet's Theme pop-up) wins over this.
 
 `ressac chart import <file.json> [--dry-run]` reads this file: `themes` in display order, `feeds` mapping a feed URL (`xml_url`, or its original one) to a theme key, and `territories`, each with either `feeds` (URLs, at least two on the chart to show) or a `continent` (a theme key). A re-import replaces the themes and the territories: themes are updated by key, a theme missing from the file is deleted and its feeds become unthemed, and every territory is rebuilt from the file. Theme keys may not be empty, `none` (in any case) or start with `-` (exit 2). The report lists the URLs it did not find, the territories with fewer than two matched feeds (kept off the chart) and the feeds left without a theme; `--dry-run` reports what would be imported and writes nothing.
 
@@ -168,7 +172,9 @@ View ▸ Sea Chart (`⇧⌘M`) opens a window that draws your living feeds as an
 }
 ```
 
-`ressac chart` prints a summary (feeds per theme, territories); `ressac --json chart` prints the page's data as one JSON line (`version` 1).
+**The database is canonical.** Themes and territories live in the database, not in the import file: the file seeded them once, and adding feeds or setting themes by hand changes them afterwards. A later `ressac chart import` replaces themes and territories wholesale, so it drops what added feeds inherited unless the file includes them. Keep that in mind before re-importing an old file; a `ressac chart export` to write the current state back to a file is not there yet.
+
+`ressac chart` prints a summary (feeds per theme, each sea headed by its name and its key in brackets, then the territories); `ressac --json chart` prints the page's data as one JSON line (`version` 1).
 
 ## Antiope
 

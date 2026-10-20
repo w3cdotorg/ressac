@@ -13,6 +13,46 @@ enum RunKind: Sendable, Equatable {
     case long, short
 }
 
+/// Feed addresses can carry secrets (`user:pass@host`, `?token=…`): anything logged goes through here.
+/// Words that look like an address (with a scheme, or a scheme-less `host/path`, `host?query`,
+/// `user@host`) keep scheme, host and path; userinfo, query and fragment are dropped
+/// (`?…` marks a query that was there). Other words are left as they are.
+enum LogRedaction {
+    static func redact(_ text: String) -> String {
+        text.split(separator: " ", omittingEmptySubsequences: false).map { word in
+            looksLikeAddress(word) ? redactAddress(String(word)) : String(word)
+        }.joined(separator: " ")
+    }
+
+    /// A scheme, or no scheme but a host-like first segment (a `.` or `localhost`, maybe `user@` and
+    /// `:port`) and something that can carry a secret or a path (`/`, `?`, `#`, `@`).
+    private static func looksLikeAddress(_ word: Substring) -> Bool {
+        if word.contains("://") { return true }
+        guard let first = word.first, first != "/", first != "~",
+              word.contains(where: { "/?#@".contains($0) }) else { return false }
+        let authority = word[..<(word.firstIndex(of: "/") ?? word.endIndex)]
+        let hostAndMore = authority[(authority.lastIndex(of: "@").map { authority.index(after: $0) } ?? authority.startIndex)...]
+        let hostEnd = hostAndMore.firstIndex { $0 == "?" || $0 == "#" || $0 == ":" } ?? hostAndMore.endIndex
+        let host = hostAndMore[..<hostEnd]
+        return host.contains(".") || host == "localhost"
+    }
+
+    /// Userinfo first (up to the last `@` of the authority, even past a `?` or `#` in a password),
+    /// then the query and the fragment.
+    static func redactAddress(_ word: String) -> String {
+        let schemeEnd = word.range(of: "://")?.upperBound ?? word.startIndex
+        let head = word[..<schemeEnd]
+        var rest = word[schemeEnd...]
+        let authorityEnd = rest.firstIndex(of: "/") ?? rest.endIndex
+        if let at = rest[..<authorityEnd].lastIndex(of: "@") {
+            rest = rest[rest.index(after: at)...]
+        }
+        let end = rest.firstIndex { $0 == "?" || $0 == "#" } ?? rest.endIndex
+        let hasQuery = end < rest.endIndex && rest[end] == "?"
+        return head + rest[..<end] + (hasQuery ? "?…" : "")
+    }
+}
+
 /// One `ressac` invocation, without the `--db … --json` prefix the runner adds.
 struct RunRequest: Sendable, Equatable {
     var arguments: [String]
@@ -72,12 +112,25 @@ struct RunRequest: Sendable, Equatable {
         RunRequest(arguments: ["feed", "theme", String(feedId), key ?? "none"], kind: .short)
     }
 
-    /// Extraction failures are shown inline in the reader, never as a banner (spec §8).
-    var showsFailureBanner: Bool { arguments.first != "extract" }
+    /// Moves a feed into a folder, or to the top level with `nil` ("root"). No network: a short run.
+    static func moveFeed(id: Int64, folder: Int64?) -> RunRequest {
+        RunRequest(arguments: ["feed", "move", String(id), folder.map(String.init) ?? "root"], kind: .short)
+    }
 
-    /// True when `failure` is the store refusing something the app cannot foresee (exit 2): a
-    /// garden decision or an undo (an address another active feed already uses), an edition
-    /// that is not due or cannot be built offline, an override on a feed buried meanwhile, a theme deleted meanwhile.
+    /// Adds the feed at `address` (a feed or a site; the CLI discovers and fetches it). Long: it
+    /// fetches, so it cannot overlap another fetch. `theme` is a theme key; nil inherits from the site.
+    static func addFeed(address: String, theme: String?) -> RunRequest {
+        RunRequest(arguments: ["add", address] + (theme.map { ["--theme", $0] } ?? []), kind: .long)
+    }
+
+    /// Extraction failures are shown inline in the reader and add failures in the Add Feed sheet,
+    /// never as a banner (spec §8; add-feed spec §7).
+    var showsFailureBanner: Bool { !["extract", "add"].contains(arguments.first) }
+
+    /// True when `failure` is the store refusing something the app cannot foresee (exit 2): an address that announces
+    /// no feed or is already followed (`add`), a garden decision or an undo (an address another
+    /// active feed already uses), an edition
+    /// that is not due or cannot be built offline, an override on a feed buried meanwhile, a theme or a folder deleted meanwhile.
     /// From any other call, exit 2 means the app built a wrong command line (spec §8).
     func isRefusal(_ failure: RunFailure) -> Bool {
         failure.exitCode == 2 && Self.refusable.contains { arguments.starts(with: $0) }
@@ -85,7 +138,7 @@ struct RunRequest: Sendable, Equatable {
 
     private static let refusable: [[String]] = [
         ["garden", "decide"], ["garden", "undo"], ["edition", "build"], ["feed", "cadence"],
-        ["feed", "theme"],
+        ["feed", "theme"], ["feed", "move"], ["add"],
     ]
 }
 
@@ -129,11 +182,11 @@ actor RessacCLI {
         let (process, stdout, stderr, exits) = makeProcess(arguments: request.arguments)
         let (events, continuation) = AsyncThrowingStream<EngineEvent, any Error>.makeStream()
         let log = Self.log
-        let commandLine = request.arguments.joined(separator: " ")
+        let commandLine = LogRedaction.redact(request.arguments.joined(separator: " "))
         do {
             try process.run()
         } catch {
-            log.error("cannot launch ressac \(commandLine, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            log.error("cannot launch ressac \(commandLine, privacy: .public): \(LogRedaction.redact(error.localizedDescription), privacy: .public)")
             continuation.finish(throwing: RunFailure(
                 exitCode: 127, lastStderrLine: "Cannot launch ressac: \(error.localizedDescription)"))
             return events
@@ -144,7 +197,7 @@ actor RessacCLI {
                 if let event = EngineEvent.decode(line: line) {
                     continuation.yield(event)
                 } else if !line.isEmpty {
-                    log.warning("skipped non-JSON line from ressac: \(line, privacy: .public)")
+                    log.warning("skipped non-JSON line from ressac: \(LogRedaction.redact(line), privacy: .public)")
                 }
             }
             let stderrLine = await lastStderrLine
@@ -197,11 +250,11 @@ actor RessacCLI {
     func capture(_ arguments: [String]) async throws -> Data {
         let (process, stdout, stderr, exits) = makeProcess(arguments: arguments)
         let log = Self.log
-        let commandLine = arguments.joined(separator: " ")
+        let commandLine = LogRedaction.redact(arguments.joined(separator: " "))
         do {
             try process.run()
         } catch {
-            log.error("cannot launch ressac \(commandLine, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            log.error("cannot launch ressac \(commandLine, privacy: .public): \(LogRedaction.redact(error.localizedDescription), privacy: .public)")
             throw RunFailure(exitCode: 127, lastStderrLine: "Cannot launch ressac: \(error.localizedDescription)")
         }
         let output = stdout.fileHandleForReading
@@ -233,7 +286,7 @@ actor RessacCLI {
         for await line in lines(of: handle) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
-            log.info("ressac: \(trimmed, privacy: .public)")
+            log.info("ressac: \(LogRedaction.redact(trimmed), privacy: .public)")
             last = trimmed
         }
         return last

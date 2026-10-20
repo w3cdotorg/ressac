@@ -1,6 +1,6 @@
 # TODO
 
-Prochaines étapes de Ressac, au 16/10/2026. Le détail des décisions passées est dans `notes.md`.
+Prochaines étapes de Ressac, au 20/10/2026. Le détail des décisions passées est dans `notes.md`.
 
 ## Mise en service
 
@@ -12,7 +12,7 @@ Prochaines étapes de Ressac, au 16/10/2026. Le détail des décisions passées 
 
 ## Sous-projets suivants
 
-- [ ] **Ajouter un flux (bloquant).** Aujourd'hui, un flux n'entre que par l'import OPML. Il faut un « Add feed » dans l'appli et dans le terminal, qui accepte soit l'URL d'un flux (RSS, Atom, JSON Feed), soit l'adresse d'un site, avec détection du flux (`discover::alternate_feeds` lit déjà les `<link rel="alternate">` d'une page, pour les réparations du jardin) et un choix quand la page en annonce plusieurs. Demandé par Clément le 19/10/2026.
+- [x] **7 : ajouter un flux.** Code fait le 20/10/2026 sur la branche `add-feed` (spec `docs/specs/2026-10-20-add-feed-design.md`) ; recette en attente ; trouvailles dans `notes.md`.
 - [x] **6 : la carte marine.** Code fait le 19/10/2026 sur la branche `sea-chart` (spec `docs/specs/2026-10-19-sea-chart-design.md`) ; recette en attente (import de l'amorce dans la vraie base, remplacement de l'appli, essai des quatre encres) ; trouvailles dans `notes.md`.
 - [x] **5 : le bandeau tmux.** Fait le 19/10/2026 sur la branche `tmux-ticker` ; recette et trouvailles dans `notes.md`.
 - [x] **2b : la lecture dans le terminal.** Fait le 19/10/2026 sur la branche `terminal-reading` ; recette et trouvailles dans `notes.md`.
@@ -95,7 +95,7 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 ### Carte marine (sous-projet 6)
 
 - [ ] Éditeur de territoires dans l'appli (aujourd'hui : `ressac chart import` seulement).
-- [ ] Proposition de thème à l'« Add feed » (dépend du chantier « Ajouter un flux »).
+- [x] Proposition de thème à l'« Add feed » : fait au sous-projet 7 (thème hérité du site, liste « Theme » facultative).
 - [ ] Étiquettes courbes le long des côtes.
 - [ ] Positions mémorisées pour la vue du port (elle dérive chaque jour par construction).
 - [ ] Un flux qui quitte la carte, ou qui change de thème, laisse les îles suivantes de sa mer remonter d'un cran (placement îlot par îlot, par ordre d'id).
@@ -110,6 +110,27 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Animation : la chaleur et la couleur de chaque île sont recalculées à chaque image.
 - [ ] Coût des rafraîchissements pendant une longue collecte : une reconstruction complète toutes les 2 s, à surveiller.
 - [ ] Tests à renforcer (détail dans le registre local `.superpowers/`, hors dépôt) : renommage et réordonnancement à la réimportation, rapport des URL inconnues en essai à blanc, précédence de `xml_url`, thème vide du test de migration v4 vers v5.
+
+### Ajouter un flux (sous-projet 7)
+
+- [ ] Choisir parmi plusieurs flux annoncés (aujourd'hui le premier est pris).
+- [ ] Choisir le dossier dans la fenêtre d'ajout.
+- [ ] Commandes Antiope pour ajouter et déplacer un flux.
+- [ ] `ressac chart export` (la base fait foi : une réimportation efface les thèmes hérités).
+- [ ] Les flux venus d'une découverte gardent le client protégé à chaque rafraîchissement (aujourd'hui seul le premier passe par lui ; demande un drapeau par flux).
+- [ ] Les erreurs réseau sur le lien annoncé sont rapportées comme « aucun flux ».
+- [ ] Annuler pendant un ajout laisse l'ajout se finir en silence.
+- [ ] Déposer un flux sur une ligne de flux d'un dossier ne fait rien (seuls les dossiers et l'en-tête « Feeds » acceptent).
+- [ ] Glisser un flux dans un champ de texte y colle `ressac-feed:<id>`.
+- [ ] Masquage des adresses : un hôte sans point et sans schéma (`intranet?token=…`) n'est pas masqué.
+- [ ] Test WebKit `the_page_draws_the_fixture_in_webkit` instable en local (polices pas toujours chargées sur une suite complète).
+- [ ] Déplacer un flux entre deux sous-dossiers d'un même dossier racine en débordement peut changer sa page (le pool ne « contient » jamais une page ; contraire à l'esprit de la règle « une page déjà dans la plage est gardée »).
+- [ ] `ressac add` crée la base avant de valider l'adresse (`ressac add ftp://x` sur une machine neuve).
+- [ ] Pas de test d'un ajout pendant un rafraîchissement (repose sur les transactions IMMEDIATE et le busy_timeout de 5 s).
+- [ ] Le `warn!(error = %e)` après un premier rafraîchissement raté n'affiche pas d'adresse aujourd'hui (`refresh_via` ne renvoie que des erreurs de base ou de diagnostic) ; à garder ainsi (journaliser le genre d'erreur, ou un commentaire qui fixe cet invariant).
+- [ ] Petites dettes du cœur : correspondance ThemeDef dupliquée trois fois ; `COALESCE(html_url, xml_url)` prend un `html_url` vide pour présent (`NULLIF`) ; un territoire peut différer du thème hérité ; dérivations `Serialize` inutilisées ; ménage préalable (« Step 0 ») non fait sur `feeds.rs` ; `service.rs` à découper (`service/add.rs`) ; un déplacement sans effet calcule quand même la page.
+- [ ] CLI : la clé d'un `--theme` inconnu n'est pas passée par `printable` dans le refus de `feed theme` ; pas de test qu'un refus en `--json` laisse stdout vide.
+- [ ] Appli : le presse-papiers est relu à chaque recréation de la fenêtre d'ajout ; un ajout qui se termine après Annuler sélectionne quand même le flux, affiche la note et peut fermer une fenêtre rouverte entre-temps ; deux notes identiques de suite ne relancent pas la minuterie.
 
 ### Durcissement proposé, non fait
 

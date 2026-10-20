@@ -45,6 +45,14 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<ChartCommand>,
     },
+    /// Add a feed by its address, or by its site's: the first feed the page announces
+    Add {
+        /// A feed address or a site address (https:// is assumed when there is no scheme)
+        address: String,
+        /// Put the feed in this theme (a theme key or name) instead of its site's
+        #[arg(long, value_name = "THEME")]
+        theme: Option<String>,
+    },
     /// Fetch every feed (or only some) and update its health
     Fetch {
         /// Also fetch feeds fetched in the last 30 minutes
@@ -189,8 +197,15 @@ pub enum FeedCommand {
     Theme {
         /// The feed's id
         feed_id: FeedId,
-        /// A theme key from the chart import file, or "none"
+        /// A theme key or name (see ressac chart), or "none"
         key: String,
+    },
+    /// Move a feed to a folder (last position, lowest free page there), or back to the root
+    Move {
+        /// The feed's id
+        feed_id: FeedId,
+        /// A folder id, or "root" for the top level
+        folder: String,
     },
 }
 

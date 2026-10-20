@@ -54,6 +54,18 @@ pub fn site_of(raw: &str) -> Option<String> {
     Some(labels[n - take..].join("."))
 }
 
+/// The host of a URL for the same-site rule of an added feed: lowercase, a leading `www.`
+/// removed, every other subdomain kept (`blog.example.org` and `x.substack.com` stay
+/// themselves). Deliberately stricter than `site_of`. `None` when the URL has no host.
+pub fn host_key(raw: &str) -> Option<String> {
+    let url = Url::parse(raw.trim()).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    Some(
+        host.strip_prefix("www.")
+            .map_or(host.clone(), str::to_owned),
+    )
+}
+
 /// The `https://` variant of an `http://` URL, `None` for anything else.
 pub fn https_variant(raw: &str) -> Option<String> {
     raw.strip_prefix("http://")
@@ -63,6 +75,23 @@ pub fn https_variant(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_key_strips_www_only() {
+        assert_eq!(
+            host_key("https://www.example.org/feed").as_deref(),
+            Some("example.org")
+        );
+        assert_eq!(
+            host_key("https://Blog.Example.org/").as_deref(),
+            Some("blog.example.org")
+        );
+        assert_eq!(
+            host_key("https://x.substack.com/feed").as_deref(),
+            Some("x.substack.com")
+        );
+        assert_eq!(host_key("not a url"), None);
+    }
 
     #[test]
     fn key_ignores_scheme_www_and_trailing_slash() {

@@ -30,6 +30,10 @@ private struct FileMenuItems: View {
     let state: AppState?
 
     var body: some View {
+        Button("Add Feed…") { state?.pendingSheet = .addFeed }
+            .keyboardShortcut("n")
+            .disabled(state == nil)
+        Divider()
         Button("Import OPML…") { state?.pendingPanel = .importOPML }
             .keyboardShortcut("o")
             .disabled(state == nil)
