@@ -54,24 +54,19 @@ fn subset(
 fn redact_address(address: &str) -> String {
     let rest_start = address.find("://").map_or(0, |i| i + 3);
     let (head, rest) = address.split_at(rest_start);
-    let end = rest.find(['?', '#']).unwrap_or(rest.len());
-    let (authority_and_path, tail) = rest.split_at(end);
-    let after_userinfo = match authority_and_path.find('/') {
-        Some(slash) => {
-            let (authority, path) = authority_and_path.split_at(slash);
-            format!(
-                "{}{path}",
-                authority.rsplit('@').next().unwrap_or(authority)
-            )
-        }
-        None => authority_and_path
-            .rsplit('@')
-            .next()
-            .unwrap_or(authority_and_path)
-            .to_owned(),
+    // Userinfo first: up to the last `@` of the authority, even past a `?` or `#` in a password.
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let rest = match rest[..authority_end].rfind('@') {
+        Some(at) => &rest[at + 1..],
+        None => rest,
     };
-    let marker = if tail.starts_with('?') { "?..." } else { "" };
-    format!("{head}{after_userinfo}{marker}")
+    let end = rest.find(['?', '#']).unwrap_or(rest.len());
+    let marker = if rest[end..].starts_with('?') {
+        "?..."
+    } else {
+        ""
+    };
+    format!("{head}{}{marker}", &rest[..end])
 }
 
 /// The refusals of `add` (nothing to follow, already followed, unknown theme, private or
@@ -227,6 +222,11 @@ mod tests {
             redact_address("u:p@host.example/feed?k=v"),
             "host.example/feed?..."
         );
+        assert_eq!(
+            redact_address("https://u:pa?ss@host.example/f"),
+            "https://host.example/f"
+        );
+        assert_eq!(redact_address("u:pa?ss@host/f"), "host/f");
     }
 
     use super::*;

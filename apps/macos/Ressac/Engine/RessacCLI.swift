@@ -14,27 +14,42 @@ enum RunKind: Sendable, Equatable {
 }
 
 /// Feed addresses can carry secrets (`user:pass@host`, `?token=…`): anything logged goes through here.
-/// Words that look like a URL keep scheme, host and path; userinfo, query and fragment are dropped
+/// Words that look like an address (with a scheme, or a scheme-less `host/path`, `host?query`,
+/// `user@host`) keep scheme, host and path; userinfo, query and fragment are dropped
 /// (`?…` marks a query that was there). Other words are left as they are.
 enum LogRedaction {
     static func redact(_ text: String) -> String {
         text.split(separator: " ", omittingEmptySubsequences: false).map { word in
-            word.contains("://") ? redactURL(String(word)) : String(word)
+            looksLikeAddress(word) ? redactAddress(String(word)) : String(word)
         }.joined(separator: " ")
     }
 
-    static func redactURL(_ word: String) -> String {
-        guard let scheme = word.range(of: "://") else { return word }
-        let head = word[..<scheme.upperBound]
-        let rest = word[scheme.upperBound...]
-        let end = rest.firstIndex { $0 == "?" || $0 == "#" } ?? rest.endIndex
-        var location = rest[..<end]
-        let hasQuery = end < rest.endIndex && rest[end] == "?"
-        let authorityEnd = location.firstIndex(of: "/") ?? location.endIndex
-        if let at = location[..<authorityEnd].lastIndex(of: "@") {
-            location = location[location.index(after: at)...]
+    /// A scheme, or no scheme but a host-like first segment (a `.` or `localhost`, maybe `user@` and
+    /// `:port`) and something that can carry a secret or a path (`/`, `?`, `#`, `@`).
+    private static func looksLikeAddress(_ word: Substring) -> Bool {
+        if word.contains("://") { return true }
+        guard let first = word.first, first != "/", first != "~",
+              word.contains(where: { "/?#@".contains($0) }) else { return false }
+        let authority = word[..<(word.firstIndex(of: "/") ?? word.endIndex)]
+        let hostAndMore = authority[(authority.lastIndex(of: "@").map { authority.index(after: $0) } ?? authority.startIndex)...]
+        let hostEnd = hostAndMore.firstIndex { $0 == "?" || $0 == "#" || $0 == ":" } ?? hostAndMore.endIndex
+        let host = hostAndMore[..<hostEnd]
+        return host.contains(".") || host == "localhost"
+    }
+
+    /// Userinfo first (up to the last `@` of the authority, even past a `?` or `#` in a password),
+    /// then the query and the fragment.
+    static func redactAddress(_ word: String) -> String {
+        let schemeEnd = word.range(of: "://")?.upperBound ?? word.startIndex
+        let head = word[..<schemeEnd]
+        var rest = word[schemeEnd...]
+        let authorityEnd = rest.firstIndex(of: "/") ?? rest.endIndex
+        if let at = rest[..<authorityEnd].lastIndex(of: "@") {
+            rest = rest[rest.index(after: at)...]
         }
-        return head + location + (hasQuery ? "?…" : "")
+        let end = rest.firstIndex { $0 == "?" || $0 == "#" } ?? rest.endIndex
+        let hasQuery = end < rest.endIndex && rest[end] == "?"
+        return head + rest[..<end] + (hasQuery ? "?…" : "")
     }
 }
 

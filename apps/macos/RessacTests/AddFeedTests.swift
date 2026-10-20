@@ -113,5 +113,22 @@ import Testing
         #expect(LogRedaction.redact("add https://host.example/@me/feed") == "add https://host.example/@me/feed")
         #expect(LogRedaction.redact("feed theme 7 ai-labs a@b?c") == "feed theme 7 ai-labs a@b?c")
         #expect(LogRedaction.redact("add example.com") == "add example.com")
+        for line in ["import /Users/willow/feeds.opml --dry-run", "export --output /tmp/a.b/c.opml",
+                     "feed theme 7 ai-labs", "feed move 12 root", "add localhost",
+                     "add [::1]:8080/feed", "add héhé.example/flux"] {
+            #expect(LogRedaction.redact(line) == line)
+        }
+    }
+
+    @Test func scheme_less_addresses_are_redacted() {
+        #expect(LogRedaction.redact("add example.com/f.xml?token=abc") == "add example.com/f.xml?…")
+        #expect(LogRedaction.redact("add u:p@example.com/feed") == "add example.com/feed")
+        #expect(LogRedaction.redact("add www.example.org#frag") == "add www.example.org")
+        #expect(LogRedaction.redact("add localhost:8080?k=v") == "add localhost:8080?…")
+    }
+
+    @Test func userinfo_goes_before_the_query_cut() {
+        #expect(LogRedaction.redact("add https://u:pa?ss@host.example/f") == "add https://host.example/f")
+        #expect(LogRedaction.redact("add u:pa#ss@host.example/f") == "add host.example/f")
     }
 }
