@@ -39,7 +39,7 @@ pub use reading::{FulltextRow, plain_text};
 pub use ticker::{TICKER_WINDOW_DAYS, TickerEntry};
 
 /// Highest schema version this binary knows.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Ordered migrations, embedded at compile time from the repository's `schema/` folder.
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -48,6 +48,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("../../../../schema/0003_pages.sql")),
     (4, include_str!("../../../../schema/0004_edition.sql")),
     (5, include_str!("../../../../schema/0005_chart.sql")),
+    (
+        6,
+        include_str!("../../../../schema/0006_title_entities.sql"),
+    ),
 ];
 
 /// The migration after which existing entries get their search rows.
@@ -59,6 +63,9 @@ const PAGES_MIGRATION: i64 = 3;
 /// The migration after which pages 104 to 109 are reserved and stored diagnoses get their
 /// rhythm group.
 const CADENCE_MIGRATION: i64 = 4;
+
+/// The migration after which entry and feed titles still holding an HTML entity are decoded.
+const TITLE_ENTITIES_MIGRATION: i64 = 6;
 
 /// `schema_meta.version`, or 0 for a database without it.
 fn read_version(conn: &Connection) -> Result<i64> {
@@ -213,6 +220,9 @@ impl Store {
                 pages::assign_missing(&tx)?;
                 health::backfill_cadence_groups(&tx, chrono::Utc::now())?;
             }
+            if *version == TITLE_ENTITIES_MIGRATION {
+                fetch::decode_stored_titles(&tx)?;
+            }
             tx.execute("UPDATE schema_meta SET version = ?1", [version])?;
             tx.commit()?;
         }
@@ -277,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_store_has_schema_v5() {
+    fn fresh_store_has_the_current_schema() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         let names = object_names(&store);
@@ -675,7 +685,7 @@ mod tests {
         let path = dir.path().join("ressac.sqlite");
         drop(v4_database(&path));
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         assert!(path.with_extension("sqlite.bak-v4").exists());
         let names = object_names(&store);
         for expected in ["theme", "territory", "territory_feed"] {
@@ -704,6 +714,107 @@ mod tests {
             .query_row("SELECT count(*) FROM feed", [], |r| r.get(0))
             .unwrap();
         assert_eq!(feeds, 3);
+    }
+
+    /// A v5 database: `v4_database` migrated by 0005, with titles as the bug stored them
+    /// (the parser left one level of entities) next to titles that are fine.
+    fn v5_database(path: &Path) -> Connection {
+        let v5 = v4_database(path);
+        v5.execute_batch(MIGRATIONS[4].1).unwrap();
+        v5.execute("UPDATE schema_meta SET version = 5", [])
+            .unwrap();
+        v5.execute_batch(
+            "UPDATE feed SET title = 'Q&amp;A &#39;Weekly&#39;' WHERE id = 1;
+             INSERT INTO entry (id, feed_id, guid, title, published_at, fetched_at) VALUES
+               (1, 1, 'a', 'America&#39;s Earliest', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z'),
+               (2, 1, 'b', 'Fish & Chips', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z'),
+               (3, 1, 'c', 'Q&amp;A', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z'),
+               (4, 1, 'd', NULL, '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z');
+             INSERT INTO entry_fts (rowid, title, author, body) VALUES
+               (1, 'America&#39;s Earliest', NULL, 'body'), (2, 'Fish & Chips', NULL, 'body'),
+               (3, 'Q&amp;A', NULL, 'body'), (4, NULL, NULL, 'body');",
+        )
+        .unwrap();
+        v5
+    }
+
+    fn title_of(store: &Store, table: &str, id: i64) -> Option<String> {
+        store
+            .conn()
+            .query_row(
+                &format!("SELECT title FROM {table} WHERE id = ?1"),
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn migrates_v5_to_v6_decoding_stored_titles_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        drop(v5_database(&path));
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 6);
+        assert!(path.with_extension("sqlite.bak-v5").exists());
+        assert_eq!(title_of(&store, "feed", 1).as_deref(), Some("Q&A 'Weekly'"));
+        assert_eq!(
+            title_of(&store, "entry", 1).as_deref(),
+            Some("America's Earliest")
+        );
+        assert_eq!(
+            title_of(&store, "entry", 2).as_deref(),
+            Some("Fish & Chips")
+        );
+        assert_eq!(title_of(&store, "entry", 3).as_deref(), Some("Q&A"));
+        assert_eq!(title_of(&store, "entry", 4), None);
+        // The search index follows the repaired titles, and only the changed rows moved.
+        assert_eq!(store.search_ids("title:earliest").unwrap(), [1]);
+        let fts: String = store
+            .conn()
+            .query_row("SELECT title FROM entry_fts WHERE rowid = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fts, "America's Earliest");
+    }
+
+    #[test]
+    fn the_title_repair_runs_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        drop(v5_database(&path));
+        drop(Store::open(&path).unwrap());
+        // After the migration a title may legitimately hold entity text.
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch(
+            "UPDATE entry SET title = '&amp;' WHERE id = 2; UPDATE feed SET title = '&lt;b&gt;' WHERE id = 1;",
+        )
+        .unwrap();
+        drop(raw);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(title_of(&store, "entry", 2).as_deref(), Some("&amp;"));
+        assert_eq!(title_of(&store, "feed", 1).as_deref(), Some("&lt;b&gt;"));
+    }
+
+    #[test]
+    fn a_failed_title_repair_leaves_the_database_at_v5() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        let v5 = v5_database(&path);
+        // The repair updates the search row of each entry it changes: without the table it fails.
+        v5.execute_batch("DROP TABLE entry_fts").unwrap();
+        drop(v5);
+        assert!(Store::open(&path).is_err());
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(read_version(&raw).unwrap(), 5);
+        let title: String = raw
+            .query_row("SELECT title FROM entry WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            title, "America&#39;s Earliest",
+            "the repair rolled back with it"
+        );
     }
 
     #[test]

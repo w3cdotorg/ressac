@@ -23,7 +23,7 @@ ressac extract 4521                    # fetch and extract the full article of a
 ressac garden decide 12 keep           # keep | repair | bury, without the terminal UI
 ressac garden undo                     # revert the latest decision
 ressac garden apply-safe               # apply every undecided safe repair; --json also gives applied and skipped
-ressac migrate                         # bring the database to the current schema (v5)
+ressac migrate                         # bring the database to the current schema (v6)
 ressac page list                       # every page number, reserved ones first; --json for NDJSON
 ressac page set feed 12 412            # renumber a feed (or a folder) by hand, within 110-799
 ressac edition build                   # refresh, then compose this morning's edition (once a day, from 04:00)
@@ -45,6 +45,8 @@ The database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs
 **Schema v4.** The Mac app migrates the shared database to schema v4 on first launch, after a backup next to it (`ressac.sqlite.bak-v3`, or the backup of whichever older version it found). v4 adds each feed's rhythm group, the per-feed override and the morning editions; v3 already gave every folder and feed a three-digit page number (`ressac page list`). A `ressac` built before v4 refuses the database ("database created by a newer Ressac"). Get a v4 CLI with `cargo install --path crates/ressac`, or use the app's own copy at `Ressac.app/Contents/Helpers/ressac`.
 
 **Schema v5.** The next launch migrates to v5 the same way (`ressac.sqlite.bak-v4`): themes, each feed's theme and the chart's territories, for the Sea Chart below. A `ressac` older than v5 refuses the database; the v4 notes above apply likewise.
+
+**Schema v6.** The migration after that (`ressac.sqlite.bak-v5`) changes no table: it decodes once the HTML entity that some feeds' double-encoded titles left in stored feed and entry titles (`America&#39;s` becomes `America's`), in the same transaction as the version bump. New titles are decoded at ingest, so it never runs again. A `ressac` older than v6 refuses the database.
 
 ## The terminal reader
 

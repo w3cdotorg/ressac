@@ -27,6 +27,14 @@ pub struct ParsedEntry {
     pub content_html: Option<String>,
 }
 
+/// Decodes the HTML entities a title still holds after the XML parser: some feeds encode
+/// titles twice (`&amp;#39;` in the XML), so the parser leaves `&#39;`. One pass, never more;
+/// text without an entity comes back as it is. The only place titles are decoded: every
+/// title entering the store (parsed feeds, OPML) goes through here.
+pub(crate) fn decode_title_entities(title: &str) -> String {
+    html_escape::decode_html_entities(title).into_owned()
+}
+
 const HTML_SNIFF_BYTES: usize = 512;
 
 /// True for an HTML page: by its first bytes, or by a `text/html` content type when the
@@ -299,7 +307,7 @@ pub fn parse_feed(
             ParsedEntry {
                 guid: e.id,
                 url: e.links.first().map(|l| l.href.clone()),
-                title: e.title.map(|t| t.content),
+                title: e.title.map(|t| decode_title_entities(&t.content)),
                 author: e.authors.first().and_then(|p| p.name.clone()),
                 published_at,
                 published_at_is_fallback: fallback,
@@ -310,7 +318,7 @@ pub fn parse_feed(
         })
         .collect();
     Ok(ParsedFeed {
-        title: feed.title.map(|t| t.content),
+        title: feed.title.map(|t| decode_title_entities(&t.content)),
         description: feed.description.map(|t| t.content),
         site_url: feed
             .links
@@ -637,6 +645,52 @@ mod tests {
         let rss = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title><link>http://u.example/</link><description>d</description><item><guid>1</guid><title>Caf&eacute; &ndash; l&rsquo;&eacute;t&eacute; &hellip;</title></item></channel></rss>"#;
         let f = parse_feed(rss.as_bytes(), None, "http://u.example/feed", now()).unwrap();
         assert_eq!(f.entries[0].title.as_deref(), Some("Café – l’été …"));
+    }
+
+    #[test]
+    fn a_title_encoded_twice_is_decoded_once_more() {
+        let rss = |title: &str| {
+            format!(
+                r#"<?xml version="1.0"?><rss version="2.0"><channel><title>{title}</title><link>http://u.example/</link><description>d</description><item><guid>1</guid><title>{title}</title></item></channel></rss>"#
+            )
+        };
+        let parsed = |title: &str| {
+            parse_feed(rss(title).as_bytes(), None, "http://u.example/feed", now()).unwrap()
+        };
+        for (xml, want) in [
+            ("America&amp;#39;s Earliest", "America's Earliest"),
+            ("America&amp;#x27;s Earliest", "America's Earliest"),
+            ("Q&amp;amp;A", "Q&A"),
+            ("Say &amp;quot;hi&amp;quot;", "Say \"hi\""),
+            ("a&amp;nbsp;b", "a\u{a0}b"),
+            // Encoded once: the parser's decoding is all there is.
+            ("America&#39;s", "America's"),
+            ("Q&amp;A", "Q&A"),
+            // A bare ampersand and look-alikes stay.
+            ("Fish & Chips", "Fish & Chips"),
+            ("AT&T", "AT&T"),
+            ("R&D; sort of", "R&D; sort of"),
+        ] {
+            let f = parsed(xml);
+            assert_eq!(f.title.as_deref(), Some(want), "feed title {xml}");
+            assert_eq!(
+                f.entries[0].title.as_deref(),
+                Some(want),
+                "entry title {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_title_entities_decodes_one_pass_only() {
+        assert_eq!(
+            decode_title_entities("a &#39; b &#x41; &lt;i&gt;"),
+            "a ' b A <i>"
+        );
+        // The decoded `&amp;#39;` is `&#39;`: a second pass would turn it into `'`.
+        assert_eq!(decode_title_entities("&amp;#39;"), "&#39;");
+        assert_eq!(decode_title_entities("plain & text"), "plain & text");
+        assert_eq!(decode_title_entities("&notanentity; &"), "&notanentity; &");
     }
 
     #[test]

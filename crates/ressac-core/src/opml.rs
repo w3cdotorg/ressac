@@ -9,6 +9,7 @@ use quick_xml::{Reader, XmlVersion};
 use crate::error::{Error, Result};
 use crate::health::hijack::has_spam;
 use crate::model::FolderId;
+use crate::parse::decode_title_entities;
 use crate::store::{FeedRow, FolderRow, Store};
 use crate::url_key::repair_url;
 
@@ -120,7 +121,7 @@ fn feed_from(
     let title = attrs
         .get("text")
         .or_else(|| attrs.get("title"))
-        .map(|t| t.trim().to_string())
+        .map(|t| decode_title_entities(t.trim()))
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| xml_url.clone());
     let html_url = attrs
@@ -559,6 +560,14 @@ mod tests {
             let feeds = all_feeds(&parse(&export(&s, false).unwrap()).unwrap());
             assert_eq!(feeds[0].title, "Say \"hi\" <b>");
             assert_eq!(feeds[0].xml_url, "http://a.example.org/f?a=1&b=2");
+        }
+
+        #[test]
+        fn a_feed_title_encoded_twice_is_decoded_once_more() {
+            let xml = r#"<opml><body><outline text="America&amp;#39;s Q&amp;amp;A" xmlUrl="http://a.example.org/f"/><outline text="Fish &amp; Chips" xmlUrl="http://b.example.org/f"/></body></opml>"#;
+            let feeds = all_feeds(&parse(xml).unwrap());
+            assert_eq!(feeds[0].title, "America's Q&A");
+            assert_eq!(feeds[1].title, "Fish & Chips");
         }
     }
 }

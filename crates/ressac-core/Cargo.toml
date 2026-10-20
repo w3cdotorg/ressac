@@ -11,6 +11,7 @@ chrono.workspace = true
 dom_smoothie.workspace = true
 feed-rs.workspace = true
 futures.workspace = true
+html-escape.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
