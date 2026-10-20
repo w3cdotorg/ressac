@@ -328,6 +328,14 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../../../tests/fixtures/vienna-like.opml");
 
+    #[test]
+    fn c1_references_in_outline_titles_become_windows_1252() {
+        let xml = r#"<opml><body><outline text="l&#146;a" xmlUrl="https://a.example/f"/><outline text="l&amp;#146;b" xmlUrl="https://b.example/f"/></body></opml>"#;
+        let outlines = parse(xml).unwrap();
+        let titles: Vec<&str> = feeds(&outlines).iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(titles, ["l\u{2019}a", "l\u{2019}b"]);
+    }
+
     fn feeds(items: &[Outline]) -> Vec<&OpmlFeed> {
         let mut out = Vec::new();
         for item in items {

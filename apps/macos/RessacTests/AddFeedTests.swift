@@ -43,6 +43,16 @@ import Testing
         #expect(FolderChoice.choices(from: []).map(\.title) == ["Feeds"])
     }
 
+    @Test func a_folder_that_disappears_resets_the_choice_to_the_top_level() {
+        let model = AddFeedModel()
+        let choices = [FolderChoice(folderId: nil, name: "Feeds", depth: 0), FolderChoice(folderId: 3, name: "A", depth: 1)]
+        model.folderId = 3
+        model.keepFolder(in: choices)
+        #expect(model.folderId == 3)
+        model.keepFolder(in: [choices[0]])
+        #expect(model.folderId == nil)
+    }
+
     @Test func the_chosen_folder_reaches_the_cli() async throws {
         let (state, _, stub) = try makeState(stub: Self.added + "\necho \"$*\" >> \"$(dirname \"$0\")/calls\"")
         let model = AddFeedModel()

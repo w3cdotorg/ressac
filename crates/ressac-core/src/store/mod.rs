@@ -780,6 +780,27 @@ mod tests {
     }
 
     #[test]
+    fn the_v6_repair_also_maps_stored_c1_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        let v5 = v5_database(&path);
+        v5.execute_batch(
+            "UPDATE feed SET title = 'l\u{92}a' WHERE id = 1;
+             UPDATE entry SET title = 'x \u{96} y' WHERE id = 2;
+             UPDATE entry_fts SET title = 'x \u{96} y' WHERE rowid = 2;",
+        )
+        .unwrap();
+        drop(v5);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(title_of(&store, "feed", 1).as_deref(), Some("l\u{2019}a"));
+        assert_eq!(
+            title_of(&store, "entry", 2).as_deref(),
+            Some("x \u{2013} y")
+        );
+        assert_eq!(store.search_ids("title:x").unwrap(), [2]);
+    }
+
+    #[test]
     fn the_title_repair_runs_once() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ressac.sqlite");

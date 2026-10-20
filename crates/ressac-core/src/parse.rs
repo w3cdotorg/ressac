@@ -30,86 +30,31 @@ pub struct ParsedEntry {
 /// Decodes the HTML entities a title still holds after the XML parser: some feeds encode
 /// titles twice (`&amp;#39;` in the XML), so the parser leaves `&#39;`. One pass, never more;
 /// text without an entity comes back as it is. The only place titles are decoded: every
-/// title entering the store (parsed feeds, OPML) goes through here. Numeric references to
-/// the C1 controls (`&#146;`) become their windows-1252 characters, as browsers read them;
-/// a control character that is literally in the text stays one (the output neutralises it).
+/// title entering the store (parsed feeds, OPML) goes through here. The C1 controls
+/// (U+0080 to U+009F), whether they came from a numeric reference (`&#146;`, which the XML
+/// parser or this decoder turns into U+0092) or were literally there, become their
+/// windows-1252 characters, as browsers read them.
 pub(crate) fn decode_title_entities(title: &str) -> String {
-    html_escape::decode_html_entities(&windows_1252_references(title)).into_owned()
+    html_escape::decode_html_entities(title)
+        .chars()
+        .map(windows_1252_for_c1)
+        .collect()
 }
 
-/// `title` with each numeric reference to U+0080..=U+009F replaced by the windows-1252
-/// character it stands for (the five undefined ones, and every other reference, are kept for
-/// the entity decoder).
-fn windows_1252_references(title: &str) -> std::borrow::Cow<'_, str> {
-    // The 32 characters of 0x80..=0x9F in windows-1252; `None` where it defines none.
-    const TABLE: [Option<char>; 32] = [
-        Some('€'),
-        None,
-        Some('‚'),
-        Some('ƒ'),
-        Some('„'),
-        Some('…'),
-        Some('†'),
-        Some('‡'),
-        Some('ˆ'),
-        Some('‰'),
-        Some('Š'),
-        Some('‹'),
-        Some('Œ'),
-        None,
-        Some('Ž'),
-        None,
-        None,
-        Some('‘'),
-        Some('’'),
-        Some('“'),
-        Some('”'),
-        Some('•'),
-        Some('–'),
-        Some('—'),
-        Some('˜'),
-        Some('™'),
-        Some('š'),
-        Some('›'),
-        Some('œ'),
-        None,
-        Some('ž'),
-        Some('Ÿ'),
+/// The windows-1252 character for a C1 control; the five bytes that encoding leaves
+/// undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D) and every other character stay.
+fn windows_1252_for_c1(c: char) -> char {
+    const TABLE: [char; 32] = [
+        '\u{20AC}', '\u{81}', '\u{201A}', '\u{192}', '\u{201E}', '\u{2026}', '\u{2020}',
+        '\u{2021}', '\u{2C6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8D}', '\u{17D}',
+        '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}',
+        '\u{2014}', '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}', '\u{153}', '\u{9D}', '\u{17E}',
+        '\u{178}',
     ];
-    if !title.contains("&#") {
-        return title.into();
+    match c {
+        '\u{80}'..='\u{9F}' => TABLE[c as usize - 0x80],
+        _ => c,
     }
-    let mut out = String::with_capacity(title.len());
-    let mut rest = title;
-    while let Some(at) = rest.find("&#") {
-        out.push_str(&rest[..at]);
-        let after = &rest[at + 2..];
-        let (digits, radix) = match after.strip_prefix(['x', 'X']) {
-            Some(hex) => (hex, 16),
-            None => (after, 10),
-        };
-        let len = digits
-            .find(|c: char| !c.is_digit(radix))
-            .unwrap_or(digits.len());
-        let mapped = digits[len..]
-            .starts_with(';')
-            .then(|| u32::from_str_radix(&digits[..len], radix).ok())
-            .flatten()
-            .filter(|n| (0x80..=0x9F).contains(n))
-            .and_then(|n| TABLE[n as usize - 0x80]);
-        match mapped {
-            Some(c) => {
-                out.push(c);
-                rest = &digits[len + 1..];
-            }
-            None => {
-                out.push_str("&#");
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
-    out.into()
 }
 
 const HTML_SNIFF_BYTES: usize = 512;
@@ -768,6 +713,59 @@ mod tests {
         assert_eq!(decode_title_entities("&amp;#39;"), "&#39;");
         assert_eq!(decode_title_entities("plain & text"), "plain & text");
         assert_eq!(decode_title_entities("&notanentity; &"), "&notanentity; &");
+    }
+
+    fn titles_of_rss(title_xml: &str) -> (Option<String>, Option<String>) {
+        let rss = format!(
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>{title_xml}</title><link>http://u.example/</link><description>d</description><item><guid>1</guid><title>{title_xml}</title></item></channel></rss>"#
+        );
+        let f = parse_feed(rss.as_bytes(), None, "http://u.example/feed", now()).unwrap();
+        (f.title, f.entries[0].title.clone())
+    }
+
+    #[test]
+    fn c1_references_in_rss_titles_become_windows_1252_whatever_their_encoding() {
+        for (xml, want) in [
+            ("l&#146;a", "l\u{2019}a"),
+            ("l&#x92;a", "l\u{2019}a"),
+            ("l&amp;#146;a", "l\u{2019}a"),
+            ("l&amp;#x92;a", "l\u{2019}a"),
+            ("<![CDATA[l&#146;a]]>", "l\u{2019}a"),
+            ("<![CDATA[l\u{92}a]]>", "l\u{2019}a"),
+            ("a &#150; b &#133; &#128;", "a \u{2013} b \u{2026} \u{20ac}"),
+            ("&#129;&#141;", "\u{81}\u{8d}"),
+        ] {
+            let (feed, entry) = titles_of_rss(xml);
+            assert_eq!(feed.as_deref(), Some(want), "feed title {xml}");
+            assert_eq!(entry.as_deref(), Some(want), "entry title {xml}");
+        }
+    }
+
+    #[test]
+    fn a_json_feed_title_with_a_c1_character_is_mapped() {
+        let json = r#"{"version":"https://jsonfeed.org/version/1.1","title":"l\u0092a","items":[{"id":"1","url":"https://x.org/1","title":"a\u0096b"}]}"#;
+        let f = parse_feed(
+            json.as_bytes(),
+            Some("application/feed+json"),
+            "https://x.org/feed.json",
+            now(),
+        )
+        .unwrap();
+        assert_eq!(f.title.as_deref(), Some("l\u{2019}a"));
+        assert_eq!(f.entries[0].title.as_deref(), Some("a\u{2013}b"));
+    }
+
+    #[test]
+    fn decode_title_entities_maps_literal_c1_characters_too() {
+        assert_eq!(
+            decode_title_entities("l\u{92}a \u{81}"),
+            "l\u{2019}a \u{81}"
+        );
+        assert_eq!(
+            decode_title_entities("l&amp;#146;a"),
+            "l&#146;a",
+            "one pass only"
+        );
     }
 
     #[test]

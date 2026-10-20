@@ -54,6 +54,11 @@ struct FolderChoice: Identifiable, Equatable {
         self.address = address
     }
 
+    /// Back to the top level when the chosen folder is no longer there (removed meanwhile).
+    func keepFolder(in choices: [FolderChoice]) {
+        if let folderId, !choices.contains(where: { $0.folderId == folderId }) { self.folderId = nil }
+    }
+
     var canAdd: Bool {
         !isRunning && !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -150,6 +155,7 @@ struct AddFeedSheet: View {
         .padding(20)
         .frame(width: 420)
         .onAppear { addressFocused = true }
+        .onChange(of: state.sidebarTree) { model.keepFolder(in: FolderChoice.choices(from: state.sidebarTree)) }
         .task {
             do {
                 for try await rows in Queries.themes().values(in: state.database.reader) { themes = rows }

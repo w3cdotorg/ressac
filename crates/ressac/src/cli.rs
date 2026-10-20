@@ -52,7 +52,7 @@ pub enum Command {
         /// Put the feed in this theme (a theme key or name) instead of its site's
         #[arg(long, value_name = "THEME")]
         theme: Option<String>,
-        /// Put the feed in this folder (an id, or a name; "root" is the top level, the default)
+        /// Put the feed in this folder (an id or a name; "root", the default, is the top level; a folder named root needs its id)
         #[arg(long, value_name = "FOLDER")]
         folder: Option<String>,
     },
@@ -207,7 +207,7 @@ pub enum FeedCommand {
     Move {
         /// The feed's id
         feed_id: FeedId,
-        /// A folder id, or "root" for the top level
+        /// A folder id or name, or "root" for the top level (a folder named root needs its id)
         folder: String,
     },
 }

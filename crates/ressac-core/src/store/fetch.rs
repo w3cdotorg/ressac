@@ -48,9 +48,14 @@ pub(super) fn bad_timestamp(col: usize) -> rusqlite::Error {
 /// inside migration 6: afterwards titles are decoded at ingest, and a title that holds
 /// entity text on purpose (`&amp;`) must stay as it is.
 pub(super) fn decode_stored_titles(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    // Rows holding an entity, or a C1 control (U+0080 to U+009F: a numeric reference the XML
+    // parser had already decoded), which the shared helper maps to windows-1252.
+    let c1_glob = "*[\u{80}-\u{9f}]*";
     let feeds = conn
-        .prepare("SELECT id, title FROM feed WHERE title LIKE '%&%;%'")?
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .prepare("SELECT id, title FROM feed WHERE title LIKE '%&%;%' OR title GLOB ?1")?
+        .query_map([c1_glob], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (id, title) in feeds {
         let decoded = decode_title_entities(&title);
@@ -65,9 +70,11 @@ pub(super) fn decode_stored_titles(conn: &rusqlite::Connection) -> rusqlite::Res
     let entries = conn
         .prepare(
             "SELECT id, title, author, COALESCE(content_html, summary_html) FROM entry \
-             WHERE title LIKE '%&%;%'",
+             WHERE title LIKE '%&%;%' OR title GLOB ?1",
         )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .query_map([c1_glob], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
         .collect::<rusqlite::Result<Vec<Row>>>()?;
     for (id, title, author, html) in entries {
         let decoded = decode_title_entities(&title);

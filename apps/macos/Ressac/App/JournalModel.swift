@@ -63,8 +63,9 @@ import Observation
     /// After a failed or offline build it waits 15 minutes; `retry()` does not.
     func checkAndBuild() async {
         // A window longer than the delay means the clock moved backwards: it has expired.
-        if let notBefore = automaticRetryNotBefore, clock() < notBefore,
-           notBefore.timeIntervalSince(clock()) <= Self.automaticRetryDelay { return }
+        let now = clock()
+        if let notBefore = automaticRetryNotBefore, now < notBefore,
+           notBefore.timeIntervalSince(now) <= Self.automaticRetryDelay { return }
         await checkAndBuildNow()
     }
 

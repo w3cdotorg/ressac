@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use ressac_core::model::{CadenceGroup, FeedId, FolderId};
+use ressac_core::model::{CadenceGroup, FeedId};
 use ressac_core::store::CadenceRow;
 
 use super::{Globals, open_with_feeds, usage};
@@ -42,7 +42,7 @@ pub fn feed(g: &Globals, action: FeedCommand, out: &mut impl Write) -> anyhow::R
             }
         }
         FeedCommand::Move { feed_id, folder } => {
-            let target = parse_folder(&folder)?;
+            let target = app.store().resolve_folder(&folder).map_err(refusal_error)?;
             let moved = app
                 .store()
                 .move_feed(feed_id, target)
@@ -69,22 +69,6 @@ pub fn feed(g: &Globals, action: FeedCommand, out: &mut impl Write) -> anyhow::R
     }
     Ok(ExitCode::SUCCESS)
 }
-
-/// The folder argument of `feed move`: an id, or `root` for the top level.
-fn parse_folder(arg: &str) -> anyhow::Result<Option<FolderId>> {
-    if arg == ROOT {
-        return Ok(None);
-    }
-    arg.parse().map(Some).map_err(|_| {
-        usage(format!(
-            "Give a folder id or \"{ROOT}\", not \"{}\".",
-            crate::output::printable(arg)
-        ))
-    })
-}
-
-/// The argument that names the top level.
-const ROOT: &str = "root";
 
 /// The key that clears a feed's theme.
 const NO_THEME: &str = "none";
@@ -146,6 +130,8 @@ fn refusal_error(e: ressac_core::Error) -> anyhow::Error {
         Error::UnknownFeed(_)
         | Error::FeedBuried(_)
         | Error::UnknownFolder(_)
+        | Error::UnknownFolderName(_)
+        | Error::AmbiguousFolder { .. }
         | Error::UnknownTheme { .. } => {
             usage(crate::output::printable(&e.to_string()).into_owned())
         }

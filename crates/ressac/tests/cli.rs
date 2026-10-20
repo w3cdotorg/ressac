@@ -2031,7 +2031,7 @@ async fn add_neutralises_controls() {
     serve(
         &server,
         "/f.xml",
-        channel("Evil \u{9b}31m title", ""),
+        channel("Evil \u{90}31m title", ""),
         "application/rss+xml",
     )
     .await;
@@ -2044,7 +2044,12 @@ async fn add_neutralises_controls() {
         text.starts_with("Added #1 Evil \u{FFFD}31m title (page "),
         "{text}"
     );
-    assert!(!text.contains('\u{9b}'));
+    assert!(
+        !text
+            .chars()
+            .any(|c| c == '\u{1b}' || ('\u{80}'..='\u{9f}').contains(&c)),
+        "no escape or C1 control reaches the terminal: {text}"
+    );
 
     // The duplicate refusal names the stored title, and an unknown theme its key.
     serve(
@@ -2142,16 +2147,26 @@ async fn feed_move_root() {
 }
 
 #[tokio::test]
+async fn feed_move_takes_a_folder_name_like_add_does() {
+    let server = MockServer::start().await;
+    let home = reading_home(&server).await;
+    let out = ressac_async(home.path(), &["feed", "move", "4", " nEWS "]).await;
+    assert!(out.status.success(), "{out:?}");
+    assert!(stdout(&out).contains("News"), "{}", stdout(&out));
+    let back = ressac_async(home.path(), &["feed", "move", "4", "ROOT"]).await;
+    assert!(back.status.success(), "{back:?}");
+    let store = Store::open(&home.path().join("db.sqlite")).unwrap();
+    assert_eq!(store.feed(4).unwrap().folder_id, None);
+}
+
+#[tokio::test]
 async fn feed_move_unknown_exit_2() {
     let server = MockServer::start().await;
     let home = reading_home(&server).await;
     for (args, message) in [
         (&["feed", "move", "99", "1"][..], "No feed #99.\n"),
         (&["feed", "move", "4", "99"], "No folder #99.\n"),
-        (
-            &["feed", "move", "4", "banana"],
-            "Give a folder id or \"root\", not \"banana\".\n",
-        ),
+        (&["feed", "move", "4", "banana"], "No folder \"banana\".\n"),
     ] {
         let out = ressac_async(home.path(), args).await;
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
