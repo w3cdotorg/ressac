@@ -322,8 +322,8 @@ impl Ressac {
         let page = fetch_guarded(&self.articles, &typed).await?;
         // The feed's address as resolved (the typed one, or the announced link); the address
         // a fetch ended at is only the base of what it contains. Every address the feed
-        // answers to is checked for duplicates, so a stored address that redirects here is
-        // found too.
+        // answers to is checked for duplicates, so a new address that redirects to a stored
+        // feed is found too.
         let (feed, xml_url, site_url, discovered, known_as) = match parse_feed(
             &page.body,
             page.content_type.as_deref(),
@@ -423,6 +423,7 @@ impl Ressac {
         tracing::info!(feeds = due.len(), force = opts.force, "refresh started");
 
         let (tx, mut rx) = mpsc::channel(64);
+        let source_in_use = source;
         let source = source.clone();
         let lane_stop = stop.clone();
         let fetching = tokio::spawn(async move { source.refresh(due, tx, lane_stop).await });
@@ -463,12 +464,13 @@ impl Ressac {
                 attempted,
             });
         } else if !stop.load(Ordering::Relaxed) {
-            self.probe_https(&fresh, &mut pacer, sink, stop.clone())
+            self.probe_https(source_in_use, &fresh, &mut pacer, sink, stop.clone())
                 .await?;
             if !stop.load(Ordering::Relaxed) {
                 // Triage waits for the final diagnosis below.
                 self.save_fresh_diagnoses(Utc::now())?;
-                self.discover_replacements(sink, Utc::now(), &stop).await?;
+                self.discover_replacements(source_in_use, sink, Utc::now(), &stop)
+                    .await?;
             }
         }
         if !unreachable && !stop.load(Ordering::Relaxed) {
@@ -490,6 +492,7 @@ impl Ressac {
     /// Each probe is noted in `pacer`.
     async fn probe_https(
         &self,
+        source: &LocalSource,
         fresh: &HashMap<FeedId, ParsedFeed>,
         pacer: &mut HostPacer,
         sink: &dyn EventSink,
@@ -519,7 +522,7 @@ impl Ressac {
             total: candidates.len(),
         });
         let (tx, mut rx) = mpsc::channel(64);
-        let source = self.source.clone();
+        let source = source.clone();
         let probing = tokio::spawn(async move { source.refresh(candidates, tx, stop).await });
         while let Some(attempt) = rx.recv().await {
             pacer.note_attempt(&attempt, Instant::now());
@@ -538,6 +541,7 @@ impl Ressac {
     /// For Dead feeds with a site address, looks for a replacement feed announced by the site.
     async fn discover_replacements(
         &self,
+        site: &LocalSource,
         sink: &dyn EventSink,
         now: DateTime<Utc>,
         stop: &AtomicBool,
@@ -565,7 +569,7 @@ impl Ressac {
             what: "autodiscovery".into(),
             total: candidates.len(),
         });
-        let (site, guarded) = (&self.source, &self.articles);
+        let guarded = &self.articles;
         let found: Vec<(FeedId, Option<Option<String>>)> = stream::iter(candidates)
             .map(|f| async move {
                 if stop.load(Ordering::Relaxed) {
@@ -2126,6 +2130,94 @@ mod tests {
             .await;
     }
 
+    /// A loopback listener that counts the connections it is offered.
+    struct Tap(std::net::TcpListener);
+
+    impl Tap {
+        fn new() -> Self {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.set_nonblocking(true).unwrap();
+            Self(l)
+        }
+
+        fn port(&self) -> u16 {
+            self.0.local_addr().unwrap().port()
+        }
+
+        fn connections(&self) -> usize {
+            std::iter::from_fn(|| self.0.accept().ok()).count()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_https_probe_uses_the_source_it_is_given() {
+        let tap = Tap::new();
+        let app = add_app();
+        let xml = format!(
+            r#"<opml><body><outline text="T" xmlUrl="http://127.0.0.1:{}/feed.xml"/></body></opml>"#,
+            tap.port()
+        );
+        app.import_opml(&xml, false).unwrap();
+        let fresh = HashMap::from([(1, feed(&["a"]))]);
+        let guarded = LocalSource::for_articles(app.limits.clone(), false).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut pacer = HostPacer::new(Duration::ZERO);
+        app.probe_https(&guarded, &fresh, &mut pacer, &NullSink, stop.clone())
+            .await
+            .unwrap();
+        assert_eq!(tap.connections(), 0, "the guarded source never connects");
+        // Control: the feed client does connect to the https variant.
+        app.store()
+            .conn()
+            .execute("UPDATE feed SET https_available = NULL", [])
+            .unwrap();
+        app.probe_https(&app.source, &fresh, &mut pacer, &NullSink, stop)
+            .await
+            .unwrap();
+        assert_eq!(tap.connections(), 1);
+    }
+
+    #[tokio::test]
+    async fn discovery_fetches_the_site_through_the_source_it_is_given() {
+        let tap = Tap::new();
+        let server = MockServer::start().await;
+        serve(&server, "/feed.xml", 410, "", "text/plain").await;
+        let app = add_app();
+        let xml = format!(
+            r#"<opml><body><outline text="T" xmlUrl="{}/feed.xml"/></body></opml>"#,
+            server.uri()
+        );
+        app.import_opml(&xml, false).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        app.refresh(RefreshOptions::default(), &NullSink, stop.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            app.store().diagnosis(1).unwrap().map(|d| d.status),
+            Some(Status::Dead)
+        );
+        app.store()
+            .conn()
+            .execute(
+                "UPDATE feed SET html_url = ?1, discovery_checked_at = NULL",
+                [format!("http://127.0.0.1:{}/", tap.port())],
+            )
+            .unwrap();
+        let guarded = LocalSource::for_articles(app.limits.clone(), false).unwrap();
+        app.discover_replacements(&guarded, &NullSink, Utc::now(), &stop)
+            .await
+            .unwrap();
+        assert_eq!(tap.connections(), 0, "the guarded source never connects");
+        app.store()
+            .conn()
+            .execute("UPDATE feed SET discovery_checked_at = NULL", [])
+            .unwrap();
+        app.discover_replacements(&app.source, &NullSink, Utc::now(), &stop)
+            .await
+            .unwrap();
+        assert_eq!(tap.connections(), 1, "control: the feed client connects");
+    }
+
     #[tokio::test]
     async fn a_direct_address_is_stored_as_typed_not_as_redirected() {
         let server = MockServer::start().await;
@@ -2166,7 +2258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_first_fetch_of_an_added_feed_uses_the_guarded_client() {
+    async fn refresh_via_fetches_the_feed_through_the_source_it_is_given() {
         let server = MockServer::start().await;
         serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
         let app = add_app();
