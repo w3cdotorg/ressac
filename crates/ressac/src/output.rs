@@ -203,10 +203,18 @@ pub fn extracted_text(entry_id: i64, error: Option<&str>) -> String {
     }
 }
 
-/// `ressac add`'s lines: the feed and its page, its theme, and the territory it joined.
+/// `ressac add`'s lines: the feed, its folder (when not the top level) and its page, its theme, and the territory it joined.
 pub fn added_text(added: &AddedFeed) -> String {
     let page = added.page.map_or(String::new(), |p| format!(" (page {p})"));
-    let mut text = format!("Added #{} {}{page}", added.id, printable(&added.title));
+    let place = added
+        .folder_name
+        .as_deref()
+        .map_or(String::new(), |name| format!(" in {}", printable(name)));
+    let mut text = format!(
+        "Added #{} {}{place}{page}",
+        added.id,
+        printable(&added.title)
+    );
     let theme = match (&added.theme, &added.theme_source) {
         (Some(name), ThemeSource::Sibling { title, .. }) => {
             format!("{} (same site as {})", printable(name), printable(title))
@@ -235,6 +243,7 @@ pub fn added_json(added: &AddedFeed) -> serde_json::Value {
         "page": added.page,
         "theme": added.theme,
         "territory": added.territory,
+        "folder": added.folder,
         "discovered": added.discovered,
         "like": like,
     })

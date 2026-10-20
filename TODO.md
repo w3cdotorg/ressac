@@ -114,7 +114,7 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 ### Ajouter un flux (sous-projet 7)
 
 - [ ] Choisir parmi plusieurs flux annoncés (aujourd'hui le premier est pris).
-- [ ] Choisir le dossier dans la fenêtre d'ajout.
+- [x] Choisir le dossier dans la fenêtre d'ajout. Fait : `ressac add --folder` (id, nom ou `root`) et un menu Folder dans la fenêtre ; le dossier n'est pas déplié dans la barre latérale.
 - [ ] Commandes Antiope pour ajouter et déplacer un flux.
 - [x] `ressac chart export` (la base fait foi : une réimportation efface les thèmes hérités). Fait : écrit le format exact de `chart import` (sortie standard ou `--output`), héritages compris.
 - [ ] Les flux venus d'une découverte gardent le client protégé à chaque rafraîchissement (aujourd'hui seul le premier passe par lui ; demande un drapeau par flux).

@@ -127,8 +127,12 @@ struct RunRequest: Sendable, Equatable {
 
     /// Adds the feed at `address` (a feed or a site; the CLI discovers and fetches it). Long: it
     /// fetches, so it cannot overlap another fetch. `theme` is a theme key; nil inherits from the site.
-    static func addFeed(address: String, theme: String?) -> RunRequest {
-        RunRequest(arguments: ["add", address] + (theme.map { ["--theme", $0] } ?? []), kind: .long)
+    /// `folder` is a folder id; nil leaves the feed at the top level (the flag is omitted).
+    static func addFeed(address: String, theme: String?, folder: Int64? = nil) -> RunRequest {
+        RunRequest(
+            arguments: ["add", address] + (theme.map { ["--theme", $0] } ?? [])
+                + (folder.map { ["--folder", String($0)] } ?? []),
+            kind: .long)
     }
 
     /// Extraction failures are shown inline in the reader and add failures in the Add Feed sheet,

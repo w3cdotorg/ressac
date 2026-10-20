@@ -638,9 +638,9 @@ enum PendingSheet: Equatable, Sendable {
 
     /// Runs `ressac add` (spec add-feed §7). On success the new feed is selected and `addFeedNote`
     /// says where it landed; the caller closes the sheet. Failures come back as the run's failure.
-    func addFeed(address: String, theme: String?) async -> Result<AddedFeed, RunFailure> {
+    func addFeed(address: String, theme: String?, folder: Int64? = nil) async -> Result<AddedFeed, RunFailure> {
         var added: AddedFeed?
-        let outcome = await runs.perform(.addFeed(address: address, theme: theme)) { event in
+        let outcome = await runs.perform(.addFeed(address: address, theme: theme, folder: folder)) { event in
             if case let .added(feed) = event { added = feed }
         }
         switch outcome {

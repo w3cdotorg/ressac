@@ -179,6 +179,8 @@ pub struct Inserted {
     pub theme_source: ThemeSource,
     /// The territory joined through a sibling, never a continent.
     pub territory: Option<String>,
+    /// The folder it went into, with its name; `None` for the top level.
+    pub folder: Option<(FolderId, String)>,
 }
 
 impl Store {
@@ -188,8 +190,9 @@ impl Store {
         duplicate_in(self.conn(), urls)
     }
 
-    /// Adds one feed at the bottom of the root, with a root page, in one transaction. The
-    /// theme is `theme` (a known key or name, else `UnknownTheme` before anything is written) or,
+    /// Adds one feed at the bottom of `folder` (`None` = the root), with a page from that
+    /// home's range (see `pages::assign_missing`), in one transaction; an unknown folder is
+    /// `UnknownFolder` before anything is written. The theme is `theme` (a known key or name, else `UnknownTheme` before anything is written) or,
     /// when none is given, the one most active feeds of the same site share (`host_key`;
     /// ties: the lowest feed id's); with a themed or not sibling in a territory, the feed
     /// joins the lowest-id one. Checks again, inside its own write transaction, that the new
@@ -199,9 +202,20 @@ impl Store {
         &self,
         new: &NewFeed,
         theme: Option<&str>,
+        folder: Option<FolderId>,
         now: DateTime<Utc>,
     ) -> Result<Inserted> {
         let tx = self.write_tx()?;
+        let folder = folder
+            .map(|id| {
+                tx.query_row("SELECT name FROM folder WHERE id = ?1", [id], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?
+                .map(|name| (id, name))
+                .ok_or(Error::UnknownFolder(id))
+            })
+            .transpose()?;
         let addresses: Vec<&str> = std::iter::once(new.xml_url.as_str())
             .chain(new.known_as.iter().map(String::as_str))
             .collect();
@@ -238,15 +252,16 @@ impl Store {
         };
         tx.execute(
             "INSERT INTO feed (folder_id, position, title, xml_url, xml_url_original, html_url, \
-             url_key, theme_id, added_at) VALUES (NULL, ?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)",
+             url_key, theme_id, added_at) VALUES (?8, ?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)",
             params![
-                next_position(&tx, None)?,
+                next_position(&tx, folder.as_ref().map(|(id, _)| *id))?,
                 title,
                 new.xml_url,
                 new.html_url,
                 url_key(&new.xml_url),
                 theme_id,
-                ts(now)
+                ts(now),
+                folder.as_ref().map(|(id, _)| *id)
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -276,6 +291,7 @@ impl Store {
             theme,
             theme_source,
             territory,
+            folder,
         })
     }
 
@@ -425,6 +441,40 @@ impl Store {
             computed_group: computed,
             is_override: forced.is_some(),
         })
+    }
+
+    /// The folder `given` names: `root` (any case) for the top level, else a folder id, else
+    /// a folder name compared case-insensitively after trimming. An id always works, even
+    /// when another folder is named like it. `UnknownFolder` for an id nobody holds (when no
+    /// folder has that name either), `UnknownFolderName` for a name nobody has and
+    /// `AmbiguousFolder` (listing the ids) when several folders share the name. Every place
+    /// that turns typed text into a folder goes through here.
+    pub fn resolve_folder(&self, given: &str) -> Result<Option<FolderId>> {
+        let given = given.trim();
+        if given.eq_ignore_ascii_case("root") {
+            return Ok(None);
+        }
+        let folders = self.folders()?;
+        let id = given.parse::<FolderId>().ok();
+        if let Some(id) = id.filter(|id| folders.iter().any(|f| f.id == *id)) {
+            return Ok(Some(id));
+        }
+        let wanted = given.to_lowercase();
+        let mut ids: Vec<FolderId> = folders
+            .iter()
+            .filter(|f| f.name.trim().to_lowercase() == wanted)
+            .map(|f| f.id)
+            .collect();
+        ids.sort_unstable();
+        match (ids.as_slice(), id) {
+            ([only], _) => Ok(Some(*only)),
+            ([], Some(id)) => Err(Error::UnknownFolder(id)),
+            ([], None) => Err(Error::UnknownFolderName(given.to_owned())),
+            _ => Err(Error::AmbiguousFolder {
+                given: given.to_owned(),
+                ids,
+            }),
+        }
     }
 
     pub fn folders(&self) -> Result<Vec<FolderRow>> {
@@ -1171,6 +1221,119 @@ mod tests {
         assert_eq!((moved.old_page, moved.new_page), (Some(203), Some(203)));
     }
 
+    fn fresh(s: &Store, n: u32, folder: Option<FolderId>) -> Inserted {
+        s.insert_added_feed(
+            &new_feed(
+                &format!("https://n{n}.example.net/rss"),
+                None,
+                &format!("N{n}"),
+            ),
+            None,
+            folder,
+            now(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn insert_into_a_folder_goes_last_with_a_page_in_its_range() {
+        let s = numbered();
+        let got = fresh(&s, 1, Some(1));
+        assert_eq!(got.folder, Some((1, "Folder 1".to_owned())));
+        assert_eq!(got.page, Some(203), "201 and 202 are held");
+        let row = s.feed(got.id).unwrap();
+        assert_eq!(row.folder_id, Some(1));
+        assert_eq!(row.position, 2, "after feed 10 (0) and folder 2 (1)");
+    }
+
+    #[test]
+    fn insert_into_a_subfolder_uses_the_root_folders_range() {
+        let s = numbered();
+        let got = fresh(&s, 1, Some(2));
+        assert_eq!(
+            (s.feed(got.id).unwrap().folder_id, got.page),
+            (Some(2), Some(203))
+        );
+        assert_eq!(
+            s.feed(got.id).unwrap().position,
+            0,
+            "first in its own folder"
+        );
+    }
+
+    #[test]
+    fn insert_at_the_root_is_unchanged_and_reports_no_folder() {
+        let s = numbered();
+        let got = fresh(&s, 1, None);
+        assert_eq!((got.folder, got.page), (None, Some(111)));
+    }
+
+    #[test]
+    fn insert_into_an_overflow_root_folder_uses_the_pool() {
+        let s = Store::open_in_memory().unwrap();
+        for i in 1..=7 {
+            folder(&s, i, None, i);
+        }
+        feed(&s, 20, None, 8);
+        pages::assign_missing(s.conn()).unwrap();
+        assert_eq!(folder_page(&s, 7), Some(111), "no hundred of its own");
+        assert_eq!(fresh(&s, 1, Some(7)).page, Some(112));
+    }
+
+    #[test]
+    fn insert_into_an_unknown_folder_writes_nothing() {
+        let s = numbered();
+        let err = s
+            .insert_added_feed(
+                &new_feed("https://n.example.net/rss", None, "N"),
+                None,
+                Some(99),
+                now(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::UnknownFolder(99)), "{err:?}");
+        assert_eq!(s.feed_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn resolve_folder_takes_root_an_id_or_a_name() {
+        let s = numbered();
+        s.conn()
+            .execute("UPDATE folder SET name = ' Étude ' WHERE id = 2", [])
+            .unwrap();
+        assert_eq!(s.resolve_folder("root").unwrap(), None);
+        assert_eq!(s.resolve_folder(" ROOT ").unwrap(), None);
+        assert_eq!(s.resolve_folder("1").unwrap(), Some(1));
+        assert_eq!(s.resolve_folder("folder 1").unwrap(), Some(1));
+        assert_eq!(s.resolve_folder("éTUDE").unwrap(), Some(2));
+        let err = s.resolve_folder("99").unwrap_err();
+        assert!(matches!(err, Error::UnknownFolder(99)), "{err:?}");
+        let err = s.resolve_folder("nope").unwrap_err();
+        assert_eq!(err.to_string(), "No folder \"nope\".");
+    }
+
+    #[test]
+    fn resolve_folder_refuses_a_shared_name_and_lets_an_id_win() {
+        let s = numbered();
+        s.conn()
+            .execute("UPDATE folder SET name = 'Dup'", [])
+            .unwrap();
+        let err = s.resolve_folder("dup").unwrap_err();
+        assert!(matches!(&err, Error::AmbiguousFolder { ids, .. } if ids == &[1, 2]));
+        assert_eq!(
+            err.to_string(),
+            "Several folders are named \"dup\": #1, #2. Use an id."
+        );
+        s.conn()
+            .execute("UPDATE folder SET name = '2' WHERE id = 1", [])
+            .unwrap();
+        assert_eq!(
+            s.resolve_folder("2").unwrap(),
+            Some(2),
+            "the id, not the name"
+        );
+    }
+
     fn new_feed(xml: &str, html: Option<&str>, title: &str) -> NewFeed {
         NewFeed {
             xml_url: xml.to_owned(),
@@ -1284,6 +1447,7 @@ mod tests {
             .insert_added_feed(
                 &new_feed("https://EXAMPLE.org/feed1.xml/", None, "Again"),
                 None,
+                None,
                 now(),
             )
             .unwrap_err();
@@ -1312,6 +1476,7 @@ mod tests {
                     Some("https://fresh.example.net/"),
                     "Fresh",
                 ),
+                None,
                 None,
                 now(),
             )
@@ -1343,6 +1508,7 @@ mod tests {
             .insert_added_feed(
                 &new_feed("https://www.example.org/rss", None, "  "),
                 None,
+                None,
                 now(),
             )
             .unwrap();
@@ -1363,6 +1529,7 @@ mod tests {
                     "New",
                 ),
                 Some("arts"),
+                None,
                 now(),
             )
             .unwrap();
@@ -1380,6 +1547,7 @@ mod tests {
             .insert_added_feed(
                 &new_feed("https://example.org/x", None, "X"),
                 Some("nope"),
+                None,
                 now(),
             )
             .unwrap_err();
@@ -1402,6 +1570,7 @@ mod tests {
                     Some("https://example.org/"),
                     "New",
                 ),
+                None,
                 None,
                 now(),
             )
@@ -1430,6 +1599,7 @@ mod tests {
                     Some("https://example.org/"),
                     "New",
                 ),
+                None,
                 None,
                 now(),
             )
@@ -1461,6 +1631,7 @@ mod tests {
                     "New",
                 ),
                 None,
+                None,
                 now(),
             )
             .unwrap();
@@ -1483,6 +1654,7 @@ mod tests {
                     Some("https://example.org/"),
                     "New",
                 ),
+                None,
                 None,
                 now(),
             )

@@ -1754,6 +1754,100 @@ async fn add_prints_the_feed_and_its_theme() {
 }
 
 #[tokio::test]
+async fn add_in_a_folder_by_name_prints_where_it_landed() {
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    let out = ressac_async(
+        home.path(),
+        &[
+            "add",
+            &format!("{}/new.xml", server.uri()),
+            "--folder",
+            " nEWS ",
+        ],
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    assert!(
+        text.starts_with("Added #5 New Feed in News (page 205)\n"),
+        "{text}"
+    );
+    let store = Store::open(&home.path().join("db.sqlite")).unwrap();
+    assert_eq!(store.feed(5).unwrap().folder_id, Some(1));
+}
+
+#[tokio::test]
+async fn add_json_names_the_folder_by_id_and_root_is_null() {
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    let out = ressac_async(
+        home.path(),
+        &[
+            "--json",
+            "add",
+            &format!("{}/new.xml", server.uri()),
+            "--folder",
+            "2",
+        ],
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let added = json_lines(&out).pop().unwrap();
+    assert_eq!(added["event"], "added");
+    assert_eq!(added["folder"], 2);
+
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    let out = ressac_async(
+        home.path(),
+        &[
+            "--json",
+            "add",
+            &format!("{}/new.xml", server.uri()),
+            "--folder",
+            "root",
+        ],
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let added = json_lines(&out).pop().unwrap();
+    assert!(added["folder"].is_null(), "{added}");
+}
+
+#[tokio::test]
+async fn add_refuses_a_bad_folder_before_any_network_work() {
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    // Two folders now share a name, so that name is ambiguous.
+    rusqlite::Connection::open(home.path().join("db.sqlite"))
+        .unwrap()
+        .execute("UPDATE folder SET name = 'Same'", [])
+        .unwrap();
+    server.reset().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let url = format!("{}/new.xml", server.uri());
+    for (given, message) in [
+        ("atlantis", "No folder \"atlantis\".\n"),
+        ("99", "No folder #99.\n"),
+        (
+            "same",
+            "Several folders are named \"same\": #1, #2. Use an id.\n",
+        ),
+    ] {
+        let out = ressac_async(home.path(), &["add", &url, "--folder", given]).await;
+        assert_eq!(out.status.code(), Some(2), "{given}: {out:?}");
+        assert_eq!(stderr(&out), message, "{given}");
+        assert!(out.stdout.is_empty(), "{given}");
+    }
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn add_through_a_site_with_a_chosen_theme_or_none() {
     let server = MockServer::start().await;
     let home = reading_home(&server).await;
@@ -1855,7 +1949,7 @@ async fn add_json_ends_with_added() {
     let added = json_lines(&lone).pop().unwrap();
     assert_eq!(added["event"], "added");
     assert_eq!(added["discovered"], false);
-    for key in ["theme", "territory", "like"] {
+    for key in ["theme", "territory", "like", "folder"] {
         assert!(added[key].is_null(), "{key}: {added}");
     }
 }

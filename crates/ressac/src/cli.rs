@@ -52,6 +52,9 @@ pub enum Command {
         /// Put the feed in this theme (a theme key or name) instead of its site's
         #[arg(long, value_name = "THEME")]
         theme: Option<String>,
+        /// Put the feed in this folder (an id, or a name; "root" is the top level, the default)
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
     },
     /// Fetch every feed (or only some) and update its health
     Fetch {

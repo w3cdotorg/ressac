@@ -19,7 +19,9 @@ use crate::extract::{Article, ExtractError, extract_article};
 use crate::garden;
 use crate::health::links::{LinkInput, apply_similar_titles, find_duplicates};
 use crate::health::{FeedEvidence, diagnose};
-use crate::model::{Action, CadenceGroup, Diagnosis, ErrorKind, FeedId, Status, parse_ts, ts};
+use crate::model::{
+    Action, CadenceGroup, Diagnosis, ErrorKind, FeedId, FolderId, Status, parse_ts, ts,
+};
 use crate::opml::{self, clean_description};
 use crate::parse::{
     CHALLENGE_SNIFF_BYTES, ParsedFeed, is_challenge_page, looks_like_html, parse_feed,
@@ -247,6 +249,9 @@ pub struct AddedFeed {
     pub theme: Option<String>,
     pub theme_source: ThemeSource,
     pub territory: Option<String>,
+    /// The folder it went into (`None`: the top level) and that folder's name.
+    pub folder: Option<FolderId>,
+    pub folder_name: Option<String>,
     /// The address typed was a site page and the feed was found through it.
     pub discovered: bool,
 }
@@ -305,12 +310,14 @@ impl Ressac {
     /// Adds one feed from `input`, a feed address or a site page whose first announced feed
     /// is taken (spec §4). Everything fetched goes through the guarded client: public web
     /// addresses only. Refuses an address already followed or buried, then inserts the feed
-    /// at the bottom of the root (with the theme `theme` names, else its site's) and fetches
+    /// at the bottom of `folder` (an id, a name or `root`, see `Store::resolve_folder`; the
+    /// top level when `None`) with the theme `theme` names, else its site's, and fetches
     /// it right away; a failed fetch keeps the feed.
     pub async fn add_feed(
         &self,
         input: &str,
         theme: Option<&str>,
+        folder: Option<&str>,
         sink: &dyn EventSink,
         stop: Arc<AtomicBool>,
     ) -> Result<AddedFeed> {
@@ -319,6 +326,10 @@ impl Ressac {
             .map(|given| self.store.resolve_theme(given))
             .transpose()?;
         let theme = theme.as_ref().map(|t| t.key.as_str());
+        let folder = folder
+            .map(|given| self.store.resolve_folder(given))
+            .transpose()?
+            .flatten();
         let typed = normalise_address(input)?;
         if let Some((id, title, buried)) = self.store.find_duplicate(&[&typed])? {
             return Err(Error::FeedExists { id, title, buried });
@@ -372,7 +383,7 @@ impl Ressac {
             xml_url,
             known_as,
         };
-        let inserted = self.store.insert_added_feed(&new, theme, now)?;
+        let inserted = self.store.insert_added_feed(&new, theme, folder, now)?;
         let opts = RefreshOptions {
             force: true,
             only: Some(vec![inserted.id]),
@@ -391,6 +402,8 @@ impl Ressac {
             theme: inserted.theme.map(|t| t.name),
             theme_source: inserted.theme_source,
             territory: inserted.territory,
+            folder: inserted.folder.as_ref().map(|(id, _)| *id),
+            folder_name: inserted.folder.map(|(_, name)| name),
             discovered,
         })
     }
@@ -2036,8 +2049,14 @@ mod tests {
     }
 
     async fn add(app: &Ressac, input: &str) -> Result<AddedFeed> {
-        app.add_feed(input, None, &NullSink, Arc::new(AtomicBool::new(false)))
-            .await
+        app.add_feed(
+            input,
+            None,
+            None,
+            &NullSink,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
     }
 
     fn page_announcing(links: &[&str]) -> String {
@@ -2449,6 +2468,7 @@ mod tests {
                 .add_feed(
                     &format!("{}/feed.xml", server.uri()),
                     Some(given),
+                    None,
                     &NullSink,
                     Arc::new(AtomicBool::new(false)),
                 )
@@ -2473,6 +2493,7 @@ mod tests {
             .add_feed(
                 &format!("{}/feed.xml", server.uri()),
                 Some("nope"),
+                None,
                 &NullSink,
                 Arc::new(AtomicBool::new(false)),
             )
@@ -2483,6 +2504,88 @@ mod tests {
         assert!(
             server.received_requests().await.unwrap().is_empty(),
             "an unknown theme is refused before any network work"
+        );
+    }
+
+    fn add_folder_app() -> Ressac {
+        let app = add_app();
+        let xml = r#"<opml><body>
+            <outline text="Reading"><outline text="Sub"/></outline>
+            <outline text="Twin"/><outline text=" TWIN "/>
+        </body></opml>"#;
+        app.import_opml(xml, false).unwrap();
+        app
+    }
+
+    async fn add_in(app: &Ressac, url: &str, folder: &str) -> Result<AddedFeed> {
+        app.add_feed(
+            url,
+            None,
+            Some(folder),
+            &NullSink,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_feed_added_with_a_folder_lands_in_it() {
+        let server = MockServer::start().await;
+        serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_folder_app();
+        let url = format!("{}/feed.xml", server.uri());
+        let got = add_in(&app, &url, " reading ").await.unwrap();
+        assert_eq!(got.folder_name.as_deref(), Some("Reading"));
+        let row = app.store().feed(got.id).unwrap();
+        assert_eq!(row.folder_id, got.folder);
+        assert_eq!(got.page, Some(202), "201 is the subfolder");
+    }
+
+    #[tokio::test]
+    async fn root_means_the_top_level() {
+        let server = MockServer::start().await;
+        serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_folder_app();
+        let got = add_in(&app, &format!("{}/feed.xml", server.uri()), "Root")
+            .await
+            .unwrap();
+        assert_eq!((got.folder, got.folder_name), (None, None));
+        assert_eq!(app.store().feed(got.id).unwrap().folder_id, None);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_or_ambiguous_folder_is_refused_before_any_network_work() {
+        let server = MockServer::start().await;
+        serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_folder_app();
+        let url = format!("{}/feed.xml", server.uri());
+        let before = count(&app, "feed");
+        for (given, ids) in [("nope", None), ("9999", None), ("twin", Some(vec![3, 4]))] {
+            let err = add_in(&app, &url, given).await.unwrap_err();
+            match ids {
+                None => assert!(
+                    matches!(
+                        err,
+                        Error::UnknownFolderName(_) | Error::UnknownFolder(9999)
+                    ),
+                    "{err:?}"
+                ),
+                Some(ids) => assert!(
+                    matches!(&err, Error::AmbiguousFolder { ids: got, .. } if *got == ids),
+                    "{err:?}"
+                ),
+            }
+        }
+        assert_eq!(count(&app, "feed"), before);
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "a bad folder is refused before any network work"
+        );
+        let ok = add_in(&app, &url, "3").await.unwrap();
+        assert_eq!(
+            ok.folder,
+            Some(3),
+            "an id always works, ambiguous name or not"
         );
     }
 

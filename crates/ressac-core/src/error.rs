@@ -42,6 +42,12 @@ pub enum Error {
     UnknownFeed(FeedId),
     #[error("No folder #{0}.")]
     UnknownFolder(FolderId),
+    /// `given` is no folder id and no folder's name.
+    #[error("No folder \"{0}\".")]
+    UnknownFolderName(String),
+    /// Several folders carry the name `given`: an id picks one.
+    #[error("{}", ambiguous_folder_sentence(.given, .ids))]
+    AmbiguousFolder { given: String, ids: Vec<FolderId> },
     /// `given` matched no theme's key or name; `keys` are the valid keys, in position order.
     #[error("No theme \"{given}\". {}", themes_hint(.keys))]
     UnknownTheme { given: String, keys: Vec<String> },
@@ -84,6 +90,14 @@ impl Error {
                 )
         )
     }
+}
+
+fn ambiguous_folder_sentence(given: &str, ids: &[FolderId]) -> String {
+    let ids: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
+    format!(
+        "Several folders are named \"{given}\": {}. Use an id.",
+        ids.join(", ")
+    )
 }
 
 fn feed_exists_sentence(buried: bool, title: &str) -> String {
