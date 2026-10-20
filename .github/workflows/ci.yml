@@ -68,6 +68,9 @@ jobs:
       - name: Build and test the app
         if: steps.xcode.outputs.available == 'true'
         working-directory: apps/macos
+        env:
+          # Reaches the tests as RESSAC_HEADLESS: WebKit cannot draw on this runner.
+          TEST_RUNNER_RESSAC_HEADLESS: "1"
         run: xcodebuild -project Ressac.xcodeproj -scheme Ressac -destination 'platform=macOS' -resultBundlePath "$RUNNER_TEMP/TestResults.xcresult" test
       - name: Check that every test ran
         if: steps.xcode.outputs.available == 'true'

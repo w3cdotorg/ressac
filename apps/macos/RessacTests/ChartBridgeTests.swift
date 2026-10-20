@@ -206,7 +206,9 @@ private func privateDefaults() throws -> (UserDefaults, String) {
 
     /// On GitHub's macOS runner WebKit runs without a display: the page's fonts never load and
     /// the canvas reads back blank, so this check only runs on a real Mac (where it passes).
-    @Test(.disabled(if: ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true",
+    /// CI sets `TEST_RUNNER_RESSAC_HEADLESS=1`; xcodebuild hands it to the test process without
+    /// its `TEST_RUNNER_` prefix.
+    @Test(.disabled(if: ProcessInfo.processInfo.environment["RESSAC_HEADLESS"] == "1",
                     "WebKit cannot draw or load fonts on the headless CI runner"))
     func the_page_draws_the_fixture_in_webkit() async throws {
         let json = try String(contentsOf: Self.fixture, encoding: .utf8)
