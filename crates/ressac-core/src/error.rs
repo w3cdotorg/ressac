@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::FeedId;
+use crate::model::{FeedId, FolderId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -40,6 +40,8 @@ pub enum Error {
     UnknownPageTarget { kind: &'static str, id: i64 },
     #[error("No feed #{0}.")]
     UnknownFeed(FeedId),
+    #[error("No folder #{0}.")]
+    UnknownFolder(FolderId),
     #[error("No theme \"{0}\".")]
     UnknownTheme(String),
     #[error("Feed #{0} is buried.")]

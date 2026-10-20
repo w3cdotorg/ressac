@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
-use super::Store;
+use super::{Store, pages};
 use crate::error::{Error, Result};
 use crate::model::{CadenceGroup, FeedId, FolderId, ts};
 use crate::opml::Outline;
@@ -108,6 +108,19 @@ fn feed_row(r: &Row<'_>) -> rusqlite::Result<FeedRow> {
     })
 }
 
+/// What `Store::move_feed` did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Moved {
+    pub feed: FeedId,
+    pub title: String,
+    pub from: Option<FolderId>,
+    pub to: Option<FolderId>,
+    pub old_page: Option<u16>,
+    pub new_page: Option<u16>,
+    /// False when the feed already sat in the target: nothing was written.
+    pub changed: bool,
+}
+
 impl Store {
     /// Imports folders and feeds. Folders are matched by (parent, name). A feed already
     /// exists when any feed, buried or not, has its URL key as current or original address,
@@ -165,6 +178,51 @@ impl Store {
             [id],
             feed_row,
         )?)
+    }
+
+    /// Moves a feed, buried or not, to the end of `folder` (`None` = the root). It takes the
+    /// lowest free page of its new home (see `pages::page_after_move`) and keeps its own when
+    /// the home is full or already holds it. Refuses an unknown feed or folder; nothing is
+    /// written then. Already there: nothing is written and `changed` is false.
+    pub fn move_feed(&self, feed: FeedId, folder: Option<FolderId>) -> Result<Moved> {
+        let tx = self.write_tx()?;
+        let row: Option<(String, Option<FolderId>, Option<u16>)> = tx
+            .query_row(
+                "SELECT title, folder_id, page FROM feed WHERE id = ?1",
+                [feed],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((title, from, old_page)) = row else {
+            return Err(Error::UnknownFeed(feed));
+        };
+        let new_page = pages::page_after_move(&tx, old_page, folder)?;
+        if from == folder {
+            return Ok(Moved {
+                feed,
+                title,
+                from,
+                to: folder,
+                old_page,
+                new_page: old_page,
+                changed: false,
+            });
+        }
+        let position = next_position(&tx, folder)?;
+        tx.execute(
+            "UPDATE feed SET folder_id = ?2, position = ?3, page = ?4 WHERE id = ?1",
+            params![feed, folder, position, new_page],
+        )?;
+        tx.commit()?;
+        Ok(Moved {
+            feed,
+            title,
+            from,
+            to: folder,
+            old_page,
+            new_page,
+            changed: true,
+        })
     }
 
     /// Forces a feed's rhythm group, or clears the override (`None`). Refuses an unknown
@@ -754,5 +812,205 @@ mod tests {
             !store.cadence_row(3).unwrap().is_override,
             "nothing written"
         );
+    }
+
+    /// A folder named "Folder <id>".
+    fn folder(s: &Store, id: i64, parent: Option<i64>, position: i64) {
+        s.conn()
+            .execute(
+                "INSERT INTO folder (id, parent_id, name, position) VALUES (?1, ?2, ?3, ?4)",
+                params![id, parent, format!("Folder {id}"), position],
+            )
+            .unwrap();
+    }
+
+    /// A feed titled "Feed <id>".
+    fn feed(s: &Store, id: i64, folder: Option<i64>, position: i64) {
+        s.conn()
+            .execute(
+                "INSERT INTO feed (id, folder_id, position, title, xml_url, xml_url_original, url_key, added_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, '2026-10-14T08:00:00.000Z')",
+                params![
+                    id,
+                    folder,
+                    position,
+                    format!("Feed {id}"),
+                    format!("https://f{id}.example.org/feed"),
+                    format!("f{id}.example.org/feed")
+                ],
+            )
+            .unwrap();
+    }
+
+    fn folder_page(s: &Store, id: i64) -> Option<u16> {
+        s.conn()
+            .query_row("SELECT page FROM folder WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn page_of(s: &Store, id: i64) -> Option<u16> {
+        s.conn()
+            .query_row("SELECT page FROM feed WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Folder 1 (200) holding feed 10 (201) and subfolder 2 (202); root feed 20 (110).
+    fn numbered() -> Store {
+        let s = Store::open_in_memory().unwrap();
+        folder(&s, 1, None, 0);
+        feed(&s, 10, Some(1), 0);
+        folder(&s, 2, Some(1), 1);
+        feed(&s, 20, None, 0);
+        pages::assign_missing(s.conn()).unwrap();
+        s
+    }
+
+    #[test]
+    fn move_to_a_folder_takes_its_range() {
+        let s = numbered();
+        let moved = s.move_feed(20, Some(1)).unwrap();
+        assert_eq!(
+            moved,
+            Moved {
+                feed: 20,
+                title: "Feed 20".into(),
+                from: None,
+                to: Some(1),
+                old_page: Some(110),
+                new_page: Some(203),
+                changed: true,
+            }
+        );
+        let row = s.feed(20).unwrap();
+        assert_eq!((row.folder_id, page_of(&s, 20)), (Some(1), Some(203)));
+        assert_eq!(row.position, 2, "last after feed 10 (0) and folder 2 (1)");
+    }
+
+    #[test]
+    fn move_to_a_subfolder_uses_the_root_folders_range() {
+        let s = numbered();
+        let moved = s.move_feed(20, Some(2)).unwrap();
+        assert_eq!(moved.new_page, Some(203));
+        assert_eq!(s.feed(20).unwrap().folder_id, Some(2));
+        folder(&s, 3, Some(2), 1);
+        pages::assign_missing(s.conn()).unwrap(); // the sub-subfolder takes 204
+        feed(&s, 21, None, 1);
+        pages::assign_missing(s.conn()).unwrap(); // 111
+        assert_eq!(s.move_feed(21, Some(3)).unwrap().new_page, Some(205));
+    }
+
+    #[test]
+    fn move_to_the_root_takes_110_to_199() {
+        let s = numbered();
+        let moved = s.move_feed(10, None).unwrap();
+        assert_eq!(
+            (moved.from, moved.to, moved.old_page, moved.new_page),
+            (Some(1), None, Some(201), Some(111))
+        );
+        let row = s.feed(10).unwrap();
+        assert_eq!((row.folder_id, row.position), (None, 1), "after feed 20");
+        // The vacated page is free again.
+        feed(&s, 11, Some(1), 5);
+        pages::assign_missing(s.conn()).unwrap();
+        assert_eq!(page_of(&s, 11), Some(201));
+    }
+
+    #[test]
+    fn full_range_keeps_the_page() {
+        let s = numbered();
+        for id in 100..189 {
+            feed(&s, id, None, id); // with feed 20 and 10's future seat: 110–199 is 90 pages
+        }
+        pages::assign_missing(s.conn()).unwrap();
+        assert_eq!(page_of(&s, 188), Some(199), "the root range is full");
+        let moved = s.move_feed(10, None).unwrap();
+        assert_eq!(
+            (moved.old_page, moved.new_page, moved.changed),
+            (Some(201), Some(201), true)
+        );
+        assert_eq!(s.feed(10).unwrap().folder_id, None);
+        assert_eq!(page_of(&s, 10), Some(201));
+    }
+
+    #[test]
+    fn move_is_a_no_op_when_already_there() {
+        let s = numbered();
+        let moved = s.move_feed(10, Some(1)).unwrap();
+        assert!(!moved.changed);
+        assert_eq!((moved.old_page, moved.new_page), (Some(201), Some(201)));
+        let row = s.feed(10).unwrap();
+        assert_eq!(
+            (row.folder_id, row.position, page_of(&s, row.id)),
+            (Some(1), 0, Some(201))
+        );
+        assert!(!s.move_feed(20, None).unwrap().changed, "the root too");
+    }
+
+    #[test]
+    fn unknown_feed_or_folder_refused() {
+        let s = numbered();
+        let err = s.move_feed(99, Some(1)).unwrap_err();
+        assert!(matches!(err, Error::UnknownFeed(99)), "{err:?}");
+        let err = s.move_feed(20, Some(99)).unwrap_err();
+        assert!(matches!(err, Error::UnknownFolder(99)), "{err:?}");
+        assert_eq!(err.to_string(), "No folder #99.");
+        let err = s.move_feed(10, Some(99)).unwrap_err();
+        assert!(
+            matches!(err, Error::UnknownFolder(99)),
+            "refused even from where it is"
+        );
+        let row = s.feed(20).unwrap();
+        assert_eq!(
+            (row.folder_id, row.position, page_of(&s, row.id)),
+            (None, 0, Some(110))
+        );
+    }
+
+    #[test]
+    fn buried_feed_can_move() {
+        let s = numbered();
+        s.conn()
+            .execute("UPDATE feed SET state = 'buried' WHERE id = 20", [])
+            .unwrap();
+        let moved = s.move_feed(20, Some(1)).unwrap();
+        assert_eq!(moved.new_page, Some(203));
+        assert_eq!(s.feed(20).unwrap().state, "buried");
+    }
+
+    #[test]
+    fn a_root_folder_without_a_hundred_uses_the_overflow_pool() {
+        let s = Store::open_in_memory().unwrap();
+        for i in 1..=7 {
+            folder(&s, i, None, i);
+        }
+        feed(&s, 20, None, 8);
+        feed(&s, 21, Some(7), 0);
+        pages::assign_missing(s.conn()).unwrap();
+        assert_eq!(page_of(&s, 20), Some(110));
+        assert_eq!(folder_page(&s, 7), Some(111), "folder 7 has no hundred");
+        assert_eq!(page_of(&s, 21), Some(112), "nor do its contents");
+        let moved = s.move_feed(20, Some(7)).unwrap();
+        assert_eq!(
+            (moved.old_page, moved.new_page),
+            (Some(110), Some(110)),
+            "its own page is the lowest free once it leaves"
+        );
+        feed(&s, 22, None, 9);
+        pages::assign_missing(s.conn()).unwrap();
+        assert_eq!(page_of(&s, 22), Some(113), "112 is held");
+        assert_eq!(
+            s.move_feed(22, Some(7)).unwrap().new_page,
+            Some(113),
+            "the pool, not 110-199 or a hundred"
+        );
+    }
+
+    #[test]
+    fn a_page_already_in_the_new_range_is_kept() {
+        let s = numbered();
+        feed(&s, 11, Some(2), 0);
+        pages::assign_missing(s.conn()).unwrap(); // 203
+        let moved = s.move_feed(11, Some(1)).unwrap();
+        assert_eq!((moved.old_page, moved.new_page), (Some(203), Some(203)));
     }
 }
