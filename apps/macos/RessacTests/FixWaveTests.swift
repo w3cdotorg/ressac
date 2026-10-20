@@ -37,6 +37,7 @@ import Testing
     /// in the background, the app's monitor polls only while a chart window is on screen.
     @Test func inTheBackgroundTheMonitorPollsOnlyWhileAChartIsOnScreen() async throws {
         let (state, test, _) = try makeState()
+        try await Task.sleep(for: .milliseconds(100))  // let GRDB's observation start before the insert
         state.isAppActive = { false }
         let monitor = state.makeExternalChangeMonitor(interval: .milliseconds(40))
         monitor.start()

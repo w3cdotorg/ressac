@@ -401,7 +401,11 @@ mod tests {
         let entries = &s.chart_snapshot(now()).unwrap().feeds[0].entries;
         let got: Vec<_> = entries.iter().map(|e| e.id).collect();
         assert_eq!(got, [1, 2, 3, 4, 5]);
-        assert_eq!(entries[0].day, "2026-10-18");
+        // the day is the one where the chart is read, so it is computed in the same zone as the snapshot
+        assert_eq!(
+            entries[0].day,
+            entry_day(&ts(now() - Duration::hours(24)), &Local)
+        );
         assert!(entries[1].read && !entries[0].read);
     }
 
