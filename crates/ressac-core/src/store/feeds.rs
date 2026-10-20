@@ -6,11 +6,12 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
-use super::{Store, pages};
+use super::chart::{join_sibling_territory, majority_theme, siblings_by_host};
+use super::{Store, ThemeDef, pages};
 use crate::error::{Error, Result};
 use crate::model::{CadenceGroup, FeedId, FolderId, ts};
 use crate::opml::Outline;
-use crate::url_key::url_key;
+use crate::url_key::{host_key, url_key};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportReport {
@@ -121,7 +122,166 @@ pub struct Moved {
     pub changed: bool,
 }
 
+/// A feed to add: the resolved feed address, the site's page when known, and its title
+/// (an empty one falls back to the site's host).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewFeed {
+    pub xml_url: String,
+    pub html_url: Option<String>,
+    pub title: String,
+}
+
+/// Where an added feed's theme came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ThemeSource {
+    /// The caller named it.
+    Chosen,
+    /// Inherited from the feeds of the same site; `id`/`title` name the sibling that holds it.
+    Sibling { id: FeedId, title: String },
+    /// No theme: no choice made and no themed sibling.
+    None,
+}
+
+/// What `Store::insert_added_feed` wrote.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Inserted {
+    pub id: FeedId,
+    pub title: String,
+    pub page: Option<u16>,
+    pub theme: Option<ThemeDef>,
+    pub theme_source: ThemeSource,
+    /// The territory joined through a sibling, never a continent.
+    pub territory: Option<String>,
+}
+
 impl Store {
+    /// The first feed, buried or not, whose address (current or original) has the same
+    /// `url_key` as any of `urls`: its id, title and whether it is buried. Reads only.
+    pub fn find_duplicate(&self, urls: &[&str]) -> Result<Option<(FeedId, String, bool)>> {
+        let keys: HashSet<String> = urls.iter().map(|u| url_key(u)).collect();
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT id, title, state, url_key, xml_url_original FROM feed ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, FeedId>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, title, state, key, original) = row?;
+            if keys.contains(&key) || keys.contains(&url_key(&original)) {
+                return Ok(Some((id, title, state == "buried")));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Adds one feed at the bottom of the root, with a root page, in one transaction. The
+    /// theme is `theme` (a known key, else `UnknownTheme` before anything is written) or,
+    /// when none is given, the one most active feeds of the same site share (`host_key`;
+    /// ties: the lowest feed id's); with a themed or not sibling in a territory, the feed
+    /// joins the lowest-id one. Does not check for duplicates (`find_duplicate`).
+    pub fn insert_added_feed(
+        &self,
+        new: &NewFeed,
+        theme: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Inserted> {
+        let tx = self.write_tx()?;
+        let chosen: Option<(i64, ThemeDef)> = match theme {
+            Some(key) => Some(
+                tx.query_row(
+                    "SELECT id, key, name, sea_name FROM theme WHERE key = ?1",
+                    [key],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            ThemeDef {
+                                key: r.get(1)?,
+                                name: r.get(2)?,
+                                sea: r.get(3)?,
+                            },
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| Error::UnknownTheme(key.to_owned()))?,
+            ),
+            None => None,
+        };
+        let site = new.html_url.as_deref().unwrap_or(&new.xml_url);
+        let host = host_key(site).or_else(|| host_key(&new.xml_url));
+        let title = match new.title.trim() {
+            "" => host.clone().unwrap_or_else(|| new.xml_url.clone()),
+            t => t.to_owned(),
+        };
+        let siblings = match (&chosen, &host) {
+            (None, Some(host)) => siblings_by_host(&tx, host)?,
+            _ => Vec::new(),
+        };
+        let (theme_id, theme_source) = match (&chosen, majority_theme(&siblings)) {
+            (Some((id, _)), _) => (Some(*id), ThemeSource::Chosen),
+            (None, Some((id, from))) => {
+                let sibling_title: String =
+                    tx.query_row("SELECT title FROM feed WHERE id = ?1", [from], |r| r.get(0))?;
+                (
+                    Some(id),
+                    ThemeSource::Sibling {
+                        id: from,
+                        title: sibling_title,
+                    },
+                )
+            }
+            (None, None) => (None, ThemeSource::None),
+        };
+        tx.execute(
+            "INSERT INTO feed (folder_id, position, title, xml_url, xml_url_original, html_url, \
+             url_key, theme_id, added_at) VALUES (NULL, ?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                next_position(&tx, None)?,
+                title,
+                new.xml_url,
+                new.html_url,
+                url_key(&new.xml_url),
+                theme_id,
+                ts(now)
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        pages::assign_missing(&tx)?;
+        let territory = join_sibling_territory(&tx, &siblings, id)?;
+        let page = tx.query_row("SELECT page FROM feed WHERE id = ?1", [id], |r| r.get(0))?;
+        let theme = match (chosen, theme_id) {
+            (Some((_, def)), _) => Some(def),
+            (None, Some(theme_id)) => Some(tx.query_row(
+                "SELECT key, name, sea_name FROM theme WHERE id = ?1",
+                [theme_id],
+                |r| {
+                    Ok(ThemeDef {
+                        key: r.get(0)?,
+                        name: r.get(1)?,
+                        sea: r.get(2)?,
+                    })
+                },
+            )?),
+            (None, None) => None,
+        };
+        tx.commit()?;
+        Ok(Inserted {
+            id,
+            title,
+            page,
+            theme,
+            theme_source,
+            territory,
+        })
+    }
+
     /// Imports folders and feeds. Folders are matched by (parent, name). A feed already
     /// exists when any feed, buried or not, has its URL key as current or original address,
     /// so triage (burials, merges, repairs) survives a re-import. New items go after the
@@ -1012,5 +1172,306 @@ mod tests {
         pages::assign_missing(s.conn()).unwrap(); // 203
         let moved = s.move_feed(11, Some(1)).unwrap();
         assert_eq!((moved.old_page, moved.new_page), (Some(203), Some(203)));
+    }
+
+    fn new_feed(xml: &str, html: Option<&str>, title: &str) -> NewFeed {
+        NewFeed {
+            xml_url: xml.to_owned(),
+            html_url: html.map(str::to_owned),
+            title: title.to_owned(),
+        }
+    }
+
+    fn add_themes(s: &Store) {
+        for (id, key) in [(1, "tech"), (2, "arts")] {
+            s.conn()
+                .execute(
+                    "INSERT INTO theme (id, key, name, sea_name, position) VALUES (?1, ?2, ?3, ?4, ?1)",
+                    params![id, key, key.to_uppercase(), format!("{key} sea")],
+                )
+                .unwrap();
+        }
+    }
+
+    /// A root feed on `host`, themed `theme_id`.
+    fn site_feed(s: &Store, id: i64, host: &str, theme_id: Option<i64>) {
+        s.conn()
+            .execute(
+                "INSERT INTO feed (id, position, title, xml_url, xml_url_original, html_url, url_key, theme_id, added_at) \
+                 VALUES (?1, ?1, ?2, ?3, ?3, ?4, ?5, ?6, '2026-10-14T08:00:00.000Z')",
+                params![
+                    id,
+                    format!("Feed {id}"),
+                    format!("https://{host}/feed{id}.xml"),
+                    format!("https://{host}/"),
+                    format!("{host}/feed{id}.xml"),
+                    theme_id
+                ],
+            )
+            .unwrap();
+    }
+
+    fn territory(s: &Store, id: i64, kind: &str, name: &str, members: &[i64]) {
+        let theme = (kind == "continent").then_some(1);
+        s.conn()
+            .execute(
+                "INSERT INTO territory (id, name, kind, theme_id) VALUES (?1, ?2, ?3, ?4)",
+                params![id, name, kind, theme],
+            )
+            .unwrap();
+        for (position, feed) in members.iter().enumerate() {
+            s.conn()
+                .execute(
+                    "INSERT INTO territory_feed (territory_id, feed_id, position) VALUES (?1, ?2, ?3)",
+                    params![id, feed, position as i64],
+                )
+                .unwrap();
+        }
+    }
+
+    fn members(s: &Store, territory: i64) -> Vec<i64> {
+        let mut stmt = s
+            .conn()
+            .prepare("SELECT feed_id FROM territory_feed WHERE territory_id = ?1 ORDER BY position")
+            .unwrap();
+        stmt.query_map([territory], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn duplicate_by_xml_url_and_original() {
+        let s = Store::open_in_memory().unwrap();
+        site_feed(&s, 1, "example.org", None);
+        s.conn()
+            .execute(
+                "UPDATE feed SET xml_url = 'https://new.example.org/rss', url_key = 'new.example.org/rss' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+        let by_current = s
+            .find_duplicate(&["http://www.new.example.org/rss/"])
+            .unwrap();
+        assert_eq!(by_current, Some((1, "Feed 1".to_owned(), false)));
+        let by_original = s
+            .find_duplicate(&["https://elsewhere.net/x", "https://example.org/feed1.xml"])
+            .unwrap();
+        assert_eq!(by_original, Some((1, "Feed 1".to_owned(), false)));
+        assert_eq!(
+            s.find_duplicate(&["https://example.org/other"]).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn duplicate_buried_reported() {
+        let s = Store::open_in_memory().unwrap();
+        site_feed(&s, 1, "example.org", None);
+        s.conn()
+            .execute("UPDATE feed SET state = 'buried' WHERE id = 1", [])
+            .unwrap();
+        assert_eq!(
+            s.find_duplicate(&["https://example.org/feed1.xml"])
+                .unwrap(),
+            Some((1, "Feed 1".to_owned(), true))
+        );
+    }
+
+    #[test]
+    fn inserted_at_the_bottom_of_root_with_a_root_page() {
+        let s = numbered();
+        let got = s
+            .insert_added_feed(
+                &new_feed(
+                    "https://fresh.example.net/rss",
+                    Some("https://fresh.example.net/"),
+                    "Fresh",
+                ),
+                None,
+                now(),
+            )
+            .unwrap();
+        let row = s.feed(got.id).unwrap();
+        assert_eq!(row.folder_id, None);
+        assert_eq!(row.title, "Fresh");
+        assert_eq!(row.xml_url, "https://fresh.example.net/rss");
+        assert_eq!(row.state, "active");
+        assert_eq!(got.page, Some(111), "feed 20 holds 110");
+        assert_eq!(page_of(&s, got.id), Some(111));
+        assert_eq!(got.theme_source, ThemeSource::None);
+        let max_other: i64 = s
+            .conn()
+            .query_row(
+                "SELECT max(position) FROM (SELECT position FROM feed WHERE folder_id IS NULL AND id <> ?1 \
+                 UNION ALL SELECT position FROM folder WHERE parent_id IS NULL)",
+                [got.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(row.position > max_other);
+    }
+
+    #[test]
+    fn an_empty_title_falls_back_to_the_host() {
+        let s = Store::open_in_memory().unwrap();
+        let got = s
+            .insert_added_feed(
+                &new_feed("https://www.example.org/rss", None, "  "),
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(got.title, "example.org");
+    }
+
+    #[test]
+    fn chosen_theme_wins() {
+        let s = Store::open_in_memory().unwrap();
+        add_themes(&s);
+        site_feed(&s, 1, "example.org", Some(1));
+        territory(&s, 1, "territory", "T", &[1]);
+        let got = s
+            .insert_added_feed(
+                &new_feed(
+                    "https://example.org/new.xml",
+                    Some("https://example.org/"),
+                    "New",
+                ),
+                Some("arts"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(got.theme_source, ThemeSource::Chosen);
+        assert_eq!(got.theme.unwrap().key, "arts");
+        assert_eq!(got.territory, None);
+        assert_eq!(members(&s, 1), vec![1]);
+    }
+
+    #[test]
+    fn unknown_theme_refused_before_writing() {
+        let s = Store::open_in_memory().unwrap();
+        add_themes(&s);
+        let err = s
+            .insert_added_feed(
+                &new_feed("https://example.org/x", None, "X"),
+                Some("nope"),
+                now(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::UnknownTheme(k) if k == "nope"));
+        assert_eq!(s.feed_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn majority_sibling_theme_tie_lowest_id() {
+        let s = Store::open_in_memory().unwrap();
+        add_themes(&s);
+        site_feed(&s, 1, "example.org", Some(2));
+        site_feed(&s, 2, "www.example.org", Some(1));
+        site_feed(&s, 3, "example.org", Some(1));
+        site_feed(&s, 4, "blog.example.org", Some(2));
+        let got = s
+            .insert_added_feed(
+                &new_feed(
+                    "https://example.org/new.xml",
+                    Some("https://example.org/"),
+                    "New",
+                ),
+                None,
+                now(),
+            )
+            .unwrap();
+        // tech has 2 votes (feeds 2, 3) against arts' 1 (feed 4 is another host).
+        assert_eq!(got.theme.as_ref().unwrap().key, "tech");
+        assert_eq!(
+            got.theme_source,
+            ThemeSource::Sibling {
+                id: 2,
+                title: "Feed 2".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_lowest_feed_id_theme() {
+        let s = Store::open_in_memory().unwrap();
+        add_themes(&s);
+        site_feed(&s, 1, "example.org", Some(2));
+        site_feed(&s, 2, "example.org", Some(1));
+        let got = s
+            .insert_added_feed(
+                &new_feed(
+                    "https://example.org/new.xml",
+                    Some("https://example.org/"),
+                    "New",
+                ),
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(got.theme.unwrap().key, "arts");
+        assert_eq!(
+            got.theme_source,
+            ThemeSource::Sibling {
+                id: 1,
+                title: "Feed 1".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn joins_lowest_territory_never_continent() {
+        let s = Store::open_in_memory().unwrap();
+        add_themes(&s);
+        site_feed(&s, 1, "example.org", Some(1));
+        site_feed(&s, 2, "example.org", Some(1));
+        territory(&s, 1, "continent", "CONTINENT", &[1]);
+        territory(&s, 3, "territory", "HIGH", &[1]);
+        territory(&s, 2, "territory", "LOW", &[2]);
+        let got = s
+            .insert_added_feed(
+                &new_feed(
+                    "https://example.org/new.xml",
+                    Some("https://example.org/"),
+                    "New",
+                ),
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(got.territory.as_deref(), Some("LOW"));
+        assert_eq!(members(&s, 2), vec![2, got.id]);
+        assert_eq!(members(&s, 3), vec![1]);
+        assert_eq!(members(&s, 1), vec![1], "never the continent");
+    }
+
+    #[test]
+    fn no_sibling_no_theme() {
+        let s = Store::open_in_memory().unwrap();
+        add_themes(&s);
+        site_feed(&s, 1, "other.org", Some(1));
+        site_feed(&s, 2, "blog.example.org", Some(1));
+        let got = s
+            .insert_added_feed(
+                &new_feed(
+                    "https://example.org/new.xml",
+                    Some("https://example.org/"),
+                    "New",
+                ),
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(got.theme, None);
+        assert_eq!(got.theme_source, ThemeSource::None);
+        assert_eq!(got.territory, None);
+        let stored: Option<i64> = s
+            .conn()
+            .query_row("SELECT theme_id FROM feed WHERE id = ?1", [got.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, None);
     }
 }

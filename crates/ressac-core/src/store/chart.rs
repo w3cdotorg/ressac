@@ -2,12 +2,13 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::Store;
 use crate::error::{Error, Result};
 use crate::model::FeedId;
+use crate::url_key::host_key;
 
 /// A theme as written in the import file: a stable key, a display name and the sea's name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +65,86 @@ fn check_theme_key(key: &str) -> Result<()> {
         return Ok(());
     };
     Err(Error::Invalid(format!("Theme key \"{key}\" {problem}.")))
+}
+
+/// Active feeds on the same site as `host` (a `host_key`, compared with the host of each
+/// feed's `html_url`, else `xml_url`), by feed id, each with its theme id.
+pub(super) fn siblings_by_host(
+    conn: &Connection,
+    host: &str,
+) -> Result<Vec<(FeedId, Option<i64>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, theme_id, COALESCE(html_url, xml_url) FROM feed \
+         WHERE state = 'active' ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, FeedId>(0)?,
+            r.get::<_, Option<i64>>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut siblings = Vec::new();
+    for row in rows {
+        let (id, theme_id, url) = row?;
+        if host_key(&url).as_deref() == Some(host) {
+            siblings.push((id, theme_id));
+        }
+    }
+    Ok(siblings)
+}
+
+/// The theme most siblings share; a tie goes to the theme of the lowest feed id. Returns
+/// that theme id and the lowest-id sibling holding it. `None` when no sibling has a theme.
+pub(super) fn majority_theme(siblings: &[(FeedId, Option<i64>)]) -> Option<(i64, FeedId)> {
+    let mut tally: Vec<(i64, FeedId, usize)> = Vec::new();
+    // `siblings` is ordered by feed id, so the first sighting is the lowest id.
+    for &(id, theme) in siblings {
+        let Some(theme) = theme else { continue };
+        match tally.iter_mut().find(|t| t.0 == theme) {
+            Some(t) => t.2 += 1,
+            None => tally.push((theme, id, 1)),
+        }
+    }
+    // `max_by_key` keeps the last maximum, so rank ties by the lower id explicitly.
+    tally
+        .into_iter()
+        .max_by_key(|&(_, first, count)| (count, std::cmp::Reverse(first)))
+        .map(|(theme, first, _)| (theme, first))
+}
+
+/// Appends `feed` to the lowest-id territory (never a continent) any of `siblings` belongs
+/// to, after its feeds; returns that territory's name. `None` when no sibling is in one.
+pub(super) fn join_sibling_territory(
+    conn: &Connection,
+    siblings: &[(FeedId, Option<i64>)],
+    feed: FeedId,
+) -> Result<Option<String>> {
+    let mut found: Option<(i64, String)> = None;
+    for &(sibling, _) in siblings {
+        let row: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT t.id, t.name FROM territory_feed tf JOIN territory t ON t.id = tf.territory_id \
+                 WHERE tf.feed_id = ?1 AND t.kind = 'territory' ORDER BY t.id LIMIT 1",
+                [sibling],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some(row) = row
+            && found.as_ref().is_none_or(|f| row.0 < f.0)
+        {
+            found = Some(row);
+        }
+    }
+    let Some((territory, name)) = found else {
+        return Ok(None);
+    };
+    conn.execute(
+        "INSERT INTO territory_feed (territory_id, feed_id, position) VALUES (?1, ?2, \
+         (SELECT COALESCE(max(position) + 1, 0) FROM territory_feed WHERE territory_id = ?1))",
+        params![territory, feed],
+    )?;
+    Ok(Some(name))
 }
 
 impl Store {
