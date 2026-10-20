@@ -294,6 +294,12 @@ Piste 10 du brainstorming du 19/10 sur d'autres présentations des flux (maquett
 - **Carte en arrière-plan** : le moniteur ne sondait `data_version` que l'appli au premier plan, si bien que la carte, faite pour un second écran, restait figée pendant le travail dans d'autres applis. Il sonde aussi tant que la fenêtre de la carte est visible (état d'occultation), et la carte se relève toutes les 5 minutes.
 - **Polices** : Cormorant Garamond, Cormorant SC et IBM Plex Mono en `woff2` locaux (OFL, provenance dans `chart.css`) ; d3 7.9.0 embarqué avec sa licence ISC.
 
+### Recette du 20/10/2026
+
+- Les six points de la recette sont acceptés par Clément.
+- Encres Pop et Pirates retirées à la recette, à la demande de Clément : il ne reste que « Blue ink » et « White on black ». Une encre mémorisée « pop » ou « pirate » est relue comme « Blue ink » (appli et page). Le parchemin vieilli et le X du trésor ont disparu avec elles.
+- Deux mineurs de la relecture finale corrigés : un test Swift qui pouvait courir contre le démarrage de l'observation GRDB (pause de 100 ms avant l'insertion), et un test Rust qui attendait un jour UTC alors que `entry_day` compte dans le fuseau local (faux à UTC+12 ; vérifié avec `TZ=Pacific/Kiritimati`).
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).

@@ -84,6 +84,7 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 
 ### Bandeau tmux (sous-projet 5)
 
+- [ ] Entités HTML dans certains titres de flux : `&#39;` s'affiche tel quel dans le bandeau (« America&#39;s Earliest… ») ; décoder les entités quand les titres sont enregistrés ou affichés (existant avant la carte marine, vu à la recette de la carte le 20/10).
 - [ ] Volume du journal : chaque appel en échec écrit un avertissement (environ 5 760 lignes par jour et par client si la base manque) ; passer en `debug!` les cas attendus ou limiter la cadence.
 - [ ] Erreurs de `try_lock` autres que « déjà pris » traitées comme un verrou pris (chemin de réimpression, sans gravité).
 - [ ] Titres faits seulement de caractères invisibles non blancs (U+200B) : ligne `Flux · ` apparemment vide ; caractères bidirectionnels (U+202E) et séparateurs de ligne Unicode non retirés (usurpation visuelle, pas d'injection) ; coupe par caractère et non par graphème (une séquence ZWJ ou VS16 peut déborder d'une ou deux colonnes).
