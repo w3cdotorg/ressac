@@ -206,9 +206,17 @@ test("unthemed_go_to_uncharted_waters", () => {
   }
 });
 
+test("only_blue_and_night_inks_remain_and_others_fall_back_to_blue", () => {
+  assert.deepEqual(Object.keys(core.INKS), ["bleu", "nuit"]);
+  for (const gone of ["pop", "pirate", "rouge"]) {
+    assert.equal(core.heat(0, 1, gone), core.heat(0, 1, "bleu"), gone);
+    assert.equal(core.heat(1, 1, gone), core.heat(1, 1, "bleu"), gone);
+  }
+});
+
 test("heat_endpoints_per_ink", () => {
   const ramps = {
-    bleu: ["#d9ece2", "#8a4417"], nuit: ["#24504c", "#ff9433"], pop: ["#c9f2e9", "#b5174f"], pirate: ["#c2cfa6", "#6e3510"],
+    bleu: ["#d9ece2", "#8a4417"], nuit: ["#24504c", "#ff9433"],
   };
   const rgb = hex => `rgb(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)})`;
   assert.deepEqual(Object.keys(core.INKS).sort(), Object.keys(ramps).sort());
@@ -260,5 +268,5 @@ test("works_as_a_page_script_with_the_global_d3", () => {
   const pageCore = vm.runInContext("ChartCore", page);
   const nodes = pageCore.place(fixture(), "harbour");
   assert.deepEqual(nodes.map(n => [n.x, n.y]), core.place(fixture(), "harbour").map(n => [n.x, n.y]));
-  assert.equal(pageCore.heat(1, 1, "pop"), core.heat(1, 1, "pop"));
+  assert.equal(pageCore.heat(1, 1, "nuit"), core.heat(1, 1, "nuit"));
 });

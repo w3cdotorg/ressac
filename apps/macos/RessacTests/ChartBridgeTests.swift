@@ -21,8 +21,8 @@ private func privateDefaults() throws -> (UserDefaults, String) {
         #expect(bridge.handle(["type": "openURL", "url": "https://example.org/a?b=1"])
             == .openURL(URL(string: "https://example.org/a?b=1")!))
         #expect(bridge.handle(["type": "openURL", "url": "http://example.org/"]) == .openURL(URL(string: "http://example.org/")!))
-        #expect(bridge.handle(["type": "prefs", "view": "themes", "ink": "pirate", "animate": NSNumber(value: false)])
-            == .prefs(ChartPrefs(view: .themes, ink: .pirate, animate: false)))
+        #expect(bridge.handle(["type": "prefs", "view": "themes", "ink": "nuit", "animate": NSNumber(value: false)])
+            == .prefs(ChartPrefs(view: .themes, ink: .nuit, animate: false)))
     }
 
     @Test func bridge_refuses_file_and_javascript_urls() {
@@ -74,15 +74,29 @@ private func privateDefaults() throws -> (UserDefaults, String) {
     @Test func reduce_motion_starts_still_and_keeps_the_stored_choice() throws {
         let (defaults, suite) = try privateDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }
-        let prefs = ChartPrefs(view: .themes, ink: .pop, animate: true)
+        let prefs = ChartPrefs(view: .themes, ink: .nuit, animate: true)
         #expect(prefs.pageArgument(reduceMotion: false) as NSDictionary
-            == ["view": "themes", "ink": "pop", "animate": true] as NSDictionary)
+            == ["view": "themes", "ink": "nuit", "animate": true] as NSDictionary)
         #expect(prefs.pageArgument(reduceMotion: true) as NSDictionary
-            == ["view": "themes", "ink": "pop", "animate": false] as NSDictionary)
+            == ["view": "themes", "ink": "nuit", "animate": false] as NSDictionary)
 
         prefs.save(to: defaults, reduceMotion: false)
-        ChartPrefs(view: .harbour, ink: .pirate, animate: false).save(to: defaults, reduceMotion: true)
-        #expect(ChartPrefs.load(from: defaults) == ChartPrefs(view: .harbour, ink: .pirate, animate: true))
+        ChartPrefs(view: .harbour, ink: .nuit, animate: false).save(to: defaults, reduceMotion: true)
+        #expect(ChartPrefs.load(from: defaults) == ChartPrefs(view: .harbour, ink: .nuit, animate: true))
+    }
+
+    /// The "Pop" and "Pirates" inks were retired: a stored one reads back as the default, and the page
+    /// cannot report one.
+    @Test func a_retired_or_unknown_stored_ink_reads_back_as_blue() throws {
+        #expect(ChartInk.allCases == [.bleu, .nuit])
+        let (defaults, suite) = try privateDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        for stored in ["pop", "pirate", "rouge", ""] {
+            defaults.set(stored, forKey: ChartPrefs.Keys.ink)
+            defaults.set("themes", forKey: ChartPrefs.Keys.view)
+            #expect(ChartPrefs.load(from: defaults) == ChartPrefs(view: .themes, ink: .bleu, animate: true), "\(stored)")
+            #expect(bridge.handle(["type": "prefs", "view": "themes", "ink": stored, "animate": NSNumber(value: true)]) == nil, "\(stored)")
+        }
     }
 
     @Test func only_the_bundled_page_is_navigable() throws {
@@ -126,7 +140,7 @@ private func privateDefaults() throws -> (UserDefaults, String) {
         let (state, _, _) = try makeState()
         let (defaults, suite) = try privateDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }
-        let prefs = ChartPrefs(view: .themes, ink: .pirate, animate: false)
+        let prefs = ChartPrefs(view: .themes, ink: .nuit, animate: false)
         ChartActions.perform(.prefs(prefs), state: state, defaults: defaults, reduceMotion: false)
         #expect(ChartPrefs.load(from: defaults) == prefs)
     }
@@ -224,14 +238,14 @@ private func privateDefaults() throws -> (UserDefaults, String) {
 
     @Test func page_messages_reach_the_app_through_the_bridge() async throws {
         let json = try String(contentsOf: Self.fixture, encoding: .utf8)
-        let h = harness(prefs: ChartPrefs(view: .themes, ink: .pop, animate: false))
+        let h = harness(prefs: ChartPrefs(view: .themes, ink: .nuit, animate: false))
         defer { h.page.close() }
         h.page.show(json)
         _ = try await waitForDrawing(h)
 
         // The page's own toolbar reports the new view.
         _ = await h.js(#"[...document.querySelectorAll(".bar button")].find(b => b.textContent === "From the harbour").click()"#)
-        #expect(await eventually { h.recorder.actions == [.prefs(ChartPrefs(view: .harbour, ink: .pop, animate: false))] })
+        #expect(await eventually { h.recorder.actions == [.prefs(ChartPrefs(view: .harbour, ink: .nuit, animate: false))] })
 
         _ = await h.js(#"window.webkit.messageHandlers.ressac.postMessage({type: "openFeed", id: 12})"#)
         _ = await h.js(#"window.webkit.messageHandlers.ressac.postMessage({type: "openURL", url: "file:///etc/passwd"})"#)
@@ -239,7 +253,7 @@ private func privateDefaults() throws -> (UserDefaults, String) {
         _ = await h.js(#"window.webkit.messageHandlers.ressac.postMessage({type: "openURL", url: "https://example.invalid/x"})"#)
         #expect(await eventually { h.recorder.actions.count == 3 })
         try await Task.sleep(for: .milliseconds(200))
-        #expect(h.recorder.actions == [.prefs(ChartPrefs(view: .harbour, ink: .pop, animate: false)), .openFeed(12),
+        #expect(h.recorder.actions == [.prefs(ChartPrefs(view: .harbour, ink: .nuit, animate: false)), .openFeed(12),
                                        .openURL(URL(string: "https://example.invalid/x")!)])
     }
 

@@ -41,10 +41,6 @@
       heat: ["#d9ece2", "#a7d3c0", "#e9cf72", "#dd9a3c", "#b8642a", "#8a4417"]},
     nuit: {paper: "#0b0d12", ink: "#e8ecf4", dot: "#e8ecf4", land: "#0b0d12", label: "#e8ecf4", beam: "232,236,244", ripple: "#e8ecf4",
       heat: ["#24504c", "#3f9c92", "#7fd3c4", "#ecd77f", "#ffb347", "#ff9433"]},
-    pop: {paper: "#f2f6fb", ink: "#14213d", dot: "#1f9e9a", land: "#ffd9cc", label: "#14213d", beam: "255,107,74", ripple: "#ff6b4a",
-      heat: ["#c9f2e9", "#6fd0c1", "#ffd166", "#ff9a76", "#ef476f", "#b5174f"]},
-    pirate: {paper: "#e6d2a4", ink: "#4b2e17", dot: "#6b4423", land: "#efdcb3", label: "#3d2412", beam: "155,43,31", ripple: "#9b2b1f",
-      parchment: true, treasure: "#a3261b", heat: ["#c2cfa6", "#8fae86", "#d8b14a", "#c98a2e", "#9c5a1c", "#6e3510"]},
   }).map(([name, ink]) => [name, Object.freeze({...ink, heat: Object.freeze(ink.heat)})])));
 
   const font = (px, family, style) => (style ? `${style} ${px}px ${family}` : `${px}px ${family}`);

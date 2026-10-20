@@ -8,9 +8,9 @@ enum ChartLayout: String, CaseIterable, Sendable {
     case harbour, themes
 }
 
-/// The chart's inks (spec §2).
+/// The chart's inks (spec §2). A stored ink that is no longer offered ("pop", "pirate") reads back as `bleu`.
 enum ChartInk: String, CaseIterable, Sendable {
-    case bleu, nuit, pop, pirate
+    case bleu, nuit
 }
 
 /// The page's display choices, kept in `UserDefaults` (spec §8). The page owns them while it is open

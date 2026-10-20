@@ -25,7 +25,7 @@ All taken while iterating on the mockup:
 - **Territories:** feeds from one publisher (or a family such as Groupe Le Monde) share one landmass, each feed a headland; named in small capitals along the land. **Continents:** a whole theme as one landmass (four proposed: Land of Comics, Republic of Letters, Silicon Shores, Terra Libertas). Landmasses have invented coastlines (hull of the group, pushed out and frayed), not ridges.
 - **Islands:** size by rhythm group; an island is one feed; islands never merge.
 - **Activity light:** a soft halo at each island's heart, no ringed dot; score = Σ over entries of the last 30 days of 2^(−age_days/3); colour from a per-ink ramp, log-scaled to the busiest feed; the busiest ones flicker when animated.
-- **Inks:** Blue ink (default), White on black, Pop, Pirates; each with its own activity ramp (blue: celadon → copper; night: teal → luminous amber; pop: mint → raspberry; pirate: verdigris → rust). Pirates adds an aged parchment and a red X on the island with the most unread entries.
+- **Inks:** Blue ink (default), White on black; each with its own activity ramp (blue: celadon → copper; night: teal → luminous amber). A stored ink that is not offered reads back as Blue ink. (The Pop and Pirates inks were removed at acceptance, 2026-10-20.)
 - **Animation:** gusts of ink along the sea strokes, the harbour light sweeping, ripples round islands with unread entries, flicker of the busiest lights; one toggle; off under Reduce Motion.
 - **Hover:** feed name, unread this week, entries this week. **Click:** popover with the five latest entries (date, title linked, unread in bold), then theme, folder, rhythm, last entry, unread.
 - **Labels never overlap:** placement by priority (harbour, continents, seas on open water, territories along their land, feeds busiest first with eight spots then a smaller size then a leader line, soundings, range rings); a name that finds no room shows on hover.
@@ -89,7 +89,7 @@ CREATE TABLE territory_feed (
 ```
 
 - Migration 5 follows the existing pattern (backup of v4, `schema_meta.version = 5`). The Mac app's known schema version moves to 5 in the same change, so the app migrates on its next launch as for v3 and v4.
-- No contract view: the apps read chart data only through `ressac chart --json` (§5), since the score and the six-month rule live in Rust. `feed.theme_id` is written only by the core.
+- No contract view: the apps draw chart data only from `ressac chart --json` (§5), since the score and the six-month rule live in Rust. The macOS app also reads `theme` and `feed.theme_id` directly, for the garden inspector's Theme pop-up; only the core writes them.
 
 ## 5. Core and CLI
 

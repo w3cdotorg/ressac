@@ -97,8 +97,9 @@ test("empty_chart_message", () => {
 test("prefs_round_trip", () => {
   assert.deepEqual(draw.normalisePrefs(undefined), {view: "harbour", ink: "bleu", animate: true});
   assert.deepEqual(draw.normalisePrefs({view: "sideways", ink: "rouge", animate: "yes"}), {view: "harbour", ink: "bleu", animate: true});
+  for (const gone of ["pop", "pirate"]) assert.equal(draw.normalisePrefs({view: "themes", ink: gone, animate: false}).ink, "bleu", gone);
   assert.deepEqual(draw.normalisePrefs({view: "toString", ink: "__proto__"}), {view: "harbour", ink: "bleu", animate: true});
-  for (const view of ["harbour", "themes"]) for (const ink of ["bleu", "nuit", "pop", "pirate"]) for (const animate of [true, false]) {
+  for (const view of ["harbour", "themes"]) for (const ink of ["bleu", "nuit"]) for (const animate of [true, false]) {
     const prefs = {view, ink, animate}, message = draw.prefsMessage(prefs);
     assert.deepEqual(message, {type: "prefs", view, ink, animate});
     assert.deepEqual(draw.normalisePrefs(message), prefs); // what the app stores comes back unchanged
@@ -186,7 +187,7 @@ test("bridge_posts_only_when_present", () => {
 });
 
 test("every_placed_label_is_drawn", () => {
-  for (const view of ["harbour", "themes"]) for (const ink of ["bleu", "pirate"]) {
+  for (const view of ["harbour", "themes"]) for (const ink of ["bleu", "nuit", "pop"]) { // "pop" is a retired ink: it draws as blue
     const scene = draw.buildScene(fixture(), view, measure), {ctx, texts} = recordingContext();
     draw.drawChart(ctx, scene, ink);
     const drawn = texts().join("\u0000");
@@ -195,6 +196,6 @@ test("every_placed_label_is_drawn", () => {
       else assert.ok(drawn.includes(p.text), `${view}: ${p.kind} ${p.text}`);
     });
     assert.ok(texts().includes("Surveyed Monday 19 October 2026, 17:40"), "the cartouche carries the survey time");
-    if (ink === "pirate") assert.ok(texts().some(t => /^X marks \d+ unread$/.test(t)), "the pirates' X");
+    assert.ok(!texts().some(t => /^X marks/.test(t)), "no treasure X on any ink");
   }
 });

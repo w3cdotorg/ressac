@@ -125,9 +125,8 @@
     const nodes = core.place(data, v), terr = core.territories(nodes, data), ground = core.field(nodes, v, data, terr);
     const placements = core.labels(nodes, data, v, measure, {field: ground, territories: terr});
     const {strokes, currents} = seaStrokes(ground.at);
-    const treasure = nodes.reduce((a, b) => (b.unread > (a ? a.unread : 0) ? b : a), null);
     return {
-      data, view: v, empty: !nodes.length, nodes, ground, placements, strokes, currents, treasure,
+      data, view: v, empty: !nodes.length, nodes, ground, placements, strokes, currents,
       contours: d3.contours().size([GW, GH]).thresholds(ISOBATHS)(ground.grid),
       seas: core.seas(data).filter(s => s.count > 0),
       maxActivity: nodes.reduce((m, n) => Math.max(m, n.activity), 0),
@@ -191,7 +190,6 @@
 
   function drawChart(ctx, scene, inkName) {
     const ink = INKS[inkName] || INKS.bleu, harbour = scene.view === "harbour";
-    if (ink.parchment) parchment(ctx);
     if (harbour) rangeLines(ctx, scene, ink);
     stipple(ctx, scene, ink);
     ctx.strokeStyle = ink.dot; ctx.lineWidth = .6; ctx.lineCap = "round"; ctx.globalAlpha = .5;
@@ -208,7 +206,6 @@
       ctx.fillStyle = ink.label; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.font = font(24, FONTS.body, "italic 500");
       halo(ctx, ink, EMPTY_MESSAGE, PORT.x, PORT.y + 130);
     }
-    if (ink.treasure && scene.treasure) treasure(ctx, ink, scene.treasure);
     compass(ctx, ink);
     neatline(ctx, ink);
     cartouche(ctx, scene, ink);
@@ -232,7 +229,7 @@
 
   // stippled shallows, denser near the coasts, as on an engraved chart
   function stipple(ctx, scene, ink) {
-    const rnd = mulberry(4242), at = scene.ground.at, onLand = ink === INKS.pop ? 0 : .035;
+    const rnd = mulberry(4242), at = scene.ground.at, onLand = .035;
     ctx.fillStyle = ink.dot;
     for (let i = 0; i < 520000; i++) {
       const x = rnd() * W, y = rnd() * H, v = at(x, y);
@@ -278,27 +275,6 @@
     });
   }
 
-  // pirate ink: a sun-browned sheet, darker at the edges, with a few stains
-  function parchment(ctx) {
-    const g = ctx.createRadialGradient(W / 2, H / 2, H * .35, W / 2, H / 2, W * .62);
-    g.addColorStop(0, "rgba(120,72,24,0)"); g.addColorStop(1, "rgba(120,72,24,.38)");
-    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-    const r = mulberry(1717);
-    for (let i = 0; i < 9; i++) {
-      const x = r() * W, y = r() * H, rad = 40 + r() * 140, s = ctx.createRadialGradient(x, y, 0, x, y, rad);
-      s.addColorStop(0, "rgba(120,72,24,.10)"); s.addColorStop(.7, "rgba(120,72,24,.05)"); s.addColorStop(1, "rgba(120,72,24,0)");
-      ctx.fillStyle = s; ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill();
-    }
-  }
-  // X marks the island with the most unread entries
-  function treasure(ctx, ink, n) {
-    const s = 13;
-    ctx.save(); ctx.strokeStyle = ink.treasure; ctx.lineWidth = 5; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(n.x - s, n.y - s); ctx.lineTo(n.x + s, n.y + s); ctx.moveTo(n.x + s, n.y - s); ctx.lineTo(n.x - s, n.y + s); ctx.stroke();
-    ctx.fillStyle = ink.treasure; ctx.font = font(16, FONTS.body, "italic 600"); ctx.textAlign = "left"; ctx.textBaseline = "middle";
-    halo(ctx, ink, `X marks ${n.unread} unread`, n.x + s + 8, n.y - s - 6);
-    ctx.restore();
-  }
   // the harbour's star, with the light flare of nautical charts drawn as an outline so it does not read as a shadow
   function portSymbol(ctx, ink, x, y, s) {
     ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
@@ -464,7 +440,7 @@
   // ---------- the page (browser only) ----------
   const FONT_FACES = ['500 16px "Cormorant Garamond"', '600 16px "Cormorant Garamond"', 'italic 400 16px "Cormorant Garamond"',
     'italic 500 16px "Cormorant Garamond"', '500 16px "Cormorant SC"', '600 16px "Cormorant SC"', '400 16px "IBM Plex Mono"', '500 16px "IBM Plex Mono"'];
-  const INK_LABELS = {bleu: "Blue ink", nuit: "White on black", pop: "Pop", pirate: "Pirates"};
+  const INK_LABELS = {bleu: "Blue ink", nuit: "White on black"};
   const VIEW_LABELS = {harbour: "From the harbour", themes: "By theme"};
   const IDLE_MS = 2500, FRAME_MS = 33; // the toolbar fades after 2.5 s still; the overlay runs at about 30 frames a second
 
