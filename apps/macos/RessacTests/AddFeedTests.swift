@@ -99,3 +99,19 @@ import Testing
         #expect(AddFeedNote.text(for: AddedFeed(id: 1, title: "A", theme: nil, like: nil)) == "Added to Uncharted waters.")
     }
 }
+
+@Suite struct LogRedactionTests {
+    @Test func userinfo_query_and_fragment_are_removed() {
+        #expect(LogRedaction.redact("add https://user:pass@host.example:8080/feed.xml?token=abc#top --theme tech")
+            == "add https://host.example:8080/feed.xml?… --theme tech")
+        #expect(LogRedaction.redact("add https://u:p@host.example?token=abc") == "add https://host.example?…")
+        #expect(LogRedaction.redact("Could not reach https://host.example/f?k=v.") == "Could not reach https://host.example/f?…")
+    }
+
+    @Test func plain_addresses_and_other_arguments_are_unchanged() {
+        #expect(LogRedaction.redact("add https://host.example/a/b.xml") == "add https://host.example/a/b.xml")
+        #expect(LogRedaction.redact("add https://host.example/@me/feed") == "add https://host.example/@me/feed")
+        #expect(LogRedaction.redact("feed theme 7 ai-labs a@b?c") == "feed theme 7 ai-labs a@b?c")
+        #expect(LogRedaction.redact("add example.com") == "add example.com")
+    }
+}

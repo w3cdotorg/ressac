@@ -13,6 +13,31 @@ enum RunKind: Sendable, Equatable {
     case long, short
 }
 
+/// Feed addresses can carry secrets (`user:pass@host`, `?token=…`): anything logged goes through here.
+/// Words that look like a URL keep scheme, host and path; userinfo, query and fragment are dropped
+/// (`?…` marks a query that was there). Other words are left as they are.
+enum LogRedaction {
+    static func redact(_ text: String) -> String {
+        text.split(separator: " ", omittingEmptySubsequences: false).map { word in
+            word.contains("://") ? redactURL(String(word)) : String(word)
+        }.joined(separator: " ")
+    }
+
+    static func redactURL(_ word: String) -> String {
+        guard let scheme = word.range(of: "://") else { return word }
+        let head = word[..<scheme.upperBound]
+        let rest = word[scheme.upperBound...]
+        let end = rest.firstIndex { $0 == "?" || $0 == "#" } ?? rest.endIndex
+        var location = rest[..<end]
+        let hasQuery = end < rest.endIndex && rest[end] == "?"
+        let authorityEnd = location.firstIndex(of: "/") ?? location.endIndex
+        if let at = location[..<authorityEnd].lastIndex(of: "@") {
+            location = location[location.index(after: at)...]
+        }
+        return head + location + (hasQuery ? "?…" : "")
+    }
+}
+
 /// One `ressac` invocation, without the `--db … --json` prefix the runner adds.
 struct RunRequest: Sendable, Equatable {
     var arguments: [String]
@@ -137,11 +162,11 @@ actor RessacCLI {
         let (process, stdout, stderr, exits) = makeProcess(arguments: request.arguments)
         let (events, continuation) = AsyncThrowingStream<EngineEvent, any Error>.makeStream()
         let log = Self.log
-        let commandLine = request.arguments.joined(separator: " ")
+        let commandLine = LogRedaction.redact(request.arguments.joined(separator: " "))
         do {
             try process.run()
         } catch {
-            log.error("cannot launch ressac \(commandLine, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            log.error("cannot launch ressac \(commandLine, privacy: .public): \(LogRedaction.redact(error.localizedDescription), privacy: .public)")
             continuation.finish(throwing: RunFailure(
                 exitCode: 127, lastStderrLine: "Cannot launch ressac: \(error.localizedDescription)"))
             return events
@@ -152,7 +177,7 @@ actor RessacCLI {
                 if let event = EngineEvent.decode(line: line) {
                     continuation.yield(event)
                 } else if !line.isEmpty {
-                    log.warning("skipped non-JSON line from ressac: \(line, privacy: .public)")
+                    log.warning("skipped non-JSON line from ressac: \(LogRedaction.redact(line), privacy: .public)")
                 }
             }
             let stderrLine = await lastStderrLine
@@ -205,11 +230,11 @@ actor RessacCLI {
     func capture(_ arguments: [String]) async throws -> Data {
         let (process, stdout, stderr, exits) = makeProcess(arguments: arguments)
         let log = Self.log
-        let commandLine = arguments.joined(separator: " ")
+        let commandLine = LogRedaction.redact(arguments.joined(separator: " "))
         do {
             try process.run()
         } catch {
-            log.error("cannot launch ressac \(commandLine, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            log.error("cannot launch ressac \(commandLine, privacy: .public): \(LogRedaction.redact(error.localizedDescription), privacy: .public)")
             throw RunFailure(exitCode: 127, lastStderrLine: "Cannot launch ressac: \(error.localizedDescription)")
         }
         let output = stdout.fileHandleForReading
@@ -241,7 +266,7 @@ actor RessacCLI {
         for await line in lines(of: handle) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
-            log.info("ressac: \(trimmed, privacy: .public)")
+            log.info("ressac: \(LogRedaction.redact(trimmed), privacy: .public)")
             last = trimmed
         }
         return last

@@ -48,13 +48,39 @@ fn subset(
     Ok(Some(feeds))
 }
 
+/// An address as the log may show it: scheme, host (port) and path. The userinfo, the query and the
+/// fragment can carry a secret (`user:pass@host`, `?token=...`), so they are dropped, and `?...`
+/// marks a query that was there. Text that is not an http(s) address is cut the same way by hand.
+fn redact_address(address: &str) -> String {
+    let rest_start = address.find("://").map_or(0, |i| i + 3);
+    let (head, rest) = address.split_at(rest_start);
+    let end = rest.find(['?', '#']).unwrap_or(rest.len());
+    let (authority_and_path, tail) = rest.split_at(end);
+    let after_userinfo = match authority_and_path.find('/') {
+        Some(slash) => {
+            let (authority, path) = authority_and_path.split_at(slash);
+            format!(
+                "{}{path}",
+                authority.rsplit('@').next().unwrap_or(authority)
+            )
+        }
+        None => authority_and_path
+            .rsplit('@')
+            .next()
+            .unwrap_or(authority_and_path)
+            .to_owned(),
+    };
+    let marker = if tail.starts_with('?') { "?..." } else { "" };
+    format!("{head}{after_userinfo}{marker}")
+}
+
 /// The refusals of `add` (nothing to follow, already followed, unknown theme, private or
 /// malformed address) are usage errors (exit 2); a network failure stays fatal (exit 1).
 /// Their texts carry feed- or user-supplied strings, so every one goes through `printable`.
 fn add_error(e: ressac_core::Error) -> anyhow::Error {
     use ressac_core::Error;
     if let Error::NoFeedFound(tried) = &e {
-        tracing::warn!(address = %tried, "no feed found");
+        tracing::warn!(address = %redact_address(tried), "no feed found");
     }
     let text = output::printable(&e.to_string()).into_owned();
     match e {
@@ -178,6 +204,31 @@ pub async fn extract(g: &Globals, entry_id: i64, out: &mut impl Write) -> anyhow
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn redact_address_drops_userinfo_query_and_fragment() {
+        use super::redact_address;
+        assert_eq!(
+            redact_address("https://user:pass@host.example:8080/feed.xml?token=abc#top"),
+            "https://host.example:8080/feed.xml?..."
+        );
+        assert_eq!(
+            redact_address("https://u:p@host.example?token=abc"),
+            "https://host.example?..."
+        );
+        assert_eq!(
+            redact_address("https://host.example/a/b.xml"),
+            "https://host.example/a/b.xml"
+        );
+        assert_eq!(
+            redact_address("host.example/feed#frag"),
+            "host.example/feed"
+        );
+        assert_eq!(
+            redact_address("u:p@host.example/feed?k=v"),
+            "host.example/feed?..."
+        );
+    }
+
     use super::*;
     use crate::commands::UsageError;
     use ressac_core::Error;
