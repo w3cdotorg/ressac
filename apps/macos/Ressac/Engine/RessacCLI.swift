@@ -18,6 +18,14 @@ enum RunKind: Sendable, Equatable {
 /// `user@host`) keep scheme, host and path; userinfo, query and fragment are dropped
 /// (`?…` marks a query that was there). Other words are left as they are.
 enum LogRedaction {
+    /// A command line for the log. The address `add` takes is redacted whatever it looks like (a
+    /// dotless host, brackets, spaces); every other argument goes through `redact`.
+    static func commandLine(_ arguments: [String]) -> String {
+        arguments.enumerated().map { index, argument in
+            index == 1 && arguments.first == "add" ? redactAddress(argument) : redact(argument)
+        }.joined(separator: " ")
+    }
+
     static func redact(_ text: String) -> String {
         text.split(separator: " ", omittingEmptySubsequences: false).map { word in
             looksLikeAddress(word) ? redactAddress(String(word)) : String(word)
@@ -182,7 +190,7 @@ actor RessacCLI {
         let (process, stdout, stderr, exits) = makeProcess(arguments: request.arguments)
         let (events, continuation) = AsyncThrowingStream<EngineEvent, any Error>.makeStream()
         let log = Self.log
-        let commandLine = LogRedaction.redact(request.arguments.joined(separator: " "))
+        let commandLine = LogRedaction.commandLine(request.arguments)
         do {
             try process.run()
         } catch {
@@ -250,7 +258,7 @@ actor RessacCLI {
     func capture(_ arguments: [String]) async throws -> Data {
         let (process, stdout, stderr, exits) = makeProcess(arguments: arguments)
         let log = Self.log
-        let commandLine = LogRedaction.redact(arguments.joined(separator: " "))
+        let commandLine = LogRedaction.commandLine(arguments)
         do {
             try process.run()
         } catch {

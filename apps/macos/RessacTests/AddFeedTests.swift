@@ -146,4 +146,18 @@ import Testing
         #expect(LogRedaction.redact("add https://u:pa?ss@host.example/f") == "add https://host.example/f")
         #expect(LogRedaction.redact("add u:pa#ss@host.example/f") == "add host.example/f")
     }
+
+    @Test func the_address_add_takes_is_redacted_whatever_it_looks_like() {
+        #expect(LogRedaction.commandLine(["add", "intranet?token=abc"]) == "add intranet?…")
+        #expect(LogRedaction.commandLine(["add", "u:p@[::1]:8080/feed", "--theme", "tech"]) == "add [::1]:8080/feed --theme tech")
+        #expect(LogRedaction.commandLine(["add", "nas/feed xml?token=abc"]) == "add nas/feed xml?…")
+        #expect(LogRedaction.commandLine(RunRequest.addFeed(address: "intranet#k", theme: nil).arguments) == "add intranet")
+    }
+
+    @Test func other_command_lines_go_through_the_word_rule() {
+        #expect(LogRedaction.commandLine(["import", "/Users/willow/feeds.opml", "--dry-run"])
+            == "import /Users/willow/feeds.opml --dry-run")
+        #expect(LogRedaction.commandLine(["feed", "move", "12", "root"]) == "feed move 12 root")
+        #expect(LogRedaction.commandLine(["extract", "https://u:p@host.example/a?b=c"]) == "extract https://host.example/a?…")
+    }
 }

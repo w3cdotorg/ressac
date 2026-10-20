@@ -122,7 +122,8 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Annuler pendant un ajout laisse l'ajout se finir en silence.
 - [ ] Déposer un flux sur une ligne de flux d'un dossier ne fait rien (seuls les dossiers et l'en-tête « Feeds » acceptent).
 - [ ] Glisser un flux dans un champ de texte y colle `ressac-feed:<id>`.
-- [ ] Masquage des adresses : un hôte sans point et sans schéma (`intranet?token=…`) n'est pas masqué.
+- [x] Masquage des adresses : l'adresse passée à `add` est maintenant toujours masquée dans les journaux de l'appli, quelle que soit sa forme (hôte sans point, crochets, espaces). Reste : un mot hors `add` qui ressemble à une adresse sans en être une (un e-mail) peut être masqué à tort.
+- [ ] Pendant un ajout, la recherche de remplacement (`discover_replacements`) passe aussi sur les autres flux morts publics, faute de tenir compte de `only` : quelques téléchargements en plus.
 - [ ] Test WebKit `the_page_draws_the_fixture_in_webkit` instable en local (polices pas toujours chargées sur une suite complète).
 - [ ] Déplacer un flux entre deux sous-dossiers d'un même dossier racine en débordement peut changer sa page (le pool ne « contient » jamais une page ; contraire à l'esprit de la règle « une page déjà dans la plage est gardée »).
 - [ ] `ressac add` crée la base avant de valider l'adresse (`ressac add ftp://x` sur une machine neuve).
