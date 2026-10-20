@@ -65,6 +65,21 @@ import Testing
         #expect(!model.isRunning)
     }
 
+    /// An add during a refresh is refused by the app itself: a sentence, not a failure to log.
+    @Test func a_busy_refusal_shows_its_sentence_without_the_log_button() async throws {
+        let (state, _, _) = try makeState(stub: """
+            case "$*" in *fetch*) sleep 1 ;; esac
+            """)
+        let running = state.runs.start(.fetch(feeds: []))
+        #expect(state.runs.isLongRunActive)
+        let model = AddFeedModel()
+        model.address = "https://df.example"
+        #expect(await model.add(to: state) == false)
+        #expect(model.errorMessage == "A refresh is running. Try again when it ends.")
+        #expect(!model.showsLog)
+        _ = await running.value
+    }
+
     @Test func failure_keeps_the_sheet_and_offers_the_log() async throws {
         let (state, _, _) = try makeState(stub: """
             echo 'Could not reach https://df.example.' >&2

@@ -118,14 +118,19 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Commandes Antiope pour ajouter et déplacer un flux.
 - [ ] `ressac chart export` (la base fait foi : une réimportation efface les thèmes hérités).
 - [ ] Les flux venus d'une découverte gardent le client protégé à chaque rafraîchissement (aujourd'hui seul le premier passe par lui ; demande un drapeau par flux).
-- [ ] Un `--theme` inconnu n'est refusé qu'après le travail réseau.
 - [ ] Les erreurs réseau sur le lien annoncé sont rapportées comme « aucun flux ».
-- [ ] Un refus pour rafraîchissement en cours affiche « Show Log ».
 - [ ] Annuler pendant un ajout laisse l'ajout se finir en silence.
 - [ ] Déposer un flux sur une ligne de flux d'un dossier ne fait rien (seuls les dossiers et l'en-tête « Feeds » acceptent).
 - [ ] Glisser un flux dans un champ de texte y colle `ressac-feed:<id>`.
 - [ ] Masquage des adresses : un hôte sans point et sans schéma (`intranet?token=…`) n'est pas masqué.
 - [ ] Test WebKit `the_page_draws_the_fixture_in_webkit` instable en local (polices pas toujours chargées sur une suite complète).
+- [ ] Déplacer un flux entre deux sous-dossiers d'un même dossier racine en débordement peut changer sa page (le pool ne « contient » jamais une page ; contraire à l'esprit de la règle « une page déjà dans la plage est gardée »).
+- [ ] `ressac add` crée la base avant de valider l'adresse (`ressac add ftp://x` sur une machine neuve).
+- [ ] Pas de test d'un ajout pendant un rafraîchissement (repose sur les transactions IMMEDIATE et le busy_timeout de 5 s).
+- [ ] Le `warn!(error = %e)` après un premier rafraîchissement raté n'affiche pas d'adresse aujourd'hui (`refresh_via` ne renvoie que des erreurs de base ou de diagnostic) ; à garder ainsi (journaliser le genre d'erreur, ou un commentaire qui fixe cet invariant).
+- [ ] Petites dettes du cœur : correspondance ThemeDef dupliquée trois fois ; `COALESCE(html_url, xml_url)` prend un `html_url` vide pour présent (`NULLIF`) ; un territoire peut différer du thème hérité ; dérivations `Serialize` inutilisées ; ménage préalable (« Step 0 ») non fait sur `feeds.rs` ; `service.rs` à découper (`service/add.rs`) ; un déplacement sans effet calcule quand même la page.
+- [ ] CLI : la clé d'un `--theme` inconnu n'est pas passée par `printable` dans le refus de `feed theme` ; pas de test qu'un refus en `--json` laisse stdout vide.
+- [ ] Appli : le presse-papiers est relu à chaque recréation de la fenêtre d'ajout ; un ajout qui se termine après Annuler sélectionne quand même le flux, affiche la note et peut fermer une fenêtre rouverte entre-temps ; deux notes identiques de suite ne relancent pas la minuterie.
 
 ### Durcissement proposé, non fait
 

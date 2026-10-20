@@ -652,7 +652,7 @@ enum PendingSheet: Equatable, Sendable {
             addFeedNote = AddFeedNote.text(for: added)
             return .success(added)
         case .refused:
-            return .failure(RunFailure(exitCode: 1, lastStderrLine: "A refresh is running. Try again when it ends."))
+            return .failure(RunFailure(exitCode: 2, lastStderrLine: "A refresh is running. Try again when it ends."))
         case let .failed(failure):
             return .failure(failure)
         }
