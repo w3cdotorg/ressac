@@ -204,7 +204,11 @@ private func privateDefaults() throws -> (UserDefaults, String) {
         return drawn
     }
 
-    @Test func the_page_draws_the_fixture_in_webkit() async throws {
+    /// On GitHub's macOS runner WebKit runs without a display: the page's fonts never load and
+    /// the canvas reads back blank, so this check only runs on a real Mac (where it passes).
+    @Test(.disabled(if: ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true",
+                    "WebKit cannot draw or load fonts on the headless CI runner"))
+    func the_page_draws_the_fixture_in_webkit() async throws {
         let json = try String(contentsOf: Self.fixture, encoding: .utf8)
         let h = harness(prefs: ChartPrefs(view: .themes, ink: .nuit, animate: true))
         defer { h.page.close() }
