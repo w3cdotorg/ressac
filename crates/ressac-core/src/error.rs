@@ -42,8 +42,9 @@ pub enum Error {
     UnknownFeed(FeedId),
     #[error("No folder #{0}.")]
     UnknownFolder(FolderId),
-    #[error("No theme \"{0}\".")]
-    UnknownTheme(String),
+    /// `given` matched no theme's key or name; `keys` are the valid keys, in position order.
+    #[error("No theme \"{given}\". {}", themes_hint(.keys))]
+    UnknownTheme { given: String, keys: Vec<String> },
     #[error("Feed #{0} is buried.")]
     FeedBuried(FeedId),
     /// Phase 2b's refusal; declared here because Phase 2b's five files are taken.
@@ -80,3 +81,12 @@ fn feed_exists_sentence(buried: bool, title: &str) -> String {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// The tail of the unknown-theme message: the valid keys, or how to get some.
+fn themes_hint(keys: &[String]) -> String {
+    if keys.is_empty() {
+        "No themes yet: import them with ressac chart import.".to_owned()
+    } else {
+        format!("Themes: {}", keys.join(", "))
+    }
+}

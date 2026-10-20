@@ -147,6 +147,36 @@ pub(super) fn join_sibling_territory(
     Ok(Some(name))
 }
 
+/// The id and definition of the theme `given` names (see `Store::resolve_theme`).
+pub(super) fn resolve_theme_in(conn: &Connection, given: &str) -> Result<(i64, ThemeDef)> {
+    let mut stmt =
+        conn.prepare("SELECT id, key, name, sea_name FROM theme ORDER BY position, id")?;
+    let all = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                ThemeDef {
+                    key: r.get(1)?,
+                    name: r.get(2)?,
+                    sea: r.get(3)?,
+                },
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let wanted = given.trim().to_lowercase();
+    let found = all.iter().position(|(_, t)| t.key == given).or_else(|| {
+        all.iter()
+            .position(|(_, t)| t.name.trim().to_lowercase() == wanted)
+    });
+    match found {
+        Some(i) => Ok(all.into_iter().nth(i).expect("index from position")),
+        None => Err(Error::UnknownTheme {
+            given: given.to_owned(),
+            keys: all.into_iter().map(|(_, t)| t.key).collect(),
+        }),
+    }
+}
+
 impl Store {
     /// Themes in `position` order.
     pub fn themes(&self) -> Result<Vec<ThemeDef>> {
@@ -163,17 +193,18 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Sets a feed's theme, or clears it with `None`. Buried feeds are allowed.
-    pub fn set_feed_theme(&self, feed: FeedId, key: Option<&str>) -> Result<()> {
-        let theme_id = match key {
-            Some(key) => Some(
-                self.conn()
-                    .query_row("SELECT id FROM theme WHERE key = ?1", [key], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                    .optional()?
-                    .ok_or_else(|| Error::UnknownTheme(key.to_owned()))?,
-            ),
+    /// The theme `given` names: its key exactly, else its name compared case-insensitively
+    /// after trimming. `UnknownTheme` (listing the valid keys) when neither matches. Every
+    /// place that turns typed text into a theme goes through here.
+    pub fn resolve_theme(&self, given: &str) -> Result<ThemeDef> {
+        resolve_theme_in(self.conn(), given).map(|(_, def)| def)
+    }
+
+    /// Sets a feed's theme, given by key or name, or clears it with `None`. Buried feeds
+    /// are allowed.
+    pub fn set_feed_theme(&self, feed: FeedId, given: Option<&str>) -> Result<()> {
+        let theme_id = match given {
+            Some(given) => Some(resolve_theme_in(self.conn(), given)?.0),
             None => None,
         };
         let changed = self.conn().execute(
@@ -422,10 +453,13 @@ mod tests {
         let s = store_with_feeds(1);
         let err = s.set_feed_theme(1, Some("nope")).unwrap_err();
         assert!(
-            matches!(&err, Error::UnknownTheme(k) if k == "nope"),
+            matches!(&err, Error::UnknownTheme { given, .. } if given == "nope"),
             "{err:?}"
         );
-        assert_eq!(err.to_string(), "No theme \"nope\".");
+        assert_eq!(
+            err.to_string(),
+            "No theme \"nope\". No themes yet: import them with ressac chart import."
+        );
         let err = s.set_feed_theme(99, None).unwrap_err();
         assert!(matches!(err, Error::UnknownFeed(99)), "{err:?}");
     }

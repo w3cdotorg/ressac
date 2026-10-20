@@ -360,7 +360,10 @@ pub fn chart_text(snap: &ChartSnapshot) -> String {
             .iter()
             .filter(|f| f.theme.as_deref() == key)
             .collect();
-        out.push_str(&format!("\n{sea} ({})\n", feeds.len()));
+        let tag = key
+            .map(|k| format!(" [{}]", printable(k)))
+            .unwrap_or_default();
+        out.push_str(&format!("\n{sea}{tag} ({})\n", feeds.len()));
         for f in feeds {
             out.push_str(&format!("  #{} {}\n", f.id, printable(&f.title)));
         }
@@ -513,6 +516,7 @@ mod tests {
         };
         let text = chart_text(&snap);
         assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(text.contains("SEA\u{FFFD}[2J [t] (2)\n"), "{text:?}");
         assert!(
             text.contains("  #1 Evil\u{FFFD}[31m\u{FFFD}Title\n"),
             "{text:?}"

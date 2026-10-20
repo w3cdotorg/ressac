@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
-use super::chart::{join_sibling_territory, majority_theme, siblings_by_host};
+use super::chart::{join_sibling_territory, majority_theme, resolve_theme_in, siblings_by_host};
 use super::{Store, ThemeDef, pages};
 use crate::error::{Error, Result};
 use crate::model::{CadenceGroup, FeedId, FolderId, ts};
@@ -189,7 +189,7 @@ impl Store {
     }
 
     /// Adds one feed at the bottom of the root, with a root page, in one transaction. The
-    /// theme is `theme` (a known key, else `UnknownTheme` before anything is written) or,
+    /// theme is `theme` (a known key or name, else `UnknownTheme` before anything is written) or,
     /// when none is given, the one most active feeds of the same site share (`host_key`;
     /// ties: the lowest feed id's); with a themed or not sibling in a territory, the feed
     /// joins the lowest-id one. Checks again, inside its own write transaction, that the new
@@ -208,27 +208,9 @@ impl Store {
         if let Some((id, title, buried)) = duplicate_in(&tx, &addresses)? {
             return Err(Error::FeedExists { id, title, buried });
         }
-        let chosen: Option<(i64, ThemeDef)> = match theme {
-            Some(key) => Some(
-                tx.query_row(
-                    "SELECT id, key, name, sea_name FROM theme WHERE key = ?1",
-                    [key],
-                    |r| {
-                        Ok((
-                            r.get(0)?,
-                            ThemeDef {
-                                key: r.get(1)?,
-                                name: r.get(2)?,
-                                sea: r.get(3)?,
-                            },
-                        ))
-                    },
-                )
-                .optional()?
-                .ok_or_else(|| Error::UnknownTheme(key.to_owned()))?,
-            ),
-            None => None,
-        };
+        let chosen: Option<(i64, ThemeDef)> = theme
+            .map(|given| resolve_theme_in(&tx, given))
+            .transpose()?;
         let site = new.html_url.as_deref().unwrap_or(&new.xml_url);
         let host = host_key(site).or_else(|| host_key(&new.xml_url));
         let title = match new.title.trim() {
@@ -1401,7 +1383,7 @@ mod tests {
                 now(),
             )
             .unwrap_err();
-        assert!(matches!(err, Error::UnknownTheme(k) if k == "nope"));
+        assert!(matches!(err, Error::UnknownTheme { given, .. } if given == "nope"));
         assert_eq!(s.feed_count().unwrap(), 0);
     }
 

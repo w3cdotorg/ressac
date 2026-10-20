@@ -26,7 +26,12 @@ pub fn feed(g: &Globals, action: FeedCommand, out: &mut impl Write) -> anyhow::R
             }
         }
         FeedCommand::Theme { feed_id, key } => {
-            let theme = (key != NO_THEME).then_some(key.as_str());
+            // Reported under the theme's key, whichever way it was typed.
+            let resolved = (key != NO_THEME)
+                .then(|| app.store().resolve_theme(&key))
+                .transpose()
+                .map_err(refusal_error)?;
+            let theme = resolved.as_ref().map(|t| t.key.as_str());
             app.store()
                 .set_feed_theme(feed_id, theme)
                 .map_err(refusal_error)?;
@@ -141,7 +146,9 @@ fn refusal_error(e: ressac_core::Error) -> anyhow::Error {
         Error::UnknownFeed(_)
         | Error::FeedBuried(_)
         | Error::UnknownFolder(_)
-        | Error::UnknownTheme(_) => usage(e.to_string()),
+        | Error::UnknownTheme { .. } => {
+            usage(crate::output::printable(&e.to_string()).into_owned())
+        }
         other => other.into(),
     }
 }
@@ -216,7 +223,10 @@ mod tests {
         for refusal in [
             Error::UnknownFeed(99),
             Error::FeedBuried(2),
-            Error::UnknownTheme("x".into()),
+            Error::UnknownTheme {
+                given: "x".into(),
+                keys: vec![],
+            },
         ] {
             let text = refusal.to_string();
             let e = refusal_error(refusal);

@@ -315,11 +315,10 @@ impl Ressac {
         stop: Arc<AtomicBool>,
     ) -> Result<AddedFeed> {
         // Refused before any network work; the insert checks it again in its transaction.
-        if let Some(key) = theme
-            && !self.store.themes()?.iter().any(|t| t.key == key)
-        {
-            return Err(Error::UnknownTheme(key.to_owned()));
-        }
+        let theme = theme
+            .map(|given| self.store.resolve_theme(given))
+            .transpose()?;
+        let theme = theme.as_ref().map(|t| t.key.as_str());
         let typed = normalise_address(input)?;
         if let Some((id, title, buried)) = self.store.find_duplicate(&[&typed])? {
             return Err(Error::FeedExists { id, title, buried });
@@ -2422,6 +2421,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_theme_is_chosen_by_key_or_by_name_ignoring_case() {
+        use crate::store::{ChartImport, ThemeDef};
+        for given in ["edu", "edu", "  education AND edtech ", "ÉDUCATION"] {
+            let server = MockServer::start().await;
+            serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+            let app = add_app();
+            let theme = |key: &str, name: &str| ThemeDef {
+                key: key.into(),
+                name: name.into(),
+                sea: name.to_uppercase(),
+            };
+            app.store()
+                .import_chart(
+                    &ChartImport {
+                        themes: vec![
+                            theme("edu", "Education and EdTech"),
+                            theme("accent", "Éducation"),
+                        ],
+                        feeds: Default::default(),
+                        territories: vec![],
+                    },
+                    false,
+                )
+                .unwrap();
+            let got = app
+                .add_feed(
+                    &format!("{}/feed.xml", server.uri()),
+                    Some(given),
+                    &NullSink,
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .await
+                .unwrap();
+            let want = if given == "ÉDUCATION" {
+                "Éducation"
+            } else {
+                "Education and EdTech"
+            };
+            assert_eq!(got.theme.as_deref(), Some(want), "{given:?}");
+            assert_eq!(got.theme_source, ThemeSource::Chosen);
+        }
+    }
+
+    #[tokio::test]
     async fn unknown_theme_is_refused_before_anything_is_written() {
         let server = MockServer::start().await;
         serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
@@ -2435,7 +2478,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, Error::UnknownTheme(_)), "{err:?}");
+        assert!(matches!(err, Error::UnknownTheme { .. }), "{err:?}");
         assert_eq!(count(&app, "feed"), 0);
         assert!(
             server.received_requests().await.unwrap().is_empty(),

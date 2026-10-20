@@ -82,7 +82,7 @@ fn add_error(e: ressac_core::Error) -> anyhow::Error {
         Error::InvalidAddress
         | Error::NoFeedFound(_)
         | Error::FeedExists { .. }
-        | Error::UnknownTheme(_)
+        | Error::UnknownTheme { .. }
         | Error::UnknownFolder(_)
         | Error::UnknownFeed(_)
         | Error::Invalid(_) => usage(text),
@@ -243,7 +243,10 @@ mod tests {
                 title: "T".into(),
                 buried: true,
             },
-            Error::UnknownTheme("x".into()),
+            Error::UnknownTheme {
+                given: "x".into(),
+                keys: vec![],
+            },
             Error::UnknownFolder(9),
             Error::UnknownFeed(9),
             Error::Invalid("Ressac only follows public web addresses.".into()),

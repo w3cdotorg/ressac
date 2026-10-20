@@ -49,8 +49,8 @@ pub enum Command {
     Add {
         /// A feed address or a site address (https:// is assumed when there is no scheme)
         address: String,
-        /// Put the feed in this theme (a key from the chart import file) instead of its site's
-        #[arg(long, value_name = "KEY")]
+        /// Put the feed in this theme (a theme key or name) instead of its site's
+        #[arg(long, value_name = "THEME")]
         theme: Option<String>,
     },
     /// Fetch every feed (or only some) and update its health
@@ -197,7 +197,7 @@ pub enum FeedCommand {
     Theme {
         /// The feed's id
         feed_id: FeedId,
-        /// A theme key from the chart import file, or "none"
+        /// A theme key or name (see ressac chart), or "none"
         key: String,
     },
     /// Move a feed to a folder (last position, lowest free page there), or back to the root

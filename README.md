@@ -9,7 +9,7 @@ Thème graphique rétro : **Antiope**, en hommage au télétexte français.
 ```sh
 ressac                                  # read: the Journal first, then every source (ressac read is the same)
 ressac import ~/Documents/vienna.opml   # --dry-run to preview
-ressac add https://example.org/        # a feed or a site address; add --theme <key> to choose its sea
+ressac add https://example.org/        # a feed or a site address; add --theme <key or name> to choose its sea
 ressac check                           # fetch, diagnose, look up archives
 ressac garden                          # triage: k keep, r repair, b bury, u undo, ? help
 ressac export -o clean.opml            # --cemetery for buried feeds
@@ -31,7 +31,7 @@ ressac edition show                    # today's edition by section; --json for 
 ressac feed cadence 12 daily           # force a feed's rhythm group (daily, weekly, monthly, rare, silent) or auto
 ressac chart                           # the sea chart's data as a summary; --json for one JSON line
 ressac chart import seas.json          # themes, feed themes and territories; --dry-run to preview
-ressac feed theme 12 ai-labs           # put a feed in a theme (a sea), or take it out with none
+ressac feed theme 12 ai-labs           # put a feed in a theme (a sea; its key or name), or take it out with none
 ressac feed move 12 3                  # move a feed into folder 3, or back to the top level with root
 ressac ticker --tmux                   # one unread entry for tmux's status bar (see The tmux ticker)
 ```
@@ -149,8 +149,8 @@ View ▸ Sea Chart (`⇧⌘M`) opens a window that draws your living feeds as an
 - **Two views** (toolbar). *From the harbour*: the distance from Ressac Harbour is the time since the feed's last entry (rings at 1 day, 1 week, 1 month, 3 months and 6 months), the bearing is its theme. *By theme*: one archipelago per theme, static; adding a feed hardly moves the others, but a feed that leaves a sea (new theme, buried, quiet for 6 months) lets the islands placed after it in that sea move up.
 - **Inks** (toolbar): Blue ink (default), White on black. A toggle stops the animation; Reduce Motion starts it off.
 - **Reading.** Hover an island for its unread and entry counts. Click it for a popover with its five latest entries (click one to open it in your browser), its theme, folder, rhythm and last entry; click its title to select the feed in the main window.
-- **Themes and territories.** Each feed has at most one theme (a sea). Feeds without one sit in UNCHARTED WATERS. A *territory* groups the feeds of one publisher on a shared landmass; a *continent* turns a whole theme into one landmass. Set a feed's theme from the garden inspector's Theme pop-up, or with `ressac feed theme <feed-id> <key|none>` (exit 2 for an unknown key). Territories and the list of themes come from `ressac chart import`.
-- **Adding a feed.** `ressac add <address>` (or File ▸ Add Feed…) gives the new feed the theme most feeds from the same site share (same host, `www.` ignored), and puts it in that feed's territory (never a continent). `--theme <key>` (or the sheet's Theme pop-up) wins over this.
+- **Themes and territories.** Each feed has at most one theme (a sea). Feeds without one sit in UNCHARTED WATERS. A *territory* groups the feeds of one publisher on a shared landmass; a *continent* turns a whole theme into one landmass. Set a feed's theme from the garden inspector's Theme pop-up, or with `ressac feed theme <feed-id> <theme|none>`, where a theme is its key or its name, in any case (exit 2 for an unknown one, with the valid keys listed). Territories and the list of themes come from `ressac chart import`.
+- **Adding a feed.** `ressac add <address>` (or File ▸ Add Feed…) gives the new feed the theme most feeds from the same site share (same host, `www.` ignored), and puts it in that feed's territory (never a continent). `--theme <key or name>` (or the sheet's Theme pop-up) wins over this.
 
 `ressac chart import <file.json> [--dry-run]` reads this file: `themes` in display order, `feeds` mapping a feed URL (`xml_url`, or its original one) to a theme key, and `territories`, each with either `feeds` (URLs, at least two on the chart to show) or a `continent` (a theme key). A re-import replaces the themes and the territories: themes are updated by key, a theme missing from the file is deleted and its feeds become unthemed, and every territory is rebuilt from the file. Theme keys may not be empty, `none` (in any case) or start with `-` (exit 2). The report lists the URLs it did not find, the territories with fewer than two matched feeds (kept off the chart) and the feeds left without a theme; `--dry-run` reports what would be imported and writes nothing.
 
@@ -174,7 +174,7 @@ View ▸ Sea Chart (`⇧⌘M`) opens a window that draws your living feeds as an
 
 **The database is canonical.** Themes and territories live in the database, not in the import file: the file seeded them once, and adding feeds or setting themes by hand changes them afterwards. A later `ressac chart import` replaces themes and territories wholesale, so it drops what added feeds inherited unless the file includes them. Keep that in mind before re-importing an old file; a `ressac chart export` to write the current state back to a file is not there yet.
 
-`ressac chart` prints a summary (feeds per theme, territories); `ressac --json chart` prints the page's data as one JSON line (`version` 1).
+`ressac chart` prints a summary (feeds per theme, each sea headed by its name and its key in brackets, then the territories); `ressac --json chart` prints the page's data as one JSON line (`version` 1).
 
 ## Antiope
 

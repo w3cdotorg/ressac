@@ -1400,8 +1400,8 @@ fn chart_human_summary() {
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], "Sea chart: 4 feeds, 3 unread this week", "{text}");
     for expected in [
-        "SEA OF THE LABS (2)",
-        "WEB SEA (1)",
+        "SEA OF THE LABS [labs] (2)",
+        "WEB SEA [web] (1)",
         "UNCHARTED WATERS (1)",
         "ORANGE COAST: Orange Drenka, Orange-Drenka",
     ] {
@@ -1541,12 +1541,34 @@ fn feed_theme_sets_and_clears() {
 }
 
 #[test]
+fn feed_theme_accepts_the_theme_name_in_any_case() {
+    let home = chart_home();
+    for given in ["labs", "ai LABS and tools", "  AI labs and tools "] {
+        let out = ressac(home.path(), &["feed", "theme", "5", given]);
+        assert!(out.status.success(), "{given:?}: {out:?}");
+        assert_eq!(stdout(&out), "#5 theme labs\n", "{given:?}");
+    }
+}
+
+#[test]
+fn feed_theme_without_any_theme_says_how_to_import_them() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
+    let out = ressac(home.path(), &["feed", "theme", "5", "atlantis"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert_eq!(
+        stderr(&out),
+        "No theme \"atlantis\". No themes yet: import them with ressac chart import.\n"
+    );
+}
+
+#[test]
 fn feed_theme_unknown_key_exits_2() {
     let home = chart_home();
     for (args, message) in [
         (
             &["feed", "theme", "5", "atlantis"][..],
-            "No theme \"atlantis\".\n",
+            "No theme \"atlantis\". Themes: labs, web\n",
         ),
         (&["--json", "feed", "theme", "99", "labs"], "No feed #99.\n"),
     ] {
@@ -1773,7 +1795,7 @@ async fn add_refusals_exit_2() {
                 "--theme".to_owned(),
                 "atlantis".to_owned(),
             ],
-            "No theme \"atlantis\".\n",
+            "No theme \"atlantis\". Themes: labs\n",
         ),
     ] {
         let mut full = vec!["add".to_owned()];
@@ -1859,7 +1881,10 @@ async fn add_neutralises_controls() {
     )
     .await;
     assert_eq!(theme.status.code(), Some(2), "{theme:?}");
-    assert_eq!(stderr(&theme), "No theme \"a\u{FFFD}[31m\".\n");
+    assert_eq!(
+        stderr(&theme),
+        "No theme \"a\u{FFFD}[31m\". No themes yet: import them with ressac chart import.\n"
+    );
 }
 
 #[tokio::test]
