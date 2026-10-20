@@ -1,6 +1,6 @@
 # Ressac
 
-Un lecteur de flux RSS/Atom/JSON Feed pour macOS, en deux interfaces : terminal (Rust, ratatui) et appli native (SwiftUI). Le flux et le reflux de vos abonnements, avec le ménage en prime.
+Un lecteur de flux RSS/Atom/JSON Feed pour macOS, en deux interfaces : terminal (Rust, ratatui) et appli native (SwiftUI). Le flux et le reflux de vos abonnements, avec le ménage en prime : un jardin pour trier les flux, un Journal du matin composé selon leur rythme, un bandeau tmux pour voir passer ce qu'on a laissé filer, et une carte marine des flux à garder sur un second écran.
 
 Thème graphique rétro : **Antiope**, en hommage au télétexte français.
 
@@ -31,6 +31,7 @@ ressac feed cadence 12 daily           # force a feed's rhythm group (daily, wee
 ressac chart                           # the sea chart's data as a summary; --json for one JSON line
 ressac chart import seas.json          # themes, feed themes and territories; --dry-run to preview
 ressac feed theme 12 ai-labs           # put a feed in a theme (a sea), or take it out with none
+ressac ticker --tmux                   # one unread entry for tmux's status bar (see The tmux ticker)
 ```
 
 Bare `ressac` opens the reader and no longer prints usage: scripts that need it call `ressac --help`. `--json` makes no sense for an interactive reader, so `ressac --json` and `ressac --json read` are refused (exit 2).
@@ -97,6 +98,8 @@ bind -n MouseDown1Status if -F '#{m/r:^rs[0-9]+$,#{mouse_status_range}}' \
 
 The binding only accepts the ticker's own click ranges (`rs` and digits) and passes them quoted; the pane title is escaped so that no program can add a clickable range or a style to the bar through it. `status-interval` stays at tmux's default, 15 seconds. Without `--tmux`, `ressac ticker` prints plain text (`Feed · Title`) for other bars; `--width` caps it (70 columns by default). The rotation is kept in `~/Library/Application Support/Ressac/ticker.json`. To remove the ticker, delete these lines and run `tmux source-file ~/.tmux.conf`.
 
+The ticker runs the `ressac` named in `~/.tmux.conf`. When that copy is older than the database (after an update migrated it), the line stays empty and each call logs "Database schema vN does not match" in `~/Library/Logs/Ressac/`: point tmux at the new app's helper, or rebuild the app.
+
 ## The Mac app
 
 `Ressac.app` (macOS 27) reads the same database as the terminal and runs its own copy of `ressac`, bundled at `Ressac.app/Contents/Helpers/ressac`, for everything that fetches or decides. Reading state (read, starred) is written by the app directly; the garden's decisions go through `ressac garden decide`, so the terminal garden sees them, and `u` / `⌘Z` undo in either place.
@@ -130,6 +133,7 @@ Quit Ressac before replacing the build. To install it for every launch instead, 
 - **Garden:** the sidebar's Needs triage, All feeds and Cemetery lists, with the terminal's keys: `k` keep, `r` repair, `b` bury, `u` undo, `o` site, `w` Wayback, `⇧R` apply safe repairs. The Cemetery shows how many entries each buried feed left unread.
 - **Settings (`⌘,`):** appearance (Native or Antiope, see below), article font (SF Pro, New York, Charter, Newsreader, Atkinson Hyperlegible Next), text size (`⌘+` / `⌘−` / `⌘0` in the View menu), line width (three widths or exactly 40 columns), database location, logs.
 - **Unread only (`⌥⌘U`):** View ▸ Show Unread Only filters the entry list to unread entries, in both looks. In Antiope the `ENTRIES  ALL/UNREAD` column title is a clickable toggle for the same setting.
+- **Sea Chart (`⇧⌘M`):** View ▸ Sea Chart opens the chart window, described below.
 - **Another database for one launch:** `open -n --env RESSAC_DB=/path/to/other.sqlite /Applications/Ressac.app` (`RESSAC_DB` also sets the terminal's database).
 
 Newsreader and Atkinson Hyperlegible Next are bundled under the SIL Open Font License 1.1; their licences ship next to them in `Ressac.app/Contents/Resources/Fonts/`.
