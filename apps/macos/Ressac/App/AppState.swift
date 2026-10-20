@@ -618,6 +618,29 @@ enum PendingSheet: Equatable, Sendable {
         runs.start(.setTheme(feedId: feedId, key: key))
     }
 
+    /// A drag of a feed onto a folder (nil: the "Feeds" header, the top level). Returns whether the drop was taken.
+    @discardableResult
+    func dropFeeds(_ items: [String], onto folder: Int64?) -> Bool {
+        guard let feedId = FeedDrop.feedId(in: items), let feed = sidebar.feeds.first(where: { $0.feedId == feedId }),
+              case let .move(target) = FeedDrop.decide(currentFolder: feed.folderId, dropFolder: folder)
+        else { return false }
+        moveFeed(feedId, to: target)
+        return true
+    }
+
+    /// Runs `ressac feed move`; the core renumbers the page. The sidebar reloads through the file
+    /// monitor, and the selection stays on the feed if it was the one moved.
+    @discardableResult
+    func moveFeed(_ feedId: Int64, to folder: Int64?) -> Task<RunOutcome, Never> {
+        let wasSelected = selection == .feed(feedId)
+        let run = runs.start(.moveFeed(id: feedId, folder: folder))
+        return Task {
+            let outcome = await run.value
+            if wasSelected, outcome == .succeeded { selection = .feed(feedId) }
+            return outcome
+        }
+    }
+
     /// Runs `ressac add` (spec add-feed §7). On success the new feed is selected and `addFeedNote`
     /// says where it landed; the caller closes the sheet. Failures come back as the run's failure.
     func addFeed(address: String, theme: String?) async -> Result<AddedFeed, RunFailure> {

@@ -112,6 +112,11 @@ struct RunRequest: Sendable, Equatable {
         RunRequest(arguments: ["feed", "theme", String(feedId), key ?? "none"], kind: .short)
     }
 
+    /// Moves a feed into a folder, or to the top level with `nil` ("root"). No network: a short run.
+    static func moveFeed(id: Int64, folder: Int64?) -> RunRequest {
+        RunRequest(arguments: ["feed", "move", String(id), folder.map(String.init) ?? "root"], kind: .short)
+    }
+
     /// Adds the feed at `address` (a feed or a site; the CLI discovers and fetches it). Long: it
     /// fetches, so it cannot overlap another fetch. `theme` is a theme key; nil inherits from the site.
     static func addFeed(address: String, theme: String?) -> RunRequest {
@@ -125,7 +130,7 @@ struct RunRequest: Sendable, Equatable {
     /// True when `failure` is the store refusing something the app cannot foresee (exit 2): an address that announces
     /// no feed or is already followed (`add`), a garden decision or an undo (an address another
     /// active feed already uses), an edition
-    /// that is not due or cannot be built offline, an override on a feed buried meanwhile, a theme deleted meanwhile.
+    /// that is not due or cannot be built offline, an override on a feed buried meanwhile, a theme or a folder deleted meanwhile.
     /// From any other call, exit 2 means the app built a wrong command line (spec §8).
     func isRefusal(_ failure: RunFailure) -> Bool {
         failure.exitCode == 2 && Self.refusable.contains { arguments.starts(with: $0) }
@@ -133,7 +138,7 @@ struct RunRequest: Sendable, Equatable {
 
     private static let refusable: [[String]] = [
         ["garden", "decide"], ["garden", "undo"], ["edition", "build"], ["feed", "cadence"],
-        ["feed", "theme"], ["add"],
+        ["feed", "theme"], ["feed", "move"], ["add"],
     ]
 }
 
