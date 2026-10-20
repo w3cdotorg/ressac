@@ -314,6 +314,12 @@ impl Ressac {
         sink: &dyn EventSink,
         stop: Arc<AtomicBool>,
     ) -> Result<AddedFeed> {
+        // Refused before any network work; the insert checks it again in its transaction.
+        if let Some(key) = theme {
+            if !self.store.themes()?.iter().any(|t| t.key == key) {
+                return Err(Error::UnknownTheme(key.to_owned()));
+            }
+        }
         let typed = normalise_address(input)?;
         if let Some((id, title, buried)) = self.store.find_duplicate(&[&typed])? {
             return Err(Error::FeedExists { id, title, buried });
@@ -343,6 +349,9 @@ impl Ressac {
                     .into_iter()
                     .next()
                     .ok_or_else(|| Error::NoFeedFound(typed.clone()))?;
+                if let Some((id, title, buried)) = self.store.find_duplicate(&[&first])? {
+                    return Err(Error::FeedExists { id, title, buried });
+                }
                 let raw = fetch_guarded(&self.articles, &first)
                     .await
                     .map_err(|_| Error::NoFeedFound(first.clone()))?;
@@ -1049,7 +1058,8 @@ async fn fetch_guarded(source: &LocalSource, url: &str) -> Result<RawResponse> {
 }
 
 /// `Some(found)` once the site was checked (`found` is `None` when it announces nothing new);
-/// `None` when it could not be checked (transient page-fetch failure, no site address).
+/// `None` when it could not be checked (transient page-fetch failure, a site page the
+/// client refuses, no site address).
 /// The site address comes from the user's OPML and goes through `site`, like feeds; the feed
 /// address the page announces is third-party content and goes through `guarded`, which
 /// refuses local and private targets (a refused candidate counts as nothing found).
@@ -1060,6 +1070,10 @@ async fn discover_one(
     now: DateTime<Utc>,
 ) -> Option<Option<String>> {
     let page = site.fetch_raw(feed.html_url.as_deref()?, None, None).await;
+    // A site page the client refuses (a LAN address) was never looked at.
+    if page.refused {
+        return None;
+    }
     if is_challenged(&page) {
         return None;
     }
@@ -1213,6 +1227,21 @@ mod tests {
             .map(|r| r.url.path().to_owned())
             .collect();
         assert_eq!(paths, ["/"], "only the site page is requested");
+    }
+
+    /// A site page the guarded client refuses (a LAN address) was never looked at: it is
+    /// not checked, so nothing is cleared or stamped.
+    #[tokio::test]
+    async fn a_refused_site_page_is_not_checked() {
+        let guarded = LocalSource::for_articles(FetchLimits::default(), false).unwrap();
+        for site in [
+            "http://nas.local/",
+            "http://192.168.1.10/",
+            "http://localhost/",
+        ] {
+            let found = discover_one(&guarded, &guarded, &row(site.to_owned()), Utc::now()).await;
+            assert_eq!(found, None, "{site}");
+        }
     }
 
     #[tokio::test]
@@ -2408,6 +2437,151 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, Error::UnknownTheme(_)), "{err:?}");
         assert_eq!(count(&app, "feed"), 0);
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "an unknown theme is refused before any network work"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_add_leaves_other_feeds_discovery_alone() {
+        let server = MockServer::start().await;
+        serve(&server, "/dead.xml", 410, "", "text/plain").await;
+        serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_app();
+        let xml = format!(
+            r#"<opml><body><outline text="L" xmlUrl="{}/dead.xml"/></body></opml>"#,
+            server.uri()
+        );
+        app.import_opml(&xml, false).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        app.refresh(RefreshOptions::default(), &NullSink, stop)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.store().diagnosis(1).unwrap().map(|d| d.status),
+            Some(Status::Dead)
+        );
+        app.store()
+            .conn()
+            .execute(
+                "UPDATE feed SET html_url = 'http://nas.local/', \
+                 discovered_url = 'https://nas.example/new.xml', discovery_checked_at = NULL",
+                [],
+            )
+            .unwrap();
+        // The production client refuses LAN addresses: the add path's guarded source must
+        // not mistake that for "checked, nothing found".
+        let state = |app: &Ressac| -> (Option<String>, Option<String>) {
+            app.store()
+                .conn()
+                .query_row(
+                    "SELECT discovered_url, discovery_checked_at FROM feed WHERE id = 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        let before = state(&app);
+        let added = add(&app, &format!("{}/feed.xml", server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(state(&app), before, "the add itself");
+        // The add's first refresh runs its discovery pass on the guarded client, which
+        // refuses a LAN site page: do the same with the production guard on.
+        let guarded = LocalSource::for_articles(app.limits.clone(), false).unwrap();
+        assert!(added.id > 1);
+        // A pending discovery makes the feed Moved; put it back to Dead, as when the
+        // diagnosis ran before the discovery landed.
+        app.store()
+            .conn()
+            .execute(
+                "UPDATE feed_health SET status = 'Dead' WHERE feed_id = 1",
+                [],
+            )
+            .unwrap();
+        app.discover_replacements(&guarded, &NullSink, Utc::now(), &AtomicBool::new(false))
+            .await
+            .unwrap();
+        assert_eq!(state(&app), before, "a guarded discovery pass");
+    }
+
+    #[tokio::test]
+    async fn the_announced_link_is_not_requested_when_already_followed() {
+        let server = MockServer::start().await;
+        serve(
+            &server,
+            "/",
+            200,
+            &page_announcing(&["/feed.xml"]),
+            "text/html",
+        )
+        .await;
+        let app = add_app();
+        let announced = format!("{}/feed.xml", server.uri());
+        app.import_opml(
+            &format!(r#"<opml><body><outline text="T" xmlUrl="{announced}"/></body></opml>"#),
+            false,
+        )
+        .unwrap();
+        let err = add(&app, &server.uri()).await.unwrap_err();
+        assert!(matches!(err, Error::FeedExists { .. }), "{err:?}");
+        let paths: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.url.path().to_owned())
+            .collect();
+        assert_eq!(paths, ["/"], "the announced link is never requested");
+    }
+
+    fn html_url_of(app: &Ressac, id: FeedId) -> Option<String> {
+        app.store()
+            .conn()
+            .query_row("SELECT html_url FROM feed WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_protocol_relative_announced_link_resolves_against_the_page() {
+        let server = MockServer::start().await;
+        let authority = server.uri().trim_start_matches("http://").to_owned();
+        let link = format!("//{authority}/rss.xml");
+        serve(&server, "/", 200, &page_announcing(&[&link]), "text/html").await;
+        serve(&server, "/rss.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_app();
+        let got = add(&app, &server.uri()).await.unwrap();
+        assert_eq!(got.xml_url, format!("{}/rss.xml", server.uri()));
+        assert!(got.discovered);
+    }
+
+    #[tokio::test]
+    async fn html_url_falls_back_to_the_page_the_redirect_ended_at() {
+        let server = MockServer::start().await;
+        let bare = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title><description>d</description><item><guid>1</guid><title>One</title></item></channel></rss>"#;
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(path("/start"))
+            .respond_with(ResponseTemplate::new(301).insert_header("location", "/home/"))
+            .mount(&server)
+            .await;
+        serve(
+            &server,
+            "/home/",
+            200,
+            &page_announcing(&["/rss.xml"]),
+            "text/html",
+        )
+        .await;
+        serve(&server, "/rss.xml", 200, bare, "application/rss+xml").await;
+        let app = add_app();
+        let got = add(&app, &format!("{}/start", server.uri())).await.unwrap();
+        assert_eq!(
+            html_url_of(&app, got.id),
+            Some(format!("{}/home/", server.uri()))
+        );
     }
 
     #[tokio::test]
