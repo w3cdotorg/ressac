@@ -26,8 +26,13 @@ targets:
       - path: Ressac
         excludes:
           - "Resources/Fonts"
+          - "Resources/Chart"
           - "Resources/AppIcon.svg"
       - path: Ressac/Resources/Fonts
+        type: folder
+        buildPhase: resources
+      # The sea chart page, one folder in the bundle: the web view reads it with one file-URL grant.
+      - path: Ressac/Resources/Chart
         type: folder
         buildPhase: resources
     info:
@@ -41,7 +46,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: org.w3cdotorg.ressac
         PRODUCT_NAME: Ressac
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "0.1.0"
+        MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Ressac

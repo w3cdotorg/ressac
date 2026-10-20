@@ -23,7 +23,7 @@ import Testing
         let database = try test.open()
         let runs = RunCoordinator(cli: RessacCLI(executable: try Stub("exit 0").executable, database: test.url))
         let state = AppState(database: database, runs: runs)
-        let monitor = ExternalChangeMonitor(database: database, isActive: { true })
+        let monitor = ExternalChangeMonitor(database: database, shouldPoll: { true })
         try await Task.sleep(for: .milliseconds(50))
         #expect(await !monitor.poll())  // first poll: baseline only
         #expect(state.sidebar.unread == 0)
@@ -31,6 +31,28 @@ import Testing
         #expect(await monitor.poll())
         #expect(await eventually { state.sidebar.unread == 1 })
         #expect(await !monitor.poll())
+    }
+
+    /// The Sea Chart on a second display stays live while another app is in front (spec §8):
+    /// in the background, the app's monitor polls only while a chart window is on screen.
+    @Test func inTheBackgroundTheMonitorPollsOnlyWhileAChartIsOnScreen() async throws {
+        let (state, test, _) = try makeState()
+        try await Task.sleep(for: .milliseconds(100))  // let GRDB's observation start before the insert
+        state.isAppActive = { false }
+        let monitor = state.makeExternalChangeMonitor(interval: .milliseconds(40))
+        monitor.start()
+        defer { monitor.stop() }
+        try test.entry(feed: 1)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(state.sidebar.unread == 0)  // in the background with no chart: not polled
+        state.isChartOnScreen = true
+        #expect(await eventually { state.sidebar.unread == 1 })
+        state.isChartOnScreen = false
+        try test.entry(feed: 1, url: "https://example.org/second")
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(state.sidebar.unread == 1)
+        state.isAppActive = { true }
+        #expect(await eventually { state.sidebar.unread == 2 })
     }
 }
 

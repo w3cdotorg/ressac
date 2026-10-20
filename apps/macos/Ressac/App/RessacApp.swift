@@ -2,10 +2,13 @@ import SwiftUI
 
 @main
 struct RessacApp: App {
+    /// The reading window's scene, which the Sea Chart opens when no reading window is left.
+    static let mainWindowID = "main"
+
     @State private var launcher = Launcher()
 
     var body: some Scene {
-        WindowGroup("Ressac") {
+        WindowGroup("Ressac", id: Self.mainWindowID) {
             LaunchView(launcher: launcher)
                 .frame(minWidth: 900, minHeight: 500)
                 .task {
@@ -15,6 +18,12 @@ struct RessacApp: App {
                 }
         }
         .commands { RessacCommands(state: launcher.state) }
+
+        // For a second screen and full screen (spec §8); SwiftUI keeps its frame.
+        Window("Sea Chart", id: ChartWindow.id) {
+            ChartWindow(launcher: launcher)
+        }
+        .defaultSize(width: 1280, height: 720)
 
         Settings {
             SettingsView()

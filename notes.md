@@ -261,6 +261,45 @@ Base : copie de la vraie base par `.backup` en lecture seule, HOME temporaire po
 | 1 | Vingt appels espacés de 15 s sur la copie | OK | 20 articles distincts de 19 flux, jamais deux fois le même flux de suite, tous non lus, récents et hors édition ; 10 à 40 ms par appel (0,5 s pour le tout premier, à froid) |
 | 2 | Lignes ajoutées à `~/.tmux.conf` | Fait par Clément | Appli locale recompilée depuis la branche (ancienne gardée dans le scratchpad de la session) |
 
+## Carte marine (sous-projet 6)
+
+Piste 10 du brainstorming du 19/10 sur d'autres présentations des flux (maquette : artefact claude.ai « Ressac Sea Chart », 18 versions). But : une fenêtre à laisser sur un second écran, où la géographie dit quelque chose de vrai des flux. Spec `docs/specs/2026-10-19-sea-chart-design.md`, plan `docs/plans/2026-10-19-sea-chart.md`, exécution en sous-agents (une relecture par tâche, relecture finale). Recette en attente.
+
+### Décisions (spec §2, prises avec Clément le 19/10/2026)
+
+- Fenêtre séparée de l'appli (⇧⌘M), pas de version terminal ; tout en anglais sur la carte ; esprit des cartes de Marine Le Breton (une encre, pointillé des hauts-fonds, traits de plume qui suivent le vent au large et la côte près de la terre).
+- Deux vues : « From the harbour » (distance au port = temps depuis la dernière entrée, échelle logarithmique étirée dont le bord est à 6 mois ; direction = secteur du thème) et « By theme » (un archipel par thème, statique).
+- Flux affichés : actifs, hors triage (Clément : tout devrait être trié), dernière entrée à 182 jours au plus. Les flux enterrés ou muets depuis plus de 6 mois n'y sont pas.
+- Un thème par flux, les mers sont les thèmes (15 proposés, modifiables) ; territoires (un éditeur ou une famille = une terre, chaque flux un cap) et continents (un thème entier) ; une île = un flux, jamais fusionnées. Lumière d'activité : somme sur 30 jours de 2^(−âge/3), échelle logarithmique rapportée au flux le plus actif.
+- Rien n'est stocké comme image ni comme position : la carte se calcule depuis la base à chaque fois.
+
+### Leçons des itérations de la maquette
+
+- **Étiquettes qui se chevauchent** : placement par priorité (port, continents, mers, territoires, flux du plus actif au moins actif avec huit emplacements, puis une taille réduite, puis un trait de rappel), un nom sans place n'apparaît qu'au survol.
+- **Îles qui fusionnent** : la fusion venait de l'union douce des reliefs (Simon Willison s'était soudé aux blogs Google) ; désormais chaque île garde sa côte (le relief le plus haut l'emporte).
+- **Presqu'îles** : reliées par des crêtes, les terres ressemblaient à des péninsules ; Clément voulait des terres plus pleines, d'où les côtes inventées autour de l'enveloppe du groupe.
+- **Port trop encombré** : échelle de distance étirée (logarithme à bord de 6 mois) et îles réduites à 70 % dans cette vue.
+- **Coupure à six mois** : la carte ne montre que ce qui vit encore ; au-delà, un flux est hors de la mer (il reste dans le jardin).
+- **Flux en triage exclus** à la demande de Clément (aucun des 38 actuels ne serait sur la carte de toute façon).
+
+### Trouvailles de la construction
+
+- **`v_cadence` en jointure interne** : un flux sans diagnostic (import OPML, pas de ligne `feed_health`) disparaissait de la carte. L'instantané part maintenant de `feed` (jointures gauches) et traite l'absence de diagnostic comme un rythme silencieux.
+- **WAL** : un écrivain ne bloque pas un lecteur, donc pas de test de base occupée utile (comme pour le bandeau tmux) ; l'appli observe les changements par `ValueObservation` (l'observation par région a fait remonter l'erreur SQLite 10 dans `notifyExternalChanges`).
+- **Injection de terminal** : le résumé humain de `ressac chart` et le rapport d'import affichaient titres, noms de mers et URL sans `output::printable` ; corrigé. Reste à assainir les messages de stderr (TODO).
+- **Mers pleines** : le placement « le plus proche emplacement libre » retombait sur la cible brute et empilait les îles quand la mer était pleine (à partir de 230 flux environ) ; l'espacement se resserre désormais.
+- **Placement « By theme »** : pas de forces d3 mais un placement îlot par îlot (ordre d'id, emplacement libre le plus proche de la cible), sur une grille de 6 × 3 avec une case pour UNCHARTED WATERS. C'est ce qui rend vraie la promesse de stabilité (un nouveau venu ne déplace personne de plus de quelques unités) ; la vue du port garde les forces d3. Les îles évitent la rose des vents et le cartouche dans les deux vues. Contrepartie : un flux qui part laisse les suivants de sa mer remonter.
+- **Verrouillage de navigation du WKWebView** : toute navigation hors du paquet est annulée (clic de menu contextuel, bouton du milieu compris), seuls http et https sont ouverts, par `NSWorkspace` ; la CSP de la page est vérifiée dans le WKWebView du banc d'essai Swift, sans lancer l'appli ni envoyer de touches.
+- **Id du `WindowGroup` principal** : « main » ajouté pour ramener la fenêtre de lecture ; il peut faire oublier son cadre une fois.
+- **Carte en arrière-plan** : le moniteur ne sondait `data_version` que l'appli au premier plan, si bien que la carte, faite pour un second écran, restait figée pendant le travail dans d'autres applis. Il sonde aussi tant que la fenêtre de la carte est visible (état d'occultation), et la carte se relève toutes les 5 minutes.
+- **Polices** : Cormorant Garamond, Cormorant SC et IBM Plex Mono en `woff2` locaux (OFL, provenance dans `chart.css`) ; d3 7.9.0 embarqué avec sa licence ISC.
+
+### Recette du 20/10/2026
+
+- Les six points de la recette sont acceptés par Clément.
+- Encres Pop et Pirates retirées à la recette, à la demande de Clément : il ne reste que « Blue ink » et « White on black ». Une encre mémorisée « pop » ou « pirate » est relue comme « Blue ink » (appli et page). Le parchemin vieilli et le X du trésor ont disparu avec elles.
+- Deux mineurs de la relecture finale corrigés : un test Swift qui pouvait courir contre le démarrage de l'observation GRDB (pause de 100 ms avant l'insertion), et un test Rust qui attendait un jour UTC alors que `entry_day` compte dans le fuseau local (faux à UTC+12 ; vérifié avec `TZ=Pacific/Kiritimati`).
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).

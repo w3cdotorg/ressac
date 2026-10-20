@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<!-- The chart page on the test fixture, for checking by eye (not bundled). Serve the repository and open
+     /apps/macos/ChartTests/preview.html?view=themes&ink=nuit&animate=0, or &empty=1 for a sea with no feed. -->
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sea Chart preview</title>
+<link rel="stylesheet" href="../Ressac/Resources/Chart/chart.css">
+<script src="../Ressac/Resources/Chart/d3.min.js"></script>
+<script src="../Ressac/Resources/Chart/chart-core.js"></script>
+<script src="../Ressac/Resources/Chart/chart-draw.js"></script>
+</head>
+<body>
+<script>
+  "use strict";
+  const q = new URLSearchParams(location.search);
+  fetch("fixture.json").then(r => r.json()).then(data => {
+    if (q.has("empty")) Object.assign(data, {feeds: [], territories: [], totals: {feeds: 0, unread_week: 0}});
+    Chart.load(JSON.stringify(data), {view: q.get("view") || "harbour", ink: q.get("ink") || "bleu", animate: q.get("animate") !== "0"});
+  });
+</script>
+</body>
+</html>

@@ -12,6 +12,9 @@ struct GardenInspector: View {
     @State private var showsHistory = false
     /// `v_cadence` by feed: active feeds only, so a buried feed shows no rhythm.
     @State private var cadence: [Int64: CadenceRow] = [:]
+    /// Every theme by position, and each themed feed's theme key (spec §9).
+    @State private var themes: [ThemeRow] = []
+    @State private var themeKeys: [Int64: String] = [:]
 
     var body: some View {
         Group {
@@ -31,6 +34,8 @@ struct GardenInspector: View {
         .task(id: scope) { await observe(.all) { active = $0 } }
         .task(id: scope) { await observe(.cemetery) { buried = $0 } }
         .task { await observeCadence() }
+        .task { await observeThemes() }
+        .task { await observeThemeKeys() }
     }
 
     @ViewBuilder
@@ -61,6 +66,9 @@ struct GardenInspector: View {
 
             if let rhythm = cadence[row.feedId], !buried {
                 rhythmControl(rhythm, feedId: row.feedId)
+            }
+            if !buried {
+                themeControl(feedId: row.feedId)
             }
 
             if let bullets = row.evidence?.bullets, !bullets.isEmpty {
@@ -140,6 +148,27 @@ struct GardenInspector: View {
         .font(.callout)
     }
 
+    /// "Theme: [None | themes by position]": the sea the feed sails on in the Sea Chart.
+    private func themeControl(feedId: Int64) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("Theme")
+            Picker("Theme", selection: Binding(
+                get: { themeKeys[feedId] },
+                set: { state.setTheme(feedId: feedId, key: $0) })) {
+                Text("None").tag(String?.none)
+                ForEach(themes) { theme in
+                    Text(theme.name).tag(Optional(theme.key))
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            .controlSize(.small)
+            .help("The sea this feed sails on in the Sea Chart. None leaves it in the uncharted waters.")
+        }
+        .font(.callout)
+    }
+
     @ViewBuilder
     private var history: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -206,6 +235,26 @@ struct GardenInspector: View {
             }
         } catch {
             cadence = [:]
+        }
+    }
+
+    private func observeThemes() async {
+        do {
+            for try await rows in Queries.themes().values(in: state.database.reader) {
+                themes = rows
+            }
+        } catch {
+            themes = []
+        }
+    }
+
+    private func observeThemeKeys() async {
+        do {
+            for try await keys in Queries.feedThemeKeys().values(in: state.database.reader) {
+                themeKeys = keys
+            }
+        } catch {
+            themeKeys = [:]
         }
     }
 

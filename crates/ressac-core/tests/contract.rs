@@ -159,7 +159,7 @@ fn reading_columns_and_views_are_stable() {
     let version: i64 = conn
         .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     assert_eq!(version, ressac_core::store::SCHEMA_VERSION);
 }
 
@@ -281,13 +281,28 @@ fn cadence_and_edition_columns_and_views_are_stable() {
     assert!(columns(&conn, "feed_health").contains(&"cadence_group".to_string()));
 }
 
+/// What the app reads of the sea chart's tables through GRDB (`Queries.themes()`,
+/// `Queries.feedThemeKeys()`), and the tables its change observation watches.
+#[test]
+fn chart_columns_read_by_the_app_are_stable() {
+    let (_dir, conn) = live_store();
+    let theme = columns(&conn, "theme");
+    for column in ["id", "key", "name", "sea_name", "position"] {
+        assert!(theme.contains(&column.to_string()), "theme.{column}");
+    }
+    assert!(columns(&conn, "feed").contains(&"theme_id".to_string()));
+    for table in ["territory", "territory_feed"] {
+        assert!(!columns(&conn, table).is_empty(), "{table}");
+    }
+}
+
 /// What the Swift tests rely on in the committed fixture (rows found by guid or title).
 #[test]
 fn contract_fixture_covers_the_reading_cases() {
     let db = fixture();
     let int = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
     let text = |sql: &str| -> String { db.query_row(sql, [], |r| r.get(0)).unwrap() };
-    assert_eq!(int("SELECT version FROM schema_meta"), 4);
+    assert_eq!(int("SELECT version FROM schema_meta"), 5);
 
     // One FTS row per entry; the backlog rule on xkcd's first fill.
     assert_eq!(int("SELECT count(*) FROM entry"), 6);

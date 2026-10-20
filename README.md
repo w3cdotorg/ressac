@@ -1,6 +1,6 @@
 # Ressac
 
-Un lecteur de flux RSS/Atom/JSON Feed pour macOS, en deux interfaces : terminal (Rust, ratatui) et appli native (SwiftUI). Le flux et le reflux de vos abonnements, avec le ménage en prime.
+Un lecteur de flux RSS/Atom/JSON Feed pour macOS, en deux interfaces : terminal (Rust, ratatui) et appli native (SwiftUI). Le flux et le reflux de vos abonnements, avec le ménage en prime : un jardin pour trier les flux, un Journal du matin composé selon leur rythme, un bandeau tmux pour voir passer ce qu'on a laissé filer, et une carte marine des flux à garder sur un second écran.
 
 Thème graphique rétro : **Antiope**, en hommage au télétexte français.
 
@@ -22,12 +22,16 @@ ressac extract 4521                    # fetch and extract the full article of a
 ressac garden decide 12 keep           # keep | repair | bury, without the terminal UI
 ressac garden undo                     # revert the latest decision
 ressac garden apply-safe               # apply every undecided safe repair; --json also gives applied and skipped
-ressac migrate                         # bring the database to the current schema (v4)
+ressac migrate                         # bring the database to the current schema (v5)
 ressac page list                       # every page number, reserved ones first; --json for NDJSON
 ressac page set feed 12 412            # renumber a feed (or a folder) by hand, within 110-799
 ressac edition build                   # refresh, then compose this morning's edition (once a day, from 04:00)
 ressac edition show                    # today's edition by section; --json for NDJSON
 ressac feed cadence 12 daily           # force a feed's rhythm group (daily, weekly, monthly, rare, silent) or auto
+ressac chart                           # the sea chart's data as a summary; --json for one JSON line
+ressac chart import seas.json          # themes, feed themes and territories; --dry-run to preview
+ressac feed theme 12 ai-labs           # put a feed in a theme (a sea), or take it out with none
+ressac ticker --tmux                   # one unread entry for tmux's status bar (see The tmux ticker)
 ```
 
 Bare `ressac` opens the reader and no longer prints usage: scripts that need it call `ressac --help`. `--json` makes no sense for an interactive reader, so `ressac --json` and `ressac --json read` are refused (exit 2).
@@ -37,6 +41,8 @@ Exit codes: `0` done, `1` error, `2` a refused request (an unknown id, nothing t
 The database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs in `~/Library/Logs/Ressac/`.
 
 **Schema v4.** The Mac app migrates the shared database to schema v4 on first launch, after a backup next to it (`ressac.sqlite.bak-v3`, or the backup of whichever older version it found). v4 adds each feed's rhythm group, the per-feed override and the morning editions; v3 already gave every folder and feed a three-digit page number (`ressac page list`). A `ressac` built before v4 refuses the database ("database created by a newer Ressac"). Get a v4 CLI with `cargo install --path crates/ressac`, or use the app's own copy at `Ressac.app/Contents/Helpers/ressac`.
+
+**Schema v5.** The next launch migrates to v5 the same way (`ressac.sqlite.bak-v4`): themes, each feed's theme and the chart's territories, for the Sea Chart below. A `ressac` older than v5 refuses the database; the v4 notes above apply likewise.
 
 ## The terminal reader
 
@@ -92,6 +98,8 @@ bind -n MouseDown1Status if -F '#{m/r:^rs[0-9]+$,#{mouse_status_range}}' \
 
 The binding only accepts the ticker's own click ranges (`rs` and digits) and passes them quoted; the pane title is escaped so that no program can add a clickable range or a style to the bar through it. `status-interval` stays at tmux's default, 15 seconds. Without `--tmux`, `ressac ticker` prints plain text (`Feed · Title`) for other bars; `--width` caps it (70 columns by default). The rotation is kept in `~/Library/Application Support/Ressac/ticker.json`. To remove the ticker, delete these lines and run `tmux source-file ~/.tmux.conf`.
 
+The ticker runs the `ressac` named in `~/.tmux.conf`. When that copy is older than the database (after an update migrated it), the line stays empty and each call logs "Database schema vN does not match" in `~/Library/Logs/Ressac/`: point tmux at the new app's helper, or rebuild the app.
+
 ## The Mac app
 
 `Ressac.app` (macOS 27) reads the same database as the terminal and runs its own copy of `ressac`, bundled at `Ressac.app/Contents/Helpers/ressac`, for everything that fetches or decides. Reading state (read, starred) is written by the app directly; the garden's decisions go through `ressac garden decide`, so the terminal garden sees them, and `u` / `⌘Z` undo in either place.
@@ -125,9 +133,42 @@ Quit Ressac before replacing the build. To install it for every launch instead, 
 - **Garden:** the sidebar's Needs triage, All feeds and Cemetery lists, with the terminal's keys: `k` keep, `r` repair, `b` bury, `u` undo, `o` site, `w` Wayback, `⇧R` apply safe repairs. The Cemetery shows how many entries each buried feed left unread.
 - **Settings (`⌘,`):** appearance (Native or Antiope, see below), article font (SF Pro, New York, Charter, Newsreader, Atkinson Hyperlegible Next), text size (`⌘+` / `⌘−` / `⌘0` in the View menu), line width (three widths or exactly 40 columns), database location, logs.
 - **Unread only (`⌥⌘U`):** View ▸ Show Unread Only filters the entry list to unread entries, in both looks. In Antiope the `ENTRIES  ALL/UNREAD` column title is a clickable toggle for the same setting.
+- **Sea Chart (`⇧⌘M`):** View ▸ Sea Chart opens the chart window, described below.
 - **Another database for one launch:** `open -n --env RESSAC_DB=/path/to/other.sqlite /Applications/Ressac.app` (`RESSAC_DB` also sets the terminal's database).
 
 Newsreader and Atkinson Hyperlegible Next are bundled under the SIL Open Font License 1.1; their licences ship next to them in `Ressac.app/Contents/Resources/Fonts/`.
+
+## Sea Chart
+
+View ▸ Sea Chart (`⇧⌘M`) opens a window that draws your living feeds as an engraved sea chart, made for a second display (resizable, full screen allowed). It is computed from the database each time and redraws within a few seconds of a change, a `ressac` run in a terminal included, even while another app is in front as long as the chart is visible; it is also surveyed again every 5 minutes, as ages move with the clock. Nothing is loaded from the network.
+
+- **What it shows.** One island per feed: active feeds that are not waiting for triage and published something in the last 6 months. Island size follows the rhythm group (Silent feeds are small islets marked "ED"). A soft light at the heart of each island glows with its activity, which counts the entries of the last 30 days, recent ones weighing most. Ripples mark islands with unread entries this week.
+- **Two views** (toolbar). *From the harbour*: the distance from Ressac Harbour is the time since the feed's last entry (rings at 1 day, 1 week, 1 month, 3 months and 6 months), the bearing is its theme. *By theme*: one archipelago per theme, static; adding a feed hardly moves the others, but a feed that leaves a sea (new theme, buried, quiet for 6 months) lets the islands placed after it in that sea move up.
+- **Inks** (toolbar): Blue ink (default), White on black. A toggle stops the animation; Reduce Motion starts it off.
+- **Reading.** Hover an island for its unread and entry counts. Click it for a popover with its five latest entries (click one to open it in your browser), its theme, folder, rhythm and last entry; click its title to select the feed in the main window.
+- **Themes and territories.** Each feed has at most one theme (a sea). Feeds without one sit in UNCHARTED WATERS. A *territory* groups the feeds of one publisher on a shared landmass; a *continent* turns a whole theme into one landmass. Set a feed's theme from the garden inspector's Theme pop-up, or with `ressac feed theme <feed-id> <key|none>` (exit 2 for an unknown key). Territories and the list of themes come from `ressac chart import`.
+
+`ressac chart import <file.json> [--dry-run]` reads this file: `themes` in display order, `feeds` mapping a feed URL (`xml_url`, or its original one) to a theme key, and `territories`, each with either `feeds` (URLs, at least two on the chart to show) or a `continent` (a theme key). A re-import replaces the themes and the territories: themes are updated by key, a theme missing from the file is deleted and its feeds become unthemed, and every territory is rebuilt from the file. Theme keys may not be empty, `none` (in any case) or start with `-` (exit 2). The report lists the URLs it did not find, the territories with fewer than two matched feeds (kept off the chart) and the feeds left without a theme; `--dry-run` reports what would be imported and writes nothing.
+
+```json
+{
+  "themes": [
+    {"key": "words", "name": "Language and words", "sea": "SEA OF WORDS"},
+    {"key": "maps", "name": "Cities and places", "sea": "SEA OF CITIES"}
+  ],
+  "feeds": {
+    "https://example.org/lexicon/feed.xml": "words",
+    "https://example.org/etymology/atom.xml": "words",
+    "https://example.net/atlas/rss.xml": "maps"
+  },
+  "territories": [
+    {"name": "EXAMPLE COAST", "feeds": ["https://example.org/lexicon/feed.xml", "https://example.org/etymology/atom.xml"]},
+    {"name": "TERRA ATLAS", "continent": "maps"}
+  ]
+}
+```
+
+`ressac chart` prints a summary (feeds per theme, territories); `ressac --json chart` prints the page's data as one JSON line (`version` 1).
 
 ## Antiope
 

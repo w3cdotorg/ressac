@@ -37,22 +37,23 @@ final class DataVersionWatcher: Sendable {
     }
 }
 
-/// Keeps the open window in step with writes made elsewhere: it refreshes when the app
-/// becomes active again, and while it is active it polls `data_version` every few seconds.
+/// Keeps the open windows in step with writes made elsewhere: it refreshes when the app
+/// becomes active again, and polls `data_version` every few seconds while `shouldPoll` says so
+/// (in the app: while it is active, or while a Sea Chart is on screen behind another app).
 @MainActor final class ExternalChangeMonitor {
     private let database: AppDatabase
     private let watcher: DataVersionWatcher?
     private let interval: Duration
-    private let isActive: @MainActor () -> Bool
+    private let shouldPoll: @MainActor () -> Bool
     private var loop: Task<Void, Never>?
     private var observer: (any NSObjectProtocol)?
 
     init(database: AppDatabase, interval: Duration = .seconds(3),
-         isActive: @escaping @MainActor () -> Bool = { NSApp?.isActive ?? false }) {
+         shouldPoll: @escaping @MainActor () -> Bool = { NSApp?.isActive ?? false }) {
         self.database = database
         self.watcher = try? DataVersionWatcher(url: database.url)
         self.interval = interval
-        self.isActive = isActive
+        self.shouldPoll = shouldPoll
     }
 
     func start() {
@@ -67,7 +68,7 @@ final class DataVersionWatcher: Sendable {
             while !Task.isCancelled {
                 try? await Task.sleep(for: interval)
                 guard let self, !Task.isCancelled else { return }
-                await pollIfActive()
+                await pollIfWanted()
             }
         }
     }
@@ -85,8 +86,8 @@ final class DataVersionWatcher: Sendable {
         Task { try? await database.notifyExternalChanges() }
     }
 
-    private func pollIfActive() async {
-        guard isActive() else { return }
+    private func pollIfWanted() async {
+        guard shouldPoll() else { return }
         await poll()
     }
 

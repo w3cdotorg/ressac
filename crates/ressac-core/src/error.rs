@@ -40,6 +40,8 @@ pub enum Error {
     UnknownPageTarget { kind: &'static str, id: i64 },
     #[error("No feed #{0}.")]
     UnknownFeed(FeedId),
+    #[error("No theme \"{0}\".")]
+    UnknownTheme(String),
     #[error("Feed #{0} is buried.")]
     FeedBuried(FeedId),
     /// Phase 2b's refusal; declared here because Phase 2b's five files are taken.

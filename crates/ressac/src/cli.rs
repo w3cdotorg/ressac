@@ -40,6 +40,11 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Print the sea chart's data, or import its themes and territories
+    Chart {
+        #[command(subcommand)]
+        action: Option<ChartCommand>,
+    },
     /// Fetch every feed (or only some) and update its health
     Fetch {
         /// Also fetch feeds fetched in the last 30 minutes
@@ -179,6 +184,24 @@ pub enum FeedCommand {
         feed_id: FeedId,
         #[arg(value_enum)]
         group: CadenceArg,
+    },
+    /// Put a feed in a theme (a sea on the chart), or take it out with "none"
+    Theme {
+        /// The feed's id
+        feed_id: FeedId,
+        /// A theme key from the chart import file, or "none"
+        key: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ChartCommand {
+    /// Import themes, feed themes and territories from a JSON file
+    Import {
+        file: PathBuf,
+        /// Report what would change without writing anything
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

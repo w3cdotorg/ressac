@@ -112,6 +112,10 @@ enum PendingPanel: Equatable, Sendable {
     private(set) var fullTextNotice: String?
     /// Garden rows decided since the scope was entered, dimmed by the table.
     private(set) var decidedThisVisit: Set<Int64> = []
+    /// Bumped on every commit to the database, whoever made it: terminal writes (through
+    /// `ExternalChangeMonitor`), the app's own writes, and the ends and progress of its runs.
+    /// The Sea Chart watches it to redraw (spec §2b).
+    private(set) var changeTick = 0
 
     let database: AppDatabase
     let writes: Writes
@@ -130,6 +134,12 @@ enum PendingPanel: Equatable, Sendable {
     /// its bottom. True, with nothing done, while that entry's page is still loading.
     @ObservationIgnored var readerPageDown: (@MainActor (Int64) async -> Bool)?
 
+    /// The Sea Chart window is at least partly visible, as its `ChartVisibilityReader` reports. The chart
+    /// often sits on a second display while another app is in front, and must stay live there.
+    @ObservationIgnored var isChartOnScreen = false
+    /// Whether Ressac is the frontmost app.
+    @ObservationIgnored var isAppActive: @MainActor () -> Bool = { NSApp?.isActive ?? false }
+
     @ObservationIgnored private var externalChanges: ExternalChangeMonitor?
     @ObservationIgnored private var systemObservers: [any NSObjectProtocol] = []
     /// The windows showing a reading root view (`MainView` or `AntiopeRootView`), each
@@ -141,6 +151,7 @@ enum PendingPanel: Equatable, Sendable {
     /// One Space at a time: a second press while the first runs is spent without effect.
     @ObservationIgnored private var isAdvancing = false
     @ObservationIgnored private var sidebarObservation: AnyDatabaseCancellable?
+    @ObservationIgnored private var changeObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var listObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var entryObservation: AnyDatabaseCancellable?
     @ObservationIgnored private var fulltextObservation: AnyDatabaseCancellable?
@@ -168,7 +179,28 @@ enum PendingPanel: Equatable, Sendable {
             Task { try? await database.notifyExternalChanges() }
         }
         startSidebarObservation()
+        startChangeObservation()
         listDidChange()
+    }
+
+    /// The tables the chart reads. A value observation (like the sidebar's) is notified by
+    /// `notifyExternalChanges`, which external polls and finished runs call, as well as by the
+    /// app's own writes. It publishes without comparing values, so every commit counts, and
+    /// once on start. (A `DatabaseRegionObservation` is not used: its schema lookups fail with
+    /// a disk I/O error inside `notifyExternalChanges`'s lock-free transaction.)
+    private nonisolated static let chartTables = ["entry", "feed", "feed_health", "theme", "territory", "territory_feed"]
+
+    private func startChangeObservation() {
+        changeObservation = ValueObservation.tracking { db in
+            for table in Self.chartTables {
+                _ = try Row.fetchOne(db, sql: "SELECT 1 FROM \(table) LIMIT 1")
+            }
+        }.start(
+            in: database.reader, scheduling: .immediate,
+            onError: { [weak self] error in
+                Task { @MainActor in self?.report(error) }
+            },
+            onChange: { [weak self] in self?.changeTick += 1 })
     }
 
     private func startSidebarObservation() {
@@ -186,7 +218,7 @@ enum PendingPanel: Equatable, Sendable {
     /// window has the keyboard. Not started in unit tests.
     func startSystemObservers() {
         guard externalChanges == nil else { return }
-        let monitor = ExternalChangeMonitor(database: database)
+        let monitor = makeExternalChangeMonitor()
         monitor.start()
         externalChanges = monitor
         let center = NotificationCenter.default
@@ -215,6 +247,14 @@ enum PendingPanel: Equatable, Sendable {
         Task { await journal.checkAndBuild() }
     }
 
+    /// The watcher of terminal writes: it polls while the app is active or a Sea Chart is on screen.
+    func makeExternalChangeMonitor(interval: Duration = .seconds(3)) -> ExternalChangeMonitor {
+        ExternalChangeMonitor(database: database, interval: interval) { [weak self] in
+            guard let self else { return false }
+            return isAppActive() || isChartOnScreen
+        }
+    }
+
     /// Midnight passed: "Today" counts and lists were built around the previous day's start.
     func dayDidChange() {
         startSidebarObservation()
@@ -229,7 +269,7 @@ enum PendingPanel: Equatable, Sendable {
     /// Single-letter shortcuts belong to the reading window: while a panel or another window has
     /// the keyboard (Export…, New…, Settings), typing "jams" must stay typing.
     func windowDidChangeKey(_ window: NSWindow?, isKey: Bool) {
-        guard readingWindows.count > 0 else { return }
+        guard !readingWindows.allObjects.isEmpty else { return }
         if let window, readingWindows.contains(window) { readingWindowIsKey = isKey }
         else if isKey { readingWindowIsKey = false }
     }
@@ -258,6 +298,18 @@ enum PendingPanel: Equatable, Sendable {
         readingWindowHolds[id] = nil
         readingWindows.remove(window)
         readingWindowIsKey = readingWindows.allObjects.contains { $0.isKeyWindow }
+    }
+
+    /// A reading window is open (the Sea Chart opens one to show a feed when none is).
+    var hasReadingWindow: Bool { !readingWindows.allObjects.isEmpty }
+
+    /// Brings a reading window to the front, the main one first (the Sea Chart's "open this feed", spec §8).
+    func showReadingWindow() {
+        let windows = readingWindows.allObjects
+        guard let window = windows.first(where: \.isMainWindow) ?? windows.first else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate()
     }
 
     var sidebarTree: [SidebarNode] { SidebarNode.tree(from: sidebar) }
@@ -550,6 +602,12 @@ enum PendingPanel: Equatable, Sendable {
     @discardableResult
     func setCadence(feedId: Int64, _ group: CadenceGroup?) -> Task<RunOutcome, Never> {
         runs.start(.setCadence(feedId: feedId, group))
+    }
+
+    /// The inspector's Theme menu (spec §9): a theme key, or nil for None. The core writes it.
+    @discardableResult
+    func setTheme(feedId: Int64, key: String?) -> Task<RunOutcome, Never> {
+        runs.start(.setTheme(feedId: feedId, key: key))
     }
 
     func openSite(feedId: Int64) {

@@ -7,6 +7,8 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::error::{Error, Result};
 
+mod chart;
+mod chart_snapshot;
 mod decisions;
 mod edition;
 mod feeds;
@@ -17,6 +19,10 @@ pub mod pages;
 mod reading;
 mod ticker;
 
+pub use chart::{ChartImport, ChartImportReport, TerritoryDef, ThemeDef};
+pub use chart_snapshot::{
+    ChartContinent, ChartEntry, ChartFeed, ChartSnapshot, ChartTerritory, ChartTheme, ChartTotals,
+};
 pub use decisions::{DecisionRecord, FeedSnapshot};
 pub use edition::{EditionEntryRow, EditionOverflowRow, EditionParams, EditionRecord, EditionView};
 pub use feeds::{CadenceRow, FeedRow, FolderRow, ImportReport};
@@ -31,7 +37,7 @@ pub use reading::{FulltextRow, plain_text};
 pub use ticker::{TICKER_WINDOW_DAYS, TickerEntry};
 
 /// Highest schema version this binary knows.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Ordered migrations, embedded at compile time from the repository's `schema/` folder.
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -39,6 +45,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("../../../../schema/0002_reading.sql")),
     (3, include_str!("../../../../schema/0003_pages.sql")),
     (4, include_str!("../../../../schema/0004_edition.sql")),
+    (5, include_str!("../../../../schema/0005_chart.sql")),
 ];
 
 /// The migration after which existing entries get their search rows.
@@ -268,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_store_has_schema_v4() {
+    fn fresh_store_has_schema_v5() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         let names = object_names(&store);
@@ -285,6 +292,9 @@ mod tests {
             "folder",
             "garden_decision",
             "schema_meta",
+            "territory",
+            "territory_feed",
+            "theme",
             "v_cadence",
             "v_edition_overflow",
             "v_edition_today",
@@ -578,7 +588,7 @@ mod tests {
         let path = dir.path().join("ressac.sqlite");
         drop(v3_database(&path));
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 4);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         assert!(path.with_extension("sqlite.bak-v3").exists());
         let page: u16 = store
             .conn()
@@ -642,7 +652,112 @@ mod tests {
         assert!(path.with_extension("sqlite.bak-v3").exists());
         raw.execute_batch("DROP TABLE edition").unwrap();
         drop(raw);
-        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 4);
+        assert_eq!(
+            Store::open(&path).unwrap().schema_version().unwrap(),
+            SCHEMA_VERSION
+        );
+    }
+
+    /// A v4 database: `v3_database` migrated by 0004 (the cadence backfill is not needed here).
+    fn v4_database(path: &Path) -> Connection {
+        let v4 = v3_database(path);
+        v4.execute_batch(MIGRATIONS[3].1).unwrap();
+        v4.execute("UPDATE schema_meta SET version = 4", [])
+            .unwrap();
+        v4
+    }
+
+    #[test]
+    fn migrates_v4_to_v5() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        drop(v4_database(&path));
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 5);
+        assert!(path.with_extension("sqlite.bak-v4").exists());
+        let names = object_names(&store);
+        for expected in ["theme", "territory", "territory_feed"] {
+            assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+        let columns: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('feed') WHERE name = 'theme_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 1);
+        let themed: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM feed WHERE theme_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(themed, 0, "every existing feed starts unthemed");
+        let feeds: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM feed", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(feeds, 3);
+    }
+
+    #[test]
+    fn theme_delete_sets_feed_theme_null() {
+        let store = Store::open_in_memory().unwrap();
+        store.conn().execute_batch(TEST_FEED_AND_ENTRY).unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "INSERT INTO theme (id, key, name, sea_name, position) VALUES (1, 'ai-labs', 'AI labs', 'SEA OF THE LABS', 0);
+                 UPDATE feed SET theme_id = 1 WHERE id = 1;
+                 INSERT INTO territory (id, name, kind, theme_id) VALUES (1, 'LABS', 'continent', 1);",
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute("DELETE FROM theme WHERE id = 1", [])
+            .unwrap();
+        let theme: Option<i64> = store
+            .conn()
+            .query_row("SELECT theme_id FROM feed WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(theme, None, "the feed survives, unthemed");
+        let continents: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM territory", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(continents, 0, "the theme's continent goes with it");
+    }
+
+    #[test]
+    fn continent_requires_theme() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO theme (id, key, name, sea_name, position) VALUES (1, 't', 'T', 'SEA', 0)",
+                [],
+            )
+            .unwrap();
+        let insert = |kind: &str, theme: Option<i64>| {
+            store.conn().execute(
+                "INSERT INTO territory (name, kind, theme_id) VALUES (?1, ?2, ?3)",
+                rusqlite::params![format!("{kind}-{theme:?}"), kind, theme],
+            )
+        };
+        assert!(
+            insert("continent", None).is_err(),
+            "continent without theme"
+        );
+        assert!(
+            insert("territory", Some(1)).is_err(),
+            "territory with theme"
+        );
+        assert!(insert("continent", Some(1)).is_ok());
+        assert!(insert("territory", None).is_ok());
     }
 
     const TEST_FEED_AND_ENTRY: &str = "INSERT INTO feed (id, position, title, xml_url, xml_url_original, url_key, added_at) \
