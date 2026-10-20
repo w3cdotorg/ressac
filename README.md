@@ -102,7 +102,7 @@ bind -n MouseDown1Status if -F '#{m/r:^rs[0-9]+$,#{mouse_status_range}}' \
 
 The binding only accepts the ticker's own click ranges (`rs` and digits) and passes them quoted; the pane title is escaped so that no program can add a clickable range or a style to the bar through it. `status-interval` stays at tmux's default, 15 seconds. Without `--tmux`, `ressac ticker` prints plain text (`Feed · Title`) for other bars; `--width` caps it (70 columns by default). The rotation is kept in `~/Library/Application Support/Ressac/ticker.json`. To remove the ticker, delete these lines and run `tmux source-file ~/.tmux.conf`.
 
-The ticker runs the `ressac` named in `~/.tmux.conf`. When that copy is older than the database (after an update migrated it), the line stays empty and each call logs "Database schema vN does not match" in `~/Library/Logs/Ressac/`: point tmux at the new app's helper, or rebuild the app.
+The ticker runs the `ressac` named in `~/.tmux.conf`. When that copy is older than the database (after an update migrated it), the line stays empty and each call logs "Database schema vN does not match" at debug level only (set `RUST_LOG=debug` to see it in `~/Library/Logs/Ressac/`), so a tmux client does not fill the log: a missing database, a busy one and a schema mismatch never write a warning: point tmux at the new app's helper, or rebuild the app.
 
 ## The Mac app
 

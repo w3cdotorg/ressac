@@ -72,6 +72,20 @@ pub enum Error {
     ImageRefused(String),
 }
 
+impl Error {
+    /// True when SQLite refused because another connection holds the database (busy or locked).
+    pub fn is_lock_contention(&self) -> bool {
+        matches!(
+            self,
+            Error::Db(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    }
+}
+
 fn feed_exists_sentence(buried: bool, title: &str) -> String {
     if buried {
         format!("Already in the Cemetery: {title}.")
