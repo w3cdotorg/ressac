@@ -40,7 +40,7 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Print the sea chart's data, or import its themes and territories
+    /// Print the sea chart's data, or import or export its themes and territories
     Chart {
         #[command(subcommand)]
         action: Option<ChartCommand>,
@@ -52,6 +52,9 @@ pub enum Command {
         /// Put the feed in this theme (a theme key or name) instead of its site's
         #[arg(long, value_name = "THEME")]
         theme: Option<String>,
+        /// Put the feed in this folder (an id or a name; "root", the default, is the top level; a folder named root needs its id)
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
     },
     /// Fetch every feed (or only some) and update its health
     Fetch {
@@ -204,7 +207,7 @@ pub enum FeedCommand {
     Move {
         /// The feed's id
         feed_id: FeedId,
-        /// A folder id, or "root" for the top level
+        /// A folder id or name, or "root" for the top level (a folder named root needs its id)
         folder: String,
     },
 }
@@ -217,6 +220,12 @@ pub enum ChartCommand {
         /// Report what would change without writing anything
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Write the database's themes, feed themes and territories as an import file
+    Export {
+        /// Write to this file instead of standard output
+        #[arg(long, short, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
 }
 

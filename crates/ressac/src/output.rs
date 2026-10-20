@@ -7,7 +7,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ressac_core::model::{Decision, FeedId, Status};
 use ressac_core::service::{AddedFeed, Event, EventSink, FULL_ARTICLES, Summary};
 use ressac_core::store::pages::PageRow;
-use ressac_core::store::{ChartImportReport, ChartSnapshot, ImportReport, Moved, ThemeSource};
+use ressac_core::store::{
+    ChartImport, ChartImportReport, ChartSnapshot, ImportReport, Moved, ThemeSource,
+};
 
 /// Order of the `check` summary grid (three per line).
 const SUMMARY_ORDER: [Status; 9] = [
@@ -201,10 +203,18 @@ pub fn extracted_text(entry_id: i64, error: Option<&str>) -> String {
     }
 }
 
-/// `ressac add`'s lines: the feed and its page, its theme, and the territory it joined.
+/// `ressac add`'s lines: the feed, its folder (when not the top level) and its page, its theme, and the territory it joined.
 pub fn added_text(added: &AddedFeed) -> String {
     let page = added.page.map_or(String::new(), |p| format!(" (page {p})"));
-    let mut text = format!("Added #{} {}{page}", added.id, printable(&added.title));
+    let place = added
+        .folder_name
+        .as_deref()
+        .map_or(String::new(), |name| format!(" in {}", printable(name)));
+    let mut text = format!(
+        "Added #{} {}{place}{page}",
+        added.id,
+        printable(&added.title)
+    );
     let theme = match (&added.theme, &added.theme_source) {
         (Some(name), ThemeSource::Sibling { title, .. }) => {
             format!("{} (same site as {})", printable(name), printable(title))
@@ -233,6 +243,7 @@ pub fn added_json(added: &AddedFeed) -> serde_json::Value {
         "page": added.page,
         "theme": added.theme,
         "territory": added.territory,
+        "folder": added.folder,
         "discovered": added.discovered,
         "like": like,
     })
@@ -385,6 +396,28 @@ pub fn chart_text(snap: &ChartSnapshot) -> String {
         }
     }
     out
+}
+
+/// What `ressac chart export --output` wrote, and where.
+pub fn chart_export_text(chart: &ChartImport, file: &std::path::Path) -> String {
+    format!(
+        "Exported {} theme(s), {} themed feed(s) and {} territories to {}.",
+        chart.themes.len(),
+        chart.feeds.len(),
+        chart.territories.len(),
+        printable(&file.display().to_string())
+    )
+}
+
+/// The note printed when the export left feeds out (see `Store::export_chart`).
+pub fn chart_export_unaddressable(ids: &[FeedId]) -> String {
+    format!(
+        "Left out: {} (their address belongs to another feed, so a chart file cannot name them).",
+        ids.iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// `ressac chart import`: what the file did, or on a dry run would do.
@@ -709,6 +742,24 @@ mod tests {
     fn progress_title_neutralises_controls() {
         assert_eq!(progress_title("a\u{1b}[2Jb"), "a\u{FFFD}[2Jb");
         assert_eq!(progress_title("Courrier"), "Courrier");
+    }
+
+    #[test]
+    fn chart_export_messages_are_printable() {
+        let chart = ChartImport {
+            themes: vec![],
+            feeds: Default::default(),
+            territories: vec![],
+        };
+        let text = chart_export_text(&chart, std::path::Path::new("a\u{1b}[31m.json"));
+        assert_eq!(
+            text,
+            "Exported 0 theme(s), 0 themed feed(s) and 0 territories to a\u{FFFD}[31m.json."
+        );
+        assert_eq!(
+            chart_export_unaddressable(&[2, 7]),
+            "Left out: #2, #7 (their address belongs to another feed, so a chart file cannot name them)."
+        );
     }
 
     #[test]

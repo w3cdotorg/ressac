@@ -18,6 +18,29 @@ use crate::ticker::{self, Rng, state_file};
 /// How long a call waits for another one to finish before reprinting what is on screen.
 const LOCK_WAIT: Duration = Duration::from_millis(200);
 
+/// True for the failures a status line meets in normal life: no database yet, a database a
+/// migration has moved past this copy of `ressac` (or one that is newer), another process holding
+/// the write lock. They are logged at `debug`: at one call per 15 seconds per tmux client, a
+/// warning each time would write thousands of lines a day. Anything else stays a warning.
+fn is_expected(e: &anyhow::Error) -> bool {
+    use ressac_core::Error;
+    e.downcast_ref::<Error>().is_some_and(|e| {
+        matches!(
+            e,
+            Error::DatabaseMissing(_) | Error::SchemaMismatch { .. } | Error::SchemaTooNew { .. }
+        ) || e.is_lock_contention()
+    })
+}
+
+/// Logs a failed call: `debug` when it is expected, `warn` otherwise.
+fn log_failure(what: &str, e: &anyhow::Error) {
+    if is_expected(e) {
+        tracing::debug!("{what}: {e:#}");
+    } else {
+        tracing::warn!("{what}: {e:#}");
+    }
+}
+
 /// Prints the entry to show now, or an empty line.
 pub fn show(
     g: &Globals,
@@ -28,7 +51,7 @@ pub fn show(
     out: &mut impl Write,
 ) -> anyhow::Result<ExitCode> {
     let text = pick(g, state_path, tmux, width, now).unwrap_or_else(|e| {
-        tracing::warn!("ticker: {e:#}");
+        log_failure("ticker", &e);
         String::new()
     });
     writeln!(out, "{text}")?;
@@ -62,7 +85,8 @@ fn pick(
 
     if guard.is_none() {
         // Another call is drawing: show what is on screen, and leave the state to it.
-        tracing::warn!("ticker: state lock not taken, reprinting the current entry");
+        // Two calls within 200 ms of each other is ordinary with several tmux clients.
+        tracing::debug!("ticker: state lock not taken, reprinting the current entry");
         let current = state
             .current
             .and_then(|id| pool.iter().find(|e| e.entry_id == id));
@@ -91,7 +115,7 @@ pub fn open(
     opener: impl FnOnce(&str) -> std::io::Result<()>,
 ) -> anyhow::Result<ExitCode> {
     if let Err(e) = open_entry(g, token, now, opener) {
-        tracing::warn!("ticker open {token}: {e:#}");
+        log_failure(&format!("ticker open {token}"), &e);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -236,6 +260,43 @@ mod tests {
         f.state = f.dir.path().join("missing/ticker.json");
         assert_eq!(show_at(&f, NOW), "\n");
         assert!(!f.dir.path().join("missing").exists());
+    }
+
+    #[test]
+    fn expected_failures_are_told_from_unexpected_ones() {
+        use ressac_core::Error;
+        let busy = |code| {
+            anyhow::Error::from(Error::Db(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            )))
+        };
+        for expected in [
+            anyhow::Error::from(Error::DatabaseMissing(PathBuf::from("x.sqlite"))),
+            anyhow::Error::from(Error::SchemaMismatch {
+                found: 5,
+                expected: 6,
+            }),
+            anyhow::Error::from(Error::SchemaTooNew { found: 9, known: 6 }),
+            busy(rusqlite::ffi::SQLITE_BUSY),
+            busy(rusqlite::ffi::SQLITE_LOCKED),
+        ] {
+            assert!(is_expected(&expected), "{expected:#}");
+        }
+        for unexpected in [
+            busy(rusqlite::ffi::SQLITE_CORRUPT),
+            busy(rusqlite::ffi::SQLITE_FULL),
+            anyhow::Error::from(Error::Invalid("boom".into())),
+            anyhow::Error::from(std::io::Error::other("disk")),
+            anyhow::anyhow!("not a ticker token"),
+        ] {
+            assert!(!is_expected(&unexpected), "{unexpected:#}");
+        }
+        // The context `open_entry` adds does not hide the cause.
+        let wrapped = Err::<(), _>(Error::DatabaseMissing(PathBuf::from("x")))
+            .context("opening")
+            .unwrap_err();
+        assert!(is_expected(&wrapped));
     }
 
     fn set_schema_version_3(f: &Fixture) {

@@ -24,6 +24,8 @@ struct AddedFeed: Sendable, Equatable {
     var title: String
     var theme: String?
     var like: String?
+    /// The folder it went into; nil for the top level.
+    var folder: Int64?
 }
 
 /// One NDJSON line printed by `ressac --json` (the core's `service::Event`,
@@ -51,7 +53,7 @@ enum EngineEvent: Decodable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case event, total, title, error, failed, attempted, what, found, summary, ok, decision
-        case id, entries, overflow, unreachable, group, theme, like
+        case id, entries, overflow, unreachable, group, theme, like, folder
         case feedId = "feed_id"
         case entryId = "entry_id"
         case isOverride = "override"
@@ -100,7 +102,8 @@ enum EngineEvent: Decodable, Sendable, Equatable {
             self = .added(AddedFeed(
                 id: try c.decode(Int64.self, forKey: .id), title: try c.decode(String.self, forKey: .title),
                 theme: try c.decodeIfPresent(String.self, forKey: .theme),
-                like: try c.decodeIfPresent(String.self, forKey: .like)))
+                like: try c.decodeIfPresent(String.self, forKey: .like),
+                folder: try c.decodeIfPresent(Int64.self, forKey: .folder)))
         default:
             throw UnknownTag()
         }

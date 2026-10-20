@@ -36,6 +36,12 @@ import Observation
     /// A check or a build is under way: launch, activation and the rollover can fire together.
     @ObservationIgnored private var isBusy = false
     @ObservationIgnored private var sawNetworkUnreachable = false
+    /// Automatic triggers do not build before this instant: set when a build ends offline or
+    /// failed, cleared by a success. In memory only: a relaunch tries again.
+    @ObservationIgnored private var automaticRetryNotBefore: Date?
+
+    /// How long automatic triggers leave a failed or offline edition alone.
+    static let automaticRetryDelay: TimeInterval = 15 * 60
 
     init(database: AppDatabase, coordinator: RunCoordinator,
          clock: @escaping @Sendable () -> Date = { Date() }, calendar: Calendar = .autoupdatingCurrent) {
@@ -54,7 +60,16 @@ import Observation
 
     /// Builds today's edition when it is due (spec §6, When). Called at launch, when the app
     /// becomes active and at the 04:00 rollover; a call while another one runs does nothing.
+    /// After a failed or offline build it waits 15 minutes; `retry()` does not.
     func checkAndBuild() async {
+        // A window longer than the delay means the clock moved backwards: it has expired.
+        let now = clock()
+        if let notBefore = automaticRetryNotBefore, now < notBefore,
+           notBefore.timeIntervalSince(now) <= Self.automaticRetryDelay { return }
+        await checkAndBuildNow()
+    }
+
+    private func checkAndBuildNow() async {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
@@ -62,6 +77,7 @@ import Observation
         do {
             guard try await database.reader.read(Queries.isEditionDue(dayStart: dayStart)) else {
                 phase = .idle
+                automaticRetryNotBefore = nil
                 return
             }
         } catch {
@@ -74,7 +90,7 @@ import Observation
     /// The Retry button of the offline and failed states: the same check, so that an edition
     /// built meanwhile in a terminal is not built twice.
     func retry() async {
-        await checkAndBuild()
+        await checkAndBuildNow()
     }
 
     /// The next 04:00 local after `now`. Through the calendar, so that a DST night keeps 04:00.
@@ -111,6 +127,12 @@ import Observation
         sawNetworkUnreachable = false
         let outcome = await coordinator.perform(.buildEdition()) { [weak self] event in
             self?.note(event)
+        }
+        defer {
+            switch phase {
+            case .offline, .failed: automaticRetryNotBefore = clock().addingTimeInterval(Self.automaticRetryDelay)
+            default: automaticRetryNotBefore = nil
+            }
         }
         switch outcome {
         case .succeeded:

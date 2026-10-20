@@ -604,7 +604,7 @@ fn migrate_reports_the_schema_version() {
     let home = tempfile::tempdir().unwrap();
     let text = ressac(home.path(), &["migrate"]);
     assert!(text.status.success(), "{text:?}");
-    assert_eq!(stdout(&text), "Schema version 5.\n");
+    assert_eq!(stdout(&text), "Schema version 6.\n");
     assert!(home.path().join("db.sqlite").exists());
     let json = ressac(home.path(), &["--json", "migrate"]);
     assert!(json.status.success(), "{json:?}");
@@ -1440,6 +1440,99 @@ fn chart_import_file(home: &Path) -> std::path::PathBuf {
 }
 
 #[test]
+fn chart_export_prints_the_import_format() {
+    let home = chart_home();
+    let out = ressac(home.path(), &["chart", "export"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+    let text = stdout(&out);
+    assert!(text.ends_with("}\n"), "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        v,
+        json!({
+            "themes": [
+                {"key": "labs", "name": "AI labs and tools", "sea": "SEA OF THE LABS"},
+                {"key": "web", "name": "Web and comics", "sea": "WEB SEA"},
+            ],
+            "feeds": {
+                "http://orange-drenka.example.net/feeds/posts/default?alt=rss": "labs",
+                "https://orange.example.org/feed/": "labs",
+                "https://www.xkcd.com/rss.xml": "web",
+            },
+            "territories": [
+                {"name": "ORANGE COAST", "feeds": [
+                    "https://orange.example.org/feed/",
+                    "http://orange-drenka.example.net/feeds/posts/default?alt=rss"]},
+                {"name": "WEB CONTINENT", "continent": "web"},
+            ],
+        })
+    );
+    // `--json` changes nothing: the file is JSON either way.
+    assert_eq!(
+        stdout(&ressac(home.path(), &["--json", "chart", "export"])),
+        text
+    );
+}
+
+#[test]
+fn chart_export_to_a_file_round_trips_through_import() {
+    let home = chart_home();
+    let file = home.path().join("seas.json");
+    let out = ressac(
+        home.path(),
+        &["chart", "export", "--output", file.to_str().unwrap()],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).starts_with("Exported 2 theme(s), 3 themed feed(s) and 2 territories to "),
+        "{}",
+        stdout(&out)
+    );
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(written, stdout(&ressac(home.path(), &["chart", "export"])));
+
+    let other = tempfile::tempdir().unwrap();
+    assert!(ressac(other.path(), &["import", FIXTURE]).status.success());
+    let report = ressac(
+        other.path(),
+        &["--json", "chart", "import", file.to_str().unwrap()],
+    );
+    assert!(report.status.success(), "{}", stderr(&report));
+    let report: Value = serde_json::from_str(stdout(&report).trim()).unwrap();
+    assert_eq!(report["unmatched_urls"], json!([]));
+    assert_eq!(report["feeds_themed"], 3);
+    assert_eq!(
+        stdout(&ressac(other.path(), &["chart", "export"])),
+        written,
+        "the second database exports what the first did"
+    );
+}
+
+#[test]
+fn chart_export_needs_a_database_and_creates_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let out = ressac(home.path(), &["chart", "export"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "");
+    assert!(stderr(&out).contains("No database at"), "{}", stderr(&out));
+    assert!(!home.path().join("db.sqlite").exists());
+}
+
+#[test]
+fn chart_export_to_an_unwritable_path_fails_cleanly() {
+    let home = chart_home();
+    let file = home.path().join("missing-dir/seas.json");
+    let out = ressac(
+        home.path(),
+        &["chart", "export", "--output", file.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("cannot write"), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "");
+}
+
+#[test]
 fn chart_import_reports_and_dry_run_writes_nothing() {
     let home = tempfile::tempdir().unwrap();
     assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
@@ -1661,6 +1754,100 @@ async fn add_prints_the_feed_and_its_theme() {
 }
 
 #[tokio::test]
+async fn add_in_a_folder_by_name_prints_where_it_landed() {
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    let out = ressac_async(
+        home.path(),
+        &[
+            "add",
+            &format!("{}/new.xml", server.uri()),
+            "--folder",
+            " nEWS ",
+        ],
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    assert!(
+        text.starts_with("Added #5 New Feed in News (page 205)\n"),
+        "{text}"
+    );
+    let store = Store::open(&home.path().join("db.sqlite")).unwrap();
+    assert_eq!(store.feed(5).unwrap().folder_id, Some(1));
+}
+
+#[tokio::test]
+async fn add_json_names_the_folder_by_id_and_root_is_null() {
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    let out = ressac_async(
+        home.path(),
+        &[
+            "--json",
+            "add",
+            &format!("{}/new.xml", server.uri()),
+            "--folder",
+            "2",
+        ],
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let added = json_lines(&out).pop().unwrap();
+    assert_eq!(added["event"], "added");
+    assert_eq!(added["folder"], 2);
+
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    let out = ressac_async(
+        home.path(),
+        &[
+            "--json",
+            "add",
+            &format!("{}/new.xml", server.uri()),
+            "--folder",
+            "root",
+        ],
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let added = json_lines(&out).pop().unwrap();
+    assert!(added["folder"].is_null(), "{added}");
+}
+
+#[tokio::test]
+async fn add_refuses_a_bad_folder_before_any_network_work() {
+    let server = MockServer::start().await;
+    let home = add_home(&server).await;
+    // Two folders now share a name, so that name is ambiguous.
+    rusqlite::Connection::open(home.path().join("db.sqlite"))
+        .unwrap()
+        .execute("UPDATE folder SET name = 'Same'", [])
+        .unwrap();
+    server.reset().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let url = format!("{}/new.xml", server.uri());
+    for (given, message) in [
+        ("atlantis", "No folder \"atlantis\".\n"),
+        ("99", "No folder #99.\n"),
+        (
+            "same",
+            "Several folders are named \"same\": #1, #2. Use an id.\n",
+        ),
+    ] {
+        let out = ressac_async(home.path(), &["add", &url, "--folder", given]).await;
+        assert_eq!(out.status.code(), Some(2), "{given}: {out:?}");
+        assert_eq!(stderr(&out), message, "{given}");
+        assert!(out.stdout.is_empty(), "{given}");
+    }
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn add_through_a_site_with_a_chosen_theme_or_none() {
     let server = MockServer::start().await;
     let home = reading_home(&server).await;
@@ -1762,7 +1949,7 @@ async fn add_json_ends_with_added() {
     let added = json_lines(&lone).pop().unwrap();
     assert_eq!(added["event"], "added");
     assert_eq!(added["discovered"], false);
-    for key in ["theme", "territory", "like"] {
+    for key in ["theme", "territory", "like", "folder"] {
         assert!(added[key].is_null(), "{key}: {added}");
     }
 }
@@ -1844,7 +2031,7 @@ async fn add_neutralises_controls() {
     serve(
         &server,
         "/f.xml",
-        channel("Evil \u{9b}31m title", ""),
+        channel("Evil \u{90}31m title", ""),
         "application/rss+xml",
     )
     .await;
@@ -1857,7 +2044,12 @@ async fn add_neutralises_controls() {
         text.starts_with("Added #1 Evil \u{FFFD}31m title (page "),
         "{text}"
     );
-    assert!(!text.contains('\u{9b}'));
+    assert!(
+        !text
+            .chars()
+            .any(|c| c == '\u{1b}' || ('\u{80}'..='\u{9f}').contains(&c)),
+        "no escape or C1 control reaches the terminal: {text}"
+    );
 
     // The duplicate refusal names the stored title, and an unknown theme its key.
     serve(
@@ -1955,16 +2147,26 @@ async fn feed_move_root() {
 }
 
 #[tokio::test]
+async fn feed_move_takes_a_folder_name_like_add_does() {
+    let server = MockServer::start().await;
+    let home = reading_home(&server).await;
+    let out = ressac_async(home.path(), &["feed", "move", "4", " nEWS "]).await;
+    assert!(out.status.success(), "{out:?}");
+    assert!(stdout(&out).contains("News"), "{}", stdout(&out));
+    let back = ressac_async(home.path(), &["feed", "move", "4", "ROOT"]).await;
+    assert!(back.status.success(), "{back:?}");
+    let store = Store::open(&home.path().join("db.sqlite")).unwrap();
+    assert_eq!(store.feed(4).unwrap().folder_id, None);
+}
+
+#[tokio::test]
 async fn feed_move_unknown_exit_2() {
     let server = MockServer::start().await;
     let home = reading_home(&server).await;
     for (args, message) in [
         (&["feed", "move", "99", "1"][..], "No feed #99.\n"),
         (&["feed", "move", "4", "99"], "No folder #99.\n"),
-        (
-            &["feed", "move", "4", "banana"],
-            "Give a folder id or \"root\", not \"banana\".\n",
-        ),
+        (&["feed", "move", "4", "banana"], "No folder \"banana\".\n"),
     ] {
         let out = ressac_async(home.path(), args).await;
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");

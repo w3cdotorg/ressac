@@ -6,7 +6,7 @@ import Testing
 
 // MARK: - Test database
 
-/// A private copy of `tests/fixtures/contract.sqlite` reduced to its schema (v5) and the
+/// A private copy of `tests/fixtures/contract.sqlite` reduced to its schema (v6) and the
 /// 7 folders and 11 feeds of `vienna-like.opml`, all active, with the page numbers the core
 /// gave them: entries, full texts, diagnoses, fetch logs, decisions, editions and rhythm
 /// overrides are cleared, so each test seeds what it asserts on.
@@ -118,19 +118,19 @@ final class TestDatabase: Sendable {
 
     @Test func newer_database_is_refused() throws {
         let test = try TestDatabase()
-        try test.execute("UPDATE schema_meta SET version = 6")
-        #expect(try AppDatabase.check(at: test.url) == .tooNew(6))
+        try test.execute("UPDATE schema_meta SET version = 7")
+        #expect(try AppDatabase.check(at: test.url) == .tooNew(7))
     }
 
-    /// Review Focus #3 of sub-project 4, carried to v5: a database the v5 core migrated, opened
-    /// by an app that knows v4, gets "This database was created by a newer Ressac".
-    @Test func an_older_app_refuses_a_v5_database() throws {
+    /// Review Focus #3 of sub-project 4, carried to v6: a database the v6 core migrated, opened
+    /// by an app that knows v5, gets "This database was created by a newer Ressac".
+    @Test func an_older_app_refuses_a_v6_database() throws {
         let test = try TestDatabase()
-        #expect(AppDatabase.knownSchemaVersion == 5)
-        #expect(try AppDatabase.schemaVersion(at: test.url) == 5)
-        #expect(try AppDatabase.check(at: test.url, known: 4) == .tooNew(5))
-        #expect(try AppDatabase.check(at: test.url, known: 5) == .ok)
-        #expect(try AppDatabase.check(at: test.url, known: 6) == .needsMigration(5))
+        #expect(AppDatabase.knownSchemaVersion == 6)
+        #expect(try AppDatabase.schemaVersion(at: test.url) == 6)
+        #expect(try AppDatabase.check(at: test.url, known: 5) == .tooNew(6))
+        #expect(try AppDatabase.check(at: test.url, known: 6) == .ok)
+        #expect(try AppDatabase.check(at: test.url, known: 7) == .needsMigration(6))
         #expect(try AppDatabase.check(at: test.dir.appending(path: "nope.sqlite"), known: 2) == .missing)
     }
 

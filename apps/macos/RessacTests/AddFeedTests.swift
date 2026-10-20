@@ -21,12 +21,55 @@ import Testing
         #expect(!RunRequest.addFeed(address: "x", theme: nil).showsFailureBanner)
     }
 
+    @Test func add_request_passes_the_folder_id_only_below_the_top_level() {
+        #expect(RunRequest.addFeed(address: "a", theme: nil, folder: 7).arguments == ["add", "a", "--folder", "7"])
+        #expect(RunRequest.addFeed(address: "a", theme: "tech", folder: 7).arguments
+            == ["add", "a", "--theme", "tech", "--folder", "7"])
+        #expect(RunRequest.addFeed(address: "a", theme: "tech", folder: nil).arguments == ["add", "a", "--theme", "tech"])
+    }
+
+    @Test func the_folder_pop_up_lists_the_top_level_then_every_folder_in_sidebar_order() {
+        func folder(_ id: Int64, _ parent: Int64?, _ name: String, _ position: Int) -> FolderItem {
+            FolderItem(folderId: id, parentId: parent, name: name, position: position, page: nil)
+        }
+        let snapshot = SidebarSnapshot(
+            folders: [folder(1, nil, "News", 1), folder(2, 1, "Sub", 0), folder(3, 2, "Deep", 0), folder(4, nil, "Blogs", 0)],
+            feeds: [])
+        let choices = FolderChoice.choices(from: SidebarNode.tree(from: snapshot))
+        #expect(choices.map(\.folderId) == [nil, 4, 1, 2, 3])
+        #expect(choices.map(\.depth) == [0, 1, 1, 2, 3])
+        #expect(choices.map(\.title) == ["Feeds", "\u{2003}Blogs", "\u{2003}News", "\u{2003}\u{2003}Sub", "\u{2003}\u{2003}\u{2003}Deep"])
+        #expect(AddFeedModel().folderId == nil, "the top level is the default")
+        #expect(FolderChoice.choices(from: []).map(\.title) == ["Feeds"])
+    }
+
+    @Test func a_folder_that_disappears_resets_the_choice_to_the_top_level() {
+        let model = AddFeedModel()
+        let choices = [FolderChoice(folderId: nil, name: "Feeds", depth: 0), FolderChoice(folderId: 3, name: "A", depth: 1)]
+        model.folderId = 3
+        model.keepFolder(in: choices)
+        #expect(model.folderId == 3)
+        model.keepFolder(in: [choices[0]])
+        #expect(model.folderId == nil)
+    }
+
+    @Test func the_chosen_folder_reaches_the_cli() async throws {
+        let (state, _, stub) = try makeState(stub: Self.added + "\necho \"$*\" >> \"$(dirname \"$0\")/calls\"")
+        let model = AddFeedModel()
+        model.address = "df.example"
+        model.folderId = 3
+        #expect(await model.add(to: state))
+        #expect(try calls(stub).last?.hasSuffix("add df.example --folder 3") == true)
+    }
+
     @Test func added_event_decodes() {
         let line = #"{"event":"added","id":7,"title":"T","xml_url":"https://a.example/f","page":120,"theme":"Tech","territory":null,"discovered":false,"like":"Sibling"}"#
         #expect(EngineEvent.decode(line: line)
             == .added(AddedFeed(id: 7, title: "T", theme: "Tech", like: "Sibling")))
         let bare = #"{"event":"added","id":8,"title":"U","xml_url":"https://a.example/g","page":121,"theme":null,"territory":null,"discovered":true}"#
         #expect(EngineEvent.decode(line: bare) == .added(AddedFeed(id: 8, title: "U", theme: nil, like: nil)))
+        let inFolder = #"{"event":"added","id":9,"title":"V","xml_url":"https://a.example/h","page":201,"theme":null,"territory":null,"folder":3,"discovered":false,"like":null}"#
+        #expect(EngineEvent.decode(line: inFolder) == .added(AddedFeed(id: 9, title: "V", theme: nil, like: nil, folder: 3)))
     }
 
     @Test func empty_address_disables_add() {

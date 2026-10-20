@@ -69,7 +69,7 @@ fn redact_address(address: &str) -> String {
     format!("{head}{}{marker}", &rest[..end])
 }
 
-/// The refusals of `add` (nothing to follow, already followed, unknown theme, private or
+/// The refusals of `add` (nothing to follow, already followed, unknown theme or folder, private or
 /// malformed address) are usage errors (exit 2); a network failure stays fatal (exit 1).
 /// Their texts carry feed- or user-supplied strings, so every one goes through `printable`.
 fn add_error(e: ressac_core::Error) -> anyhow::Error {
@@ -84,6 +84,8 @@ fn add_error(e: ressac_core::Error) -> anyhow::Error {
         | Error::FeedExists { .. }
         | Error::UnknownTheme { .. }
         | Error::UnknownFolder(_)
+        | Error::UnknownFolderName(_)
+        | Error::AmbiguousFolder { .. }
         | Error::UnknownFeed(_)
         | Error::Invalid(_) => usage(text),
         Error::Unreachable { .. } => anyhow::anyhow!(text),
@@ -97,11 +99,14 @@ pub async fn add(
     g: &Globals,
     address: &str,
     theme: Option<&str>,
+    folder: Option<&str>,
     out: &mut impl Write,
 ) -> anyhow::Result<ExitCode> {
     let app = open(&g.db)?;
     let sink = output::sink(g.json);
-    let result = app.add_feed(address, theme, &sink, g.stop.clone()).await;
+    let result = app
+        .add_feed(address, theme, folder, &sink, g.stop.clone())
+        .await;
     sink.finish();
     let added = result.map_err(add_error)?;
     if g.json {

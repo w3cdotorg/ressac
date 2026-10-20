@@ -27,6 +27,36 @@ pub struct ParsedEntry {
     pub content_html: Option<String>,
 }
 
+/// Decodes the HTML entities a title still holds after the XML parser: some feeds encode
+/// titles twice (`&amp;#39;` in the XML), so the parser leaves `&#39;`. One pass, never more;
+/// text without an entity comes back as it is. The only place titles are decoded: every
+/// title entering the store (parsed feeds, OPML) goes through here. The C1 controls
+/// (U+0080 to U+009F), whether they came from a numeric reference (`&#146;`, which the XML
+/// parser or this decoder turns into U+0092) or were literally there, become their
+/// windows-1252 characters, as browsers read them.
+pub(crate) fn decode_title_entities(title: &str) -> String {
+    html_escape::decode_html_entities(title)
+        .chars()
+        .map(windows_1252_for_c1)
+        .collect()
+}
+
+/// The windows-1252 character for a C1 control; the five bytes that encoding leaves
+/// undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D) and every other character stay.
+fn windows_1252_for_c1(c: char) -> char {
+    const TABLE: [char; 32] = [
+        '\u{20AC}', '\u{81}', '\u{201A}', '\u{192}', '\u{201E}', '\u{2026}', '\u{2020}',
+        '\u{2021}', '\u{2C6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8D}', '\u{17D}',
+        '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}',
+        '\u{2014}', '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}', '\u{153}', '\u{9D}', '\u{17E}',
+        '\u{178}',
+    ];
+    match c {
+        '\u{80}'..='\u{9F}' => TABLE[c as usize - 0x80],
+        _ => c,
+    }
+}
+
 const HTML_SNIFF_BYTES: usize = 512;
 
 /// True for an HTML page: by its first bytes, or by a `text/html` content type when the
@@ -299,7 +329,7 @@ pub fn parse_feed(
             ParsedEntry {
                 guid: e.id,
                 url: e.links.first().map(|l| l.href.clone()),
-                title: e.title.map(|t| t.content),
+                title: e.title.map(|t| decode_title_entities(&t.content)),
                 author: e.authors.first().and_then(|p| p.name.clone()),
                 published_at,
                 published_at_is_fallback: fallback,
@@ -310,7 +340,7 @@ pub fn parse_feed(
         })
         .collect();
     Ok(ParsedFeed {
-        title: feed.title.map(|t| t.content),
+        title: feed.title.map(|t| decode_title_entities(&t.content)),
         description: feed.description.map(|t| t.content),
         site_url: feed
             .links
@@ -637,6 +667,120 @@ mod tests {
         let rss = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title><link>http://u.example/</link><description>d</description><item><guid>1</guid><title>Caf&eacute; &ndash; l&rsquo;&eacute;t&eacute; &hellip;</title></item></channel></rss>"#;
         let f = parse_feed(rss.as_bytes(), None, "http://u.example/feed", now()).unwrap();
         assert_eq!(f.entries[0].title.as_deref(), Some("Café – l’été …"));
+    }
+
+    #[test]
+    fn a_title_encoded_twice_is_decoded_once_more() {
+        let rss = |title: &str| {
+            format!(
+                r#"<?xml version="1.0"?><rss version="2.0"><channel><title>{title}</title><link>http://u.example/</link><description>d</description><item><guid>1</guid><title>{title}</title></item></channel></rss>"#
+            )
+        };
+        let parsed = |title: &str| {
+            parse_feed(rss(title).as_bytes(), None, "http://u.example/feed", now()).unwrap()
+        };
+        for (xml, want) in [
+            ("America&amp;#39;s Earliest", "America's Earliest"),
+            ("America&amp;#x27;s Earliest", "America's Earliest"),
+            ("Q&amp;amp;A", "Q&A"),
+            ("Say &amp;quot;hi&amp;quot;", "Say \"hi\""),
+            ("a&amp;nbsp;b", "a\u{a0}b"),
+            // Encoded once: the parser's decoding is all there is.
+            ("America&#39;s", "America's"),
+            ("Q&amp;A", "Q&A"),
+            // A bare ampersand and look-alikes stay.
+            ("Fish & Chips", "Fish & Chips"),
+            ("AT&T", "AT&T"),
+            ("R&D; sort of", "R&D; sort of"),
+        ] {
+            let f = parsed(xml);
+            assert_eq!(f.title.as_deref(), Some(want), "feed title {xml}");
+            assert_eq!(
+                f.entries[0].title.as_deref(),
+                Some(want),
+                "entry title {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_title_entities_decodes_one_pass_only() {
+        assert_eq!(
+            decode_title_entities("a &#39; b &#x41; &lt;i&gt;"),
+            "a ' b A <i>"
+        );
+        // The decoded `&amp;#39;` is `&#39;`: a second pass would turn it into `'`.
+        assert_eq!(decode_title_entities("&amp;#39;"), "&#39;");
+        assert_eq!(decode_title_entities("plain & text"), "plain & text");
+        assert_eq!(decode_title_entities("&notanentity; &"), "&notanentity; &");
+    }
+
+    fn titles_of_rss(title_xml: &str) -> (Option<String>, Option<String>) {
+        let rss = format!(
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>{title_xml}</title><link>http://u.example/</link><description>d</description><item><guid>1</guid><title>{title_xml}</title></item></channel></rss>"#
+        );
+        let f = parse_feed(rss.as_bytes(), None, "http://u.example/feed", now()).unwrap();
+        (f.title, f.entries[0].title.clone())
+    }
+
+    #[test]
+    fn c1_references_in_rss_titles_become_windows_1252_whatever_their_encoding() {
+        for (xml, want) in [
+            ("l&#146;a", "l\u{2019}a"),
+            ("l&#x92;a", "l\u{2019}a"),
+            ("l&amp;#146;a", "l\u{2019}a"),
+            ("l&amp;#x92;a", "l\u{2019}a"),
+            ("<![CDATA[l&#146;a]]>", "l\u{2019}a"),
+            ("<![CDATA[l\u{92}a]]>", "l\u{2019}a"),
+            ("a &#150; b &#133; &#128;", "a \u{2013} b \u{2026} \u{20ac}"),
+            ("&#129;&#141;", "\u{81}\u{8d}"),
+        ] {
+            let (feed, entry) = titles_of_rss(xml);
+            assert_eq!(feed.as_deref(), Some(want), "feed title {xml}");
+            assert_eq!(entry.as_deref(), Some(want), "entry title {xml}");
+        }
+    }
+
+    #[test]
+    fn a_json_feed_title_with_a_c1_character_is_mapped() {
+        let json = r#"{"version":"https://jsonfeed.org/version/1.1","title":"l\u0092a","items":[{"id":"1","url":"https://x.org/1","title":"a\u0096b"}]}"#;
+        let f = parse_feed(
+            json.as_bytes(),
+            Some("application/feed+json"),
+            "https://x.org/feed.json",
+            now(),
+        )
+        .unwrap();
+        assert_eq!(f.title.as_deref(), Some("l\u{2019}a"));
+        assert_eq!(f.entries[0].title.as_deref(), Some("a\u{2013}b"));
+    }
+
+    #[test]
+    fn decode_title_entities_maps_literal_c1_characters_too() {
+        assert_eq!(
+            decode_title_entities("l\u{92}a \u{81}"),
+            "l\u{2019}a \u{81}"
+        );
+        assert_eq!(
+            decode_title_entities("l&amp;#146;a"),
+            "l&#146;a",
+            "one pass only"
+        );
+    }
+
+    #[test]
+    fn decode_title_entities_maps_c1_references_to_windows_1252() {
+        assert_eq!(decode_title_entities("l&#146;a"), "l\u{2019}a");
+        assert_eq!(decode_title_entities("l&amp;#146;a"), "l&#146;a");
+        assert_eq!(
+            decode_title_entities("&#150; &#133; &#128;"),
+            "\u{2013} \u{2026} \u{20ac}"
+        );
+        // Undefined in windows-1252: left as they are.
+        assert_eq!(
+            decode_title_entities("&#129;&#141;&#143;&#144;&#157;"),
+            "\u{81}\u{8d}\u{8f}\u{90}\u{9d}"
+        );
     }
 
     #[test]

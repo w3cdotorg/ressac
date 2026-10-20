@@ -302,11 +302,11 @@ func calls(_ stub: Stub) throws -> [String] {
 
     @Test func newer_database_is_refused() async throws {
         let test = try TestDatabase()
-        try test.execute("UPDATE schema_meta SET version = 6")
+        try test.execute("UPDATE schema_meta SET version = 7")
         let launcher = Launcher()
         await launcher.launch(database: test.url, executable: try Stub("exit 0").executable)
-        guard case .tooNew(6) = launcher.phase else {
-            Issue.record("expected tooNew(6), got \(launcher.phase)")
+        guard case .tooNew(7) = launcher.phase else {
+            Issue.record("expected tooNew(7), got \(launcher.phase)")
             return
         }
     }

@@ -3250,6 +3250,7 @@ dependencies = [
  "dom_smoothie",
  "feed-rs",
  "futures",
+ "html-escape",
  "quick-xml",
  "reqwest",
  "rusqlite",

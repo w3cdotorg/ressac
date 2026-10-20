@@ -86,6 +86,18 @@ func makeJournal(at instant: String = "2026-10-16T07:30:00.000Z") throws -> (Jou
     return (journal, state, test, stub)
 }
 
+/// A clock the test moves by hand.
+final class TestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant: Date
+
+    init(_ utc: String) { instant = Timestamp.date(from: utc)! }
+
+    var now: Date { lock.withLock { instant } }
+
+    func advance(minutes: Double) { lock.withLock { instant += minutes * 60 } }
+}
+
 /// Records the rollover waits; every wait after the first lasts a minute (the test cancels it).
 actor SleepLog {
     private(set) var waits: [Duration] = []
@@ -202,6 +214,102 @@ actor SleepLog {
         #expect(relaunched.phase == .idle)
         #expect(try builds(stub) == 2)
         #expect(try test.one(Int.self, "SELECT COUNT(*) FROM edition") == 1)
+    }
+
+    /// Automatic triggers wait 15 minutes after a failed or offline build; Retry never waits.
+    @Test(arguments: ["fail", "offline"])
+    func automatic_triggers_wait_fifteen_minutes_after_a_failure(_ failure: String) async throws {
+        let (state, test, stub) = try makeState(stub: editionStub)
+        defer { withExtendedLifetime(test) {} }
+        try test.execute("DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;")
+        let clock = TestClock("2026-10-16T07:30:00.000Z")
+        let journal = JournalModel(database: state.database, coordinator: state.runs,
+                                   clock: { clock.now }, calendar: .paris)
+        try flag(stub, failure)
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 1)
+
+        clock.advance(minutes: 5)
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 1)
+
+        clock.advance(minutes: 11)  // 16 minutes after the failure
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 2)
+    }
+
+    @Test func retry_builds_during_the_window_and_a_manual_failure_restarts_it() async throws {
+        let (state, test, stub) = try makeState(stub: editionStub)
+        defer { withExtendedLifetime(test) {} }
+        try test.execute("DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;")
+        let clock = TestClock("2026-10-16T07:30:00.000Z")
+        let journal = JournalModel(database: state.database, coordinator: state.runs,
+                                   clock: { clock.now }, calendar: .paris)
+        try flag(stub, "fail")
+        await journal.checkAndBuild()
+        clock.advance(minutes: 10)
+        await journal.retry()  // inside the window: still builds
+        #expect(try builds(stub) == 2)
+
+        clock.advance(minutes: 10)  // 20 after the first failure, 10 after the manual one
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 2)
+        clock.advance(minutes: 6)
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 3)
+    }
+
+    @Test func a_success_clears_the_window() async throws {
+        let (state, test, stub) = try makeState(stub: editionStub)
+        defer { withExtendedLifetime(test) {} }
+        try test.execute("DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;")
+        let clock = TestClock("2026-10-16T07:30:00.000Z")
+        let journal = JournalModel(database: state.database, coordinator: state.runs,
+                                   clock: { clock.now }, calendar: .paris)
+        try flag(stub, "fail")
+        await journal.checkAndBuild()
+        try unflag(stub, "fail")
+        await journal.retry()  // succeeds: the edition exists now
+        #expect(journal.phase == .idle)
+        try test.execute("DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;")
+        clock.advance(minutes: 1)
+        await journal.checkAndBuild()  // due again, and no window is left
+        #expect(try builds(stub) == 3)
+    }
+
+    @Test func finding_the_edition_not_due_clears_the_window() async throws {
+        let (state, test, stub) = try makeState(stub: editionStub)
+        defer { withExtendedLifetime(test) {} }
+        try test.execute("DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;")
+        let clock = TestClock("2026-10-16T07:30:00.000Z")
+        let journal = JournalModel(database: state.database, coordinator: state.runs,
+                                   clock: { clock.now }, calendar: .paris)
+        try flag(stub, "fail")
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 1)
+        try seedEdition(test, builtAt: "2026-10-16T07:31:00.000Z")  // built elsewhere meanwhile
+        clock.advance(minutes: 2)
+        await journal.retry()  // not due: nothing built, and the window goes
+        #expect(journal.phase == .idle)
+        #expect(try builds(stub) == 1)
+        try test.execute("DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;")
+        clock.advance(minutes: 1)  // 3 minutes after the failure: the window would still hold
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 2)
+    }
+
+    @Test func a_clock_moved_backwards_expires_the_window() async throws {
+        let (state, test, stub) = try makeState(stub: editionStub)
+        defer { withExtendedLifetime(test) {} }
+        try test.execute("DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition;")
+        let clock = TestClock("2026-10-16T07:30:00.000Z")
+        let journal = JournalModel(database: state.database, coordinator: state.runs,
+                                   clock: { clock.now }, calendar: .paris)
+        try flag(stub, "fail")
+        await journal.checkAndBuild()
+        clock.advance(minutes: -60)  // the clock is an hour behind the failure
+        await journal.checkAndBuild()
+        #expect(try builds(stub) == 2)
     }
 
     @Test func a_build_turned_away_by_another_long_run_stays_due() async throws {

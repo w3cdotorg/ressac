@@ -13,11 +13,38 @@ enum AddFeedNote {
     }
 }
 
+/// One line of the sheet's Folder pop-up: the top level, or a folder under its parent.
+struct FolderChoice: Identifiable, Equatable {
+    /// Nil for the top level ("Feeds").
+    let folderId: Int64?
+    let name: String
+    let depth: Int
+
+    var id: Int64 { folderId ?? 0 }
+
+    /// The menu text: one em space per level under the top.
+    var title: String { String(repeating: "\u{2003}", count: depth) + name }
+
+    /// "Feeds" first, then every folder in sidebar order, each under its parent.
+    static func choices(from tree: [SidebarNode]) -> [FolderChoice] {
+        func walk(_ nodes: [SidebarNode], depth: Int) -> [FolderChoice] {
+            nodes.flatMap { node -> [FolderChoice] in
+                guard case let .folder(folder) = node.kind else { return [] }
+                return [FolderChoice(folderId: folder.folderId, name: folder.name, depth: depth)]
+                    + walk(node.children ?? [], depth: depth + 1)
+            }
+        }
+        return [FolderChoice(folderId: nil, name: "Feeds", depth: 0)] + walk(tree, depth: 1)
+    }
+}
+
 /// The Add Feed sheet's state: the address, the optional theme, and what the last attempt said.
 @MainActor @Observable final class AddFeedModel {
     var address = ""
     /// A theme key; nil lets the core inherit the theme of the site's other feeds.
     var themeKey: String?
+    /// A folder id; nil is the top level.
+    var folderId: Int64?
     var isRunning = false
     private(set) var errorMessage: String?
     /// The error is not a plain refusal: the log may say more.
@@ -25,6 +52,11 @@ enum AddFeedNote {
 
     init(address: String = "") {
         self.address = address
+    }
+
+    /// Back to the top level when the chosen folder is no longer there (removed meanwhile).
+    func keepFolder(in choices: [FolderChoice]) {
+        if let folderId, !choices.contains(where: { $0.folderId == folderId }) { self.folderId = nil }
     }
 
     var canAdd: Bool {
@@ -51,7 +83,8 @@ enum AddFeedNote {
         showsLog = false
         defer { isRunning = false }
         let result = await state.addFeed(
-            address: address.trimmingCharacters(in: .whitespacesAndNewlines), theme: themeKey)
+            address: address.trimmingCharacters(in: .whitespacesAndNewlines), theme: themeKey,
+            folder: folderId)
         switch result {
         case .success:
             state.pendingSheet = nil
@@ -98,6 +131,13 @@ struct AddFeedSheet: View {
             }
             .pickerStyle(.menu)
             .disabled(model.isRunning)
+            Picker("Folder", selection: $model.folderId) {
+                ForEach(FolderChoice.choices(from: state.sidebarTree)) { choice in
+                    Text(choice.title).tag(choice.folderId)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(model.isRunning)
             HStack {
                 if model.isRunning, let progress = state.runs.progress {
                     ProgressView(value: progress.fraction).progressViewStyle(.linear).frame(width: 120)
@@ -115,6 +155,7 @@ struct AddFeedSheet: View {
         .padding(20)
         .frame(width: 420)
         .onAppear { addressFocused = true }
+        .onChange(of: state.sidebarTree) { model.keepFolder(in: FolderChoice.choices(from: state.sidebarTree)) }
         .task {
             do {
                 for try await rows in Queries.themes().values(in: state.database.reader) { themes = rows }
