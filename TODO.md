@@ -84,8 +84,8 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 
 ### Bandeau tmux (sous-projet 5)
 
-- [ ] Entités HTML dans certains titres de flux : `&#39;` s'affiche tel quel dans le bandeau (« America&#39;s Earliest… ») ; décoder les entités quand les titres sont enregistrés ou affichés (existant avant la carte marine, vu à la recette de la carte le 20/10).
-- [ ] Volume du journal : chaque appel en échec écrit un avertissement (environ 5 760 lignes par jour et par client si la base manque) ; passer en `debug!` les cas attendus ou limiter la cadence.
+- [x] Entités HTML dans certains titres de flux : `&#39;` s'affiche tel quel dans le bandeau (« America&#39;s Earliest… ») ; décoder les entités quand les titres sont enregistrés ou affichés (existant avant la carte marine, vu à la recette de la carte le 20/10). Fait : un seul assistant (`parse::decode_title_entities`) décode une fois de plus à l'enregistrement (flux analysés et titres de flux OPML), et le schéma v6 répare une fois les titres déjà en base.
+- [x] Volume du journal : chaque appel en échec écrit un avertissement (environ 5 760 lignes par jour et par client si la base manque) ; passer en `debug!` les cas attendus ou limiter la cadence. Fait : base absente, base occupée ou verrouillée, schéma différent et verrou d'état disputé passent en `debug!` ; le reste reste en `warn!`.
 - [ ] Erreurs de `try_lock` autres que « déjà pris » traitées comme un verrou pris (chemin de réimpression, sans gravité).
 - [ ] Titres faits seulement de caractères invisibles non blancs (U+200B) : ligne `Flux · ` apparemment vide ; caractères bidirectionnels (U+202E) et séparateurs de ligne Unicode non retirés (usurpation visuelle, pas d'injection) ; coupe par caractère et non par graphème (une séquence ZWJ ou VS16 peut déborder d'une ou deux colonnes).
 - [ ] La connexion en lecture seule peut faire un point de contrôle du WAL en se fermant si elle est la dernière (pages déjà validées, aucune écriture logique) ; `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE` le supprimerait.
@@ -116,7 +116,7 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Choisir parmi plusieurs flux annoncés (aujourd'hui le premier est pris).
 - [ ] Choisir le dossier dans la fenêtre d'ajout.
 - [ ] Commandes Antiope pour ajouter et déplacer un flux.
-- [ ] `ressac chart export` (la base fait foi : une réimportation efface les thèmes hérités).
+- [x] `ressac chart export` (la base fait foi : une réimportation efface les thèmes hérités). Fait : écrit le format exact de `chart import` (sortie standard ou `--output`), héritages compris.
 - [ ] Les flux venus d'une découverte gardent le client protégé à chaque rafraîchissement (aujourd'hui seul le premier passe par lui ; demande un drapeau par flux).
 - [ ] Les erreurs réseau sur le lien annoncé sont rapportées comme « aucun flux ».
 - [ ] Annuler pendant un ajout laisse l'ajout se finir en silence.
@@ -129,8 +129,8 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] `ressac add` crée la base avant de valider l'adresse (`ressac add ftp://x` sur une machine neuve).
 - [ ] Pas de test d'un ajout pendant un rafraîchissement (repose sur les transactions IMMEDIATE et le busy_timeout de 5 s).
 - [ ] Le `warn!(error = %e)` après un premier rafraîchissement raté n'affiche pas d'adresse aujourd'hui (`refresh_via` ne renvoie que des erreurs de base ou de diagnostic) ; à garder ainsi (journaliser le genre d'erreur, ou un commentaire qui fixe cet invariant).
-- [ ] Petites dettes du cœur : correspondance ThemeDef dupliquée trois fois ; `COALESCE(html_url, xml_url)` prend un `html_url` vide pour présent (`NULLIF`) ; un territoire peut différer du thème hérité ; dérivations `Serialize` inutilisées ; ménage préalable (« Step 0 ») non fait sur `feeds.rs` ; `service.rs` à découper (`service/add.rs`) ; un déplacement sans effet calcule quand même la page.
-- [ ] CLI : la clé d'un `--theme` inconnu n'est pas passée par `printable` dans le refus de `feed theme` ; pas de test qu'un refus en `--json` laisse stdout vide.
+- [ ] Petites dettes du cœur : la résolution d'un thème par clé ou par nom est maintenant unique (`resolve_theme_in`), mais la lecture d'une ligne de thème en `ThemeDef` reste écrite à trois endroits (`resolve_theme_in`, `themes`, relecture dans `insert_added_feed`) ; `COALESCE(html_url, xml_url)` prend un `html_url` vide pour présent (`NULLIF`) ; un territoire peut différer du thème hérité ; dérivations `Serialize` inutilisées ; ménage préalable (« Step 0 ») non fait sur `feeds.rs` ; `service.rs` à découper (`service/add.rs`) ; un déplacement sans effet calcule quand même la page.
+- [ ] CLI : pas de test qu'un refus en `--json` laisse stdout vide.
 - [ ] Appli : le presse-papiers est relu à chaque recréation de la fenêtre d'ajout ; un ajout qui se termine après Annuler sélectionne quand même le flux, affiche la note et peut fermer une fenêtre rouverte entre-temps ; deux notes identiques de suite ne relancent pas la minuterie.
 
 ### Durcissement proposé, non fait
