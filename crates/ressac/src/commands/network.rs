@@ -9,7 +9,7 @@ use ressac_core::model::{FeedId, FolderId};
 use ressac_core::service::{ExtractOutcome, NullSink, RefreshOptions};
 use ressac_core::store::Store;
 
-use super::{Globals, INTERRUPTED, open_with_feeds, usage};
+use super::{Globals, INTERRUPTED, open, open_with_feeds, usage};
 use crate::output;
 
 /// `ressac extract` on an entry without a link (spec Review Focus 1).
@@ -46,6 +46,49 @@ fn subset(
         return Err(usage(format!("No feed #{missing}.")));
     }
     Ok(Some(feeds))
+}
+
+/// The refusals of `add` (nothing to follow, already followed, unknown theme, private or
+/// malformed address) are usage errors (exit 2); a network failure stays fatal (exit 1).
+/// Their texts carry feed- or user-supplied strings, so every one goes through `printable`.
+fn add_error(e: ressac_core::Error) -> anyhow::Error {
+    use ressac_core::Error;
+    if let Error::NoFeedFound(tried) = &e {
+        tracing::warn!(address = %tried, "no feed found");
+    }
+    let text = output::printable(&e.to_string()).into_owned();
+    match e {
+        Error::InvalidAddress
+        | Error::NoFeedFound(_)
+        | Error::FeedExists { .. }
+        | Error::UnknownTheme(_)
+        | Error::UnknownFolder(_)
+        | Error::UnknownFeed(_)
+        | Error::Invalid(_) => usage(text),
+        Error::Unreachable { .. } => anyhow::anyhow!(text),
+        other => other.into(),
+    }
+}
+
+/// `ressac add`: one feed, fetched right away. Progress as `fetch` shows it; with `--json`
+/// the stream ends with an `added` event.
+pub async fn add(
+    g: &Globals,
+    address: &str,
+    theme: Option<&str>,
+    out: &mut impl Write,
+) -> anyhow::Result<ExitCode> {
+    let app = open(&g.db)?;
+    let sink = output::sink(g.json);
+    let result = app.add_feed(address, theme, &sink, g.stop.clone()).await;
+    sink.finish();
+    let added = result.map_err(add_error)?;
+    if g.json {
+        writeln!(out, "{}", output::added_json(&added))?;
+    } else {
+        writeln!(out, "{}", output::added_text(&added))?;
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `ressac fetch`: every due feed, or only those named by `--feed` or `--folder`.
@@ -131,4 +174,44 @@ pub async fn extract(g: &Globals, entry_id: i64, out: &mut impl Write) -> anyhow
         writeln!(out, "{text}")?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::UsageError;
+    use ressac_core::Error;
+
+    #[test]
+    fn add_refusals_are_usage_errors_and_a_failed_reach_stays_fatal() {
+        for refusal in [
+            Error::InvalidAddress,
+            Error::NoFeedFound("https://e.org/".into()),
+            Error::FeedExists {
+                id: 1,
+                title: "T".into(),
+                buried: true,
+            },
+            Error::UnknownTheme("x".into()),
+            Error::UnknownFolder(9),
+            Error::UnknownFeed(9),
+            Error::Invalid("Ressac only follows public web addresses.".into()),
+        ] {
+            let text = refusal.to_string();
+            let e = add_error(refusal);
+            assert_eq!(
+                e.downcast_ref::<UsageError>().map(ToString::to_string),
+                Some(text)
+            );
+        }
+        let down = add_error(Error::Unreachable {
+            url: "https://e.org/\u{1b}[31m".into(),
+            reason: "timed out".into(),
+        });
+        assert!(down.downcast_ref::<UsageError>().is_none());
+        assert_eq!(
+            down.to_string(),
+            "Could not reach https://e.org/\u{FFFD}[31m: timed out."
+        );
+    }
 }

@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use ressac_core::model::{Decision, FeedId, Status};
-use ressac_core::service::{Event, EventSink, FULL_ARTICLES, Summary};
+use ressac_core::service::{AddedFeed, Event, EventSink, FULL_ARTICLES, Summary};
 use ressac_core::store::pages::PageRow;
-use ressac_core::store::{ChartImportReport, ChartSnapshot, ImportReport};
+use ressac_core::store::{ChartImportReport, ChartSnapshot, ImportReport, Moved, ThemeSource};
 
 /// Order of the `check` summary grid (three per line).
 const SUMMARY_ORDER: [Status; 9] = [
@@ -199,6 +199,74 @@ pub fn extracted_text(entry_id: i64, error: Option<&str>) -> String {
         None => format!("Saved the full article of entry #{entry_id}."),
         Some(e) => format!("Full article unavailable: {e}"),
     }
+}
+
+/// `ressac add`'s lines: the feed and its page, its theme, and the territory it joined.
+pub fn added_text(added: &AddedFeed) -> String {
+    let page = added.page.map_or(String::new(), |p| format!(" (page {p})"));
+    let mut text = format!("Added #{} {}{page}", added.id, printable(&added.title));
+    let theme = match (&added.theme, &added.theme_source) {
+        (Some(name), ThemeSource::Sibling { title, .. }) => {
+            format!("{} (same site as {})", printable(name), printable(title))
+        }
+        (Some(name), _) => format!("{} (chosen)", printable(name)),
+        (None, _) => "none (Uncharted waters)".to_owned(),
+    };
+    text.push_str(&format!("\nTheme: {theme}"));
+    if let Some(territory) = &added.territory {
+        text.push_str(&format!("\nTerritory: {}", printable(territory)));
+    }
+    text
+}
+
+/// The `added` event that ends `ressac --json add`; `like` names the sibling a theme came from.
+pub fn added_json(added: &AddedFeed) -> serde_json::Value {
+    let like = match &added.theme_source {
+        ThemeSource::Sibling { title, .. } => Some(title.as_str()),
+        ThemeSource::Chosen | ThemeSource::None => None,
+    };
+    serde_json::json!({
+        "event": "added",
+        "id": added.id,
+        "title": added.title,
+        "xml_url": added.xml_url,
+        "page": added.page,
+        "theme": added.theme,
+        "territory": added.territory,
+        "discovered": added.discovered,
+        "like": like,
+    })
+}
+
+/// `ressac feed move`: `Moved #7 Title to Folder (page 120 → 305)`; `folder` is the target's
+/// name, `None` for the root.
+pub fn moved_text(moved: &Moved, folder: Option<&str>) -> String {
+    let place = folder.map_or("the root".into(), printable);
+    let title = printable(&moved.title);
+    let page = |p: Option<u16>| p.map_or("-".to_owned(), |p| p.to_string());
+    if !moved.changed {
+        return format!("#{} {title} is already in {place}.", moved.feed);
+    }
+    format!(
+        "Moved #{} {title} to {place} (page {} → {})",
+        moved.feed,
+        page(moved.old_page),
+        page(moved.new_page)
+    )
+}
+
+/// The `moved` event of `ressac --json feed move`.
+pub fn moved_json(moved: &Moved) -> serde_json::Value {
+    serde_json::json!({
+        "event": "moved",
+        "feed_id": moved.feed,
+        "title": moved.title,
+        "from": moved.from,
+        "to": moved.to,
+        "old_page": moved.old_page,
+        "new_page": moved.new_page,
+        "changed": moved.changed,
+    })
 }
 
 pub fn migrated_text(version: i64) -> String {

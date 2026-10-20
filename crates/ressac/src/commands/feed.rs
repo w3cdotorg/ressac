@@ -1,9 +1,9 @@
-//! `ressac feed cadence` and `ressac feed theme`: a feed's rhythm group and its sea.
+//! `ressac feed cadence`, `theme` and `move`: a feed's rhythm group, its sea and its folder.
 
 use std::io::Write;
 use std::process::ExitCode;
 
-use ressac_core::model::{CadenceGroup, FeedId};
+use ressac_core::model::{CadenceGroup, FeedId, FolderId};
 use ressac_core::store::CadenceRow;
 
 use super::{Globals, open_with_feeds, usage};
@@ -36,9 +36,50 @@ pub fn feed(g: &Globals, action: FeedCommand, out: &mut impl Write) -> anyhow::R
                 writeln!(out, "{}", theme_text(feed_id, theme))?;
             }
         }
+        FeedCommand::Move { feed_id, folder } => {
+            let target = parse_folder(&folder)?;
+            let moved = app
+                .store()
+                .move_feed(feed_id, target)
+                .map_err(refusal_error)?;
+            let name = match moved.to {
+                Some(id) => app
+                    .store()
+                    .folders()?
+                    .into_iter()
+                    .find(|f| f.id == id)
+                    .map(|f| f.name),
+                None => None,
+            };
+            if g.json {
+                writeln!(out, "{}", crate::output::moved_json(&moved))?;
+            } else {
+                writeln!(
+                    out,
+                    "{}",
+                    crate::output::moved_text(&moved, name.as_deref())
+                )?;
+            }
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
+
+/// The folder argument of `feed move`: an id, or `root` for the top level.
+fn parse_folder(arg: &str) -> anyhow::Result<Option<FolderId>> {
+    if arg == ROOT {
+        return Ok(None);
+    }
+    arg.parse().map(Some).map_err(|_| {
+        usage(format!(
+            "Give a folder id or \"{ROOT}\", not \"{}\".",
+            crate::output::printable(arg)
+        ))
+    })
+}
+
+/// The argument that names the top level.
+const ROOT: &str = "root";
 
 /// The key that clears a feed's theme.
 const NO_THEME: &str = "none";
@@ -92,14 +133,15 @@ pub fn cadence_json(row: &CadenceRow) -> serde_json::Value {
     })
 }
 
-/// An unknown or buried feed, or an unknown theme, is a usage error (exit 2); anything else
+/// An unknown or buried feed, folder or theme is a usage error (exit 2); anything else
 /// stays fatal (exit 1).
 fn refusal_error(e: ressac_core::Error) -> anyhow::Error {
     use ressac_core::Error;
     match e {
-        Error::UnknownFeed(_) | Error::FeedBuried(_) | Error::UnknownTheme(_) => {
-            usage(e.to_string())
-        }
+        Error::UnknownFeed(_)
+        | Error::FeedBuried(_)
+        | Error::UnknownFolder(_)
+        | Error::UnknownTheme(_) => usage(e.to_string()),
         other => other.into(),
     }
 }
