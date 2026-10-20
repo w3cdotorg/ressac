@@ -109,6 +109,29 @@ fn feed_row(r: &Row<'_>) -> rusqlite::Result<FeedRow> {
     })
 }
 
+/// `Store::find_duplicate` on any connection, so a write transaction can run it too.
+fn duplicate_in(conn: &Connection, urls: &[&str]) -> Result<Option<(FeedId, String, bool)>> {
+    let keys: HashSet<String> = urls.iter().map(|u| url_key(u)).collect();
+    let mut stmt =
+        conn.prepare("SELECT id, title, state, url_key, xml_url_original FROM feed ORDER BY id")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, FeedId>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, title, state, key, original) = row?;
+        if keys.contains(&key) || keys.contains(&url_key(&original)) {
+            return Ok(Some((id, title, state == "buried")));
+        }
+    }
+    Ok(None)
+}
+
 /// What `Store::move_feed` did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Moved {
@@ -159,33 +182,16 @@ impl Store {
     /// The first feed, buried or not, whose address (current or original) has the same
     /// `url_key` as any of `urls`: its id, title and whether it is buried. Reads only.
     pub fn find_duplicate(&self, urls: &[&str]) -> Result<Option<(FeedId, String, bool)>> {
-        let keys: HashSet<String> = urls.iter().map(|u| url_key(u)).collect();
-        let mut stmt = self
-            .conn()
-            .prepare("SELECT id, title, state, url_key, xml_url_original FROM feed ORDER BY id")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, FeedId>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-            ))
-        })?;
-        for row in rows {
-            let (id, title, state, key, original) = row?;
-            if keys.contains(&key) || keys.contains(&url_key(&original)) {
-                return Ok(Some((id, title, state == "buried")));
-            }
-        }
-        Ok(None)
+        duplicate_in(self.conn(), urls)
     }
 
     /// Adds one feed at the bottom of the root, with a root page, in one transaction. The
     /// theme is `theme` (a known key, else `UnknownTheme` before anything is written) or,
     /// when none is given, the one most active feeds of the same site share (`host_key`;
     /// ties: the lowest feed id's); with a themed or not sibling in a territory, the feed
-    /// joins the lowest-id one. Does not check for duplicates (`find_duplicate`).
+    /// joins the lowest-id one. Checks again, inside its own write transaction, that the new
+    /// address is not already followed (`Error::FeedExists`), so two concurrent adds cannot
+    /// both pass; callers check earlier with `find_duplicate` to avoid network work.
     pub fn insert_added_feed(
         &self,
         new: &NewFeed,
@@ -193,6 +199,9 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<Inserted> {
         let tx = self.write_tx()?;
+        if let Some((id, title, buried)) = duplicate_in(&tx, &[&new.xml_url])? {
+            return Err(Error::FeedExists { id, title, buried });
+        }
         let chosen: Option<(i64, ThemeDef)> = match theme {
             Some(key) => Some(
                 tx.query_row(
@@ -1276,6 +1285,32 @@ mod tests {
                 .unwrap(),
             Some((1, "Feed 1".to_owned(), true))
         );
+    }
+
+    #[test]
+    fn insert_refuses_an_address_already_followed_inside_its_own_transaction() {
+        let s = Store::open_in_memory().unwrap();
+        site_feed(&s, 1, "example.org", None);
+        let err = s
+            .insert_added_feed(
+                &new_feed("https://EXAMPLE.org/feed1.xml/", None, "Again"),
+                None,
+                now(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                Error::FeedExists {
+                    id: 1,
+                    buried: false,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(err.to_string(), "Already followed: Feed 1.");
+        assert_eq!(s.feed_count().unwrap(), 1, "nothing is written");
     }
 
     #[test]

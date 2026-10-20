@@ -28,7 +28,9 @@ use crate::source::{
     FeedRef, FetchAttempt, FetchLimits, HostPacer, LocalSource, RawResponse, Source,
 };
 use crate::store::pages::{self, PageKind, PageRow};
-use crate::store::{CadenceRow, EditionParams, EditionRecord, FeedRow, ImportReport, Store};
+use crate::store::{
+    CadenceRow, EditionParams, EditionRecord, FeedRow, ImportReport, NewFeed, Store, ThemeSource,
+};
 pub use crate::store::{EditionEntryRow, EditionOverflowRow, EditionView};
 use crate::url_key::{https_variant, url_key};
 use crate::wayback::Wayback;
@@ -234,6 +236,21 @@ pub enum EditionOutcome {
     Interrupted,
 }
 
+/// What `Ressac::add_feed` did.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AddedFeed {
+    pub id: FeedId,
+    pub title: String,
+    pub xml_url: String,
+    pub page: Option<u16>,
+    /// The theme's display name.
+    pub theme: Option<String>,
+    pub theme_source: ThemeSource,
+    pub territory: Option<String>,
+    /// The address typed was a site page and the feed was found through it.
+    pub discovered: bool,
+}
+
 pub struct Ressac {
     store: Store,
     source: LocalSource,
@@ -283,6 +300,73 @@ impl Ressac {
     pub fn import_opml(&self, xml: &str, dry_run: bool) -> Result<ImportReport> {
         let outlines = opml::parse(xml)?;
         self.store.import_outlines(&outlines, dry_run, Utc::now())
+    }
+
+    /// Adds one feed from `input`, a feed address or a site page whose first announced feed
+    /// is taken (spec §4). Everything fetched goes through the guarded client: public web
+    /// addresses only. Refuses an address already followed or buried, then inserts the feed
+    /// at the bottom of the root (with the theme `theme` names, else its site's) and fetches
+    /// it right away; a failed fetch keeps the feed.
+    pub async fn add_feed(
+        &self,
+        input: &str,
+        theme: Option<&str>,
+        sink: &dyn EventSink,
+        stop: Arc<AtomicBool>,
+    ) -> Result<AddedFeed> {
+        let typed = normalise_address(input)?;
+        if let Some((id, title, buried)) = self.store.find_duplicate(&[&typed])? {
+            return Err(Error::FeedExists { id, title, buried });
+        }
+        let now = Utc::now();
+        let page = fetch_guarded(&self.articles, &typed).await?;
+        let (feed, xml_url, site_url, discovered) = match parse_feed(
+            &page.body,
+            page.content_type.as_deref(),
+            &page.final_url,
+            now,
+        ) {
+            Ok(feed) => (feed, page.final_url.clone(), None, false),
+            Err(_) => {
+                let html = String::from_utf8_lossy(&page.body);
+                let first = alternate_feeds(&html, &page.final_url)
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::NoFeedFound(typed.clone()))?;
+                let raw = fetch_guarded(&self.articles, &first)
+                    .await
+                    .map_err(|_| Error::NoFeedFound(first.clone()))?;
+                let feed = parse_feed(&raw.body, raw.content_type.as_deref(), &raw.final_url, now)
+                    .map_err(|_| Error::NoFeedFound(first.clone()))?;
+                (feed, raw.final_url, Some(page.final_url), true)
+            }
+        };
+        if let Some((id, title, buried)) = self.store.find_duplicate(&[&typed, &xml_url])? {
+            return Err(Error::FeedExists { id, title, buried });
+        }
+        let new = NewFeed {
+            html_url: feed.site_url.clone().or(site_url),
+            title: feed.title.clone().unwrap_or_default(),
+            xml_url,
+        };
+        let inserted = self.store.insert_added_feed(&new, theme, now)?;
+        let opts = RefreshOptions {
+            force: true,
+            only: Some(vec![inserted.id]),
+        };
+        if let Err(e) = self.refresh(opts, sink, stop).await {
+            tracing::warn!(feed = inserted.id, error = %e, "the first fetch of an added feed failed");
+        }
+        Ok(AddedFeed {
+            id: inserted.id,
+            title: inserted.title,
+            xml_url: new.xml_url,
+            page: inserted.page,
+            theme: inserted.theme.map(|t| t.name),
+            theme_source: inserted.theme_source,
+            territory: inserted.territory,
+            discovered,
+        })
     }
 
     /// Fetches due feeds, or the due feeds among `opts.only` (writing each attempt as it
@@ -885,6 +969,50 @@ fn article_from(raw: &RawResponse) -> Extraction {
         return Err(ExtractError::NoContent);
     }
     extract_article(&String::from_utf8_lossy(&raw.body), &raw.final_url)
+}
+
+/// A typed address as an http(s) URL: trimmed, `https://` when it names no scheme.
+/// Anything else (`ftp://`, `mailto:`, an empty string) is `Error::InvalidAddress`.
+fn normalise_address(input: &str) -> Result<String> {
+    let input = input.trim();
+    let has_scheme = input.contains("://")
+        || input.split_once(':').is_some_and(|(scheme, rest)| {
+            // `host:8080/...` is a port, not a scheme.
+            !rest.starts_with(|c: char| c.is_ascii_digit())
+                && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+        });
+    let full = if has_scheme {
+        input.to_owned()
+    } else {
+        format!("https://{input}")
+    };
+    match url::Url::parse(&full) {
+        Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => {
+            Ok(u.to_string())
+        }
+        _ => Err(Error::InvalidAddress),
+    }
+}
+
+/// Fetches `url` through the guarded client for `add_feed`: a private address or a failure
+/// is an error worded for a person.
+async fn fetch_guarded(source: &LocalSource, url: &str) -> Result<RawResponse> {
+    let raw = source.fetch_raw(url, None, None).await;
+    if raw.refused {
+        return Err(Error::Invalid(
+            "Ressac only follows public web addresses.".into(),
+        ));
+    }
+    match &raw.error {
+        Some(kind) => Err(Error::Unreachable {
+            url: url.to_owned(),
+            reason: kind.label(),
+        }),
+        None => Ok(raw),
+    }
 }
 
 /// `Some(found)` once the site was checked (`found` is `None` when it announces nothing new);
@@ -1826,6 +1954,305 @@ mod tests {
             app.extract_entry(9_999, &NullSink).await.unwrap(),
             ExtractOutcome::UnknownEntry
         );
+    }
+
+    // ---- add_feed ----
+
+    fn add_app() -> Ressac {
+        let limits = FetchLimits {
+            per_host_gap: Duration::ZERO,
+            timeout: Duration::from_secs(5),
+            ..FetchLimits::default()
+        };
+        Ressac::with_parts(
+            Store::open_in_memory().unwrap(),
+            limits,
+            "http://127.0.0.1:9",
+        )
+        .unwrap()
+        .allow_private_articles()
+        .unwrap()
+    }
+
+    async fn add(app: &Ressac, input: &str) -> Result<AddedFeed> {
+        app.add_feed(input, None, &NullSink, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    fn page_announcing(links: &[&str]) -> String {
+        let links: String = links
+            .iter()
+            .map(|l| format!(r#"<link rel="alternate" type="application/rss+xml" href="{l}">"#))
+            .collect();
+        format!("<html><head>{links}</head><body>hello</body></html>")
+    }
+
+    fn count(app: &Ressac, table: &str) -> i64 {
+        app.store()
+            .conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn normalises_scheme_less_input() {
+        assert_eq!(
+            normalise_address("  example.org/feed ").unwrap(),
+            "https://example.org/feed"
+        );
+        assert_eq!(
+            normalise_address("http://example.org").unwrap(),
+            "http://example.org/"
+        );
+        assert_eq!(
+            normalise_address("localhost:8080/x").unwrap(),
+            "https://localhost:8080/x"
+        );
+    }
+
+    #[test]
+    fn refuses_non_http() {
+        for bad in [
+            "",
+            "   ",
+            "ftp://example.org/feed",
+            "file:///etc/passwd",
+            "mailto:a@example.org",
+            "javascript:alert(1)",
+            "https://",
+            "not a url",
+        ] {
+            assert!(
+                matches!(normalise_address(bad), Err(Error::InvalidAddress)),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn adds_a_feed_address_directly() {
+        let server = MockServer::start().await;
+        serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_app();
+        let got = add(&app, &format!("{}/feed.xml", server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(got.title, "T");
+        assert_eq!(got.xml_url, format!("{}/feed.xml", server.uri()));
+        assert!(!got.discovered);
+        assert_eq!(got.page, Some(110));
+        assert_eq!(got.theme, None);
+        assert_eq!(got.theme_source, ThemeSource::None);
+        let row = app.store().feed(got.id).unwrap();
+        assert_eq!(row.folder_id, None);
+        assert_eq!(row.xml_url_original, row.xml_url);
+        assert_eq!(row.html_url.as_deref(), Some("http://example.org/"));
+    }
+
+    #[tokio::test]
+    async fn discovers_the_first_announced_feed() {
+        let server = MockServer::start().await;
+        let html = page_announcing(&["/first.xml", "/second.xml"]);
+        serve(&server, "/", 200, &html, "text/html").await;
+        serve(&server, "/first.xml", 200, RSS, "application/rss+xml").await;
+        serve(&server, "/second.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_app();
+        let got = add(&app, &server.uri()).await.unwrap();
+        assert!(got.discovered);
+        assert_eq!(got.xml_url, format!("{}/first.xml", server.uri()));
+        let seen: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.url.path().to_owned())
+            .collect();
+        assert!(!seen.contains(&"/second.xml".to_owned()), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn relative_feed_link_resolves_against_the_final_url() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(path("/old"))
+            .respond_with(ResponseTemplate::new(301).insert_header("location", "/blog/index.html"))
+            .mount(&server)
+            .await;
+        let html = page_announcing(&["feed.xml"]);
+        serve(&server, "/blog/index.html", 200, &html, "text/html").await;
+        serve(&server, "/blog/feed.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_app();
+        let got = add(&app, &format!("{}/old", server.uri())).await.unwrap();
+        assert_eq!(got.xml_url, format!("{}/blog/feed.xml", server.uri()));
+    }
+
+    #[tokio::test]
+    async fn page_without_feed_is_refused() {
+        let server = MockServer::start().await;
+        serve(&server, "/", 200, &page_announcing(&[]), "text/html").await;
+        let app = add_app();
+        let err = add(&app, &server.uri()).await.unwrap_err();
+        assert!(matches!(err, Error::NoFeedFound(_)), "{err:?}");
+        assert_eq!(err.to_string(), "This page announces no feed.");
+        assert_eq!(count(&app, "feed"), 0);
+    }
+
+    #[tokio::test]
+    async fn first_link_not_a_feed_is_refused() {
+        let server = MockServer::start().await;
+        let html = page_announcing(&["/broken.xml", "/good.xml"]);
+        serve(&server, "/", 200, &html, "text/html").await;
+        serve(
+            &server,
+            "/broken.xml",
+            200,
+            "<html>nope</html>",
+            "text/html",
+        )
+        .await;
+        serve(&server, "/good.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_app();
+        let err = add(&app, &server.uri()).await.unwrap_err();
+        match &err {
+            Error::NoFeedFound(tried) => assert!(tried.ends_with("/broken.xml"), "{tried}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(count(&app, "feed"), 0);
+    }
+
+    #[tokio::test]
+    async fn typed_address_already_followed_is_refused() {
+        let server = MockServer::start().await;
+        serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_app();
+        let url = format!("{}/feed.xml", server.uri());
+        let first = add(&app, &url).await.unwrap();
+        let before = server.received_requests().await.unwrap().len();
+        let err = add(&app, &url).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::FeedExists { id, buried: false, .. } if *id == first.id),
+            "{err:?}"
+        );
+        assert_eq!(err.to_string(), "Already followed: T.");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            before,
+            "the typed address is checked before any network work"
+        );
+        garden::decide(
+            app.store(),
+            first.id,
+            crate::model::Decision::Bury,
+            Utc::now(),
+        )
+        .unwrap();
+        let err = add(&app, &url).await.unwrap_err();
+        assert_eq!(err.to_string(), "Already in the Cemetery: T.");
+        assert_eq!(count(&app, "feed"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_resolved_feed_already_followed_is_refused_after_discovery() {
+        let server = MockServer::start().await;
+        serve(
+            &server,
+            "/",
+            200,
+            &page_announcing(&["/feed.xml"]),
+            "text/html",
+        )
+        .await;
+        serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_app();
+        add(&app, &format!("{}/feed.xml", server.uri()))
+            .await
+            .unwrap();
+        let err = add(&app, &server.uri()).await.unwrap_err();
+        assert!(matches!(err, Error::FeedExists { .. }), "{err:?}");
+        assert_eq!(count(&app, "feed"), 1);
+    }
+
+    #[tokio::test]
+    async fn private_address_refused() {
+        let server = MockServer::start().await;
+        serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+        let limits = FetchLimits {
+            per_host_gap: Duration::ZERO,
+            timeout: Duration::from_secs(5),
+            ..FetchLimits::default()
+        };
+        // Production configuration: no `allow_private_articles`.
+        let app = Ressac::with_parts(
+            Store::open_in_memory().unwrap(),
+            limits,
+            "http://127.0.0.1:9",
+        )
+        .unwrap();
+        let err = add(&app, &format!("{}/feed.xml", server.uri()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert_eq!(count(&app, "feed"), 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_theme_is_refused_before_anything_is_written() {
+        let server = MockServer::start().await;
+        serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_app();
+        let err = app
+            .add_feed(
+                &format!("{}/feed.xml", server.uri()),
+                Some("nope"),
+                &NullSink,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::UnknownTheme(_)), "{err:?}");
+        assert_eq!(count(&app, "feed"), 0);
+    }
+
+    #[tokio::test]
+    async fn fetches_right_after_adding() {
+        let server = MockServer::start().await;
+        serve(&server, "/feed.xml", 200, RSS, "application/rss+xml").await;
+        let app = add_app();
+        let got = add(&app, &format!("{}/feed.xml", server.uri()))
+            .await
+            .unwrap();
+        let entries: i64 = app
+            .store()
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM entry WHERE feed_id = ?1",
+                [got.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(entries, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_fetch_keeps_the_feed() {
+        let server = MockServer::start().await;
+        // The first request (the add's own look at the address) succeeds, the next fail.
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(path("/feed.xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(RSS, "application/rss+xml"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        serve(&server, "/feed.xml", 500, "", "text/plain").await;
+        let app = add_app();
+        let got = add(&app, &format!("{}/feed.xml", server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(count(&app, "feed"), 1);
+        assert_eq!(count(&app, "entry"), 0);
+        let attempts = app.store().attempts(got.id, 1).unwrap();
+        assert_eq!(attempts.len(), 1, "the failed fetch is recorded");
     }
 }
 
