@@ -315,10 +315,10 @@ impl Ressac {
         stop: Arc<AtomicBool>,
     ) -> Result<AddedFeed> {
         // Refused before any network work; the insert checks it again in its transaction.
-        if let Some(key) = theme {
-            if !self.store.themes()?.iter().any(|t| t.key == key) {
-                return Err(Error::UnknownTheme(key.to_owned()));
-            }
+        if let Some(key) = theme
+            && !self.store.themes()?.iter().any(|t| t.key == key)
+        {
+            return Err(Error::UnknownTheme(key.to_owned()));
         }
         let typed = normalise_address(input)?;
         if let Some((id, title, buried)) = self.store.find_duplicate(&[&typed])? {
