@@ -300,6 +300,30 @@ Piste 10 du brainstorming du 19/10 sur d'autres présentations des flux (maquett
 - Encres Pop et Pirates retirées à la recette, à la demande de Clément : il ne reste que « Blue ink » et « White on black ». Une encre mémorisée « pop » ou « pirate » est relue comme « Blue ink » (appli et page). Le parchemin vieilli et le X du trésor ont disparu avec elles.
 - Deux mineurs de la relecture finale corrigés : un test Swift qui pouvait courir contre le démarrage de l'observation GRDB (pause de 100 ms avant l'insertion), et un test Rust qui attendait un jour UTC alors que `entry_day` compte dans le fuseau local (faux à UTC+12 ; vérifié avec `TZ=Pacific/Kiritimati`).
 
+## Ajouter un flux (sous-projet 7)
+
+Demandé par Clément le 19/10/2026 (jusque-là un flux n'entrait que par l'import OPML). Spec `docs/specs/2026-10-20-add-feed-design.md`, plan `docs/plans/2026-10-20-add-feed.md`, exécution en sous-agents (une relecture par tâche). Schéma inchangé (v5). Recette en attente.
+
+### Décisions (spec §2, prises avec Clément le 20/10/2026)
+
+- Une seule adresse : celle d'un flux (RSS, Atom, JSON Feed) ou celle d'un site. Pour une page, le **premier** flux annoncé est pris ; aucun, rien n'est ajouté (« This page announces no feed. »).
+- Le flux atterrit seul, **tout en bas des flux hors dossier**, et Clément le glisse ensuite sur un dossier de la barre latérale ; en terminal, `ressac feed move <flux> <dossier|root>`.
+- Carte marine : un flux du même site (même hôte, `www.` ignoré) donne son thème et son territoire au nouveau ; sinon, une liste « Theme » facultative dans la fenêtre d'ajout, et à défaut UNCHARTED WATERS.
+- Proposé par Claude et accepté : le flux est rafraîchi tout de suite, une adresse déjà suivie est refusée, les garde-fous réseau habituels s'appliquent. Aucune classification par IA (règle du 10/10).
+
+### Décisions de la construction (spec §2b, prises par Claude)
+
+- **Même site** : l'hôte sans `www.`, volontairement plus strict que `url_key::site_of` (domaine enregistrable), sinon tous les `*.substack.com` ou `*.github.io` passeraient leur thème à des inconnus.
+- **La base fait foi** pour thèmes et territoires. Le fichier d'amorce de la recette de la carte était un coup unique : un `ressac chart import` ultérieur remplace tout et efface ce qu'un ajout a hérité, sauf si le fichier le contient. Dit dans le README ; `ressac chart export` reste à faire.
+- **Déplacement et pages** : le flux déplacé prend la plus petite page libre de la plage de sa nouvelle place (règles d'`assign_missing`), garde sa page si la plage est pleine ou si sa page s'y trouve déjà. Un déplacement sans effet affiche « is already in » et sort en code 0.
+- **Doublons** : `url_key` de l'adresse saisie et de l'adresse résolue contre `xml_url` et `xml_url_original` de tous les flux, enterrés compris, pas de comparaison de contenu.
+- **Journaux** : l'appli et la CLI n'écrivent plus que l'adresse sans identifiants, requête ni fragment (ils peuvent porter un jeton).
+- Le rafraîchissement immédiat réutilise `refresh` (`only`, `force`) ; l'évènement `added` clôt le flux `--json`.
+
+### Reporté
+
+Voir TODO, section « Ajouter un flux (sous-projet 7) » : choix parmi plusieurs flux annoncés, dossier dans la fenêtre d'ajout, commandes Antiope, `ressac chart export`, et les mineurs de la relecture finale.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
