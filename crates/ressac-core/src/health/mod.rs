@@ -202,12 +202,18 @@ fn verdict(
         return v;
     }
     if let Some(err) = &last.error {
-        return Verdict::new(
+        let mut v = Verdict::new(
             Status::Ailing,
             format!("Last fetch failed: {}.", err.label()),
             err.clue(),
             upgrade,
         );
+        if unconfirmed_gone(ev) {
+            v.bullets.push(
+                "It worked on the fetch before; the next fetch will tell if it is gone.".into(),
+            );
+        }
+        return v;
     }
     let Some(last_entry) = cadence.last_entry_at else {
         return Verdict::new(
@@ -337,9 +343,24 @@ fn is_definitive_off_site(err: &ErrorKind, target: &str) -> bool {
     }
 }
 
-/// Dead rule (spec §7): 404/410/NXDOMAIN on the last meaningful attempt, a redirect to
-/// another site that serves no feed, or a long enough streak of failures.
+/// Whether the last meaningful attempt is a 404/410 right after one that worked. A whole
+/// host can answer that way for a few hours (YouTube, 20/10/2026), so the next fetch has
+/// to confirm it before the feed is Dead.
+fn unconfirmed_gone(ev: &FeedEvidence) -> bool {
+    let mut meaningful = ev.attempts.iter().filter(|a| !a.network_suspect);
+    matches!(
+        meaningful.next().and_then(|a| a.error.as_ref()),
+        Some(ErrorKind::Http(404 | 410))
+    ) && meaningful.next().is_some_and(|a| a.error.is_none())
+}
+
+/// Dead rule (spec §7): 404/410 on the last meaningful attempt, unless the one before
+/// worked; NXDOMAIN; a redirect to another site that serves no feed; or a long enough
+/// streak of failures.
 pub fn dead_reason(ev: &FeedEvidence) -> Option<DeadReason> {
+    if unconfirmed_gone(ev) {
+        return None;
+    }
     let meaningful: Vec<&AttemptRecord> =
         ev.attempts.iter().filter(|a| !a.network_suspect).collect();
     let last = meaningful.first()?;
@@ -543,11 +564,65 @@ mod tests {
             (ErrorKind::Http(404), "404"),
             (ErrorKind::Dns, "DNS"),
         ] {
-            let d = diagnose(&ev(vec![failed(0, kind), ok(30)], vec![entry(40)]));
+            let d = diagnose(&ev(
+                vec![failed(0, kind), failed(1, ErrorKind::Timeout), ok(30)],
+                vec![entry(40)],
+            ));
             assert_eq!(d.status, Status::Dead);
             assert_eq!(d.evidence.clue, clue);
             assert_eq!(d.action, Some(Action::Bury));
         }
+        let first = diagnose(&ev(vec![failed(0, ErrorKind::Http(404))], vec![]));
+        assert_eq!(
+            first.status,
+            Status::Dead,
+            "a first fetch has nothing to wait for"
+        );
+    }
+
+    /// Real run 2026-10-20: YouTube answered 404 for all 13 of its feeds in one run and
+    /// 200 again a few hours later. A 404/410 right after a fetch that worked waits for
+    /// the next fetch.
+    #[test]
+    fn gone_right_after_a_working_fetch_waits_for_confirmation() {
+        for code in [404, 410] {
+            let d = diagnose(&ev(
+                vec![failed(0, ErrorKind::Http(code)), ok(1)],
+                vec![entry(3)],
+            ));
+            assert_eq!(d.status, Status::Ailing, "{code}");
+            assert_eq!(d.reason, format!("Last fetch failed: HTTP {code}."));
+            assert_eq!(d.evidence.clue, code.to_string());
+            assert_eq!(d.action, None);
+            assert_eq!(
+                d.evidence.bullets.last().unwrap(),
+                "It worked on the fetch before; the next fetch will tell if it is gone."
+            );
+            let confirmed = diagnose(&ev(
+                vec![
+                    failed(0, ErrorKind::Http(code)),
+                    failed(1, ErrorKind::Http(code)),
+                    ok(2),
+                ],
+                vec![entry(3)],
+            ));
+            assert_eq!(confirmed.status, Status::Dead, "{code} confirmed");
+        }
+    }
+
+    #[test]
+    fn unconfirmed_gone_skips_network_suspects_and_adopts_nothing() {
+        let mut suspect = failed(1, ErrorKind::Dns);
+        suspect.network_suspect = true;
+        let mut e = ev(
+            vec![failed(0, ErrorKind::Http(404)), suspect, ok(2)],
+            vec![entry(3)],
+        );
+        assert_eq!(diagnose(&e).status, Status::Ailing);
+        e.discovered_url = Some("https://blog.example.org/new-feed.xml".into());
+        let d = diagnose(&e);
+        assert_eq!(d.status, Status::Ailing);
+        assert_eq!(d.action, None);
     }
 
     #[test]
