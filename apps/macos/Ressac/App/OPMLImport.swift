@@ -263,6 +263,14 @@ private struct LibraryChrome: ViewModifier {
                 ImportConfirmationSheet(file: pending.file, report: pending.report, flow: flow)
             }
         }
+        .sheet(isPresented: Binding(get: { state.pendingSheet == .addFeed }, set: { if !$0 { state.pendingSheet = nil } })) {
+            AddFeedSheet(state: state)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let note = state.addFeedNote {
+                AddFeedNoteView(note: note) { state.addFeedNote = nil }
+            }
+        }
         .alert("This OPML file can't be imported",
                isPresented: Binding(get: { flow.failureMessage != nil }, set: { if !$0 { flow.cancel() } })) {
             Button("OK", role: .cancel) { flow.cancel() }
