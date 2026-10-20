@@ -112,16 +112,37 @@ fn export(g: &Globals, output: Option<&Path>, out: &mut impl Write) -> anyhow::R
 }
 
 /// Writes `text` to a temporary file beside `file`, then renames it over `file`: a failed
-/// write leaves the old file whole instead of a truncated backup.
+/// write leaves the old file whole instead of a truncated backup. The temporary file is
+/// created exclusively (`create_new` refuses an existing path, a planted symlink included)
+/// under a name that differs on every try, and removed if anything fails.
 fn write_replacing(file: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
     let name = file
         .file_name()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file name"))?;
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(name);
-    tmp_name.push(format!(".{}.tmp", std::process::id()));
-    let tmp = file.with_file_name(tmp_name);
-    let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, file));
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "not a file name"))?;
+    let mut attempt = 0u32;
+    let (tmp, mut handle) = loop {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let mut tmp_name = std::ffi::OsString::from(".");
+        tmp_name.push(name);
+        tmp_name.push(format!(".{}-{nanos:x}-{attempt}.tmp", std::process::id()));
+        let tmp = file.with_file_name(tmp_name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(handle) => break (tmp, handle),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists && attempt < 8 => attempt += 1,
+            Err(e) => return Err(e),
+        }
+    };
+    let result = handle
+        .write_all(text.as_bytes())
+        .and_then(|()| handle.sync_all())
+        .and_then(|()| std::fs::rename(&tmp, file));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -146,7 +167,27 @@ mod tests {
         std::fs::write(&file, "old").unwrap();
         write_replacing(&file, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no temporary file left"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_replacing_ignores_a_planted_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "precious").unwrap();
+        let file = dir.path().join("seas.json");
+        let planted = dir
+            .path()
+            .join(format!(".seas.json.{}.tmp", std::process::id()));
+        std::os::unix::fs::symlink(&victim, planted).unwrap();
+        write_replacing(&file, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
     }
 
     #[test]
