@@ -7,7 +7,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ressac_core::model::{Decision, FeedId, Status};
 use ressac_core::service::{AddedFeed, Event, EventSink, FULL_ARTICLES, Summary};
 use ressac_core::store::pages::PageRow;
-use ressac_core::store::{ChartImportReport, ChartSnapshot, ImportReport, Moved, ThemeSource};
+use ressac_core::store::{
+    ChartImport, ChartImportReport, ChartSnapshot, ImportReport, Moved, ThemeSource,
+};
 
 /// Order of the `check` summary grid (three per line).
 const SUMMARY_ORDER: [Status; 9] = [
@@ -388,6 +390,28 @@ pub fn chart_text(snap: &ChartSnapshot) -> String {
 }
 
 /// `ressac chart import`: what the file did, or on a dry run would do.
+/// What `ressac chart export --output` wrote, and where.
+pub fn chart_export_text(chart: &ChartImport, file: &std::path::Path) -> String {
+    format!(
+        "Exported {} theme(s), {} themed feed(s) and {} territories to {}.",
+        chart.themes.len(),
+        chart.feeds.len(),
+        chart.territories.len(),
+        printable(&file.display().to_string())
+    )
+}
+
+/// The note printed when the export left feeds out (see `Store::export_chart`).
+pub fn chart_export_unaddressable(ids: &[FeedId]) -> String {
+    format!(
+        "Left out: {} (their address belongs to another feed, so a chart file cannot name them).",
+        ids.iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 pub fn chart_import_text(r: &ChartImportReport, dry_run: bool) -> String {
     let mut out = String::new();
     if dry_run {
@@ -709,6 +733,24 @@ mod tests {
     fn progress_title_neutralises_controls() {
         assert_eq!(progress_title("a\u{1b}[2Jb"), "a\u{FFFD}[2Jb");
         assert_eq!(progress_title("Courrier"), "Courrier");
+    }
+
+    #[test]
+    fn chart_export_messages_are_printable() {
+        let chart = ChartImport {
+            themes: vec![],
+            feeds: Default::default(),
+            territories: vec![],
+        };
+        let text = chart_export_text(&chart, std::path::Path::new("a\u{1b}[31m.json"));
+        assert_eq!(
+            text,
+            "Exported 0 theme(s), 0 themed feed(s) and 0 territories to a\u{FFFD}[31m.json."
+        );
+        assert_eq!(
+            chart_export_unaddressable(&[2, 7]),
+            "Left out: #2, #7 (their address belongs to another feed, so a chart file cannot name them)."
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub mod pages;
 mod reading;
 mod ticker;
 
-pub use chart::{ChartImport, ChartImportReport, TerritoryDef, ThemeDef};
+pub use chart::{ChartExport, ChartImport, ChartImportReport, TerritoryDef, ThemeDef};
 pub use chart_snapshot::{
     ChartContinent, ChartEntry, ChartFeed, ChartSnapshot, ChartTerritory, ChartTheme, ChartTotals,
 };

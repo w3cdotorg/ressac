@@ -40,7 +40,7 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Print the sea chart's data, or import its themes and territories
+    /// Print the sea chart's data, or import or export its themes and territories
     Chart {
         #[command(subcommand)]
         action: Option<ChartCommand>,
@@ -217,6 +217,12 @@ pub enum ChartCommand {
         /// Report what would change without writing anything
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Write the database's themes, feed themes and territories as an import file
+    Export {
+        /// Write to this file instead of standard output
+        #[arg(long, short, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
 }
 

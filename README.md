@@ -31,6 +31,7 @@ ressac edition show                    # today's edition by section; --json for 
 ressac feed cadence 12 daily           # force a feed's rhythm group (daily, weekly, monthly, rare, silent) or auto
 ressac chart                           # the sea chart's data as a summary; --json for one JSON line
 ressac chart import seas.json          # themes, feed themes and territories; --dry-run to preview
+ressac chart export                    # that same file, written from the database; --output seas.json for a file
 ressac feed theme 12 ai-labs           # put a feed in a theme (a sea; its key or name), or take it out with none
 ressac feed move 12 3                  # move a feed into folder 3, or back to the top level with root
 ressac ticker --tmux                   # one unread entry for tmux's status bar (see The tmux ticker)
@@ -156,6 +157,8 @@ View ▸ Sea Chart (`⇧⌘M`) opens a window that draws your living feeds as an
 
 `ressac chart import <file.json> [--dry-run]` reads this file: `themes` in display order, `feeds` mapping a feed URL (`xml_url`, or its original one) to a theme key, and `territories`, each with either `feeds` (URLs, at least two on the chart to show) or a `continent` (a theme key). A re-import replaces the themes and the territories: themes are updated by key, a theme missing from the file is deleted and its feeds become unthemed, and every territory is rebuilt from the file. Theme keys may not be empty, `none` (in any case) or start with `-` (exit 2). The report lists the URLs it did not find, the territories with fewer than two matched feeds (kept off the chart) and the feeds left without a theme; `--dry-run` reports what would be imported and writes nothing.
 
+`ressac chart export [--output <file.json>]` writes that same file from the database, to standard output unless `--output` names a file: `themes` in display order (empty ones included), `feeds` mapping each themed feed's `xml_url` to its theme key (buried feeds too, as import accepts them), then every territory and continent with its feeds in order. It reads without writing, needs an existing database (exit 1 otherwise) and exports what feeds inherited when they were added, so `export`, then `import` into the same or another database, gives the same chart. A feed whose addresses another feed claims first (a buried twin) cannot be named in a file import would resolve to it: it is left out, and its id is listed on standard error.
+
 ```json
 {
   "themes": [
@@ -174,7 +177,7 @@ View ▸ Sea Chart (`⇧⌘M`) opens a window that draws your living feeds as an
 }
 ```
 
-**The database is canonical.** Themes and territories live in the database, not in the import file: the file seeded them once, and adding feeds or setting themes by hand changes them afterwards. A later `ressac chart import` replaces themes and territories wholesale, so it drops what added feeds inherited unless the file includes them. Keep that in mind before re-importing an old file; a `ressac chart export` to write the current state back to a file is not there yet.
+**The database is canonical.** Themes and territories live in the database, not in the import file: the file seeded them once, and adding feeds or setting themes by hand changes them afterwards. A later `ressac chart import` replaces themes and territories wholesale, so it drops what added feeds inherited unless the file includes them. Keep that in mind before re-importing an old file: write the current state back with `ressac chart export` first.
 
 `ressac chart` prints a summary (feeds per theme, each sea headed by its name and its key in brackets, then the territories); `ressac --json chart` prints the page's data as one JSON line (`version` 1).
 

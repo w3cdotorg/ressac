@@ -1,4 +1,4 @@
-//! `ressac chart`: the sea chart's data for the apps, and the import of its themes.
+//! `ressac chart`: the sea chart's data for the apps, and the import and export of its themes.
 
 use std::io::Write;
 use std::path::Path;
@@ -22,6 +22,7 @@ pub fn chart(
     match action {
         None => snapshot(g, out),
         Some(ChartCommand::Import { file, dry_run }) => import(g, &file, dry_run, out),
+        Some(ChartCommand::Export { output }) => export(g, output.as_deref(), out),
     }
 }
 
@@ -77,6 +78,31 @@ fn import(
         writeln!(out, "{}", report_json(&report, dry_run))?;
     } else {
         writeln!(out, "{}", output::chart_import_text(&report, dry_run))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `ressac chart export [--output FILE]`: the import file, from the database as it is now.
+/// Read-only, and never creates a database: with none there is nothing to export. The JSON
+/// is serde's, so feed-supplied strings are escaped; the messages go through `printable`.
+fn export(g: &Globals, output: Option<&Path>, out: &mut impl Write) -> anyhow::Result<ExitCode> {
+    let store = Store::open_existing_query_only(&g.db)?;
+    let export = store.export_chart()?;
+    let mut text = serde_json::to_string_pretty(&export.chart)?;
+    text.push('\n');
+    match output {
+        Some(file) => {
+            std::fs::write(file, &text)
+                .with_context(|| format!("cannot write {}", file.display()))?;
+            writeln!(out, "{}", output::chart_export_text(&export.chart, file))?;
+        }
+        None => write!(out, "{text}")?,
+    }
+    if !export.unaddressable.is_empty() {
+        eprintln!(
+            "{}",
+            output::chart_export_unaddressable(&export.unaddressable)
+        );
     }
     Ok(ExitCode::SUCCESS)
 }

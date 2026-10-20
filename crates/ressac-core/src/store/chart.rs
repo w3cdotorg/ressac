@@ -1,6 +1,6 @@
 //! Themes, territories and the chart import file (sea chart, spec §4 and §5).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -19,23 +19,31 @@ pub struct ThemeDef {
 }
 
 /// A territory (a named group of feeds) or, with `continent`, a whole theme given a name.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerritoryDef {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feeds: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continent: Option<String>,
 }
 
 /// The import file: themes in order, the theme of each feed URL, and the territories.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChartImport {
     pub themes: Vec<ThemeDef>,
     #[serde(default)]
     pub feeds: BTreeMap<String, String>,
     #[serde(default)]
     pub territories: Vec<TerritoryDef>,
+}
+
+/// What `Store::export_chart` read: the file `import_chart` takes back, and the feeds it could
+/// not put in it (see `Store::export_chart`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartExport {
+    pub chart: ChartImport,
+    pub unaddressable: Vec<FeedId>,
 }
 
 /// What an import did (or, on a dry run, would do).
@@ -147,6 +155,21 @@ pub(super) fn join_sibling_territory(
     Ok(Some(name))
 }
 
+/// The feed each address resolves to when a chart file names it: `xml_url` wins over
+/// `xml_url_original` when both name the same address, and of two feeds sharing one (a buried
+/// twin) the lowest id wins. Import and export both read it, so they agree.
+fn feed_owners(conn: &Connection) -> Result<HashMap<String, i64>> {
+    let mut owners: HashMap<String, i64> = HashMap::new();
+    for column in ["xml_url_original", "xml_url"] {
+        let mut stmt = conn.prepare(&format!("SELECT {column}, id FROM feed ORDER BY id DESC"))?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+            let (url, id) = row?;
+            owners.insert(url, id);
+        }
+    }
+    Ok(owners)
+}
+
 /// The id and definition of the theme `given` names (see `Store::resolve_theme`).
 pub(super) fn resolve_theme_in(conn: &Connection, given: &str) -> Result<(i64, ThemeDef)> {
     let mut stmt =
@@ -217,6 +240,91 @@ impl Store {
         Ok(())
     }
 
+    /// The database's themes, feed themes and territories as the file `import_chart` reads:
+    /// themes in position order, each themed feed (buried ones too, as import accepts them)
+    /// under its `xml_url`, territories and continents in creation order with their feeds in
+    /// order. A feed whose addresses another feed claims first (a buried twin) cannot be named
+    /// in a file that import would resolve to it; those ids come back in `unaddressable`
+    /// instead of being exported under the wrong feed.
+    pub fn export_chart(&self) -> Result<ChartExport> {
+        let conn = self.conn();
+        let owners = feed_owners(conn)?;
+        let mut unaddressable = BTreeSet::new();
+        let mut address_of: HashMap<i64, Option<String>> = HashMap::new();
+        {
+            let mut stmt =
+                conn.prepare("SELECT id, xml_url, xml_url_original FROM feed ORDER BY id")?;
+            for row in stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })? {
+                let (id, xml, original) = row?;
+                let address = [xml, original]
+                    .into_iter()
+                    .find(|url| owners.get(url) == Some(&id));
+                address_of.insert(id, address);
+            }
+        }
+        let mut address = |id: i64| -> Option<String> {
+            let found = address_of.get(&id).cloned().flatten();
+            if found.is_none() {
+                unaddressable.insert(id);
+            }
+            found
+        };
+
+        let mut feeds = BTreeMap::new();
+        let themed: Vec<(i64, String)> = conn
+            .prepare(
+                "SELECT f.id, t.key FROM feed f JOIN theme t ON t.id = f.theme_id ORDER BY f.id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (id, key) in themed {
+            if let Some(url) = address(id) {
+                feeds.insert(url, key);
+            }
+        }
+
+        let mut territories = Vec::new();
+        let defs: Vec<(i64, String, Option<String>)> = conn
+            .prepare(
+                "SELECT t.id, t.name, th.key FROM territory t \
+                 LEFT JOIN theme th ON th.id = t.theme_id ORDER BY t.id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (id, name, continent) in defs {
+            let mut members = Vec::new();
+            let ids: Vec<i64> = conn
+                .prepare(
+                    "SELECT feed_id FROM territory_feed WHERE territory_id = ?1 ORDER BY position",
+                )?
+                .query_map([id], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            for feed in ids {
+                members.extend(address(feed));
+            }
+            territories.push(TerritoryDef {
+                name,
+                feeds: members,
+                continent,
+            });
+        }
+
+        Ok(ChartExport {
+            chart: ChartImport {
+                themes: self.themes()?,
+                feeds,
+                territories,
+            },
+            unaddressable: unaddressable.into_iter().collect(),
+        })
+    }
+
     /// Applies an import file in one transaction; a dry run rolls it back but still reports.
     pub fn import_chart(&self, import: &ChartImport, dry_run: bool) -> Result<ChartImportReport> {
         let mut seen = HashSet::new();
@@ -268,16 +376,7 @@ impl Store {
             }
         }
 
-        // `xml_url` wins over `xml_url_original` when both name the same address.
-        let mut feeds_by_url: HashMap<String, i64> = HashMap::new();
-        for column in ["xml_url_original", "xml_url"] {
-            let mut stmt =
-                tx.prepare(&format!("SELECT {column}, id FROM feed ORDER BY id DESC"))?;
-            for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
-                let (url, id) = row?;
-                feeds_by_url.insert(url, id);
-            }
-        }
+        let feeds_by_url = feed_owners(&tx)?;
 
         let mut unknown_keys: Vec<String> = Vec::new();
         let mut note_unknown = |key: &str| {
@@ -667,5 +766,203 @@ mod tests {
         assert_eq!(count(&s, "theme"), 0);
         assert_eq!(count(&s, "territory"), 0);
         assert_eq!(feed_theme(&s, 1), None);
+    }
+
+    const NOW: &str = "2026-10-20T12:00:00Z";
+
+    /// One recent entry per feed, so the chart draws them all.
+    fn with_entries(s: &Store, n: i64) {
+        for id in 1..=n {
+            s.conn()
+                .execute(
+                    "INSERT INTO entry (id, feed_id, guid, title, published_at, fetched_at) \
+                     VALUES (?1, ?1, ?2, ?3, '2026-10-19T08:00:00.000Z', '2026-10-19T08:00:00.000Z')",
+                    params![id, format!("g{id}"), format!("Entry {id}")],
+                )
+                .unwrap();
+        }
+    }
+
+    fn snapshot(s: &Store) -> serde_json::Value {
+        let mut v = serde_json::to_value(s.chart_snapshot(NOW.parse().unwrap()).unwrap()).unwrap();
+        v["surveyed_at"] = serde_json::Value::Null;
+        v
+    }
+
+    fn continent(name: &str, key: &str) -> TerritoryDef {
+        TerritoryDef {
+            name: name.into(),
+            feeds: vec![],
+            continent: Some(key.into()),
+        }
+    }
+
+    /// Three themes (one empty), three of five feeds themed, a territory and a continent.
+    fn charted_store() -> Store {
+        let s = store_with_feeds(5);
+        with_entries(&s, 5);
+        s.import_chart(
+            &import(
+                &["zeta", "alpha", "empty"],
+                &[(url(3), "alpha"), (url(1), "zeta"), (url(4), "alpha")],
+                vec![
+                    territory("PAIR", &[url(4), url(3)]),
+                    continent("ALL ALPHA", "alpha"),
+                    territory("LONE", &[url(1)]),
+                ],
+            ),
+            false,
+        )
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn export_writes_the_import_format_in_order() {
+        let s = charted_store();
+        let export = s.export_chart().unwrap();
+        assert_eq!(export.unaddressable, Vec::<FeedId>::new());
+        let chart = export.chart;
+        let keys: Vec<_> = chart.themes.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["zeta", "alpha", "empty"],
+            "position order, empty theme kept"
+        );
+        assert_eq!(chart.themes[0], theme("zeta"));
+        assert_eq!(
+            chart.feeds,
+            BTreeMap::from([
+                (url(1), "zeta".to_owned()),
+                (url(3), "alpha".to_owned()),
+                (url(4), "alpha".to_owned()),
+            ])
+        );
+        assert_eq!(
+            chart.territories,
+            vec![
+                territory("PAIR", &[url(4), url(3)]),
+                continent("ALL ALPHA", "alpha"),
+                territory("LONE", &[url(1)]),
+            ],
+            "creation order, feeds in territory order"
+        );
+    }
+
+    #[test]
+    fn an_exported_file_imports_into_a_fresh_store_to_the_same_chart() {
+        let a = charted_store();
+        let exported = a.export_chart().unwrap().chart;
+        // The file form, as the CLI writes it.
+        let text = serde_json::to_string_pretty(&exported).unwrap();
+        let parsed: ChartImport = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, exported);
+
+        let b = store_with_feeds(5);
+        with_entries(&b, 5);
+        let report = b.import_chart(&parsed, false).unwrap();
+        assert!(report.unmatched_urls.is_empty() && report.unknown_theme_keys.is_empty());
+        assert_eq!(snapshot(&a), snapshot(&b));
+        assert_eq!(b.export_chart().unwrap().chart, exported);
+        assert_eq!(a.themes().unwrap(), b.themes().unwrap());
+    }
+
+    #[test]
+    fn export_includes_what_an_added_feed_inherited() {
+        let s = store_with_feeds(3);
+        for id in [1, 2] {
+            s.conn()
+                .execute(
+                    "UPDATE feed SET xml_url = ?2, xml_url_original = ?2, html_url = 'https://site.example.org/' WHERE id = ?1",
+                    params![id, format!("https://site.example.org/feed{id}.xml")],
+                )
+                .unwrap();
+        }
+        let site = |id: i64| format!("https://site.example.org/feed{id}.xml");
+        s.import_chart(
+            &import(
+                &["a"],
+                &[(site(1), "a")],
+                vec![territory("SITE", &[site(1), site(2)])],
+            ),
+            false,
+        )
+        .unwrap();
+        let added = s
+            .insert_added_feed(
+                &crate::store::NewFeed {
+                    xml_url: "https://site.example.org/new.xml".into(),
+                    html_url: Some("https://site.example.org/".into()),
+                    title: "New".into(),
+                    known_as: Vec::new(),
+                },
+                None,
+                NOW.parse().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(added.territory.as_deref(), Some("SITE"));
+        let chart = s.export_chart().unwrap().chart;
+        assert_eq!(chart.feeds["https://site.example.org/new.xml"], "a");
+        assert_eq!(
+            chart.territories,
+            [territory(
+                "SITE",
+                &[site(1), site(2), "https://site.example.org/new.xml".into()]
+            )]
+        );
+    }
+
+    #[test]
+    fn export_keeps_the_assignments_of_buried_feeds() {
+        let s = store_with_feeds(3);
+        s.conn()
+            .execute("UPDATE feed SET state = 'buried' WHERE id = 2", [])
+            .unwrap();
+        s.import_chart(
+            &import(
+                &["a"],
+                &[(url(1), "a"), (url(2), "a")],
+                vec![territory("PAIR", &[url(1), url(2)])],
+            ),
+            false,
+        )
+        .unwrap();
+        let chart = s.export_chart().unwrap().chart;
+        assert_eq!(chart.feeds.len(), 2);
+        assert_eq!(chart.territories, [territory("PAIR", &[url(1), url(2)])]);
+    }
+
+    #[test]
+    fn a_feed_import_cannot_address_is_reported_not_exported() {
+        let s = store_with_feeds(2);
+        // Feed 2 is a buried twin of feed 1: import resolves their shared address to feed 1.
+        s.conn()
+            .execute(
+                "UPDATE feed SET state = 'buried', xml_url = ?1, xml_url_original = ?1 WHERE id = 2",
+                [url(1)],
+            )
+            .unwrap();
+        s.conn()
+            .execute_batch(
+                "INSERT INTO theme (id, key, name, sea_name, position) VALUES (1, 'a', 'A', 'SEA', 0);
+                 UPDATE feed SET theme_id = 1;",
+            )
+            .unwrap();
+        let export = s.export_chart().unwrap();
+        assert_eq!(
+            export.chart.feeds,
+            BTreeMap::from([(url(1), "a".to_owned())])
+        );
+        assert_eq!(export.unaddressable, [2]);
+    }
+
+    #[test]
+    fn export_of_an_empty_store_is_an_empty_file() {
+        let s = store_with_feeds(2);
+        let chart = s.export_chart().unwrap().chart;
+        assert_eq!(
+            serde_json::to_value(&chart).unwrap(),
+            serde_json::json!({"themes": [], "feeds": {}, "territories": []})
+        );
     }
 }

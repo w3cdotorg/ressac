@@ -1440,6 +1440,99 @@ fn chart_import_file(home: &Path) -> std::path::PathBuf {
 }
 
 #[test]
+fn chart_export_prints_the_import_format() {
+    let home = chart_home();
+    let out = ressac(home.path(), &["chart", "export"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+    let text = stdout(&out);
+    assert!(text.ends_with("}\n"), "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        v,
+        json!({
+            "themes": [
+                {"key": "labs", "name": "AI labs and tools", "sea": "SEA OF THE LABS"},
+                {"key": "web", "name": "Web and comics", "sea": "WEB SEA"},
+            ],
+            "feeds": {
+                "http://orange-drenka.example.net/feeds/posts/default?alt=rss": "labs",
+                "https://orange.example.org/feed/": "labs",
+                "https://www.xkcd.com/rss.xml": "web",
+            },
+            "territories": [
+                {"name": "ORANGE COAST", "feeds": [
+                    "https://orange.example.org/feed/",
+                    "http://orange-drenka.example.net/feeds/posts/default?alt=rss"]},
+                {"name": "WEB CONTINENT", "continent": "web"},
+            ],
+        })
+    );
+    // `--json` changes nothing: the file is JSON either way.
+    assert_eq!(
+        stdout(&ressac(home.path(), &["--json", "chart", "export"])),
+        text
+    );
+}
+
+#[test]
+fn chart_export_to_a_file_round_trips_through_import() {
+    let home = chart_home();
+    let file = home.path().join("seas.json");
+    let out = ressac(
+        home.path(),
+        &["chart", "export", "--output", file.to_str().unwrap()],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).starts_with("Exported 2 theme(s), 3 themed feed(s) and 2 territories to "),
+        "{}",
+        stdout(&out)
+    );
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(written, stdout(&ressac(home.path(), &["chart", "export"])));
+
+    let other = tempfile::tempdir().unwrap();
+    assert!(ressac(other.path(), &["import", FIXTURE]).status.success());
+    let report = ressac(
+        other.path(),
+        &["--json", "chart", "import", file.to_str().unwrap()],
+    );
+    assert!(report.status.success(), "{}", stderr(&report));
+    let report: Value = serde_json::from_str(stdout(&report).trim()).unwrap();
+    assert_eq!(report["unmatched_urls"], json!([]));
+    assert_eq!(report["feeds_themed"], 3);
+    assert_eq!(
+        stdout(&ressac(other.path(), &["chart", "export"])),
+        written,
+        "the second database exports what the first did"
+    );
+}
+
+#[test]
+fn chart_export_needs_a_database_and_creates_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let out = ressac(home.path(), &["chart", "export"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "");
+    assert!(stderr(&out).contains("No database at"), "{}", stderr(&out));
+    assert!(!home.path().join("db.sqlite").exists());
+}
+
+#[test]
+fn chart_export_to_an_unwritable_path_fails_cleanly() {
+    let home = chart_home();
+    let file = home.path().join("missing-dir/seas.json");
+    let out = ressac(
+        home.path(),
+        &["chart", "export", "--output", file.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("cannot write"), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "");
+}
+
+#[test]
 fn chart_import_reports_and_dry_run_writes_nothing() {
     let home = tempfile::tempdir().unwrap();
     assert!(ressac(home.path(), &["import", FIXTURE]).status.success());
