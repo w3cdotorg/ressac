@@ -152,6 +152,9 @@ pub struct NewFeed {
     pub xml_url: String,
     pub html_url: Option<String>,
     pub title: String,
+    /// Other addresses the feed answers to (the typed one, a redirect target): checked for
+    /// duplicates with `xml_url`, never stored.
+    pub known_as: Vec<String>,
 }
 
 /// Where an added feed's theme came from.
@@ -199,7 +202,10 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<Inserted> {
         let tx = self.write_tx()?;
-        if let Some((id, title, buried)) = duplicate_in(&tx, &[&new.xml_url])? {
+        let addresses: Vec<&str> = std::iter::once(new.xml_url.as_str())
+            .chain(new.known_as.iter().map(String::as_str))
+            .collect();
+        if let Some((id, title, buried)) = duplicate_in(&tx, &addresses)? {
             return Err(Error::FeedExists { id, title, buried });
         }
         let chosen: Option<(i64, ThemeDef)> = match theme {
@@ -1188,6 +1194,7 @@ mod tests {
             xml_url: xml.to_owned(),
             html_url: html.map(str::to_owned),
             title: title.to_owned(),
+            known_as: Vec::new(),
         }
     }
 
