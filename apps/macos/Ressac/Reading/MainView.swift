@@ -113,6 +113,8 @@ struct SidebarView: View {
             } header: {
                 // Dropping a feed on the header takes it out of its folder.
                 Text("Feeds")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                     .dropDestination(for: String.self) { items, _ in state.dropFeeds(items, onto: nil) }
             }
             Section("Rhythm") {

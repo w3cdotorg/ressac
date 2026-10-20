@@ -629,16 +629,11 @@ enum PendingSheet: Equatable, Sendable {
     }
 
     /// Runs `ressac feed move`; the core renumbers the page. The sidebar reloads through the file
-    /// monitor, and the selection stays on the feed if it was the one moved.
+    /// monitor. The selection is keyed by feed id, which a move does not change, and is never blank
+    /// (it is not optional), so there is nothing to restore and a source picked meanwhile is kept.
     @discardableResult
     func moveFeed(_ feedId: Int64, to folder: Int64?) -> Task<RunOutcome, Never> {
-        let wasSelected = selection == .feed(feedId)
-        let run = runs.start(.moveFeed(id: feedId, folder: folder))
-        return Task {
-            let outcome = await run.value
-            if wasSelected, outcome == .succeeded { selection = .feed(feedId) }
-            return outcome
-        }
+        runs.start(.moveFeed(id: feedId, folder: folder))
     }
 
     /// Runs `ressac add` (spec add-feed §7). On success the new feed is selected and `addFeedNote`

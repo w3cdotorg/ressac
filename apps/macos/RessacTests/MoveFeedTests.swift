@@ -35,17 +35,70 @@ import Testing
         }
     }
 
-    @Test func selection_follows_the_moved_feed() async throws {
+    /// A stub that records its call, then waits for the test to create `go`: the move is in flight until then.
+    private static let slow = """
+        echo "$*" >> "$(dirname "$0")/calls"
+        while [ ! -f "$(dirname "$0")/go" ]; do sleep 0.02; done
+        """
+
+    private func release(_ stub: Stub) throws {
+        try Data().write(to: stub.file("go"))
+    }
+
+    /// `selection` is not optional: nothing can blank it, so a move never needs to restore it.
+    @Test func selection_stays_on_the_moved_feed() async throws {
+        let (state, _, stub) = try makeState(stub: Self.slow)
+        state.selection = .feed(7)
+        let run = state.moveFeed(7, to: 3)
+        try release(stub)
+        #expect(await run.value == .succeeded)
+        #expect(state.selection == .feed(7))
+    }
+
+    @Test func a_source_picked_during_the_move_is_kept() async throws {
+        let (state, _, stub) = try makeState(stub: Self.slow)
+        state.selection = .feed(7)
+        let run = state.moveFeed(7, to: 3)
+        #expect(await eventually { (try? calls(stub).count) == 1 })
+        state.selection = .journal
+        try release(stub)
+        #expect(await run.value == .succeeded)
+        #expect(state.selection == .journal)
+    }
+
+    @Test func moving_an_unselected_feed_leaves_the_selection_alone() async throws {
         let (state, _, stub) = try makeState()
         state.selection = .feed(7)
-        let outcome = await state.moveFeed(7, to: 3).value
-        #expect(outcome == .succeeded)
-        #expect(state.selection == .feed(7))
-        #expect(try calls(stub).last?.hasSuffix("feed move 7 3") == true)
-
-        // Another feed's move leaves the selection alone.
-        _ = await state.moveFeed(8, to: nil).value
+        #expect(await state.moveFeed(8, to: nil).value == .succeeded)
         #expect(state.selection == .feed(7))
         #expect(try calls(stub).last?.hasSuffix("feed move 8 root") == true)
+    }
+
+    // The fixture: feed 2 sits in folder 2 (YouTube, inside Blogs, folder 1).
+    @Test func drop_of_an_unknown_feed_or_a_foreign_string_is_refused() throws {
+        let (state, _, stub) = try makeState()
+        #expect(!state.dropFeeds([FeedDrop.payload(feedId: 999)], onto: 1))
+        #expect(!state.dropFeeds(["https://example.com"], onto: 1))
+        #expect(!FileManager.default.fileExists(atPath: stub.file("calls").path))
+    }
+
+    @Test func drop_on_the_feeds_own_folder_runs_nothing() throws {
+        let (state, _, stub) = try makeState()
+        #expect(!state.dropFeeds([FeedDrop.payload(feedId: 2)], onto: 2))
+        #expect(!FileManager.default.fileExists(atPath: stub.file("calls").path))
+    }
+
+    @Test func drop_on_another_folder_runs_one_move() async throws {
+        let (state, _, stub) = try makeState()
+        #expect(state.dropFeeds([FeedDrop.payload(feedId: 2)], onto: 1))
+        #expect(await eventually { (try? calls(stub).count) == 1 })
+        #expect(try calls(stub).last?.hasSuffix("feed move 2 1") == true)
+    }
+
+    @Test func drop_on_the_feeds_header_moves_to_root() async throws {
+        let (state, _, stub) = try makeState()
+        #expect(state.dropFeeds([FeedDrop.payload(feedId: 2)], onto: nil))
+        #expect(await eventually { (try? calls(stub).count) == 1 })
+        #expect(try calls(stub).last?.hasSuffix("feed move 2 root") == true)
     }
 }
