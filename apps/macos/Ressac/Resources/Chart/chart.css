@@ -67,8 +67,10 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--ink); outline-o
 .key small { font-size: 14px; line-height: 1.25; color: var(--muted); display: block; }
 
 /* ---------- hover ---------- */
+/* chart-draw.js places it (tooltipPosition); max-content keeps its width the same wherever it sits, so it is not
+   squeezed to a word per line near the right edge */
 .tip {
-  position: fixed; z-index: 2; pointer-events: none; transform: translate(12px, 12px); max-width: 260px;
+  position: fixed; z-index: 2; pointer-events: none; box-sizing: border-box; width: max-content; max-width: min(260px, calc(100% - 16px));
   font: 500 16px/1.25 var(--body); background: color-mix(in srgb, var(--paper) 94%, transparent); color: var(--label);
   border: 1px solid var(--ink); padding: 6px 9px;
 }
