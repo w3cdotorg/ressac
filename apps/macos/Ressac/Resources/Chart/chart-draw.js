@@ -88,6 +88,17 @@
     const counts = `${node.unread ? `${node.unread} unread` : "nothing unread"} · ${plural(node.week, "entry", "entries")} this week`;
     return [make(doc, "b", null, titleOf(node)), make(doc, "span", null, counts)];
   }
+  // where a w × h tooltip goes for a pointer at (x, y) in a vw × vh window: right of and below the pointer, on
+  // the side away from any edge it would cross, and never outside the window
+  function tooltipPosition(x, y, w, h, vw, vh) {
+    const GAP = 12, MARGIN = 8;
+    const side = (p, size, room) => {
+      const after = p + GAP;
+      const at = after + size > room - MARGIN ? p - GAP - size : after;
+      return Math.max(MARGIN, Math.min(at, room - size - MARGIN));
+    };
+    return {left: side(x, w, vw), top: side(y, h, vh)};
+  }
   // [head, entries, facts, note]; `on` = {openFeed(id), openURL(url, event), close()}, each optional
   function popoverContent(doc, node, data, on) {
     const head = make(doc, "div", "pop-head"), h = make(doc, "h3");
@@ -595,7 +606,8 @@
       if (!n || !pop.hidden) { tip.hidden = true; return; }
       tip.replaceChildren(...tooltipContent(doc, n));
       tip.hidden = false;
-      tip.style.left = e.clientX + "px"; tip.style.top = e.clientY + "px";
+      const {left, top} = tooltipPosition(e.clientX, e.clientY, tip.offsetWidth, tip.offsetHeight, win.innerWidth, win.innerHeight);
+      tip.style.left = left + "px"; tip.style.top = top + "px";
     });
     plate.addEventListener("pointerleave", () => { tip.hidden = true; });
     const handlers = {
@@ -671,7 +683,7 @@
   const thePage = () => (page ||= createPage(globalThis));
 
   return Object.freeze({
-    normalisePrefs, prefsMessage, parseData, bridge, formatSurvey, tooltipContent, popoverContent, buildScene, drawChart,
+    normalisePrefs, prefsMessage, parseData, bridge, formatSurvey, tooltipContent, tooltipPosition, popoverContent, buildScene, drawChart,
     load(json, prefs) { thePage().load(json, prefs); },
     update(json) { thePage().update(json); },
   });

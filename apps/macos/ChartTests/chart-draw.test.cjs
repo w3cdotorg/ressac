@@ -169,6 +169,17 @@ test("tooltip_counts_the_week", () => {
   assert.equal(draw.tooltipContent(doc, {title: "  ", unread: 0, week: 0})[0].textContent, "(untitled)");
 });
 
+test("tooltip_stays_inside_the_window", () => {
+  // a 200 × 60 tooltip in a 1000 × 700 window: right and below the pointer, 12 px away, unless that edge is too near
+  const at = (x, y) => draw.tooltipPosition(x, y, 200, 60, 1000, 700);
+  assert.deepEqual(at(400, 300), {left: 412, top: 312});
+  assert.deepEqual(at(900, 300), {left: 688, top: 312}, "near the right edge: on the left of the pointer");
+  assert.deepEqual(at(400, 680), {left: 412, top: 608}, "near the bottom: above the pointer");
+  assert.deepEqual(at(990, 695), {left: 778, top: 623}, "bottom right corner: left and above");
+  assert.deepEqual(at(0, 0), {left: 12, top: 12}, "top left corner: right and below");
+  assert.deepEqual(draw.tooltipPosition(100, 50, 200, 60, 150, 80), {left: 8, top: 8}, "a window smaller than the tip");
+});
+
 test("load_accepts_a_string_or_an_object", () => {
   const text = JSON.stringify(fixture());
   assert.deepEqual(draw.parseData(text), draw.parseData(fixture()));
