@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ressac-core", "crates/ressac"]
+members = ["crates/ressac-core", "crates/ressac", "crates/ressac-ui"]
 
 [workspace.package]
 version = "0.2.0"

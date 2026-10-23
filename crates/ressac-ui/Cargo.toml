@@ -1,0 +1,13 @@
+[package]
+name = "ressac-ui"
+description = "View models and pure logic of the Ressac desktop app (no Qt)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ressac-core = { path = "../ressac-core" }
+
+[dev-dependencies]
+tempfile.workspace = true
