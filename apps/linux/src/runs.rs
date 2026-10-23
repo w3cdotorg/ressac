@@ -3,22 +3,26 @@
 //! `ressac_ui`'s (`runs`, `live`); these objects translate them to Qt and bring the worker's
 //! callbacks back to the GUI thread.
 
+use std::cell::RefCell;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use cxx_qt::{CxxQtType, Threading};
+use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use ressac_core::clock::today_start;
+use ressac_core::logging::redact_text;
 use ressac_core::paths::Paths;
-use ressac_core::service::Event;
+use ressac_core::service::{Event, EventSink};
 use ressac_ui::chrono;
 use ressac_ui::live::{Invalidation, POLL_INTERVAL, should_poll};
 use ressac_ui::runs::{
-    Admission, Banner, RunCoordinator, RunRequest, compact_progress_text, fetch_options,
-    progress_text, progress_width,
+    Admission, Banner, RunCoordinator, RunEnd, RunFailure, RunRequest, compact_progress_text,
+    fetch_options, progress_text, progress_width,
 };
 use ressac_ui::sources::Selection;
-use ressac_ui::worker::JobResult;
+use ressac_ui::worker::{JobContext, JobResult};
 
 use crate::launcher::with_session;
 
@@ -89,6 +93,7 @@ pub mod qobject {
     }
 
     impl cxx_qt::Threading for Runs {}
+    impl cxx_qt::Initialize for Runs {}
 
     #[auto_cxx_name]
     unsafe extern "RustQt" {
@@ -212,18 +217,18 @@ impl qobject::Runs {
     }
 
     fn refresh_all(self: Pin<&mut Self>) {
-        self.start(RunRequest::FetchAll);
+        self.fetch(RunRequest::FetchAll);
     }
 
     fn refresh_source(self: Pin<&mut Self>, key: &QString) {
         let Some(selection) = Selection::parse_key(&key.to_string()) else {
             return;
         };
-        self.start(RunRequest::refresh(&selection));
+        self.fetch(RunRequest::refresh(&selection));
     }
 
     fn refresh_feed(self: Pin<&mut Self>, feed_id: i64) {
-        self.start(RunRequest::FetchFeeds(vec![feed_id]));
+        self.fetch(RunRequest::FetchFeeds(vec![feed_id]));
     }
 
     fn show_banner(mut self: Pin<&mut Self>, message: &QString, show_log: bool) {
@@ -248,8 +253,39 @@ impl qobject::Runs {
         self.state_changed();
     }
 
-    /// Admits a fetch (a second long run is refused, not queued) and hands it to the worker.
-    fn start(mut self: Pin<&mut Self>, request: RunRequest) {
+    /// A refresh: the fetch job as a long run nobody waits for.
+    fn fetch(self: Pin<&mut Self>, request: RunRequest) {
+        let job_request = request.clone();
+        self.start_long(
+            request,
+            move |cx, sink, stop| {
+                let options = fetch_options(cx.app.store(), &job_request)?;
+                cx.block_on(cx.app.refresh(options, sink, stop)).map(drop)
+            },
+            |_: &()| None,
+            |_| {},
+            |_| {},
+        );
+    }
+
+    /// Admits a long run (a second one is refused, not queued) and hands it to the worker.
+    /// `events` sees every event on the worker's thread; `end` runs on the GUI thread once the
+    /// run is concluded.
+    fn start_long<T: Send + 'static>(
+        mut self: Pin<&mut Self>,
+        request: RunRequest,
+        job: impl FnOnce(&JobContext<'_>, &dyn EventSink, Arc<AtomicBool>) -> ressac_core::Result<T>
+        + Send
+        + 'static,
+        failure_of: impl FnOnce(&T) -> Option<RunFailure> + Send + 'static,
+        events: impl Fn(&Event) + Send + Sync + 'static,
+        end: impl FnOnce(RunEnd<T>) + Send + 'static,
+    ) {
+        if with_session(|_| ()).is_none() {
+            // No session: nothing ran, nothing changed, nothing to show.
+            end(RunEnd::Refused);
+            return;
+        }
         let admission = self
             .as_mut()
             .rust_mut()
@@ -257,32 +293,30 @@ impl qobject::Runs {
             .coordinator
             .admit(&request);
         if admission == Admission::Refused {
+            end(RunEnd::Refused);
             return;
         }
-        self.as_mut().rust_mut().get_mut().current = Some(request.clone());
+        self.as_mut().rust_mut().get_mut().current = Some(request);
         self.as_mut().state_changed();
 
         let for_events = self.qt_thread();
         let for_done = self.qt_thread();
-        let job_request = request.clone();
-        let started = with_session(|session| {
+        with_session(|session| {
             session.worker.long(
-                move |cx, sink, stop| {
-                    let options = fetch_options(cx.app.store(), &job_request)?;
-                    cx.block_on(cx.app.refresh(options, sink, stop)).map(drop)
-                },
+                job,
                 move |event| {
-                    let event = event.clone();
+                    let queued = event.clone();
                     if for_events
-                        .queue(move |runs| runs.run_event(&event))
+                        .queue(move |runs| runs.run_event(&queued))
                         .is_err()
                     {
                         tracing::debug!("the app quit during a run");
                     }
+                    events(event);
                 },
                 move |result| {
                     if for_done
-                        .queue(move |runs| runs.run_finished(result))
+                        .queue(move |runs| runs.long_finished(result, failure_of, end))
                         .is_err()
                     {
                         tracing::debug!("the app quit before a run finished");
@@ -290,13 +324,6 @@ impl qobject::Runs {
                 },
             );
         });
-        if started.is_none() {
-            // No session: nothing ran, nothing changed, nothing to show.
-            let rust = self.as_mut().rust_mut().get_mut();
-            rust.coordinator.finish(&request, Ok(()));
-            rust.current = None;
-            self.state_changed();
-        }
     }
 
     /// One event of the long run, on the GUI thread.
@@ -313,31 +340,186 @@ impl qobject::Runs {
     }
 
     /// The long run ended, on the GUI thread.
-    fn run_finished(mut self: Pin<&mut Self>, result: JobResult<()>) {
-        let Some(request) = self.rust().current.clone() else {
+    fn long_finished<T>(
+        mut self: Pin<&mut Self>,
+        result: JobResult<T>,
+        failure_of: impl FnOnce(&T) -> Option<RunFailure>,
+        end: impl FnOnce(RunEnd<T>),
+    ) {
+        let Some(request) = self.as_mut().rust_mut().get_mut().current.take() else {
+            tracing::error!("a long run ended with no run in flight");
+            end(RunEnd::Refused);
             return;
         };
-        let failure = result
-            .as_ref()
-            .err()
-            .map(|failure| request.failure(failure));
-        match &failure {
-            Some(failure) if failure.refusal => {
-                tracing::info!("{request:?} refused: {}", failure.message)
-            }
-            Some(failure) => tracing::warn!("{request:?} failed: {}", failure.message),
-            None => {}
+        let run_end = self.as_mut().conclude(&request, result, failure_of);
+        end(run_end);
+    }
+
+    /// Queues a short run on the worker (they overlap a long run and one another's order is
+    /// kept); `end` runs on the GUI thread once the run is concluded.
+    #[expect(
+        dead_code,
+        reason = "the garden (B5) is the first caller of the short door"
+    )]
+    fn start_short<T: Send + 'static>(
+        mut self: Pin<&mut Self>,
+        request: RunRequest,
+        job: impl FnOnce(&JobContext<'_>) -> ressac_core::Result<T> + Send + 'static,
+        end: impl FnOnce(RunEnd<T>) + Send + 'static,
+    ) {
+        if with_session(|_| ()).is_none() {
+            end(RunEnd::Refused);
+            return;
         }
+        // A short run is always admitted: the call keeps the coordinator's one door.
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .coordinator
+            .admit(&request);
+        let for_done = self.qt_thread();
+        with_session(|session| {
+            session.worker.short(job, move |result| {
+                if for_done
+                    .queue(move |runs| runs.short_finished(request, result, end))
+                    .is_err()
+                {
+                    tracing::debug!("the app quit before a run finished");
+                }
+            });
+        });
+    }
+
+    /// A short run ended, on the GUI thread.
+    #[expect(
+        dead_code,
+        reason = "the garden (B5) is the first caller of the short door"
+    )]
+    fn short_finished<T>(
+        mut self: Pin<&mut Self>,
+        request: RunRequest,
+        result: JobResult<T>,
+        end: impl FnOnce(RunEnd<T>),
+    ) {
+        let run_end = self.as_mut().conclude(&request, result, |_| None);
+        end(run_end);
+    }
+
+    /// The coordinator's verdict on a finished run, logged (the request's redacted label, the
+    /// redacted message), then the reload and the state signals.
+    fn conclude<T>(
+        mut self: Pin<&mut Self>,
+        request: &RunRequest,
+        result: JobResult<T>,
+        failure_of: impl FnOnce(&T) -> Option<RunFailure>,
+    ) -> RunEnd<T> {
         let rust = self.as_mut().rust_mut().get_mut();
-        rust.coordinator
-            .finish(&request, failure.as_ref().map_or(Ok(()), Err));
-        rust.current = None;
+        let run_end = rust.coordinator.conclude(request, result, failure_of);
+        match &run_end {
+            RunEnd::Failed(failure) if failure.refusal => tracing::info!(
+                "{} refused: {}",
+                request.log_label(),
+                redact_text(&failure.message)
+            ),
+            RunEnd::Failed(failure) => tracing::warn!(
+                "{} failed: {}",
+                request.log_label(),
+                redact_text(&failure.message)
+            ),
+            RunEnd::Done(_) | RunEnd::Refused => {}
+        }
         let reload = rust.invalidation.run_finished(Instant::now());
         if reload {
             self.as_mut().database_changed();
         }
         self.state_changed();
+        run_end
     }
+}
+
+thread_local! {
+    // The GUI thread's handle on `Runs`, registered when QML first touches the singleton:
+    // the one way in for every bridge that starts a run.
+    static RUNS: RefCell<Option<CxxQtThread<qobject::Runs>>> = const { RefCell::new(None) };
+}
+
+impl cxx_qt::Initialize for qobject::Runs {
+    fn initialize(self: Pin<&mut Self>) {
+        let handle = self.qt_thread();
+        RUNS.with(|slot| *slot.borrow_mut() = Some(handle));
+    }
+}
+
+/// Queues `start` onto `Runs`; false when there is no handle (the singleton was never created)
+/// or the queue refused (the app is quitting).
+fn queue_on_runs(start: impl FnOnce(Pin<&mut qobject::Runs>) + Send + 'static) -> bool {
+    RUNS.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|runs| runs.queue(start).is_ok())
+    })
+}
+
+/// Starts a long run through the one coordinator: one at a time (a second is turned away and
+/// `end` gets `Refused`), its progress and banner shared. `job` runs on its own thread and
+/// connection; `failure_of` reads a value as a failure (an offline edition); `events` sees
+/// every event on the job's thread; `end` runs on the GUI thread.
+pub(crate) fn submit_long<T: Send + 'static>(
+    request: RunRequest,
+    job: impl FnOnce(&JobContext<'_>, &dyn EventSink, Arc<AtomicBool>) -> ressac_core::Result<T>
+    + Send
+    + 'static,
+    failure_of: impl FnOnce(&T) -> Option<RunFailure> + Send + 'static,
+    events: impl Fn(&Event) + Send + Sync + 'static,
+    end: impl FnOnce(RunEnd<T>) + Send + 'static,
+) {
+    // The end is shared between the queued start and the failure path of this function.
+    let end = Arc::new(Mutex::new(Some(end)));
+    let queued = end.clone();
+    let label = request.log_label();
+    let sent = queue_on_runs(move |runs| {
+        if let Some(end) = take(&queued) {
+            runs.start_long(request, job, failure_of, events, end);
+        }
+    });
+    if !sent {
+        tracing::error!("cannot start {label}: no way into the run coordinator");
+        if let Some(end) = take(&end) {
+            end(RunEnd::Refused);
+        }
+    }
+}
+
+/// Queues a short run (any number may overlap a long one, in order) through the coordinator;
+/// `end` runs on the GUI thread.
+#[expect(
+    dead_code,
+    reason = "the garden (B5) is the first caller of the short door"
+)]
+pub(crate) fn submit_short<T: Send + 'static>(
+    request: RunRequest,
+    job: impl FnOnce(&JobContext<'_>) -> ressac_core::Result<T> + Send + 'static,
+    end: impl FnOnce(RunEnd<T>) + Send + 'static,
+) {
+    let end = Arc::new(Mutex::new(Some(end)));
+    let queued = end.clone();
+    let label = request.log_label();
+    let sent = queue_on_runs(move |runs| {
+        if let Some(end) = take(&queued) {
+            runs.start_short(request, job, end);
+        }
+    });
+    if !sent {
+        tracing::error!("cannot start {label}: no way into the run coordinator");
+        if let Some(end) = take(&end) {
+            end(RunEnd::Refused);
+        }
+    }
+}
+
+/// The value out of a shared one-shot slot.
+fn take<F>(slot: &Mutex<Option<F>>) -> Option<F> {
+    slot.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
 #[derive(Default)]

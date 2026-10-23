@@ -132,6 +132,8 @@ pub struct Worker {
     direct: mpsc::Sender<ShortJob>,
     /// The two lane threads, joined by `shutdown`.
     lanes: Vec<JoinHandle<()>>,
+    /// The thread of the current (or last) long run, joined by `shutdown` with the lanes.
+    long_thread: Mutex<Option<JoinHandle<()>>>,
     /// The flag of the current (or last) long run; each long run gets its own.
     stop: Mutex<Arc<AtomicBool>>,
 }
@@ -146,6 +148,7 @@ impl Worker {
             short,
             direct,
             lanes: vec![short_thread, direct_thread],
+            long_thread: Mutex::new(None),
             stop: Mutex::new(Arc::new(AtomicBool::new(false))),
         }
     }
@@ -189,7 +192,7 @@ impl Worker {
         let db = self.db.clone();
         let stop = Arc::new(AtomicBool::new(false));
         *self.stop.lock().unwrap_or_else(|e| e.into_inner()) = stop.clone();
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let caught = catch_unwind(AssertUnwindSafe(|| {
                 let app = Ressac::open(&db)?;
                 let runtime = runtime()?;
@@ -205,11 +208,14 @@ impl Worker {
             }));
             finish(outcome(caught), done);
         });
+        // The previous long run has ended (one at a time): its handle is dropped, detached.
+        *self.long_thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
     /// Ends the worker before the process tears Qt down: stops the long run, closes the lanes
-    /// (each finishes the job it is running) and waits up to `wait` in all for them. True when
-    /// every lane ended; a lane still busy is logged and left to the process exit.
+    /// (each finishes the job it is running) and waits up to `wait` in all for them and for
+    /// the long run's thread (a fetch must not queue onto a deleted `QApplication`). True when
+    /// every thread ended; one still busy is logged and left to the process exit.
     pub fn shutdown(mut self, wait: Duration) -> bool {
         self.stop();
         // Senders whose receivers are gone: dropping the real ones ends the lanes' loops.
@@ -217,7 +223,12 @@ impl Worker {
         self.direct = mpsc::channel().0;
         let deadline = Instant::now() + wait;
         let mut all = true;
-        for lane in std::mem::take(&mut self.lanes) {
+        let long = self
+            .long_thread
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        for lane in std::mem::take(&mut self.lanes).into_iter().chain(long) {
             while !lane.is_finished() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(5));
             }
@@ -272,6 +283,41 @@ mod tests {
         let started = Instant::now();
         assert!(!worker.shutdown(Duration::from_millis(50)));
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn shutdown_waits_for_the_long_run_thread_within_the_same_bound() {
+        let db = TestDb::new();
+        let worker = Worker::new(&db.path);
+        let (done_tx, done_rx) = mpsc::channel();
+        worker.long(
+            |_, _, _| {
+                thread::sleep(Duration::from_millis(600));
+                Ok(())
+            },
+            |_| {},
+            move |_| done_tx.send(()).unwrap(),
+        );
+        let started = Instant::now();
+        assert!(!worker.shutdown(Duration::from_millis(50)));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        done_rx.recv_timeout(WAIT).unwrap();
+
+        let worker = Worker::new(&db.path);
+        let (done_tx, done_rx) = mpsc::channel();
+        worker.long(
+            |_, _, stop| {
+                while !stop.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Ok(())
+            },
+            |_| {},
+            move |_| done_tx.send(()).unwrap(),
+        );
+        assert!(worker.shutdown(WAIT));
+        // Joined: its completion callback has already run.
+        assert!(done_rx.try_recv().is_ok());
     }
 
     /// Mac RunCoordinatorTests.short_runs_run_one_at_a_time_in_order.
