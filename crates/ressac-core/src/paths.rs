@@ -148,16 +148,18 @@ impl Paths {
     }
 }
 
-/// Resolve symlinks and `..`; for a file that does not exist yet, canonicalise its parent;
-/// otherwise keep the path as given.
+/// Resolve symlinks and `..`; for a file that does not exist yet, canonicalise its parent (an
+/// empty parent, as in a bare `x.sqlite`, means the current directory); otherwise keep the path
+/// as given.
 fn canonical(p: &Path) -> PathBuf {
     if let Ok(real) = p.canonicalize() {
         return real;
     }
-    match (
-        p.parent().and_then(|d| d.canonicalize().ok()),
-        p.file_name(),
-    ) {
+    let parent = match p.parent() {
+        Some(d) if d.as_os_str().is_empty() => Some(Path::new(".")),
+        other => other,
+    };
+    match (parent.and_then(|d| d.canonicalize().ok()), p.file_name()) {
         (Some(dir), Some(name)) => dir.join(name),
         _ => p.to_path_buf(),
     }
@@ -401,5 +403,20 @@ mod tests {
         std::fs::write(&legacy, b"").unwrap();
         assert_eq!(xdg.legacy_macos_database(), Some(legacy));
         assert_eq!(mac.legacy_macos_database(), None);
+    }
+
+    #[test]
+    fn a_not_yet_created_database_has_one_ticker_state_relative_or_absolute() {
+        let paths = resolve(Layout::Xdg, &[("HOME", "/home/clement")]).unwrap();
+        let name = "ressac-paths-test-not-created.sqlite";
+        assert!(!Path::new(name).exists());
+        let absolute = std::env::current_dir()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join(name);
+        let expected = paths.ticker_state(&absolute);
+        assert_eq!(paths.ticker_state(Path::new(name)), expected);
+        assert_eq!(paths.ticker_state(&Path::new(".").join(name)), expected);
     }
 }
