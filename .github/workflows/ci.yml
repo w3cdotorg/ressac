@@ -40,7 +40,7 @@ jobs:
           required=27
           major() { xcodebuild -version | awk 'NR == 1 { split($2, v, "."); print v[1] }'; }
           if [ "$(major)" -lt "$required" ]; then
-            candidate=$(ls -d /Applications/Xcode_"$required"*.app 2>/dev/null | sort -V | tail -n 1 || true)
+            candidate=$(find /Applications -maxdepth 1 -name "Xcode_${required}*.app" 2>/dev/null | sort -V | tail -n 1 || true)
             if [ -n "$candidate" ]; then
               sudo xcode-select -s "$candidate/Contents/Developer"
             fi
