@@ -84,7 +84,7 @@ On a garden page (800 to 802) the garden's keys apply: `k` keep, `r` repair, `b`
 
 **Settings.** The look and the images switch are kept in `~/Library/Application Support/Ressac/terminal.json` (on Linux, `~/.config/ressac/terminal.json`).
 
-**Logs.** `~/Library/Logs/Ressac/` (on Linux `~/.local/state/ressac/logs/`) (with `-v`, tracing also goes to stderr, which garbles the alternate screen: prefer the log file).
+**Logs.** `~/Library/Logs/Ressac/` (on Linux `~/.local/state/ressac/logs/`; with `-v`, tracing also goes to stderr, which garbles the alternate screen: prefer the log file).
 
 ## The tmux ticker
 
@@ -118,7 +118,7 @@ The terminal side runs on Linux: the reader, the garden, the tmux ticker and eve
 | Ticker rotation (`ticker.json`, `ticker-<hash>.json`, their locks) | `$XDG_STATE_HOME/ressac/`, by default `~/.local/state/ressac/` | next to the database |
 | Logs | `$XDG_STATE_HOME/ressac/logs/` | `~/Library/Logs/Ressac/` |
 
-`--db` and `RESSAC_DB` still win over the default database. If a database exists at the macOS path under your Linux home (`~/Library/Application Support/Ressac/ressac.sqlite`, left by a `ressac` built before Linux support), each run names it in the log; Ressac never moves it. Move it to `~/.local/share/ressac/` yourself, or pass it with `--db`.
+`--db` and `RESSAC_DB` still win over the default database. If a database exists at the macOS path under your Linux home (`~/Library/Application Support/Ressac/ressac.sqlite`, left by a `ressac` built before Linux support), each run names it in the log (at debug level for `ressac ticker`, which tmux runs every 15 s); Ressac never moves it. Move it to `~/.local/share/ressac/` yourself, or pass it with `--db`.
 
 **Install.** Either download `ressac-X.Y.Z-linux-<arch>.tar.gz` from a release (`x86_64` or `aarch64`, glibc 2.35 or newer) and `tar -xzf` it into `~/.local/bin`, or build it:
 

@@ -22,6 +22,12 @@ use commands::{Globals, INTERRUPTED, USAGE, UsageError};
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let paths = ressac_core::paths::Paths::from_env().ok();
+    // No usable HOME and no database named: refuse rather than write relative to the working
+    // directory. The tmux ticker stays silent (its own empty line, exit 0) so tmux shows nothing.
+    if paths.is_none() && cli.db.is_none() && !matches!(cli.command, Some(Command::Ticker { .. })) {
+        eprintln!("error: no home directory: set HOME or pass --db");
+        return ExitCode::from(1);
+    }
     let _log_guard = paths
         .as_ref()
         .and_then(|p| init_logging(&p.log_dir(), cli.verbose));

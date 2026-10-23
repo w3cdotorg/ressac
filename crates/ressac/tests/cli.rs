@@ -2505,3 +2505,50 @@ fn the_mac_never_calls_its_own_database_legacy() {
     let out = ressac(home.path(), &["-v", "export"]);
     assert!(!stderr(&out).contains(LEGACY), "{}", stderr(&out));
 }
+
+/// `hermetic` without `HOME` at all, run from `cwd`.
+fn without_home(cwd: &Path) -> Command {
+    let mut cmd = hermetic(cwd);
+    cmd.env_remove("HOME").current_dir(cwd);
+    cmd
+}
+
+#[test]
+fn no_home_and_no_database_is_refused_and_writes_nothing() {
+    let cwd = tempfile::tempdir().unwrap();
+    let out = without_home(cwd.path())
+        .arg("migrate")
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        "error: no home directory: set HOME or pass --db\n"
+    );
+    assert_eq!(std::fs::read_dir(cwd.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn no_home_with_a_database_still_works() {
+    let cwd = tempfile::tempdir().unwrap();
+    let db = cwd.path().join("x.sqlite");
+    let out = without_home(cwd.path())
+        .args(["--db", db.to_str().unwrap(), "migrate"])
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(db.exists());
+}
+
+#[test]
+fn the_ticker_without_home_prints_an_empty_line() {
+    let cwd = tempfile::tempdir().unwrap();
+    let out = without_home(cwd.path())
+        .args(["ticker", "--tmux"])
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "\n");
+    assert_eq!(stderr(&out), "");
+    assert_eq!(std::fs::read_dir(cwd.path()).unwrap().count(), 0);
+}
