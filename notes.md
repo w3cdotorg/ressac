@@ -349,6 +349,18 @@ Demandé par Clément le 23/10/2026 : Ressac sur marghe (Fedora KDE Plasma 44, a
 - **`ubuntu-22.04-arm`** : gratuit pour les dépôts publics, ce que `w3cdotorg/ressac` est ; pas un trou.
 - **README** : la ligne `dnf install` a été essayée sur un Fedora 44 nu (`cargo install --locked --path crates/ressac` puis `ressac --version` : 0.2.0, en 2 min 47 s, `tar` seulement pour la copie des sources) et le bloc tmux est sourcé tel quel par tmux 3.8 dans le conteneur.
 
+### Point d'étape VM 1 (B3, 23/10/2026)
+
+- **Commit testé** : `03989d8`, transféré par l'entrée standard (`prlctl exec` la relaie ; les morceaux base64 n'ont pas servi). Piège de l'outillage : `prlctl exec` recolle ses arguments en une seule ligne de shell sans guillemets, donc `marghe.sh` envoie chaque script par l'entrée standard dans `/tmp/ressac-vm/.script.sh`, puis l'exécute.
+- **Paquets installés par dnf** (accord de Clément) : gcc-c++, clang, lld, qt6-qtbase-devel, qt6-qtdeclarative-devel, qt6-qtwebengine-devel, qt6-qtwebchannel-devel, kf6-kirigami-devel, kf6-kcoreaddons-devel, kf6-ki18n-devel, dejavu-sans-fonts, sqlite, openssl-devel (50 paquets avec leurs dépendances).
+- **Compilation release** : 3 min 23 s (205 s en tout, première fois, dossier de compilation vide).
+- **Rendu** : virgl tenu, pas de rendu logiciel imposé. Aucune ligne virgl, QRhi ou crash dans `run.log` ; seulement « Failed to release graphics resources because QQuickWindow is not exposed » (environ 7 fois) et l'avertissement de locale C. Le rendu logiciel dessine le lecteur dans plus de captures, mais Clément n'a rien vu de gris à la main : c'est un artefact de minutage de la recette (voir TODO), pas une panne de rendu.
+- **Page de l'article** : dessinée (captures 12 et 23 : titre, avis HTTP 404, texte) ; preuve des scripts : aucun script d'article exécuté (toutes les marques `null`). Dans la recette automatique, le panneau du lecteur est gris ou périmé sur plusieurs captures (9 sur 24 en GPU) parce que la capture part avant la première peinture de la page.
+- **Polices à l'échelle 2** : Noto Sans nette (Breeze, icônes, PNG 2200 x 1440) ; Newsreader reconnaissable (empattements propres à Newsreader sur la capture 12, pas Noto Serif).
+- **Touches** : parcours automatique vert (24 étapes, `exit=0` trois fois), puis vérification de Clément au clavier réel dans sa session Plasma le 23/10 : « toutes les touches fonctionnent » (Espace, j, k, m, s, flèches, Ctrl+R, Ctrl+Maj+A).
+- **Menu global** : non vérifié (Clément ne l'a pas mentionné).
+- **Anomalies** : le panneau du lecteur de la recette (voir ci-dessus) ; l'écran de la VM était peut-être verrouillé pendant les captures (`kscreenlocker_greet` actif).
+
 ### Décisions de la partie B
 
 - Deux crates Unicode pour Antiope (B8a1) : `unicode-segmentation` 1.13.3, déjà dans `Cargo.lock` par ratatui, pour couper le texte en graphèmes comme le Mac, et `unicode-normalization` 0.1.26 pour la forme composée (NFC) qui fait de « e + accent » un « é » de Bedstead. Pas de crate de polices : la table `cmap` et les métriques de Bedstead sont lues à la main, une soixantaine de lignes.

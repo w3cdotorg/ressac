@@ -141,6 +141,7 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Lecteur et jardin du terminal : un SIGTERM venu d'ailleurs les arrête sans restaurer le terminal (mode brut, écran alternatif). Il faudrait que les deux boucles surveillent le signal et quittent proprement (`commands/mod.rs`, `commands/garden.rs`, une boucle du jardin qui n'attend plus `event::read` sans fin).
 - [ ] Après le 02/11/2026 (crédits Actions) : vérifier le premier passage de `ci.yml` (job `fedora`, avertissement attendu de `--exclude ressac-kde` tant que l'appli n'existe pas) et, au premier tag, celui de `release.yml` (le runner `ubuntu-22.04-arm` est-il offert à ce dépôt ? il est public, donc normalement oui ; sinon le job attend sans fin dans la file).
 - [ ] Release : le build x86_64 n'a jamais été rejoué et le plafond glibc (2.35) est affiché, pas contrôlé ; ajouter un garde-fou qui échoue au-delà.
+- [ ] Recette `--screenshot` : attendre le `loadingChanged` (ou la première peinture) de la page WebEngine avant chaque capture ; sur la VM, le panneau du lecteur sort gris, vide ou périmé sur plusieurs captures (artefact de minutage, Clément ne le voit pas à la main). Vérifier aussi le menu global de Plasma (non vérifié au point d'étape VM 1).
 
 ### Durcissement proposé, non fait
 
