@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::offset::MappedLocalTime;
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use ressac_core::store::Store;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -182,6 +183,38 @@ impl TestDb {
         id
     }
 
+    /// A new latest edition built at `built_at`, with no entries; its window is the one
+    /// `edition()` writes.
+    #[allow(dead_code, reason = "used by the journal tests (B4a)")]
+    pub fn built(&self, built_at: &str) -> i64 {
+        let id: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM edition", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        self.conn
+            .execute(
+                "INSERT INTO edition (id, built_at, window_start, window_end, unreachable) \
+                 VALUES (?1, ?2, '2026-10-15T05:00:00.000Z', '2026-10-16T05:00:00.000Z', 0)",
+                params![id, built_at],
+            )
+            .unwrap();
+        id
+    }
+
+    /// `hidden` entries of `feed` left out of `edition`'s `section` by the caps.
+    #[allow(dead_code, reason = "used by the journal tests (B4a)")]
+    pub fn overflow(&self, edition: i64, feed: i64, section: &str, hidden: u32) {
+        self.conn
+            .execute(
+                "INSERT INTO edition_overflow (edition_id, feed_id, section, hidden_count) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![edition, feed, section, hidden],
+            )
+            .unwrap();
+    }
+
     pub fn execute(&self, sql: &str) {
         self.conn.execute_batch(sql).unwrap();
     }
@@ -218,5 +251,66 @@ impl TestDb {
             std::thread::sleep(hold);
             conn.execute_batch("COMMIT").unwrap();
         })
+    }
+}
+
+/// Europe/Paris for 2026 only (a copy of core `edition.rs`'s test zone): CEST (+2) from
+/// 2026-03-29 01:00 UTC to 2026-10-25 01:00 UTC, CET (+1) otherwise.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code, reason = "used by the journal tests (B4a)")]
+pub struct Paris;
+
+#[allow(dead_code, reason = "used by the journal tests (B4a)")]
+impl Paris {
+    fn offset_at_utc(utc: &NaiveDateTime) -> FixedOffset {
+        let summer_from = NaiveDate::from_ymd_opt(2026, 3, 29)
+            .unwrap()
+            .and_hms_opt(1, 0, 0)
+            .unwrap();
+        let summer_until = NaiveDate::from_ymd_opt(2026, 10, 25)
+            .unwrap()
+            .and_hms_opt(1, 0, 0)
+            .unwrap();
+        let hours = if *utc >= summer_from && *utc < summer_until {
+            2
+        } else {
+            1
+        };
+        FixedOffset::east_opt(hours * 3600).unwrap()
+    }
+}
+
+impl TimeZone for Paris {
+    type Offset = FixedOffset;
+
+    fn from_offset(_: &FixedOffset) -> Self {
+        Paris
+    }
+
+    fn offset_from_local_date(&self, local: &NaiveDate) -> MappedLocalTime<FixedOffset> {
+        self.offset_from_local_datetime(&local.and_hms_opt(12, 0, 0).unwrap())
+    }
+
+    /// Both offsets are tried; the ones that read back are the answers. Two answers is the
+    /// repeated hour (summer time first, it is the earlier instant); none is the skipped hour.
+    fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> MappedLocalTime<FixedOffset> {
+        let fits: Vec<FixedOffset> = [2, 1]
+            .into_iter()
+            .map(|h| FixedOffset::east_opt(h * 3600).unwrap())
+            .filter(|o| Paris::offset_at_utc(&(*local - *o)) == *o)
+            .collect();
+        match fits.as_slice() {
+            [] => MappedLocalTime::None,
+            [o] => MappedLocalTime::Single(*o),
+            [a, b, ..] => MappedLocalTime::Ambiguous(*a, *b),
+        }
+    }
+
+    fn offset_from_utc_date(&self, utc: &NaiveDate) -> FixedOffset {
+        Paris::offset_at_utc(&utc.and_hms_opt(12, 0, 0).unwrap())
+    }
+
+    fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> FixedOffset {
+        Paris::offset_at_utc(utc)
     }
 }
