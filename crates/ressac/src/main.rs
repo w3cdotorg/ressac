@@ -49,6 +49,23 @@ fn is_broken_pipe(e: &anyhow::Error) -> bool {
     })
 }
 
+/// On Linux, a database left at the macOS location (copied over from a Mac) is never read
+/// or moved; this names it, and the one in use, unless `db` is that very file.
+fn legacy_database_warning(paths: &ressac_core::paths::Paths, db: &Path) -> Option<String> {
+    let legacy = paths.legacy_macos_database()?;
+    if let (Ok(a), Ok(b)) = (db.canonicalize(), legacy.canonicalize())
+        && a == b
+    {
+        return None;
+    }
+    Some(format!(
+        "An older Ressac database is still at {}, unused: this run uses {}. \
+         Move it there, or pass --db, to keep using it.",
+        legacy.display(),
+        db.display()
+    ))
+}
+
 /// The commands that read `Globals::stop`. Only these catch SIGTERM: the readers and the
 /// garden TUI never look at the flag, so a handled SIGTERM would leave them running.
 fn honours_stop(command: &Command) -> bool {
@@ -105,6 +122,14 @@ async fn run(cli: Cli, paths: Option<&ressac_core::paths::Paths>) -> anyhow::Res
         .db
         .clone()
         .unwrap_or_else(ressac_core::store::default_path);
+    if let Some(text) = paths.and_then(|p| legacy_database_warning(p, &db)) {
+        // The tmux ticker runs every 15 s: it must not fill the log with this.
+        if matches!(cli.command, Some(Command::Ticker { .. })) {
+            tracing::debug!("{text}");
+        } else {
+            tracing::warn!("{text}");
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     {
         // First Ctrl-C (or SIGTERM, for the commands that watch the flag): stop scheduling
@@ -220,6 +245,55 @@ fn init_logging(dir: &Path, verbose: bool) -> Option<tracing_appender::non_block
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    use ressac_core::paths::{Layout, Paths};
+
+    fn paths(layout: Layout, home: &Path) -> Paths {
+        let home = home.as_os_str().to_owned();
+        Paths::resolve(layout, &move |k: &str| (k == "HOME").then(|| home.clone())).unwrap()
+    }
+
+    fn make_legacy(home: &Path) -> PathBuf {
+        let legacy = home.join("Library/Application Support/Ressac/ressac.sqlite");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"").unwrap();
+        legacy
+    }
+
+    #[test]
+    fn a_legacy_database_on_linux_is_named_with_the_one_in_use() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = paths(Layout::Xdg, home.path());
+        let db = paths.database();
+        assert_eq!(legacy_database_warning(&paths, &db), None);
+        let legacy = make_legacy(home.path());
+        assert_eq!(
+            legacy_database_warning(&paths, &db),
+            Some(format!(
+                "An older Ressac database is still at {}, unused: this run uses {}. \
+                 Move it there, or pass --db, to keep using it.",
+                legacy.display(),
+                db.display()
+            ))
+        );
+        assert_eq!(
+            legacy_database_warning(&paths, &legacy),
+            None,
+            "--db on the old file"
+        );
+    }
+
+    #[test]
+    fn the_mac_layout_never_warns() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = paths(Layout::MacOs, home.path());
+        make_legacy(home.path());
+        assert_eq!(
+            legacy_database_warning(&paths, &home.path().join("db.sqlite")),
+            None
+        );
+    }
 
     fn parse(args: &[&str]) -> Command {
         Cli::parse_from(std::iter::once("ressac").chain(args.iter().copied()))

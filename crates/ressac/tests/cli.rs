@@ -2476,3 +2476,32 @@ async fn a_second_signal_of_either_kind_leaves_at_once() {
         "waited for the slow feed"
     );
 }
+
+const LEGACY: &str = "An older Ressac database is still at";
+
+fn make_legacy_db(home: &Path) {
+    let legacy = home.join("Library/Application Support/Ressac/ressac.sqlite");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, b"").unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_legacy_database_is_warned_about_once_per_run() {
+    let home = tempfile::tempdir().unwrap();
+    make_legacy_db(home.path());
+    let out = ressac(home.path(), &["-v", "export"]);
+    assert_eq!(stderr(&out).matches(LEGACY).count(), 1, "{}", stderr(&out));
+    // The tmux ticker runs every 15 s: debug only, so not on stderr at the default level.
+    let out = ressac(home.path(), &["-v", "ticker", "--tmux"]);
+    assert!(!stderr(&out).contains(LEGACY), "{}", stderr(&out));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_mac_never_calls_its_own_database_legacy() {
+    let home = tempfile::tempdir().unwrap();
+    make_legacy_db(home.path());
+    let out = ressac(home.path(), &["-v", "export"]);
+    assert!(!stderr(&out).contains(LEGACY), "{}", stderr(&out));
+}
