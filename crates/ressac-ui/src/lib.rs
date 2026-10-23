@@ -8,6 +8,7 @@ pub mod garden;
 pub mod journal;
 pub mod keys;
 pub mod launch;
+pub mod library;
 pub mod live;
 pub mod pages;
 pub mod runs;

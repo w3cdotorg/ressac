@@ -3,12 +3,14 @@
 //! refusal classes copied from the CLI, the four direct writes and the fetch job's options.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use chrono::{DateTime, Utc};
 use ressac_core::Error;
 use ressac_core::logging::redact_address;
 use ressac_core::model::{CadenceGroup, Decision, FeedId, FolderId};
-use ressac_core::service::{Event, RefreshOptions, check_subset};
+use ressac_core::service::{Event, EventSink, RefreshOptions, Ressac, check_subset};
 use ressac_core::store::{Source, Store};
 
 use crate::sources::Selection;
@@ -446,6 +448,18 @@ pub fn fetch_options(store: &Store, request: &RunRequest) -> ressac_core::Result
     Ok(RefreshOptions { force: true, only })
 }
 
+/// The job of a fetch request (`FetchAll`, `FetchFeeds`, `FetchFolder`): the subset is checked
+/// before the network is touched, then everything due (forced) is fetched.
+pub async fn fetch(
+    app: &Ressac,
+    request: &RunRequest,
+    sink: &dyn EventSink,
+    stop: Arc<AtomicBool>,
+) -> ressac_core::Result<()> {
+    let options = fetch_options(app.store(), request)?;
+    app.refresh(options, sink, stop).await.map(drop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +498,30 @@ mod tests {
             "MoveFeed(12, None)"
         );
         assert_eq!(RunRequest::FetchAll.log_label(), "FetchAll");
+    }
+
+    #[test]
+    fn the_fetch_job_checks_its_request_before_the_network() {
+        let db = TestDb::new();
+        let app = Ressac::open(&db.path).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let run = |request: RunRequest| {
+            runtime
+                .block_on(fetch(
+                    &app,
+                    &request,
+                    &ressac_core::service::NullSink,
+                    Arc::new(AtomicBool::new(false)),
+                ))
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(run(RunRequest::FetchFeeds(vec![999])), "No feed #999.");
+        assert_eq!(run(RunRequest::FetchFolder(99)), "No folder #99.");
+        assert_eq!(run(RunRequest::Undo), "not a fetch request");
     }
 
     fn busy() -> Error {
