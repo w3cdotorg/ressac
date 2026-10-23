@@ -7,7 +7,7 @@ use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
-use ressac_ui::settings::{Appearance, Settings, SettingsStore, TextSizeCommand, effective_size};
+use ressac_ui::settings::{Appearance, Settings, SettingsStore, TextSizeCommand};
 
 use crate::shim;
 
@@ -236,23 +236,18 @@ impl qobject::AppSettings {
     fn resize(mut self: Pin<&mut Self>, look: &QString, command: &QString) -> f64 {
         let look = Appearance::parse(&look.to_string()).unwrap_or_default();
         let command = match command.to_string().as_str() {
-            "bigger" => Some(TextSizeCommand::Bigger),
-            "smaller" => Some(TextSizeCommand::Smaller),
-            "actualSize" => Some(TextSizeCommand::ActualSize),
-            _ => None,
+            "bigger" => TextSizeCommand::Bigger,
+            "smaller" => TextSizeCommand::Smaller,
+            "actualSize" => TextSizeCommand::ActualSize,
+            _ => return self.rust().settings.shown_size(look),
         };
-        let stored = |settings: &Settings| match look {
-            Appearance::Native => settings.reader_size,
-            Appearance::Antiope => settings.reader_size_antiope,
-        };
-        let before = stored(&self.rust().settings);
-        let Some(command) = command else {
-            return effective_size(before, look);
-        };
-        let AppSettingsRust { store, settings } = self.as_mut().rust_mut().get_mut();
-        let size = settings.resize(store, look, command);
-        let after = stored(settings);
-        if after != before {
+        let mut size = 0.0;
+        let changed = self.as_mut().write(|settings, store| {
+            let (new_size, changed) = settings.resize(store, look, command);
+            size = new_size;
+            changed
+        });
+        if changed {
             match look {
                 Appearance::Native => self.reader_size_changed(),
                 Appearance::Antiope => self.reader_size_antiope_changed(),

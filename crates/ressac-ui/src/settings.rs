@@ -362,15 +362,23 @@ impl Settings {
         replace(&mut self.chart.animate, value)
     }
 
+    /// The size the look shown really draws at.
+    pub fn shown_size(&self, shown: Appearance) -> f64 {
+        match shown {
+            Appearance::Native => effective_size(self.reader_size, shown),
+            Appearance::Antiope => effective_size(self.reader_size_antiope, shown),
+        }
+    }
+
     /// View ▸ Bigger / Smaller / Actual Size on the look shown: writes only that look's
     /// key (always, so a hand-edited value is rewritten as a legal one) and returns its
-    /// new size.
+    /// new size and whether the stored value changed.
     pub fn resize(
         &mut self,
         store: &mut dyn SettingsStore,
         shown: Appearance,
         command: TextSizeCommand,
-    ) -> f64 {
+    ) -> (f64, bool) {
         let slot = match shown {
             Appearance::Native => &mut self.reader_size,
             Appearance::Antiope => &mut self.reader_size_antiope,
@@ -386,9 +394,8 @@ impl Settings {
             (_, Appearance::Native) => clamped_size(current + f64::from(delta)),
             (_, Appearance::Antiope) => step_antiope(current, delta),
         };
-        *slot = size;
         store.set(size_key(shown), &size.to_string());
-        size
+        (size, replace(slot, size))
     }
 }
 
@@ -644,7 +651,7 @@ mod tests {
         let mut s = Settings::load(&st);
         assert_eq!(
             s.resize(&mut st, Appearance::Antiope, TextSizeCommand::Bigger),
-            25.0
+            (25.0, true)
         );
         assert_eq!(
             st.get("reader.size.antiope").map(String::as_str),
@@ -653,7 +660,7 @@ mod tests {
         assert_eq!(st.get("reader.size"), None);
         assert_eq!(
             s.resize(&mut st, Appearance::Native, TextSizeCommand::Smaller),
-            16.0
+            (16.0, true)
         );
         assert_eq!(
             (
@@ -664,12 +671,17 @@ mod tests {
         );
         assert_eq!(
             s.resize(&mut st, Appearance::Native, TextSizeCommand::Bigger),
-            17.0
+            (17.0, true)
         );
         assert_eq!(
             s.resize(&mut st, Appearance::Antiope, TextSizeCommand::ActualSize),
-            20.0
+            (20.0, true)
         );
+        assert_eq!(
+            s.resize(&mut st, Appearance::Antiope, TextSizeCommand::ActualSize),
+            (20.0, false)
+        );
+        assert_eq!(s.shown_size(Appearance::Native), 17.0);
         assert_eq!(st["reader.size"].as_str(), "17");
         for stored in ["17", "0", "-3", "22.5", "99"] {
             for command in [
@@ -679,7 +691,7 @@ mod tests {
             ] {
                 let mut st = store(&[("reader.size.antiope", stored)]);
                 let mut s = Settings::load(&st);
-                let size = s.resize(&mut st, Appearance::Antiope, command);
+                let (size, _) = s.resize(&mut st, Appearance::Antiope, command);
                 assert!(ANTIOPE_SIZES.contains(&size), "{stored} {command:?}");
                 assert_eq!(st["reader.size.antiope"], size.to_string());
             }
