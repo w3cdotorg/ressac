@@ -406,16 +406,32 @@ pub fn decide_drop(current: Option<FolderId>, target: Option<FolderId>) -> FeedD
     }
 }
 
+/// Control characters and the Unicode line breaks a drop target may split a payload on.
+fn is_break(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// A feed-supplied title on one line: every control or line-break character becomes a space,
+/// runs of whitespace collapse, the ends are trimmed.
+fn one_line(title: &str) -> String {
+    let spaced: String = title
+        .chars()
+        .map(|c| if is_break(c) { ' ' } else { c })
+        .collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// An entry dragged out: its link as a URL list, as text and as a titled Mozilla URL; nothing
-/// when the link is not a web address.
+/// when the link is not a web address or carries a control or line-break character (a
+/// `text/x-moz-url` is a list of URL and title lines, so neither part may add a line).
 pub fn entry_drag_data(link: &str, title: &str) -> Vec<(&'static str, String)> {
-    if !is_web_url(link) {
+    if !is_web_url(link) || link.chars().any(is_break) {
         return Vec::new();
     }
     vec![
         ("text/uri-list", format!("{link}\r\n")),
         ("text/plain", link.to_string()),
-        ("text/x-moz-url", format!("{link}\n{title}")),
+        ("text/x-moz-url", format!("{link}\n{}", one_line(title))),
     ]
 }
 
@@ -1051,5 +1067,42 @@ mod tests {
         );
         assert!(entry_drag_data("javascript:alert(1)", "x").is_empty());
         assert!(entry_drag_data("", "x").is_empty());
+    }
+
+    fn moz_url_lines(data: &[(&'static str, String)]) -> Vec<String> {
+        let (_, text) = data.iter().find(|(m, _)| *m == "text/x-moz-url").unwrap();
+        text.split(['\n', '\r', '\u{2028}', '\u{2029}', '\u{85}'])
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_hostile_title_cannot_smuggle_a_url_into_the_moz_url_list() {
+        for title in [
+            "a\r\nhttps://evil.example/\nb",
+            "a\u{2028}https://evil.example/\u{2029}b",
+            "a\u{85}https://evil.example/\tb",
+        ] {
+            let data = entry_drag_data("https://example.org/a", title);
+            assert_eq!(
+                moz_url_lines(&data),
+                ["https://example.org/a", "a https://evil.example/ b"],
+                "{title:?}"
+            );
+        }
+        let data = entry_drag_data("https://example.org/a", "  x \r\n\r\n y  ");
+        assert_eq!(moz_url_lines(&data)[1], "x y");
+    }
+
+    #[test]
+    fn a_link_with_a_control_character_is_not_dragged() {
+        for link in [
+            "https://example.org/a\nhttps://evil.example/",
+            "https://example.org/a\u{2028}b",
+            "https://example.org/a\u{85}b",
+            "https://example.org/a\u{2029}b",
+        ] {
+            assert!(entry_drag_data(link, "t").is_empty(), "{link:?}");
+        }
     }
 }
