@@ -19,6 +19,9 @@ use url::Url;
 
 pub use depth::estimated_nesting_depth;
 use worker::memo;
+
+use crate::article::TOGGLE_SCHEME;
+use crate::mosaic::{CELL_HEIGHT, MAX_COLUMNS, MosaicRequest, columns_for_width, grid};
 pub use worker::{Gate, memo_stats, on_large_stack, shared_gate};
 
 /// Past this, the plain-text fallback (the largest stored article was 358 KB on 15/10/2026).
@@ -35,10 +38,14 @@ pub const MEMO_CAPACITY: usize = 32;
 /// A virtual reservation, so no parse can exhaust its thread's stack.
 pub const WORKER_STACK_BYTES: usize = 256 << 20;
 
-/// What becomes of images (B8d adds Antiope's mosaics).
+/// What becomes of images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Images {
+    /// Plain `img` elements (Native).
     Web,
+    /// Antiope: each http(s) image becomes a numbered mosaic box (`ressac-mosaic:` source,
+    /// original kept for the swap). `data:` images stay as they are.
+    Mosaics,
 }
 
 /// Removed together with everything inside them (sorted).
@@ -114,7 +121,8 @@ fn sanitize_uncached(
 
 /// One step of the serialiser's walk: a node to write at a depth, or an element to close.
 enum Step<N> {
-    Visit(N, usize),
+    /// A node, its depth, and whether an `a` encloses it.
+    Visit(N, usize, bool),
     Close(&'static str),
 }
 
@@ -122,24 +130,25 @@ enum Step<N> {
 /// None when a node lies deeper than `MAX_NESTING_DEPTH` (the depth estimate may fall a few
 /// levels short): nothing is dropped silently, the caller shows the plain text instead.
 fn render(html: &str, base: Option<&Url>, images: Images) -> Option<String> {
-    let Images::Web = images;
+    let mosaics = images == Images::Mosaics;
+    let mut boxes = 0usize;
     let document = Html::parse_fragment(html);
     let mut out = String::with_capacity(html.len());
     let mut pending: Vec<_> = document
         .root_element()
         .children()
         .rev()
-        .map(|child| Step::Visit(child, 1))
+        .map(|child| Step::Visit(child, 1, false))
         .collect();
     while let Some(step) = pending.pop() {
-        let (node, depth) = match step {
+        let (node, depth, in_link) = match step {
             Step::Close(tag) => {
                 out.push_str("</");
                 out.push_str(tag);
                 out.push('>');
                 continue;
             }
-            Step::Visit(node, depth) => (node, depth),
+            Step::Visit(node, depth, in_link) => (node, depth, in_link),
         };
         if depth > MAX_NESTING_DEPTH {
             return None;
@@ -163,14 +172,30 @@ fn render(html: &str, base: Option<&Url>, images: Images) -> Option<String> {
             pending.extend(
                 node.children()
                     .rev()
-                    .map(|child| Step::Visit(child, depth + 1)),
+                    .map(|child| Step::Visit(child, depth + 1, in_link)),
             );
             continue;
         };
         let tag = KEPT[kept];
         let mut attributes = safe_attributes(element, tag, base);
         if tag == "img" {
-            if !attributes.iter().any(|(name, _)| *name == "src") {
+            let Some(source) = attributes
+                .iter()
+                .find_map(|(name, value)| (*name == "src").then_some(value.as_str()))
+            else {
+                continue;
+            };
+            if mosaics && is_web_url(source) {
+                let alt = attributes
+                    .iter()
+                    .find_map(|(name, value)| (*name == "alt").then_some(value.as_str()))
+                    .unwrap_or("");
+                let all: Vec<(String, String)> = element
+                    .attrs()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect();
+                write_mosaic_box(&mut out, boxes, source, alt, declared_size(&all), in_link);
+                boxes += 1;
                 continue;
             }
             // Its height is known before it loads, so Space never takes the page's end too early.
@@ -204,14 +229,68 @@ fn render(html: &str, base: Option<&Url>, images: Images) -> Option<String> {
         out.push('>');
         if VOID.binary_search(&tag).is_err() {
             pending.push(Step::Close(tag));
+            let in_link = in_link || tag == "a";
             pending.extend(
                 node.children()
                     .rev()
-                    .map(|child| Step::Visit(child, depth + 1)),
+                    .map(|child| Step::Visit(child, depth + 1, in_link)),
             );
         }
     }
     Some(out)
+}
+
+/// Image `index` as a mosaic box. The box keeps both addresses for the swap and an IMAGE line
+/// with the alt text, shown by the stylesheet when the mosaic fails (`data-failed`). With the
+/// original's `size`, the box keeps the mosaic's height before it arrives: the rows its renderer
+/// will draw, in PNG pixels (one per font pixel) times `--font-pixel`. The box holds it, not
+/// the `img`, which is always drawn at its real grid, never stretched. `original` is an
+/// already-validated http(s) address; every value is escaped, and the sizes are integers.
+fn write_mosaic_box(
+    out: &mut String,
+    index: usize,
+    original: &str,
+    alt: &str,
+    size: Option<ImageSize>,
+    in_link: bool,
+) {
+    let source = MosaicRequest::url_for(original, MAX_COLUMNS);
+    // Inside a link the box is a span: the link keeps its meaning and nothing nests.
+    let tag = if in_link { "span" } else { "a" };
+    out.push('<');
+    out.push_str(tag);
+    out.push_str(r#" class="mosaic""#);
+    if !in_link {
+        out.push_str(" href=\"");
+        out.push_str(TOGGLE_SCHEME);
+        out.push_str(&format!(":{index}\""));
+    }
+    out.push_str(&format!(" id=\"m{index}\" data-original=\""));
+    escape_attribute(out, original);
+    out.push_str("\" data-mosaic=\"");
+    escape_attribute(out, &source);
+    out.push('"');
+    if let Some(size) = size {
+        let columns = columns_for_width(size.width, MAX_COLUMNS);
+        let (_, rows) = grid(size.width, size.height, columns);
+        out.push_str(&format!(
+            " style=\"min-height: calc({}px * var(--font-pixel))\"",
+            rows * CELL_HEIGHT
+        ));
+    }
+    out.push_str("><img src=\"");
+    escape_attribute(out, &source);
+    out.push_str("\" alt=\"");
+    escape_attribute(out, alt);
+    out.push_str("\" loading=\"lazy\"><span class=\"mosaic-alt\">");
+    out.push_str("IMAGE");
+    if !alt.is_empty() {
+        out.push(' ');
+        escape_text(out, alt);
+    }
+    out.push_str("</span></");
+    out.push_str(tag);
+    out.push('>');
 }
 
 /// The attribute `name` of a kept `tag`, when the allowlist has it.
@@ -887,6 +966,106 @@ mod tests {
     fn the_element_lists_are_sorted_for_binary_search() {
         for list in [&KEPT[..], &DROPPED[..], &VOID[..]] {
             assert!(list.windows(2).all(|pair| pair[0] < pair[1]), "{list:?}");
+        }
+    }
+
+    // MosaicMarkupTests
+
+    mod mosaic_boxes {
+        use super::*;
+        use crate::mosaic::{MAX_COLUMNS, MosaicRequest};
+
+        fn mosaics(html: &str, base: Option<&str>) -> String {
+            sanitize(html, base, Images::Mosaics)
+        }
+
+        fn address(original: &str) -> String {
+            MosaicRequest::url_for(original, MAX_COLUMNS).replace('&', "&amp;")
+        }
+
+        #[test]
+        fn images_become_numbered_mosaic_boxes() {
+            let html = r#"<p><img src="https://img.example.org/a.png" alt="A &quot;cat&quot;" width="800"></p><img src="/b.jpg"><img src="data:image/png;base64,AAAA">"#;
+            let base = Some("https://blog.example.org/post.html");
+            let clean = mosaics(html, base);
+            let a = address("https://img.example.org/a.png");
+            let b = address("https://blog.example.org/b.jpg");
+            let first = format!(
+                r#"<a class="mosaic" href="ressac-toggle:0" id="m0" data-original="https://img.example.org/a.png" data-mosaic="{a}"><img src="{a}" alt="A &quot;cat&quot;" loading="lazy"><span class="mosaic-alt">IMAGE A "cat"</span></a>"#
+            );
+            let second = format!(
+                r#"<a class="mosaic" href="ressac-toggle:1" id="m1" data-original="https://blog.example.org/b.jpg" data-mosaic="{b}"><img src="{b}" alt="" loading="lazy"><span class="mosaic-alt">IMAGE</span></a>"#
+            );
+            assert!(clean.contains(&first), "{clean}");
+            assert!(clean.contains(&second), "{clean}");
+            // Inline data stays as it is.
+            assert!(clean.contains(r#"<img src="data:image/png;base64,AAAA" loading="lazy">"#));
+            assert!(!clean.contains("width="));
+            // Without mosaics (Native) the same input keeps its plain images.
+            assert!(
+                sanitize(html, base, Images::Web).contains(
+                    r#"<img alt="A &quot;cat&quot;" src="https://img.example.org/a.png" width="800" loading="lazy">"#
+                )
+            );
+        }
+
+        #[test]
+        fn an_image_inside_a_link_keeps_the_link() {
+            let clean = mosaics(
+                r#"<a href="https://example.org/big.jpg"><img src="https://example.org/small.jpg"></a>"#,
+                None,
+            );
+            assert!(
+                clean.starts_with(
+                    r#"<a href="https://example.org/big.jpg"><span class="mosaic" id="m0" data-original="https://example.org/small.jpg""#
+                ),
+                "{clean}"
+            );
+            assert!(!clean.contains("ressac-toggle"));
+        }
+
+        #[test]
+        fn a_declared_size_reserves_the_mosaics_rows() {
+            // 600 pixels: 40 columns; 0.6 x 40 x 400 / 600 = 16 rows of 10 font pixels. The
+            // image without a size has no style.
+            let clean = mosaics(
+                r#"<img src="https://e.org/a.png" width="600" height="400"><img src="https://e.org/b.png">"#,
+                None,
+            );
+            assert!(
+                clean.contains(r#" style="min-height: calc(160px * var(--font-pixel))"><img src="#),
+                "{clean}"
+            );
+            assert_eq!(clean.matches("min-height").count(), 1);
+            // 120 x 120: 10 columns, 6 rows.
+            let square = mosaics(
+                r#"<img src="https://e.org/c.png" width="120" height="120">"#,
+                None,
+            );
+            assert!(
+                square.contains("min-height: calc(60px * var(--font-pixel))"),
+                "{square}"
+            );
+        }
+
+        #[test]
+        fn hostile_values_stay_escaped_inside_a_box() {
+            let clean = mosaics(
+                r#"<img src="https://e.example/a.png?x=1&y=<b>&quot;" alt='"><script>alert(1)</script>'>"#,
+                None,
+            );
+            assert!(!clean.contains("<script"), "{clean}");
+            assert!(!clean.contains("<b>"), "{clean}");
+            assert!(clean.contains("&lt;script&gt;"), "{clean}");
+            for rejected in [
+                r#"<img src="javascript:alert(1)">"#,
+                r#"<img src="ftp://e.example/a.png">"#,
+                r#"<img src="ressac-mosaic:image?cols=1&src=x">"#,
+            ] {
+                let clean = mosaics(rejected, None);
+                assert!(!clean.contains("class=\"mosaic\""), "{rejected}: {clean}");
+                assert!(!clean.contains("javascript:"), "{clean}");
+            }
         }
     }
 }

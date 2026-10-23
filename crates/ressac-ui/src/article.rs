@@ -267,7 +267,12 @@ impl ArticlePage {
                     .find(|html| !html.trim().is_empty())
             })
             .unwrap_or("");
-        let body = sanitize(source, link, Images::Web);
+        let images = if antiope {
+            Images::Mosaics
+        } else {
+            Images::Web
+        };
+        let body = sanitize(source, link, images);
 
         let mut meta = vec![
             escape_text(&row.feed_title),
@@ -711,6 +716,29 @@ pub fn page_down_script(expected_url: &str) -> String {
     format!(
         r#"(() => {{ if (location.href !== {expected}) {{ return "spent"; }} if (document.readyState === "loading") {{ return "spent"; }} const page = document.scrollingElement; if (page.scrollTop + window.innerHeight >= page.scrollHeight - 2) {{ return "bottom"; }} window.scrollBy({{ top: Math.round(window.innerHeight * 0.9), behavior: "smooth" }}); return "scrolled"; }})()"#,
         expected = js_string(expected_url)
+    )
+}
+
+/// Swaps mosaic `index` and its original (a click on the mosaic): evaluates to whether the
+/// original is now shown. App JavaScript; the page's own stays off.
+pub fn toggle_image_script(index: u32) -> String {
+    format!(
+        r#"(() => {{ const box = document.getElementById("m" + {index}); if (!box) {{ return false; }} const original = !box.classList.contains("original"); box.classList.toggle("original", original); box.querySelector("img").src = original ? box.dataset.original : box.dataset.mosaic; return original; }})()"#
+    )
+}
+
+/// `i`: every image of the article both ways, originals while any mosaic shows, else mosaics.
+/// Evaluates to how many boxes it swapped.
+pub fn toggle_all_images_script() -> String {
+    r#"(() => { const boxes = Array.from(document.querySelectorAll(".mosaic")); const original = boxes.some((box) => !box.classList.contains("original")); for (const box of boxes) { box.classList.toggle("original", original); box.querySelector("img").src = original ? box.dataset.original : box.dataset.mosaic; } return boxes.length; })()"#.to_string()
+}
+
+/// Flags every box showing the mosaic address `source` as failed (`data-failed`), so the
+/// stylesheet shows the IMAGE line. Evaluates to nothing.
+pub fn mark_failed_script(source: &str) -> String {
+    format!(
+        r#"(() => {{ const source = {source}; for (const box of document.querySelectorAll(".mosaic")) {{ const image = box.querySelector("img"); if (box.dataset.mosaic === source || (image && image.src === source)) {{ box.dataset.failed = ""; }} }} }})()"#,
+        source = js_string(source)
     )
 }
 
@@ -1636,6 +1664,42 @@ mod tests {
         assert_eq!(js_string(r#"a"b\c</script>"#), r#""a\"b\\c\u003c/script>""#);
         assert_eq!(js_string("x\u{2028}y\n"), r#""x\u2028y\n""#);
         assert_eq!(js_string("\u{2029}\t\u{1}\r"), r#""\u2029\t\u0001\r""#);
+    }
+
+    #[test]
+    fn antiope_pages_draw_mosaics_and_native_pages_do_not() {
+        let html = r#"<p><img src="https://img.example.org/a.png" alt="Cat"></p>"#;
+        let draw = |theme| {
+            ArticlePage {
+                entry: entry(1, Some("T"), Some(ARTICLE), Some(html), None),
+                theme,
+                ..base_page()
+            }
+            .html(&paris())
+        };
+        let antiope_page = draw(antiope(false));
+        assert!(antiope_page.contains(r#"<a class="mosaic" href="ressac-toggle:0" id="m0""#));
+        assert!(!antiope_page.contains(r#"src="https://img.example.org"#));
+        let native = draw(ReaderTheme::NATIVE);
+        assert!(native.contains(r#"src="https://img.example.org/a.png" loading="lazy""#));
+        assert!(!native.contains(r#"class="mosaic""#));
+    }
+
+    #[test]
+    fn the_image_scripts_are_app_world_and_escaped() {
+        let toggle = toggle_image_script(3);
+        assert!(toggle.contains(r#"getElementById("m" + 3)"#), "{toggle}");
+        assert!(toggle.contains("box.dataset.original") && toggle.contains("box.dataset.mosaic"));
+        assert!(toggle.contains(r#"classList.toggle("original", original)"#));
+        let all = toggle_all_images_script();
+        assert!(
+            all.contains(r#"querySelectorAll(".mosaic")"#) && all.contains("return boxes.length")
+        );
+        let source = r#"https://x/"a"#;
+        let failed = mark_failed_script(source);
+        assert!(failed.contains(&js_string(source)), "{failed}");
+        assert!(failed.contains("dataset.failed"));
+        assert!(!failed.contains(source), "the address only appears escaped");
     }
 
     #[test]
