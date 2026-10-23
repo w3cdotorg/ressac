@@ -6,21 +6,17 @@
 use std::pin::Pin;
 
 use cxx_qt::{CxxQtType, Threading};
-use cxx_qt_lib::{
-    QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
-};
+use cxx_qt_lib::{QString, QVariant};
 use ressac_core::clock::today_start;
 use ressac_core::store::Source;
 use ressac_ui::chrono;
-use ressac_ui::live::{RowOp, plan_rows};
+use ressac_ui::live::plan_rows;
 use ressac_ui::runs::{DirectWrite, read_failure, write_failure};
 use ressac_ui::sources::{RowKind, Selection, SidebarRow, SidebarTree, index_of};
 use ressac_ui::worker::JobResult;
 
 use crate::launcher::with_session;
-
-/// `Qt::UserRole`: the first custom role.
-const FIRST_ROLE: i32 = 256;
+use crate::rows::{list_model_rows, to_i32, variant_string};
 
 /// The role names QML sees, in role order (`FIRST_ROLE + index`).
 const ROLES: [&str; 14] = [
@@ -154,10 +150,6 @@ pub struct SourcesModelRust {
     selection: Selection,
 }
 
-fn variant_string(text: &str) -> QVariant {
-    QVariant::from(&QString::from(text))
-}
-
 fn variant_count(count: usize) -> QVariant {
     QVariant::from(&i32::try_from(count).unwrap_or(i32::MAX))
 }
@@ -211,32 +203,6 @@ impl qobject::SourcesModel {
         self.rust().selection.is_garden()
     }
 
-    fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
-        let row = usize::try_from(index.row()).ok();
-        let name = usize::try_from(role - FIRST_ROLE)
-            .ok()
-            .and_then(|role| ROLES.get(role));
-        match (row.and_then(|row| self.rust().rows.get(row)), name) {
-            (Some(row), Some(name)) => role_value(row, name),
-            _ => QVariant::default(),
-        }
-    }
-
-    fn row_count(&self, parent: &QModelIndex) -> i32 {
-        if parent.is_valid() {
-            return 0;
-        }
-        i32::try_from(self.rust().rows.len()).unwrap_or(i32::MAX)
-    }
-
-    fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
-        let mut names = QHash::<QHashPair_i32_QByteArray>::default();
-        for (offset, name) in (FIRST_ROLE..).zip(ROLES) {
-            names.insert(offset, QByteArray::from(name));
-        }
-        names
-    }
-
     /// A row index from QML; `None` when out of range (a stale index).
     fn row_at(&self, row: i32) -> Option<&SidebarRow> {
         usize::try_from(row)
@@ -254,37 +220,6 @@ impl qobject::SourcesModel {
         }
         if (self.selected_row(), self.selected_key()) != before {
             self.selection_changed();
-        }
-    }
-
-    fn apply(mut self: Pin<&mut Self>, op: RowOp<SidebarRow>) {
-        let root = QModelIndex::default();
-        match op {
-            RowOp::Remove { first, last } => {
-                self.as_mut()
-                    .begin_remove_rows(&root, to_i32(first), to_i32(last));
-                self.as_mut().rust_mut().get_mut().rows.drain(first..=last);
-                self.as_mut().end_remove_rows();
-            }
-            RowOp::Insert { at, rows } => {
-                let last = at + rows.len() - 1;
-                self.as_mut()
-                    .begin_insert_rows(&root, to_i32(at), to_i32(last));
-                self.as_mut().rust_mut().get_mut().rows.splice(at..at, rows);
-                self.as_mut().end_insert_rows();
-            }
-            RowOp::Change { first, rows } => {
-                let last = first + rows.len() - 1;
-                self.as_mut()
-                    .rust_mut()
-                    .get_mut()
-                    .rows
-                    .splice(first..=last, rows);
-                let top = self.index(to_i32(first), 0, &root);
-                let bottom = self.index(to_i32(last), 0, &root);
-                // No roles listed: every role may have changed.
-                self.data_changed(&top, &bottom, &QList::default());
-            }
         }
     }
 
@@ -414,6 +349,4 @@ impl qobject::SourcesModel {
     }
 }
 
-fn to_i32(index: usize) -> i32 {
-    i32::try_from(index).unwrap_or(i32::MAX)
-}
+list_model_rows!(qobject::SourcesModel, rows: SidebarRow, ROLES, role_value);

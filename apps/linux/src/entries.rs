@@ -6,22 +6,18 @@
 use std::pin::Pin;
 
 use cxx_qt::{CxxQtType, Threading};
-use cxx_qt_lib::{
-    QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
-};
+use cxx_qt_lib::{QString, QVariant};
 use ressac_core::clock::today_start;
 use ressac_core::store::{ListFilter, ListQuery, Source};
 use ressac_ui::chrono::{self, Utc};
 use ressac_ui::entries::{EntryList, ListRow, LocalEdit, relative_date};
-use ressac_ui::live::{RowOp, plan_rows};
+use ressac_ui::live::plan_rows;
 use ressac_ui::runs::{DirectWrite, read_failure, write_failure};
 use ressac_ui::sources::Selection;
 use ressac_ui::worker::JobResult;
 
 use crate::launcher::with_session;
-
-/// `Qt::UserRole`: the first custom role.
-const FIRST_ROLE: i32 = 256;
+use crate::rows::{list_model_rows, to_i32, variant_string};
 
 /// The role names QML sees, in role order (`FIRST_ROLE + index`).
 const ROLES: [&str; 8] = [
@@ -192,10 +188,6 @@ struct View {
     selected_entry_id: i64,
 }
 
-fn variant_string(text: &str) -> QVariant {
-    QVariant::from(&QString::from(text))
-}
-
 fn role_value(shown: &Shown, role: &str) -> QVariant {
     let row = &shown.row;
     match role {
@@ -209,10 +201,6 @@ fn role_value(shown: &Shown, role: &str) -> QVariant {
         "link" => variant_string(row.link.as_deref().unwrap_or("")),
         _ => QVariant::default(),
     }
-}
-
-fn to_i32(index: usize) -> i32 {
-    i32::try_from(index).unwrap_or(i32::MAX)
 }
 
 /// The list's query for `source` under the pane's filter and search box.
@@ -261,32 +249,6 @@ impl qobject::EntriesModel {
             .list
             .as_ref()
             .is_some_and(EntryList::can_mark_all_read)
-    }
-
-    fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
-        let row = usize::try_from(index.row()).ok();
-        let name = usize::try_from(role - FIRST_ROLE)
-            .ok()
-            .and_then(|role| ROLES.get(role));
-        match (row.and_then(|row| self.rust().shown.get(row)), name) {
-            (Some(shown), Some(name)) => role_value(shown, name),
-            _ => QVariant::default(),
-        }
-    }
-
-    fn row_count(&self, parent: &QModelIndex) -> i32 {
-        if parent.is_valid() {
-            return 0;
-        }
-        to_i32(self.rust().shown.len())
-    }
-
-    fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
-        let mut names = QHash::<QHashPair_i32_QByteArray>::default();
-        for (offset, name) in (FIRST_ROLE..).zip(ROLES) {
-            names.insert(offset, QByteArray::from(name));
-        }
-        names
     }
 
     fn view(&self) -> View {
@@ -340,41 +302,6 @@ impl qobject::EntriesModel {
             != (before.active, before.empty_text, before.can_mark_all_read)
         {
             self.list_changed();
-        }
-    }
-
-    fn apply(mut self: Pin<&mut Self>, op: RowOp<Shown>) {
-        let root = QModelIndex::default();
-        match op {
-            RowOp::Remove { first, last } => {
-                self.as_mut()
-                    .begin_remove_rows(&root, to_i32(first), to_i32(last));
-                self.as_mut().rust_mut().get_mut().shown.drain(first..=last);
-                self.as_mut().end_remove_rows();
-            }
-            RowOp::Insert { at, rows } => {
-                let last = at + rows.len() - 1;
-                self.as_mut()
-                    .begin_insert_rows(&root, to_i32(at), to_i32(last));
-                self.as_mut()
-                    .rust_mut()
-                    .get_mut()
-                    .shown
-                    .splice(at..at, rows);
-                self.as_mut().end_insert_rows();
-            }
-            RowOp::Change { first, rows } => {
-                let last = first + rows.len() - 1;
-                self.as_mut()
-                    .rust_mut()
-                    .get_mut()
-                    .shown
-                    .splice(first..=last, rows);
-                let top = self.index(to_i32(first), 0, &root);
-                let bottom = self.index(to_i32(last), 0, &root);
-                // No roles listed: every role may have changed.
-                self.data_changed(&top, &bottom, &QList::default());
-            }
         }
     }
 
@@ -488,9 +415,10 @@ impl qobject::EntriesModel {
         match reloaded {
             Some(Some(Ok(Some(generation)))) => {
                 // The list outgrew a page: restart it on the next turn.
+                let epoch = self.rust().epoch;
                 let qt = self.qt_thread();
                 if qt
-                    .queue(move |model| model.restart_if_due(generation))
+                    .queue(move |model| model.restart_if_due(epoch, generation))
                     .is_err()
                 {
                     tracing::debug!("the app quit before a restart");
@@ -503,7 +431,10 @@ impl qobject::EntriesModel {
     }
 
     /// The restart a reload asked for, if its list is still the one that wanted it.
-    fn restart_if_due(mut self: Pin<&mut Self>, generation: u64) {
+    fn restart_if_due(mut self: Pin<&mut Self>, epoch: u64, generation: u64) {
+        if self.rust().epoch != epoch {
+            return;
+        }
         let before = self.view();
         let keeping = self.rust().selected;
         let today = today_start(chrono::Local::now());
@@ -533,14 +464,21 @@ impl qobject::EntriesModel {
             .and_then(|list| list.row_appeared(id));
         if let Some(generation) = scheduled {
             // Never inside a delegate's creation: the page loads on the next turn.
+            let epoch = self.rust().epoch;
             let qt = self.qt_thread();
-            if qt.queue(move |model| model.load_page(generation)).is_err() {
+            if qt
+                .queue(move |model| model.load_page(epoch, generation))
+                .is_err()
+            {
                 tracing::debug!("the app quit before a page loaded");
             }
         }
     }
 
-    fn load_page(mut self: Pin<&mut Self>, generation: u64) {
+    fn load_page(mut self: Pin<&mut Self>, epoch: u64, generation: u64) {
+        if self.rust().epoch != epoch {
+            return;
+        }
         let before = self.view();
         let today = today_start(chrono::Local::now());
         let loaded = with_session(|session| {
@@ -712,3 +650,5 @@ impl qobject::EntriesModel {
         self.wrote();
     }
 }
+
+list_model_rows!(qobject::EntriesModel, shown: Shown, ROLES, role_value);

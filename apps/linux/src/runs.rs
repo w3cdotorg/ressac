@@ -264,7 +264,7 @@ impl qobject::Runs {
 
         let for_events = self.qt_thread();
         let for_done = self.qt_thread();
-        let job_request = request;
+        let job_request = request.clone();
         let started = with_session(|session| {
             session.worker.long(
                 move |cx, sink, stop| {
@@ -291,8 +291,11 @@ impl qobject::Runs {
             );
         });
         if started.is_none() {
-            // No session: nothing to run, and nothing to show.
-            self.run_finished(Ok(()));
+            // No session: nothing ran, nothing changed, nothing to show.
+            let rust = self.as_mut().rust_mut().get_mut();
+            rust.coordinator.finish(&request, Ok(()));
+            rust.current = None;
+            self.state_changed();
         }
     }
 

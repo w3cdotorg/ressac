@@ -5,6 +5,7 @@
 mod entries;
 mod launcher;
 mod recette;
+mod rows;
 mod runs;
 mod settings;
 mod sources;
