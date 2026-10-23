@@ -683,7 +683,8 @@ pub fn full_article_help(
 }
 
 /// `text` as a JSON string literal, safe inside a `<script>` too: quotes, backslashes, control
-/// characters, U+2028, U+2029 and `<` escaped.
+/// characters, U+2028, U+2029 and `<` escaped. For app-world scripts only, never for markup:
+/// it does not escape `&` or `"` the HTML way, so it is no HTML attribute value.
 pub fn js_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
