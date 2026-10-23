@@ -13,6 +13,7 @@ pub mod runs;
 pub mod sanitize;
 pub mod settings;
 pub mod sources;
+pub mod teletext;
 pub mod worker;
 
 /// The chrono the app's types use, so the KDE bridges pass the clock in with the same chrono.

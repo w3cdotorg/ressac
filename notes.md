@@ -349,6 +349,11 @@ Demandé par Clément le 23/10/2026 : Ressac sur marghe (Fedora KDE Plasma 44, a
 - **`ubuntu-22.04-arm`** : gratuit pour les dépôts publics, ce que `w3cdotorg/ressac` est ; pas un trou.
 - **README** : la ligne `dnf install` a été essayée sur un Fedora 44 nu (`cargo install --locked --path crates/ressac` puis `ressac --version` : 0.2.0, en 2 min 47 s, `tar` seulement pour la copie des sources) et le bloc tmux est sourcé tel quel par tmux 3.8 dans le conteneur.
 
+### Décisions de la partie B
+
+- Deux crates Unicode pour Antiope (B8a1) : `unicode-segmentation` 1.13.3, déjà dans `Cargo.lock` par ratatui, pour couper le texte en graphèmes comme le Mac, et `unicode-normalization` 0.1.26 pour la forme composée (NFC) qui fait de « e + accent » un « é » de Bedstead. Pas de crate de polices : la table `cmap` et les métriques de Bedstead sont lues à la main, une soixantaine de lignes.
+- La table `cmap` de Bedstead compte 2604 points de code dans ses groupes, mais l'un (U+F1FF) pointe sur le glyphe 0 (`.notdef`) : il est écarté, d'où les 2603 de fontTools.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).

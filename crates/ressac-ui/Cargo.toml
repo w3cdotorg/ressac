@@ -12,6 +12,8 @@ chrono.workspace = true
 scraper.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+unicode-normalization.workspace = true
+unicode-segmentation.workspace = true
 url.workspace = true
 
 [dev-dependencies]
