@@ -439,8 +439,8 @@ impl qobject::Library {
             .get_mut()
             .form
             .as_mut()
-            .and_then(AddFeedForm::start);
-        let Some(request) = started else {
+            .and_then(|form| form.start().map(|request| (form.generation(), request)));
+        let Some((generation, request)) = started else {
             return;
         };
         let RunRequest::Add {
@@ -468,24 +468,26 @@ impl qobject::Library {
             |_| {},
             move |end: RunEnd<AddedFeed>| {
                 queue_on(&qt, "the add ended", move |library| {
-                    library.add_finished(end)
+                    library.add_finished(generation, end)
                 });
             },
         );
         self.add_changed();
     }
 
-    fn add_finished(mut self: Pin<&mut Self>, end: RunEnd<AddedFeed>) {
+    /// The end of the add started by the form `generation`: only that form takes it; after a
+    /// cancel (and maybe a new form) the end is the no-form path (the note and `added`).
+    fn add_finished(mut self: Pin<&mut Self>, generation: u64, end: RunEnd<AddedFeed>) {
         let rust = self.as_mut().rust_mut().get_mut();
-        let feed = match rust.form.as_mut() {
-            Some(form) => form.finished(end),
-            None => match end {
-                RunEnd::Done(feed) => Some(feed),
-                _ => None,
-            },
-        };
+        let feed = library::settle_add(&mut rust.form, generation, end);
         if let Some(feed) = feed {
-            rust.form = None;
+            if rust
+                .form
+                .as_ref()
+                .is_some_and(|f| f.generation() == generation)
+            {
+                rust.form = None;
+            }
             rust.note = added_note(&feed);
             self.as_mut().note_changed();
             self.as_mut()

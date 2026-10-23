@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ressac_core::model::{FeedId, FolderId};
 use ressac_core::opml;
@@ -100,14 +100,25 @@ pub struct AddFeedForm {
     running: bool,
     error: Option<String>,
     shows_log: bool,
+    generation: u64,
 }
+
+/// The number of the next form: an add run carries its form's, so a run that ends after its form
+/// was cancelled (and maybe replaced by a new one) cannot touch the new form.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 impl AddFeedForm {
     pub fn new(clipboard: Option<&str>) -> AddFeedForm {
         AddFeedForm {
             address: clipboard_address(clipboard).unwrap_or_default(),
+            generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
             ..AddFeedForm::default()
         }
+    }
+
+    /// This form's number (unique among the forms of the process).
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn can_add(&self) -> bool {
@@ -166,6 +177,23 @@ impl AddFeedForm {
 
     pub fn shows_log(&self) -> bool {
         self.shows_log
+    }
+}
+
+/// The end of an add run started by the form `generation`: the open form takes it when it is
+/// that form; any other case (no form, or a newer one) only keeps the feed it added, so the end
+/// shows no error in and never closes a form that did not start it. The added feed, if any.
+pub fn settle_add(
+    form: &mut Option<AddFeedForm>,
+    generation: u64,
+    end: RunEnd<AddedFeed>,
+) -> Option<AddedFeed> {
+    match form.as_mut().filter(|f| f.generation == generation) {
+        Some(form) => form.finished(end),
+        None => match end {
+            RunEnd::Done(feed) => Some(feed),
+            _ => None,
+        },
     }
 }
 
@@ -679,6 +707,31 @@ mod tests {
         );
         assert!(form.start().is_some(), "a new attempt clears the error");
         assert_eq!(form.error(), None);
+    }
+
+    #[test]
+    fn a_stale_add_never_touches_a_newer_form() {
+        let mut old = AddFeedForm::new(Some("https://df.example"));
+        let stale = old.generation();
+        old.start();
+        let mut form = Some(AddFeedForm::new(Some("https://other.example")));
+        form.as_mut().unwrap().start();
+        // The old run fails: the new form shows no error and keeps running.
+        let failure = RunFailure {
+            message: "Could not reach https://df.example: timed out.".into(),
+            refusal: false,
+        };
+        assert_eq!(settle_add(&mut form, stale, RunEnd::Failed(failure)), None);
+        let new = form.as_ref().unwrap();
+        assert_eq!((new.error(), new.is_running()), (None, true));
+        // The old run succeeds: the feed is reported, the new form is neither closed nor reset.
+        let feed = settle_add(&mut form, stale, RunEnd::Done(added(None, None)));
+        assert_eq!(feed.map(|f| f.id), Some(20));
+        assert!(form.as_ref().unwrap().is_running());
+        // Its own run still settles it.
+        let own = form.as_ref().unwrap().generation();
+        assert!(settle_add(&mut form, own, RunEnd::Done(added(None, None))).is_some());
+        assert!(!form.as_ref().unwrap().is_running());
     }
 
     #[test]
