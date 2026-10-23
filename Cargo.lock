@@ -3497,9 +3497,11 @@ dependencies = [
  "chrono",
  "ressac-core",
  "rusqlite",
+ "scraper",
  "tempfile",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

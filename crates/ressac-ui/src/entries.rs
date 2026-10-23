@@ -100,17 +100,10 @@ pub fn excerpt(html: &str, limit: usize) -> String {
     }
 }
 
-/// `url` when it is an http(s) link with something after the scheme.
+/// `url` when it is a web address (`sanitize::is_web_url`, the reader's link rule).
 pub fn web_link(url: Option<&str>) -> Option<String> {
-    let url = url?;
-    ["http://", "https://"]
-        .iter()
-        .any(|scheme| {
-            url.get(..scheme.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
-                && url.len() > scheme.len()
-        })
-        .then(|| url.to_string())
+    url.filter(|url| crate::sanitize::is_web_url(url))
+        .map(str::to_string)
 }
 
 /// "3 hours ago", "yesterday", "in 2 days": the largest whole unit, with fixed spans
@@ -568,6 +561,7 @@ mod tests {
         ] {
             assert_eq!(web_link(bad), None, "{bad:?}");
         }
+        assert_eq!(web_link(Some("https:///nohost")), None);
     }
 
     #[test]
