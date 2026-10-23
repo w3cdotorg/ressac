@@ -10,6 +10,7 @@ license.workspace = true
 ressac-core = { path = "../ressac-core" }
 chrono.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true

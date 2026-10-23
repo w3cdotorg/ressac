@@ -5,6 +5,7 @@
 pub mod entries;
 pub mod launch;
 pub mod live;
+pub mod runs;
 pub mod settings;
 pub mod sources;
 pub mod worker;

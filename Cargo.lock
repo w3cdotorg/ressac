@@ -3499,6 +3499,7 @@ dependencies = [
  "rusqlite",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
