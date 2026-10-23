@@ -143,6 +143,7 @@ Item {
         Reader.reload()
         Journal.reload()
         Garden.reload()
+        Chart.noteChange()                       // the Sea Chart's debounced survey (ignored while its window is closed)
     }
 
     ColumnLayout {

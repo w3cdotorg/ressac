@@ -1,4 +1,5 @@
 import QtQuick
+import QtCore
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -13,6 +14,34 @@ Kirigami.ApplicationWindow {
     minimumWidth: 960
     minimumHeight: 500
     visible: true
+
+    // The Sea Chart: a window of its own, made on demand and dropped when closed.
+    Loader { id: chartLoader; active: false; sourceComponent: Component { SeaChartWindow { chrome: root } } }
+    function openChart() {
+        chartLoader.active = true
+        const w = chartLoader.item
+        w.show(); w.raise(); w.requestActivate()
+        Chart.openWindow()
+    }
+    function chartClosed() { chartLoader.active = false }
+    // Web addresses go to the user's browser; a walk only logs them.
+    function openExternally(url) {
+        if (Recette.active)
+            console.warn("open: " + url)
+        else
+            Qt.openUrlExternally(url)
+    }
+    Binding { target: mainMenu.seaChart; property: "enabled"; value: true }
+    Connections { target: mainMenu.seaChart; function onTriggered() { root.openChart() } }
+    Connections {
+        target: Chart
+        function onOpenFeed(key) {
+            SourcesModel.selectKey(key)
+            if (root.visibility === Window.Minimized) root.showNormal()
+            root.show(); root.raise(); root.requestActivate()
+        }
+        function onOpenUrl(url) { root.openExternally(url) }
+    }
 
     function useDefaultDatabase() {
         AppSettings.databasePath = ""
@@ -152,7 +181,57 @@ Kirigami.ApplicationWindow {
                 + " apply=" + Garden.showsApply) } },
         { name: "20-buried-key", enter: function () { Recette.key(Qt.Key_B, "b", 0); console.warn("walk: 20-buried-key message=" + Garden.message) } }
     ]
-    readonly property var steps: Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
+    // The `chart` and `chart-live` walks: the Sea Chart window (B7c).
+    readonly property var chartSteps: [
+        { name: "02-open", enter: function () { root.openChart()
+            console.warn("walk: 02-open open=" + Chart.open + " reduce=" + Chart.reduceMotion + " onScreen=" + Live.chartOnScreen) } },
+        { name: "03-wait", enter: function () {} }, { name: "04-wait", enter: function () {} }, { name: "05-wait", enter: function () {} },
+        { name: "06-wait", enter: function () {} }, { name: "07-wait", enter: function () {} }, { name: "08-wait", enter: function () {} },
+        { name: "09-wait", enter: function () {} },
+        { name: "10-first", enter: function () { chartLoader.item.probe("10-first") } },
+        { name: "11-fixture", enter: function () { const home = String(StandardPaths.writableLocation(StandardPaths.HomeLocation))
+            console.warn("walk: 11-fixture shown=" + Chart.showFile(home + "/fixture.json")) } },
+        { name: "12-wait", enter: function () {} }, { name: "13-wait", enter: function () {} }, { name: "14-wait", enter: function () {} },
+        { name: "15-drawn", enter: function () { chartLoader.item.probe("15-drawn") } },
+        { name: "16-messages", enter: function () { chartLoader.item.runPage(
+            "const h = window.webkit.messageHandlers.ressac;"
+            + "h.postMessage({type: 'openFeed', id: 8}); h.postMessage({type: 'openURL', url: 'file:///etc/passwd'});"
+            + "h.postMessage({type: 'openURL', url: 'javascript:alert(1)'}); h.postMessage({type: 'openFeed', id: '9'});"
+            + "h.postMessage({type: 'openURL', url: 'https://example.invalid/x'});"
+            + "[...document.querySelectorAll('.bar button')].find(b => b.textContent === 'From the harbour').click();") } },
+        { name: "17-wait", enter: function () {} },
+        { name: "18-answered", enter: function () { console.warn("walk: 18-answered selected=" + SourcesModel.selectedKey + " view=" + AppSettings.chartView
+            + " ink=" + AppSettings.chartInk + " animate=" + AppSettings.chartAnimate); chartLoader.item.requestActivate() } },
+        { name: "19-navigate", enter: function () { chartLoader.item.runPage(
+            "for (const t of ['LICENSE-d3.txt', 'https://example.invalid/']) { const a = document.createElement('a'); a.href = t; document.body.append(a); a.click() }"
+            + "setTimeout(() => { location.href = 'about:blank' }, 100);") } },
+        { name: "20-wait", enter: function () {} }, { name: "21-wait", enter: function () {} }, { name: "22-wait", enter: function () {} },
+        { name: "23-home", enter: function () { chartLoader.item.probe("23-home") } },
+        { name: "24-close", enter: function () { chartLoader.item.width = 1200; chartLoader.item.close() } },
+        { name: "25-closed", enter: function () { console.warn("walk: 25-closed open=" + Chart.open + " onScreen=" + Live.chartOnScreen
+            + " window=" + (chartLoader.item !== null)) } },
+    ]
+    readonly property var chartLiveSteps: [
+        { name: "02-open", enter: function () { root.openChart() } },
+        { name: "03-wait", enter: function () {} }, { name: "04-wait", enter: function () {} }, { name: "05-wait", enter: function () {} },
+        { name: "06-first", enter: function () { console.warn("walk: 06-first surveys=" + Chart.surveys + " phase=" + Chart.phase) } },
+        { name: "07-write", enter: function () { root.requestActivate(); SourcesModel.selectKey("unread"); EntriesModel.select(0); EntriesModel.toggleStarred(0) } },
+        { name: "08-wait", enter: function () {} }, { name: "09-wait", enter: function () {} }, { name: "10-wait", enter: function () {} },
+        { name: "11-wait", enter: function () {} }, { name: "12-wait", enter: function () {} }, { name: "13-wait", enter: function () {} },
+        { name: "14-wait", enter: function () {} },
+        { name: "15-second", enter: function () { console.warn("walk: 15-second surveys=" + Chart.surveys) } },
+        { name: "16-retry", enter: function () { Chart.retry() } },
+        { name: "17-wait", enter: function () {} },
+        { name: "18-third", enter: function () { console.warn("walk: 18-third surveys=" + Chart.surveys) } },
+        { name: "19-close", enter: function () { chartLoader.item.close() } },
+        { name: "20-note", enter: function () { console.warn("walk: 20-note surveys=" + Chart.surveys); Chart.noteChange(); EntriesModel.toggleStarred(0) } },
+        { name: "21-wait", enter: function () {} }, { name: "22-wait", enter: function () {} }, { name: "23-wait", enter: function () {} },
+        { name: "24-wait", enter: function () {} }, { name: "25-wait", enter: function () {} }, { name: "26-wait", enter: function () {} },
+        { name: "27-wait", enter: function () {} },
+        { name: "28-after", enter: function () { console.warn("walk: 28-after surveys=" + Chart.surveys + " open=" + Chart.open
+            + " onScreen=" + Live.chartOnScreen + " polling=" + Live.polling) } },
+    ]
+    readonly property var steps: Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }

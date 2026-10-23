@@ -84,6 +84,7 @@ pub mod qobject {
         #[qproperty(QString, adapter_script, READ = adapter_script, CONSTANT)]
         #[qproperty(QString, probe_script, READ = probe_script, CONSTANT)]
         #[qproperty(QString, window_title, READ = window_title, CONSTANT)]
+        #[qproperty(QString, not_open_text, READ = not_open_text, CONSTANT)]
         #[qproperty(QString, not_drawn_text, READ = not_drawn_text, CONSTANT)]
         #[qproperty(QString, retry_text, READ = retry_text, CONSTANT)]
         #[qproperty(i32, tick_ms, READ = tick_ms, CONSTANT)]
@@ -100,6 +101,7 @@ pub mod qobject {
         fn adapter_script(self: &Chart) -> QString;
         fn probe_script(self: &Chart) -> QString;
         fn window_title(self: &Chart) -> QString;
+        fn not_open_text(self: &Chart) -> QString;
         fn not_drawn_text(self: &Chart) -> QString;
         fn retry_text(self: &Chart) -> QString;
         fn tick_ms(self: &Chart) -> i32;
@@ -178,6 +180,9 @@ pub struct ChartRust {
     page: ChartPage,
     reduce_motion: bool,
     surveys: i32,
+    /// The survey whose thread is out; a result for any other ticket is stale (a reopened window
+    /// gets new tickets) and is neither counted, logged nor shown.
+    in_flight: Option<Survey>,
 }
 
 impl ChartRust {
@@ -246,6 +251,10 @@ impl qobject::Chart {
         QString::from(WINDOW_TITLE)
     }
 
+    fn not_open_text(&self) -> QString {
+        QString::from(NOT_OPEN)
+    }
+
     fn not_drawn_text(&self) -> QString {
         QString::from(NOT_DRAWN)
     }
@@ -274,6 +283,7 @@ impl qobject::Chart {
     fn close_window(mut self: Pin<&mut Self>) {
         let this = self.as_mut().rust_mut().get_mut();
         this.model.close();
+        this.in_flight = None;
         this.page = ChartPage::default();
         self.state_changed();
     }
@@ -302,33 +312,42 @@ impl qobject::Chart {
     }
 
     /// Runs a survey on a thread of its own; its result comes back to `survey_done`.
-    fn start(self: Pin<&mut Self>, survey: Survey) {
+    fn start(mut self: Pin<&mut Self>, survey: Survey) {
+        self.as_mut().rust_mut().get_mut().in_flight = Some(survey);
         let Some(db) = with_session(|session| session.worker.db().to_path_buf()) else {
             self.survey_done(survey, Err(NOT_OPEN.to_string()));
             return;
         };
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
-            let result = chart::survey(&db, chrono::Utc::now());
-            if qt
-                .queue(move |chart| chart.survey_done(survey, result))
-                .is_err()
-            {
-                tracing::debug!("the app quit during a survey");
-            }
-        });
+        let spawned = std::thread::Builder::new()
+            .name("chart-survey".to_string())
+            .spawn(move || {
+                let result = chart::survey(&db, chrono::Utc::now());
+                if qt
+                    .queue(move |chart| chart.survey_done(survey, result))
+                    .is_err()
+                {
+                    tracing::debug!("the app quit during a survey");
+                }
+            });
+        if let Err(error) = spawned {
+            self.survey_done(survey, Err(format!("cannot start the survey: {error}")));
+        }
     }
 
     /// A survey's result, back on the GUI thread.
     fn survey_done(mut self: Pin<&mut Self>, survey: Survey, result: Result<String, String>) {
-        let ok = result.is_ok();
+        let this = self.as_mut().rust_mut().get_mut();
+        if this.in_flight != Some(survey) {
+            return;
+        }
+        this.in_flight = None;
         if let Err(message) = &result {
             tracing::warn!("chart survey failed: {}", redact_text(message));
         }
-        let this = self.as_mut().rust_mut().get_mut();
+        let ok = result.is_ok();
         let next = this.model.finished(survey, result);
-        // A result for a window closed meanwhile is stale: the model ignored it.
-        if ok && this.model.is_open() && matches!(this.model.phase(), Phase::Ready(_)) {
+        if ok && matches!(this.model.phase(), Phase::Ready(_)) {
             this.surveys = this.surveys.saturating_add(1);
         }
         self.as_mut().show_current();
@@ -374,6 +393,12 @@ impl qobject::Chart {
     }
 
     fn receive(self: Pin<&mut Self>, text: &QString) {
+        // The cap is checked on the Qt string first, before any copy into a Rust one: a message
+        // of more UTF-16 units than the cap is more bytes than it too.
+        if usize::try_from(text.len()).map_or(true, |units| units > MAX_MESSAGE) {
+            tracing::debug!("chart: ignored an oversized page message");
+            return;
+        }
         match parse_message(&text.to_string()) {
             Some(ChartAction::OpenFeed(id)) => {
                 self.open_feed(&QString::from(format!("feed:{id}").as_str()));
