@@ -1,0 +1,16 @@
+[package]
+name = "ressac-qt-spike"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+cxx = "1.0"
+cxx-qt = "0.10"
+cxx-qt-lib = { version = "0.10", features = ["qt_gui", "qt_qml"] }
+ressac-core = { path = "/work/ressac/crates/ressac-core" }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+tempfile = "3"
+
+[build-dependencies]
+cxx-qt-build = "0.10"

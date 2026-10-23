@@ -1,0 +1,39 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>graph</title>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<style>
+ body{margin:0;font:13px sans-serif;background:#0f2433;color:#e6f0f5}
+ #log{position:absolute;left:8px;bottom:8px;background:#0008;padding:6px 8px;border-radius:4px;white-space:pre}
+ circle{cursor:pointer} text{fill:#e6f0f5;font-size:12px;pointer-events:none}
+ line{stroke:#5fa8c8;stroke-opacity:.5}
+</style></head>
+<body><svg id="svg" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid meet" style="position:absolute;inset:0;width:100%;height:100%"></svg><div id="log">waiting for WebChannel…</div>
+<script>
+const names=["Tech","LWN.net","KDE Planet","Rust Blog","Le Monde","Fedora Magazine","Ressac"];
+const links=[[6,0],[0,1],[0,2],[0,3],[6,4],[6,5]];
+/* fixed viewBox: innerWidth is unreliable while the page is pushed */ const W=800,H=600; const nodes=names.map((n,i)=>({n,x:W/2+Math.cos(i)*150,y:H/2+Math.sin(i)*150,vx:0,vy:0}));
+// tiny d3-force-like relaxation
+for(let it=0;it<300;it++){
+  for(const a of nodes)for(const b of nodes){if(a===b)continue;const dx=a.x-b.x,dy=a.y-b.y,d2=dx*dx+dy*dy+.01;a.vx+=dx/d2*800;a.vy+=dy/d2*800;}
+  for(const [s,t] of links){const a=nodes[s],b=nodes[t],dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),k=(d-120)*.02;a.vx+=dx/d*k;a.vy+=dy/d*k;b.vx-=dx/d*k;b.vy-=dy/d*k;}
+  for(const a of nodes){a.vx+=(W/2-a.x)*.005;a.vy+=(H/2-a.y)*.005;a.x+=a.vx*.5;a.y+=a.vy*.5;a.vx*=.6;a.vy*=.6;}
+}
+const svg=document.getElementById('svg'),NS='http://www.w3.org/2000/svg';
+for(const [s,t] of links){const l=document.createElementNS(NS,'line');l.setAttribute('x1',nodes[s].x);l.setAttribute('y1',nodes[s].y);l.setAttribute('x2',nodes[t].x);l.setAttribute('y2',nodes[t].y);svg.appendChild(l);}
+nodes.forEach((d,i)=>{const c=document.createElementNS(NS,'circle');c.setAttribute('cx',d.x);c.setAttribute('cy',d.y);c.setAttribute('r',i==6?22:14);c.setAttribute('fill',i==6?'#f2b134':'#3fa7d6');c.id='n'+i;c.onclick=()=>clicked(d.n);svg.appendChild(c);
+ const tx=document.createElementNS(NS,'text');tx.setAttribute('x',d.x+18);tx.setAttribute('y',d.y+4);tx.textContent=d.n;svg.appendChild(tx);});
+const log=m=>{document.getElementById('log').textContent+= "\n"+m; console.log(m);};
+let backend=null, qmlBridge=null;
+new QWebChannel(qt.webChannelTransport, ch => {
+  backend=ch.objects.backend; qmlBridge=ch.objects.qmlBridge;
+  log("WebChannel up: objects="+Object.keys(ch.objects).join(","));
+  if (qmlBridge) qmlBridge.hello("graph.html", r=>log("qmlBridge.hello -> "+r));
+  if (backend) backend.statusChanged.connect(()=>log("backend.status changed -> "+backend.status));
+});
+function clicked(name){
+  document.querySelectorAll('circle').forEach(c=>c.setAttribute('stroke',''));
+  const i=names.indexOf(name); if(i>=0){const c=document.getElementById('n'+i);c.setAttribute('stroke','#fff');c.setAttribute('stroke-width','4');}
+  if(backend) backend.nodeClicked(name, r=>log("Rust nodeClicked returned: "+r)); else log("no backend on channel");
+}
+function simulateClick(name){ clicked(name); }
+</script></body></html>
