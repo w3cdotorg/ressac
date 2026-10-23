@@ -98,6 +98,8 @@ pub struct ReaderRust {
     page: Option<ArticlePage>,
     revision: u64,
     page_url: QString,
+    /// A new selection could not be read yet (no session): the next read resets the toggle.
+    select_pending: bool,
 }
 
 impl Default for ReaderRust {
@@ -115,6 +117,7 @@ impl Default for ReaderRust {
             page: None,
             revision: 0,
             page_url: QString::default(),
+            select_pending: false,
         }
     }
 }
@@ -155,8 +158,8 @@ impl qobject::Reader {
             return;
         }
         self.as_mut().rust_mut().get_mut().entry_id = value;
-        self.as_mut().entry_id_changed();
         self.as_mut().read(true);
+        self.as_mut().entry_id_changed();
         self.rebuild();
     }
 
@@ -265,8 +268,10 @@ impl qobject::Reader {
     }
 
     /// Reads the entry and its stored full article; a new selection (`selecting`) also resets
-    /// the Full Article state. A failed read leaves the page as it was and tells the banner.
+    /// the Full Article state. A failed read leaves the page as it was and tells the banner;
+    /// before the session exists nothing is read and the next read (`reload`) catches up.
     fn read(mut self: Pin<&mut Self>, selecting: bool) {
+        let selecting = selecting || self.rust().select_pending;
         let id = self.rust().entry_id;
         let read = if id < 0 {
             Some((Ok(None), Ok(None)))
@@ -275,7 +280,10 @@ impl qobject::Reader {
         };
         let (detail, fulltext) = match read {
             // No session (the launcher has not finished): nothing to read yet.
-            None => return,
+            None => {
+                self.rust_mut().get_mut().select_pending = selecting;
+                return;
+            }
             Some((Err(error), _)) | Some((_, Err(error))) => {
                 let banner = read_failure(&error);
                 self.as_mut()
@@ -285,6 +293,7 @@ impl qobject::Reader {
             Some((Ok(detail), Ok(fulltext))) => (detail, fulltext),
         };
         let rust = self.rust_mut().get_mut();
+        rust.select_pending = false;
         if selecting {
             rust.full_text
                 .select(detail.as_ref().map(|detail| &detail.row));
@@ -340,13 +349,19 @@ fn clear_page() {
     PAGE.with(|slot| *slot.borrow_mut() = None);
 }
 
-fn stored_page(url: &str) -> Option<String> {
+/// Appends the page stored under `url` to `body`; false when it is not the stored one.
+fn write_stored_page(url: &str, body: &mut Vec<u8>) -> bool {
     PAGE.with(|slot| {
-        slot.try_borrow()
-            .ok()?
-            .as_ref()
-            .filter(|(stored, _)| stored == url)
-            .map(|(_, html)| html.clone())
+        let Ok(slot) = slot.try_borrow() else {
+            return false;
+        };
+        match slot.as_ref().filter(|(stored, _)| stored == url) {
+            Some((_, html)) => {
+                body.extend_from_slice(html.as_bytes());
+                true
+            }
+            None => false,
+        }
     })
 }
 
@@ -377,19 +392,25 @@ fn asset_bytes(file: &str) -> Option<&'static [u8]> {
 }
 
 /// What the C++ `ressac:` handler serves: the proof page, the current entry page, the bundled
-/// assets. False for any other address (the handler then answers "not found"). Called from C++:
-/// it never panics.
+/// assets, written straight into `body`. False for any other address (the handler then answers
+/// "not found"). Called from C++: it never panics.
 pub fn ressac_scheme_serve(url: &str, mime: &mut String, body: &mut Vec<u8>) -> bool {
-    let (kind, bytes) = if url == PROOF_URL {
-        ("text/html; charset=utf-8", PROOF_PAGE.as_bytes().to_vec())
+    const HTML: &str = "text/html; charset=utf-8";
+    body.clear();
+    let kind = if url == PROOF_URL {
+        body.extend_from_slice(PROOF_PAGE.as_bytes());
+        HTML
     } else if url.starts_with(PAGE_PREFIX) {
-        match stored_page(url) {
-            Some(html) => ("text/html; charset=utf-8", html.into_bytes()),
-            None => return false,
+        if !write_stored_page(url, body) {
+            return false;
         }
+        HTML
     } else if let Some(file) = url.strip_prefix(ASSET_PREFIX) {
         match (asset(file), asset_bytes(file)) {
-            (Some(known), Some(bytes)) => (known.mime, bytes.to_vec()),
+            (Some(known), Some(bytes)) => {
+                body.extend_from_slice(bytes);
+                known.mime
+            }
             _ => return false,
         }
     } else {
@@ -397,14 +418,24 @@ pub fn ressac_scheme_serve(url: &str, mime: &mut String, body: &mut Vec<u8>) -> 
     };
     mime.clear();
     mime.push_str(kind);
-    body.clear();
-    body.extend_from_slice(&bytes);
     true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_asset_is_served_with_its_mime_type_and_bytes() {
+        for known in ressac_ui::article::ASSETS {
+            let (mut mime, mut body) = (String::new(), vec![0u8; 3]);
+            let url = format!("{ASSET_PREFIX}{}", known.file);
+            assert!(ressac_scheme_serve(&url, &mut mime, &mut body), "{url}");
+            assert_eq!(mime, known.mime, "{url}");
+            assert!(!body.is_empty(), "{url}");
+            assert_eq!(Some(body.as_slice()), asset_bytes(known.file), "{url}");
+        }
+    }
 
     #[test]
     fn assets_and_pages_are_served_and_nothing_else() {

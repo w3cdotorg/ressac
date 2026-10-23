@@ -12,6 +12,7 @@ Item {
     property alias allButton: allButton
     property alias unreadButton: unreadButton
     property alias sourcesPane: sourcesPane
+    property string look: "native"
 
     function syncFilter() {
         allButton.checked = !EntriesModel.unreadOnly
@@ -21,6 +22,7 @@ Item {
     function reloadAll() {
         SourcesModel.reload()
         EntriesModel.reload()
+        Reader.reload()
     }
 
     ColumnLayout {
@@ -149,7 +151,7 @@ Item {
                 QQC2.SplitView.maximumWidth: 480
             }
 
-            Item {
+            ReaderPane {
                 id: readerPane
                 QQC2.SplitView.fillWidth: true
                 QQC2.SplitView.minimumWidth: 300
@@ -167,6 +169,7 @@ Item {
     }
 
     Connections { target: EntriesModel; function onUnreadOnlyChanged() { page.syncFilter() } }
+    Connections { target: Reader; function onBanner(m, l) { Runs.showBanner(m, l) } }
     Connections { target: Live; function onInvalidated() { page.reloadAll() } }
     Connections { target: Runs; function onDatabaseChanged() { page.reloadAll() } }
     Connections { target: SourcesModel; function onWrote() { page.reloadAll() } }
@@ -175,8 +178,19 @@ Item {
     Connections { target: EntriesModel; function onBanner(m, l) { Runs.showBanner(m, l) } }
     Connections { target: SourcesModel; function onSelectionChanged() { EntriesModel.showSource(SourcesModel.selectedKey) } }
 
+    Binding { target: Reader; property: "entryId"; value: EntriesModel.selectedEntryId }
+    Binding {
+        target: Reader; property: "colorScheme"
+        value: Kirigami.ColorUtils.brightnessForColor(Kirigami.Theme.backgroundColor) === Kirigami.ColorUtils.Dark ? "dark" : "light"
+    }
+    Binding { target: Reader; property: "look"; value: page.look }
+    Binding { target: Reader; property: "readerFont"; value: AppSettings.readerFont }
+    Binding { target: Reader; property: "textSize"; value: page.look === "antiope" ? AppSettings.readerSizeAntiope : AppSettings.readerSize }
+    Binding { target: Reader; property: "readerWidth"; value: AppSettings.readerWidth }
+
     Component.onCompleted: {
         page.syncFilter()
+        Reader.reload()
         SourcesModel.reload()
         EntriesModel.showSource(SourcesModel.selectedKey)
     }
