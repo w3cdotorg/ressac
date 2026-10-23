@@ -15,6 +15,7 @@ use crate::sources::{GardenScope, Selection, rhythm_title};
 use crate::teletext::CellLine;
 
 pub mod frame;
+pub mod special;
 
 /// The index column's width, in cells.
 pub const INDEX_CELLS: usize = 22;
