@@ -21,6 +21,7 @@ Kirigami.ApplicationWindow {
 
     // --screenshot (spec §8.2): grab the settled launch screen, then each walk step (ready only), then quit.
     readonly property var walkSteps: []          // B2 onwards: { name: "02-…", enter: function () { … } }
+    property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… walkSteps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }
     function slug() { return Launcher.phase === Launcher.Ready ? "ready" : Launcher.phase === Launcher.TooNew ? "too-new" : "failed" }
@@ -29,8 +30,13 @@ Kirigami.ApplicationWindow {
     Timer {
         id: walkTimer; interval: 400
         onTriggered: {
-            const name = root.walkIndex < 0 ? "01-" + root.slug() : root.walkSteps[root.walkIndex].name
+            const name = root.walkIndex < 0 ? (root.pressedDefault ? "02-" : "01-") + root.slug() : root.walkSteps[root.walkIndex].name
             if (!Recette.grab(name)) { Qt.exit(1); return }
+            if (root.walkIndex === -1 && !root.pressedDefault && Recette.pressDefault !== "" && root.settled() && Launcher.phase !== Launcher.Ready) {
+                root.pressedDefault = true; root.walkIndex = -2
+                Recette.prepareDefault(); root.useDefaultDatabase()
+                return
+            }
             root.walkIndex += 1
             if (Launcher.phase !== Launcher.Ready || root.walkIndex >= root.walkSteps.length) { Qt.exit(0); return }
             root.walkSteps[root.walkIndex].enter()

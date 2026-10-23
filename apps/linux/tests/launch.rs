@@ -32,6 +32,10 @@ impl Run {
     /// `ressac-kde --screenshot <shots>` with RESSAC_DB = `db` (None: unset), offscreen, HOME and
     /// XDG_{CONFIG,DATA,STATE,CACHE}_HOME under the temp dir, RUST_LOG unset.
     fn launch(&self, db: Option<&Path>) -> Output {
+        self.launch_with(db, &[])
+    }
+
+    fn launch_with(&self, db: Option<&Path>, extra_env: &[(&str, &str)]) -> Output {
         let mut cmd = Command::new("timeout");
         cmd.arg("90")
             .arg(env!("CARGO_BIN_EXE_ressac-kde"))
@@ -46,6 +50,7 @@ impl Run {
             .env("QT_FORCE_STDERR_LOGGING", "1")
             .env_remove("RUST_LOG")
             .env_remove("RESSAC_DB");
+        cmd.envs(extra_env.iter().copied());
         if let Some(db) = db {
             cmd.env("RESSAC_DB", db);
         }
@@ -163,6 +168,14 @@ fn a_file_that_is_not_a_database_fails_and_is_left_alone() {
     std::fs::write(&db, words).unwrap();
     let out = run.launch(Some(&db));
     assert_eq!(out.status.code(), Some(0));
+    assert_clean(&out);
+    let log: String = std::fs::read_dir(run.home.join("state/ressac/logs"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .collect();
+    let want = format!("launch: Failed(\"Cannot open {}: ", db.display());
+    assert!(log.contains(&want), "{log}");
     assert_eq!(shots(&run), ["01-failed.png"]);
     assert_drawn(&run.shots.join("01-failed.png"));
     assert_eq!(std::fs::read_to_string(&db).unwrap(), words);
@@ -178,4 +191,75 @@ fn the_screenshot_flag_needs_ressac_db() {
         format!("{}\n", ressac_ui::launch::SCREENSHOT_NEEDS_DB)
     );
     assert!(!run.shots.exists());
+}
+
+/// A settings file whose `databasePath` points at `bad`, and a file that is not a database.
+fn seed_bad_setting(run: &Run) -> PathBuf {
+    let bad = run.home.join("notes.sqlite");
+    std::fs::write(
+        &bad,
+        "only words, long enough to fill the first page of a SQLite header",
+    )
+    .unwrap();
+    let conf = run.home.join("config/ressac/ressac-kde.conf");
+    std::fs::create_dir_all(conf.parent().unwrap()).unwrap();
+    std::fs::write(
+        &conf,
+        format!(
+            "[General]\ndatabasePath={}\nreader.size=21\n",
+            bad.display()
+        ),
+    )
+    .unwrap();
+    bad
+}
+
+fn conf_text(run: &Run) -> String {
+    std::fs::read_to_string(run.home.join("config/ressac/ressac-kde.conf")).unwrap()
+}
+
+#[test]
+fn use_default_database_clears_the_setting_and_relaunches_on_the_default_location() {
+    let run = Run::new();
+    let bad = seed_bad_setting(&run);
+    let default_db = run.home.join("data/ressac/ressac.sqlite");
+    // The hook forgets RESSAC_DB (required by --screenshot) just before the press.
+    let out = run.launch_with(Some(&bad), &[("RESSAC_RECETTE_PRESS_DEFAULT", "drop-db")]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_clean(&out);
+    assert_eq!(shots(&run), ["01-failed.png", "02-ready.png"]);
+    assert_drawn(&run.shots.join("02-ready.png"));
+    assert_eq!(Store::probe(&default_db).unwrap(), SchemaState::Current);
+    let conf = conf_text(&run);
+    assert!(!conf.contains("databasePath"), "{conf}");
+    assert!(conf.contains("reader.size=21"), "{conf}");
+}
+
+#[test]
+fn ressac_db_still_wins_after_use_default_database() {
+    let run = Run::new();
+    let bad = seed_bad_setting(&run);
+    let out = run.launch_with(Some(&bad), &[("RESSAC_RECETTE_PRESS_DEFAULT", "keep-db")]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(shots(&run), ["01-failed.png", "02-failed.png"]);
+    assert!(!conf_text(&run).contains("databasePath"));
+    assert!(
+        !run.home.join("data/ressac/ressac.sqlite").exists(),
+        "the default location was used"
+    );
+    assert!(
+        std::fs::read_to_string(&bad)
+            .unwrap()
+            .starts_with("only words")
+    );
 }

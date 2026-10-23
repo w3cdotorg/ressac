@@ -46,7 +46,7 @@ installed_files=("$bindir/ressac" "$bindir/ressac-kde" "$icon" "$desktop")
 
 for dir in "$bindir" "$data"; do
   case "$dir" in
-    *[\"\`\$\\]*) die "$dir holds a character a .desktop Exec line cannot carry" ;;
+    *[\"\`\$\\%]*) die "$dir holds a character a .desktop Exec line cannot carry" ;;
   esac
 done
 
@@ -64,6 +64,7 @@ fi
 # Packages: every one of the dev container's list that the app needs on a desktop. The script
 # never runs dnf itself.
 container_only=" rustfmt clippy nodejs cmake shadow-utils util-linux-core procps-ng findutils diffutils tar gzip git-core "
+[ -r "$script_dir/dev/packages.txt" ] || die "cannot read $script_dir/dev/packages.txt"
 missing=()
 while read -r package; do
   [ -n "$package" ] || continue

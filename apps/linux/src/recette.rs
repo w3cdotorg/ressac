@@ -29,28 +29,54 @@ pub mod qobject {
         #[qml_element]
         #[qml_singleton]
         #[qproperty(bool, active, READ, CONSTANT)]
+        #[qproperty(QString, press_default, READ, CONSTANT)]
         type Recette = super::RecetteRust;
 
         /// Saves the first visible window to `<dir>/<name>.png`; false when inactive or failed.
         #[qinvokable]
         fn grab(self: &Recette, name: &QString) -> bool;
+
+        /// Test hook of the walk: with `press_default` set to `drop-db`, forgets `RESSAC_DB` so the
+        /// relaunch after "Use Default Database" reaches the default location.
+        #[qinvokable]
+        fn prepare_default(self: &Recette);
     }
 }
 
 /// Active when `--screenshot` was given.
 pub struct RecetteRust {
     active: bool,
+    /// `RESSAC_RECETTE_PRESS_DEFAULT` (`keep-db` or `drop-db`): the walk presses "Use Default
+    /// Database" once after the first screen. Empty: it does not.
+    press_default: QString,
 }
+
+const PRESS_DEFAULT_ENV: &str = "RESSAC_RECETTE_PRESS_DEFAULT";
 
 impl Default for RecetteRust {
     fn default() -> Self {
         RecetteRust {
             active: DIR.get().is_some(),
+            press_default: QString::from(
+                std::env::var(PRESS_DEFAULT_ENV)
+                    .ok()
+                    .filter(|_| DIR.get().is_some())
+                    .unwrap_or_default()
+                    .as_str(),
+            ),
         }
     }
 }
 
 impl qobject::Recette {
+    fn prepare_default(&self) {
+        if self.rust().active && self.rust().press_default.to_string() == "drop-db" {
+            // SAFETY: a test hook, run from QML on the GUI thread; no other thread reads the
+            // environment at that point (the migration worker only touches the database).
+            unsafe { std::env::remove_var("RESSAC_DB") };
+        }
+    }
+
     fn grab(&self, name: &QString) -> bool {
         let Some(dir) = DIR.get().filter(|_| self.rust().active) else {
             return false;
