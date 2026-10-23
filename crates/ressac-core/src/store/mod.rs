@@ -87,8 +87,8 @@ pub struct Store {
 
 /// The default database of [`crate::paths::Paths::from_env`]. Without a usable `HOME` it logs the
 /// error and falls back to the macOS-style path under whatever `HOME` holds (empty if unset).
-/// The CLI never reaches that fallback: it refuses to run without a home directory unless a
-/// database was named (`--db`, `RESSAC_DB`), and `ressac ticker` never opens a default there.
+/// The CLI only calls it when a home directory exists: without one and without a named
+/// database (`--db`, `RESSAC_DB`) it exits before `run` (the tmux ticker, both forms, silently).
 pub fn default_path() -> PathBuf {
     match crate::paths::Paths::from_env() {
         Ok(paths) => paths.database(),

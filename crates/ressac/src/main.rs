@@ -23,10 +23,22 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let paths = ressac_core::paths::Paths::from_env().ok();
     // No usable HOME and no database named: refuse rather than write relative to the working
-    // directory. The tmux ticker stays silent (its own empty line, exit 0) so tmux shows nothing.
-    if paths.is_none() && cli.db.is_none() && !matches!(cli.command, Some(Command::Ticker { .. })) {
-        eprintln!("error: no home directory: set HOME or pass --db");
-        return ExitCode::from(1);
+    // directory. The tmux ticker (both forms) is decided here, before `run`, so that no ticker
+    // path ever reaches a default database: the line form prints an empty line, `open` does
+    // nothing, and both exit 0 silently since tmux calls them.
+    if paths.is_none() && cli.db.is_none() {
+        match &cli.command {
+            Some(Command::Ticker { action, .. }) => {
+                if action.is_none() {
+                    println!();
+                }
+                return ExitCode::SUCCESS;
+            }
+            _ => {
+                eprintln!("error: no home directory: set HOME or pass --db");
+                return ExitCode::from(1);
+            }
+        }
     }
     let _log_guard = paths
         .as_ref()

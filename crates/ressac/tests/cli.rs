@@ -2552,3 +2552,35 @@ fn the_ticker_without_home_prints_an_empty_line() {
     assert_eq!(stderr(&out), "");
     assert_eq!(std::fs::read_dir(cwd.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn ticker_open_without_home_touches_nothing() {
+    let cwd = tempfile::tempdir().unwrap();
+    let planted = cwd
+        .path()
+        .join("Library/Application Support/Ressac/ressac.sqlite");
+    std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+    std::fs::write(&planted, b"not a database").unwrap();
+    let before = std::fs::metadata(&planted).unwrap().modified().unwrap();
+    let out = without_home(cwd.path())
+        .args(["ticker", "open", "rs1"])
+        .env("RESSAC_NO_BROWSER", "1")
+        .env("RUST_LOG", "info")
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "");
+    assert_eq!(stderr(&out), "");
+    assert_eq!(std::fs::read(&planted).unwrap(), b"not a database");
+    assert_eq!(
+        std::fs::metadata(&planted).unwrap().modified().unwrap(),
+        before
+    );
+    let mut names: Vec<_> =
+        std::fs::read_dir(cwd.path().join("Library/Application Support/Ressac"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+    names.sort();
+    assert_eq!(names, ["ressac.sqlite"]);
+}
