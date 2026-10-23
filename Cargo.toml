@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/ressac-core", "crates/ressac", "crates/ressac-ui"]
+members = ["crates/ressac-core", "crates/ressac", "crates/ressac-ui", "apps/linux"]
+default-members = ["crates/ressac-core", "crates/ressac", "crates/ressac-ui"]
 
 [workspace.package]
 version = "0.2.0"
@@ -12,6 +13,10 @@ license = "MIT"
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
+cxx = "1.0.205"
+cxx-qt = "0.10.0"
+cxx-qt-build = "0.10.0"
+cxx-qt-lib = { version = "0.10.0", features = ["qt_gui", "qt_qml"] }
 dom_smoothie = "0.18.2"
 feed-rs = "3.0.0"
 futures = "0.3.34"
