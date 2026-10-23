@@ -269,6 +269,34 @@ pub struct Ressac {
     host_gap: Duration,
 }
 
+/// The feeds a subset refresh (`--feed`, `--folder`) will check. A folder wins over the
+/// named feeds and lists its active feeds, subfolders included, in id order; otherwise the
+/// named feeds are returned in the order given. An unknown folder or feed is an error
+/// (`Error::UnknownFolder`, then the first unknown `Error::UnknownFeed`). Buried feeds stay
+/// in the list, and `refresh` skips them. Nothing named gives an empty list: the caller
+/// maps that to "no restriction" (`RefreshOptions::only: None`).
+pub fn check_subset(
+    store: &Store,
+    feeds: &[FeedId],
+    folder: Option<FolderId>,
+) -> Result<Vec<FeedId>> {
+    if let Some(folder) = folder {
+        if !store.folders()?.iter().any(|f| f.id == folder) {
+            return Err(Error::UnknownFolder(folder));
+        }
+        return store.feeds_in_folder(folder);
+    }
+    if feeds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let known: std::collections::HashSet<FeedId> =
+        store.feeds()?.into_iter().map(|f| f.id).collect();
+    if let Some(missing) = feeds.iter().find(|id| !known.contains(id)) {
+        return Err(Error::UnknownFeed(*missing));
+    }
+    Ok(feeds.to_vec())
+}
+
 impl Ressac {
     pub fn open(path: &Path) -> Result<Self> {
         Self::with_parts(
@@ -1351,6 +1379,87 @@ mod tests {
                 "{e:?}"
             );
         }
+    }
+
+    /// News (folder 1) holds A (feed 1) and Sub (folder 2) with B (feed 2); C (feed 3) is at the top level.
+    fn subset_store() -> Store {
+        let store = Store::open_in_memory().unwrap();
+        let xml = r#"<opml><body>
+            <outline text="News"><outline text="A" xmlUrl="https://a.example.org/feed"/>
+              <outline text="Sub"><outline text="B" xmlUrl="https://b.example.org/feed"/></outline></outline>
+            <outline text="C" xmlUrl="https://c.example.org/feed"/>
+            </body></opml>"#;
+        store
+            .import_outlines(&opml::parse(xml).unwrap(), false, Utc::now())
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn check_subset_lists_a_folder_s_feeds_or_checks_the_named_ones() {
+        let store = subset_store();
+        let feeds: Vec<(FeedId, String)> = store
+            .feeds()
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.id, f.title))
+            .collect();
+        assert_eq!(
+            feeds,
+            [(1, "A".into()), (2, "B".into()), (3, "C".into())],
+            "fixture ids"
+        );
+        let folders: Vec<(FolderId, String)> = store
+            .folders()
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.id, f.name))
+            .collect();
+        assert_eq!(
+            folders,
+            [(1, "News".into()), (2, "Sub".into())],
+            "fixture ids"
+        );
+        assert_eq!(
+            check_subset(&store, &[], Some(1)).unwrap(),
+            [1, 2],
+            "subfolders included, id order"
+        );
+        assert_eq!(check_subset(&store, &[], Some(2)).unwrap(), [2]);
+        assert_eq!(
+            check_subset(&store, &[3, 1], None).unwrap(),
+            [3, 1],
+            "order kept"
+        );
+        assert_eq!(
+            check_subset(&store, &[], None).unwrap(),
+            Vec::<FeedId>::new()
+        );
+        assert_eq!(
+            check_subset(&store, &[99], Some(2)).unwrap(),
+            [2],
+            "the folder wins"
+        );
+        garden::decide(&store, 3, crate::model::Decision::Bury, Utc::now()).unwrap();
+        assert_eq!(
+            check_subset(&store, &[3], None).unwrap(),
+            [3],
+            "a buried feed stays; refresh skips it"
+        );
+    }
+
+    #[test]
+    fn check_subset_refuses_unknown_ids_with_the_cli_s_sentences() {
+        let store = subset_store();
+        let folder = check_subset(&store, &[1], Some(99)).unwrap_err();
+        assert!(matches!(folder, Error::UnknownFolder(99)), "{folder:?}");
+        assert_eq!(folder.to_string(), "No folder #99.");
+        let feed = check_subset(&store, &[1, 98, 99], None).unwrap_err();
+        assert!(
+            matches!(feed, Error::UnknownFeed(98)),
+            "the first unknown id: {feed:?}"
+        );
+        assert_eq!(feed.to_string(), "No feed #98.");
     }
 
     #[derive(Default)]

@@ -1,13 +1,11 @@
 //! The commands that go to the network: `fetch`, `check` and `extract`.
 
-use std::collections::HashSet;
 use std::io::Write;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ressac_core::model::{FeedId, FolderId};
-use ressac_core::service::{ExtractOutcome, NullSink, RefreshOptions};
-use ressac_core::store::Store;
+use ressac_core::service::{ExtractOutcome, NullSink, RefreshOptions, check_subset};
 
 use super::{Globals, INTERRUPTED, open, open_with_feeds, usage};
 use crate::output;
@@ -25,27 +23,15 @@ fn interrupted(stop: &AtomicBool, sink: &output::Sink) -> ExitCode {
     }
 }
 
-/// The feeds named by `--feed` or `--folder` (`None`: no restriction). Unknown ids are
-/// usage errors. Buried feeds stay in the list, and `refresh` skips them.
-fn subset(
-    store: &Store,
-    feeds: Vec<FeedId>,
-    folder: Option<FolderId>,
-) -> anyhow::Result<Option<Vec<FeedId>>> {
-    if let Some(folder) = folder {
-        if !store.folders()?.iter().any(|f| f.id == folder) {
-            return Err(usage(format!("No folder #{folder}.")));
+/// The refusals of `service::check_subset` (an unknown feed or folder) are usage errors
+/// (exit 2); any other error stays fatal (exit 1).
+fn subset_error(e: ressac_core::Error) -> anyhow::Error {
+    match e {
+        e @ (ressac_core::Error::UnknownFeed(_) | ressac_core::Error::UnknownFolder(_)) => {
+            usage(e.to_string())
         }
-        return Ok(Some(store.feeds_in_folder(folder)?));
+        other => other.into(),
     }
-    if feeds.is_empty() {
-        return Ok(None);
-    }
-    let known: HashSet<FeedId> = store.feeds()?.into_iter().map(|f| f.id).collect();
-    if let Some(missing) = feeds.iter().find(|id| !known.contains(id)) {
-        return Err(usage(format!("No feed #{missing}.")));
-    }
-    Ok(Some(feeds))
 }
 
 /// An address as the log may show it: scheme, host (port) and path. The userinfo, the query and the
@@ -128,7 +114,11 @@ pub async fn fetch(
     let Some(app) = open_with_feeds(&g.db)? else {
         return Ok(ExitCode::SUCCESS);
     };
-    let only = subset(app.store(), feeds, folder)?;
+    let only = if feeds.is_empty() && folder.is_none() {
+        None
+    } else {
+        Some(check_subset(app.store(), &feeds, folder).map_err(subset_error)?)
+    };
     // A manual refresh of some feeds ignores the 30-minute freshness rule (spec §2).
     let opts = RefreshOptions {
         force: force || only.is_some(),
@@ -271,6 +261,26 @@ mod tests {
         assert_eq!(
             down.to_string(),
             "Could not reach https://e.org/\u{FFFD}[31m: timed out."
+        );
+    }
+
+    #[test]
+    fn subset_refusals_are_usage_errors_and_others_stay_fatal() {
+        use super::subset_error;
+        use crate::commands::UsageError;
+        use ressac_core::Error;
+        for refusal in [Error::UnknownFeed(99), Error::UnknownFolder(99)] {
+            let text = refusal.to_string();
+            let e = subset_error(refusal);
+            assert_eq!(
+                e.downcast_ref::<UsageError>().map(ToString::to_string),
+                Some(text)
+            );
+        }
+        assert!(
+            subset_error(Error::Invalid("disk".into()))
+                .downcast_ref::<UsageError>()
+                .is_none()
         );
     }
 }
