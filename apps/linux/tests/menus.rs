@@ -1,5 +1,6 @@
 //! The menu bar is spec §7.2's table (read from the QML file, on every platform).
 const MENU: &str = include_str!("../qml/MainMenu.qml");
+const GARDEN: &str = include_str!("../qml/GardenPane.qml");
 
 #[test]
 fn the_shortcuts_are_the_spec_table() {
@@ -73,4 +74,16 @@ fn menu_mnemonics_never_use_s_g_or_r() {
             .to_ascii_lowercase();
         assert!(!['s', 'g', 'r'].contains(&mnemonic), "{title}");
     }
+}
+
+#[test]
+fn the_garden_undo_is_ctrl_z_and_its_tooltips_name_kde_keys() {
+    assert!(GARDEN.contains("shortcut: StandardKey.Undo"));
+    assert!(
+        GARDEN
+            .contains("Apply every safe repair: https upgrades and permanent redirects (Shift+R)")
+    );
+    assert!(
+        GARDEN.contains("Undo the last decision, here or in the terminal garden (U or Ctrl+Z)")
+    );
 }

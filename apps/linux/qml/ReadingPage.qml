@@ -16,6 +16,7 @@ Item {
     property alias sourcesPane: sourcesPane
     property string look: "native"
     readonly property alias reader: readerPane
+    readonly property alias garden: gardenPane
     readonly property bool searchFocused: searchField.activeFocus
     // The morning edition builds by itself, except in the screenshot walks that do not test it.
     readonly property bool editionTriggers: !Recette.active || Recette.walk === "journal"
@@ -40,12 +41,14 @@ Item {
     function focusName() {
         if (searchFocused) return "search"
         if (focusWithin(sourcesPane)) return "sidebar"
+        if (focusWithin(gardenPane)) return "garden"
         if (focusWithin(entriesPane)) return "entries"
         if (focusWithin(readerPane)) return "reader"
         return "other"
     }
 
     function focusSidebar() { sourcesPane.focusList() }
+    function focusGarden() { gardenPane.focusList() }
     function focusSearch() { searchField.forceActiveFocus() }
 
     function openInBrowser() {
@@ -111,8 +114,12 @@ Item {
             handled = EntriesModel.canToggle        // spent: a held key never toggles again
             break
         case "focusEntryList":
-            if (!SourcesModel.isGarden) EntriesModel.selectFirstIfNone()
-            entriesPane.focusList()
+            if (SourcesModel.isGarden) {
+                gardenPane.focusList()
+            } else {
+                EntriesModel.selectFirstIfNone()
+                entriesPane.focusList()
+            }
             handled = true
             break
         case "focusSidebar":
@@ -135,6 +142,7 @@ Item {
         EntriesModel.reload()
         Reader.reload()
         Journal.reload()
+        Garden.reload()
     }
 
     ColumnLayout {
@@ -314,17 +322,27 @@ Item {
                 QQC2.SplitView.maximumWidth: 320
             }
 
-            EntriesPane {
-                id: entriesPane
-                QQC2.SplitView.minimumWidth: 260
-                QQC2.SplitView.preferredWidth: 320
-                QQC2.SplitView.maximumWidth: 480
+            Item {
+                // The garden's table and header need more room than the entry list.
+                QQC2.SplitView.minimumWidth: SourcesModel.isGarden ? 440 : 260
+                QQC2.SplitView.preferredWidth: SourcesModel.isGarden ? 520 : 320
+                QQC2.SplitView.maximumWidth: SourcesModel.isGarden ? 760 : 480
+
+                EntriesPane { id: entriesPane; anchors.fill: parent; visible: !SourcesModel.isGarden }
+                GardenPane { id: gardenPane; anchors.fill: parent; visible: SourcesModel.isGarden }
             }
 
-            ReaderPane {
-                id: readerPane
+            Item {
                 QQC2.SplitView.fillWidth: true
                 QQC2.SplitView.minimumWidth: 300
+
+                ReaderPane { id: readerPane; anchors.fill: parent; visible: !SourcesModel.isGarden }
+                GardenInspector {
+                    id: gardenInspector
+                    anchors.fill: parent
+                    visible: SourcesModel.isGarden
+                    onOpenUrl: (url) => readerPane.openExternally(url)
+                }
             }
         }
     }
@@ -373,6 +391,7 @@ Item {
     }
 
     Connections { target: EntriesModel; function onUnreadOnlyChanged() { page.syncFilter() } }
+    Connections { target: Garden; function onOpenUrl(url) { readerPane.openExternally(url) } }
     Connections { target: Reader; function onBanner(m, l) { Runs.showBanner(m, l) } }
     Connections { target: Journal; function onBanner(message, showLog) { Runs.showBanner(message, showLog) } }
     Connections { target: Reader; function onWrote() { page.reloadAll() } }
@@ -386,7 +405,10 @@ Item {
         target: SourcesModel
         function onSelectionChanged() {
             EntriesModel.showSource(SourcesModel.selectedKey)
-            if (SourcesModel.selectedKey === "journal")
+            Garden.show(SourcesModel.selectedKey)
+            if (SourcesModel.isGarden)
+                gardenPane.focusList()
+            else if (SourcesModel.selectedKey === "journal")
                 entriesPane.focusList()      // as on the Mac, the list takes the keyboard in the Journal
         }
     }

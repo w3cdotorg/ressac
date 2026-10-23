@@ -566,6 +566,8 @@ impl qobject::Garden {
         if self.rust().visit.scope().is_none() {
             return;
         }
+        // Whatever ran (a refresh, a decision in another visit) may have added fetch attempts.
+        self.as_mut().rust_mut().get_mut().log_feed = None;
         match with_session(|session| load(&session.store)) {
             Some(Ok(snapshot)) => self.as_mut().rust_mut().get_mut().visit.update(snapshot),
             Some(Err(error)) => {

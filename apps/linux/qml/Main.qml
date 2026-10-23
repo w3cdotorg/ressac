@@ -118,7 +118,41 @@ Kirigami.ApplicationWindow {
             console.warn("walk: 03-mark-all can=" + EntriesModel.canMarkAllRead) } },
         { name: "04-marked", enter: function () { console.warn("walk: 04-marked rows=" + EntriesModel.rowCount() + " header=" + Journal.header) } }
     ]
-    readonly property var steps: Recette.walk === "journal" ? journalSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
+    // The `garden` walk (fixture: queue Hijacked 6, Moved 5 (a safe repair), Fossil 2; Unphotographable 7 kept; feed 4 buried;
+    // the test adds the themes Literature and Technology, feed 8 on Technology).
+    readonly property var gardenSteps: [
+        { name: "02-triage", enter: function () { SourcesModel.selectKey("garden:needs-triage")
+            console.warn("walk: 02-triage count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId + " rows=" + Garden.rowCount()
+                + " apply=" + Garden.applyTitle + " focus=" + readingLoader.item.focusName() + " sections=" + Garden.sectionTitles.join("|")) } },
+        { name: "03-keep", enter: function () { Recette.key(Qt.Key_K, "k", 0) } },
+        { name: "04-wait", enter: function () {} },
+        { name: "05-kept", enter: function () { console.warn("walk: 05-kept count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId
+            + " rows=" + Garden.rowCount() + " kept6=" + (Garden.rowOfFeed(6) >= 0)) } },
+        { name: "06-confirm", enter: function () { Recette.key(Qt.Key_R, "R", Qt.ShiftModifier)
+            console.warn("walk: 06-confirm confirming=" + Garden.confirming + " question=" + Garden.applyQuestion
+                + " preview=" + Garden.applyPreview + " confirm=" + Garden.applyConfirmLabel) } },
+        { name: "07-apply", enter: function () { readingLoader.item.garden.acceptRepairs() } },
+        { name: "08-wait", enter: function () {} },
+        { name: "09-applied", enter: function () { console.warn("walk: 09-applied count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId) } },
+        { name: "10-undo", enter: function () { Recette.key(Qt.Key_U, "u", 0) } },
+        { name: "11-wait", enter: function () {} },
+        { name: "12-undone", enter: function () { console.warn("walk: 12-undone count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId) } },
+        { name: "13-all-rhythm", enter: function () { SourcesModel.selectKey("garden:all"); Garden.grouping = "rhythm"
+            console.warn("walk: 13-all-rhythm count=" + Garden.countLabel + " sections=" + Garden.sectionTitles.join("|")) } },
+        { name: "14-inspector", enter: function () { Garden.selectFeed(8)
+            console.warn("walk: 14-inspector rhythmIndex=" + Garden.rhythmIndex + " theme=" + Garden.themeIndex
+                + " themes=" + Garden.themeNames.join("|") + " rhythm=" + Garden.rhythmLine) } },
+        { name: "15-set", enter: function () { Garden.setCadence(1); Garden.setTheme(1) } },
+        { name: "16-wait", enter: function () {} },
+        { name: "17-set-done", enter: function () { console.warn("walk: 17-set-done rhythmIndex=" + Garden.rhythmIndex + " theme=" + Garden.themeIndex
+            + " rhythm=" + Garden.rhythmLine) } },
+        { name: "18-open", enter: function () { readingLoader.item.focusGarden(); Recette.key(Qt.Key_O, "o", 0) } },
+        { name: "19-cemetery", enter: function () { SourcesModel.selectKey("garden:cemetery")
+            console.warn("walk: 19-cemetery count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId + " keep=" + Garden.keepTitle
+                + " apply=" + Garden.showsApply) } },
+        { name: "20-buried-key", enter: function () { Recette.key(Qt.Key_B, "b", 0); console.warn("walk: 20-buried-key message=" + Garden.message) } }
+    ]
+    readonly property var steps: Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }

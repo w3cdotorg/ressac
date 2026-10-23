@@ -167,5 +167,9 @@ Item {
             enabled: feedMenu.site !== ""
             onTriggered: Qt.openUrlExternally(feedMenu.site)
         }
+        QQC2.MenuItem {
+            text: "Show in Garden"
+            onTriggered: { SourcesModel.selectKey("garden:all"); Garden.selectFeed(feedMenu.feedId) }
+        }
     }
 }
