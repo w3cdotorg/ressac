@@ -3,14 +3,17 @@
 //! `ressac_ui::entries`'; this object applies the rows by id (no reset: the selection and the
 //! scroll position survive every reload) and runs the writes on the worker's direct lane.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QString, QVariant};
 use ressac_core::clock::today_start;
-use ressac_core::store::{ListFilter, ListQuery, Source, Store};
+use ressac_core::model::FeedId;
+use ressac_core::store::{JournalView, ListFilter, ListQuery, Source, Store};
 use ressac_ui::chrono::{self, DateTime, Utc};
 use ressac_ui::entries::{AUTO_READ_DELAY, EntryList, ListRow, LocalEdit, relative_date};
+use ressac_ui::journal::{JournalRow, overflow_label, section_title, sections};
 use ressac_ui::live::plan_rows;
 use ressac_ui::runs::{DirectWrite, read_failure, write_failure};
 use ressac_ui::sources::Selection;
@@ -20,7 +23,7 @@ use crate::launcher::with_session;
 use crate::rows::{list_model_rows, to_i32, variant_string};
 
 /// The role names QML sees, in role order (`FIRST_ROLE + index`).
-const ROLES: [&str; 8] = [
+const ROLES: [&str; 11] = [
     "entryId",
     "feedTitle",
     "title",
@@ -29,6 +32,9 @@ const ROLES: [&str; 8] = [
     "read",
     "starred",
     "link",
+    "kind",
+    "section",
+    "overflowFeed",
 ];
 
 #[cxx_qt::bridge]
@@ -60,6 +66,7 @@ pub mod qobject {
         #[qproperty(i32, selected_row, READ = selected_row, NOTIFY = selection_changed)]
         #[qproperty(i64, selected_entry_id, READ = selected_entry_id, NOTIFY = selection_changed)]
         #[qproperty(bool, active, READ = active, NOTIFY = list_changed)]
+        #[qproperty(bool, journal, READ = journal, NOTIFY = list_changed)]
         #[qproperty(QString, empty_text, READ = empty_text, NOTIFY = list_changed)]
         #[qproperty(bool, can_mark_all_read, READ = can_mark_all_read, NOTIFY = list_changed)]
         #[qproperty(bool, can_navigate, READ = can_navigate, NOTIFY = list_changed)]
@@ -73,6 +80,7 @@ pub mod qobject {
         fn selected_row(self: &EntriesModel) -> i32;
         fn selected_entry_id(self: &EntriesModel) -> i64;
         fn active(self: &EntriesModel) -> bool;
+        fn journal(self: &EntriesModel) -> bool;
         fn empty_text(self: &EntriesModel) -> QString;
         fn can_mark_all_read(self: &EntriesModel) -> bool;
         fn can_navigate(self: &EntriesModel) -> bool;
@@ -207,10 +215,46 @@ struct Shown {
     date: String,
 }
 
+/// A row of the model: an entry, or (in the Journal) the "+N more in Feed" row after its
+/// feed. `section` is the Journal section's title, `""` outside the Journal.
+#[derive(Debug, Clone, PartialEq)]
+enum Slot {
+    Entry {
+        shown: Shown,
+        section: &'static str,
+    },
+    Overflow {
+        id: String,
+        section: &'static str,
+        label: String,
+        feed_id: FeedId,
+    },
+}
+
+impl Slot {
+    /// The identity the row plan follows: `entry-<id>` or the overflow row's own.
+    fn key(&self) -> String {
+        match self {
+            Slot::Entry { shown, .. } => format!("entry-{}", shown.row.entry_id),
+            Slot::Overflow { id, .. } => id.clone(),
+        }
+    }
+
+    /// The entry of an entry slot; `None` for an overflow row.
+    fn entry(&self) -> Option<&Shown> {
+        match self {
+            Slot::Entry { shown, .. } => Some(shown),
+            Slot::Overflow { .. } => None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct EntriesModelRust {
     list: Option<EntryList>,
-    shown: Vec<Shown>,
+    /// The Journal's latest edition, read with the list's source (never by a local edit).
+    edition: Option<JournalView>,
+    slots: Vec<Slot>,
     selected: Option<i64>,
     unread_only: bool,
     search: String,
@@ -222,6 +266,7 @@ pub struct EntriesModelRust {
 #[derive(Debug, PartialEq)]
 struct View {
     active: bool,
+    journal: bool,
     empty_text: &'static str,
     can_mark_all_read: bool,
     can_navigate: bool,
@@ -232,7 +277,25 @@ struct View {
     selected_starred: bool,
 }
 
-fn role_value(shown: &Shown, role: &str) -> QVariant {
+fn role_value(slot: &Slot, role: &str) -> QVariant {
+    match (slot, role) {
+        (Slot::Entry { .. }, "kind") => variant_string("entry"),
+        (Slot::Overflow { .. }, "kind") => variant_string("overflow"),
+        (Slot::Entry { section, .. } | Slot::Overflow { section, .. }, "section") => {
+            variant_string(section)
+        }
+        (Slot::Overflow { feed_id, .. }, "overflowFeed") => QVariant::from(feed_id),
+        (Slot::Entry { .. }, "overflowFeed") => QVariant::from(&0_i64),
+        (Slot::Overflow { label, .. }, "title") => variant_string(label),
+        (Slot::Overflow { .. }, "entryId") => QVariant::from(&-1_i64),
+        (Slot::Overflow { .. }, "read" | "starred") => QVariant::from(&false),
+        (Slot::Overflow { .. }, "feedTitle" | "excerpt" | "date" | "link") => variant_string(""),
+        (Slot::Entry { shown, .. }, role) => entry_value(shown, role),
+        _ => QVariant::default(),
+    }
+}
+
+fn entry_value(shown: &Shown, role: &str) -> QVariant {
     let row = &shown.row;
     match role {
         "entryId" => QVariant::from(&row.entry_id),
@@ -269,9 +332,12 @@ impl qobject::EntriesModel {
     fn selected_row(&self) -> i32 {
         let rust = self.rust();
         let selected = rust.selected;
-        rust.shown
+        rust.slots
             .iter()
-            .position(|shown| Some(shown.row.entry_id) == selected)
+            .position(|slot| {
+                slot.entry()
+                    .is_some_and(|s| Some(s.row.entry_id) == selected)
+            })
             .map_or(-1, to_i32)
     }
 
@@ -281,6 +347,14 @@ impl qobject::EntriesModel {
 
     fn active(&self) -> bool {
         self.rust().list.is_some()
+    }
+
+    /// The list's source is the Journal: its rows carry sections.
+    fn journal(&self) -> bool {
+        self.rust()
+            .list
+            .as_ref()
+            .is_some_and(|list| list.query().source == Source::Journal)
     }
 
     fn empty_text(&self) -> QString {
@@ -323,8 +397,9 @@ impl qobject::EntriesModel {
     fn selected_shown(&self) -> Option<&Shown> {
         let selected = self.rust().selected?;
         self.rust()
-            .shown
+            .slots
             .iter()
+            .filter_map(Slot::entry)
             .find(|shown| shown.row.entry_id == selected)
     }
 
@@ -332,6 +407,7 @@ impl qobject::EntriesModel {
         let rust = self.rust();
         View {
             active: rust.list.is_some(),
+            journal: self.journal(),
             empty_text: rust
                 .list
                 .as_ref()
@@ -347,30 +423,82 @@ impl qobject::EntriesModel {
         }
     }
 
-    /// The rows of the list as shown now, with their relative dates.
-    fn shown_rows(&self) -> Vec<Shown> {
+    /// The rows of the list as shown now, with their relative dates: in the Journal laid out
+    /// by section with the overflow rows, elsewhere one entry slot per row.
+    fn shown_slots(&self) -> Vec<Slot> {
         let now = Utc::now();
-        self.rust().list.as_ref().map_or_else(Vec::new, |list| {
-            list.rows()
-                .iter()
-                .map(|row| Shown {
-                    row: row.clone(),
-                    date: relative_date(row.published_at, now),
-                })
-                .collect()
-        })
+        let rust = self.rust();
+        let Some(list) = rust.list.as_ref() else {
+            return Vec::new();
+        };
+        let shown = list.rows().iter().map(|row| Shown {
+            row: row.clone(),
+            date: relative_date(row.published_at, now),
+        });
+        if list.query().source != Source::Journal {
+            return shown
+                .map(|shown| Slot::Entry { shown, section: "" })
+                .collect();
+        }
+        let listed: Vec<(i64, FeedId)> = list
+            .rows()
+            .iter()
+            .map(|row| (row.entry_id, row.feed_id))
+            .collect();
+        let mut by_id: HashMap<i64, Shown> = shown.map(|s| (s.row.entry_id, s)).collect();
+        let mut slots = Vec::new();
+        for section in sections(&listed, rust.edition.as_ref()) {
+            let title = section_title(section.section);
+            for row in section.rows {
+                match row {
+                    JournalRow::Entry(id) => {
+                        if let Some(shown) = by_id.remove(&id) {
+                            slots.push(Slot::Entry {
+                                shown,
+                                section: title,
+                            });
+                        }
+                    }
+                    JournalRow::Overflow(overflow) => slots.push(Slot::Overflow {
+                        id: JournalRow::Overflow(overflow.clone()).id(),
+                        section: title,
+                        label: overflow_label(&overflow),
+                        feed_id: overflow.feed_id,
+                    }),
+                }
+            }
+        }
+        slots
+    }
+
+    /// Reads the Journal's edition when the list's source is the Journal (else forgets it);
+    /// an unreadable one is a banner, the sections stay as they were.
+    fn read_edition(mut self: Pin<&mut Self>) {
+        if !self.as_ref().journal() {
+            self.as_mut().rust_mut().get_mut().edition = None;
+            return;
+        }
+        match with_session(|session| session.store.journal()) {
+            Some(Ok(edition)) => self.as_mut().rust_mut().get_mut().edition = edition,
+            Some(Err(error)) => self.report_read(&error),
+            None => {}
+        }
     }
 
     /// Applies the list's rows to the model by id, drops a selection whose row is gone, and
     /// tells QML what moved since `before` (a [`View`] taken before the change).
     fn sync(mut self: Pin<&mut Self>, before: &View) {
-        let new = self.shown_rows();
-        let ops = plan_rows(&self.rust().shown, &new, |shown| shown.row.entry_id);
+        let new = self.shown_slots();
+        let ops = plan_rows(&self.rust().slots, &new, Slot::key);
         for op in ops {
             self.as_mut().apply(op);
         }
         let selected = self.rust().selected;
-        if selected.is_some_and(|id| !new.iter().any(|shown| shown.row.entry_id == id)) {
+        if selected.is_some_and(|id| {
+            !new.iter()
+                .filter_map(Slot::entry)
+                .any(|shown| shown.row.entry_id == id)
+        }) {
             self.as_mut().rust_mut().get_mut().selected = None;
         }
         let after = self.view();
@@ -381,11 +509,13 @@ impl qobject::EntriesModel {
         }
         if (
             after.active,
+            after.journal,
             after.empty_text,
             after.can_mark_all_read,
             after.can_navigate,
         ) != (
             before.active,
+            before.journal,
             before.empty_text,
             before.can_mark_all_read,
             before.can_navigate,
@@ -415,11 +545,13 @@ impl qobject::EntriesModel {
         self.show_banner_for(read_failure(error));
     }
 
-    /// The row at `row`, `None` when out of range (an empty list, a stale index from QML).
+    /// The entry at `row`: `None` when out of range (an empty list, a stale index from QML)
+    /// and for an overflow row, which no action touches.
     fn shown_at(&self, row: i32) -> Option<&Shown> {
         usize::try_from(row)
             .ok()
-            .and_then(|row| self.rust().shown.get(row))
+            .and_then(|row| self.rust().slots.get(row))
+            .and_then(Slot::entry)
     }
 
     fn show_source(mut self: Pin<&mut Self>, key: &QString) {
@@ -432,6 +564,7 @@ impl qobject::EntriesModel {
             rust.list = None;
             rust.selected = None;
             rust.epoch += 1;
+            self.as_mut().read_edition();
             self.sync(&before);
             return;
         };
@@ -458,6 +591,7 @@ impl qobject::EntriesModel {
         if let Some(Err(error)) = &loaded {
             self.as_mut().report_read(error);
         }
+        self.as_mut().read_edition();
         self.sync(&before);
     }
 
@@ -527,6 +661,7 @@ impl qobject::EntriesModel {
             Some(Some(Err(error))) => self.as_mut().report_read(&error),
             _ => {}
         }
+        self.as_mut().read_edition();
         self.sync(&before);
     }
 
@@ -607,8 +742,9 @@ impl qobject::EntriesModel {
         if self.rust().selected == Some(entry_id)
             || !self
                 .rust()
-                .shown
+                .slots
                 .iter()
+                .filter_map(Slot::entry)
                 .any(|shown| shown.row.entry_id == entry_id)
         {
             return;
@@ -622,7 +758,13 @@ impl qobject::EntriesModel {
         if self.rust().selected.is_some() {
             return;
         }
-        if let Some(id) = self.rust().shown.first().map(|shown| shown.row.entry_id) {
+        let first = self
+            .rust()
+            .slots
+            .iter()
+            .find_map(Slot::entry)
+            .map(|shown| shown.row.entry_id);
+        if let Some(id) = first {
             self.select_entry(id);
         }
     }
@@ -847,4 +989,4 @@ impl qobject::EntriesModel {
     }
 }
 
-list_model_rows!(qobject::EntriesModel, shown: Shown, ROLES, role_value);
+list_model_rows!(qobject::EntriesModel, slots: Slot, ROLES, role_value);
