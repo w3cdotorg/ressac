@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{Action, Decision, Diagnosis, FeedId, Status};
 use crate::store::{AttemptRecord, DecisionRecord, Store, TriageFacts};
 
@@ -182,6 +182,31 @@ pub fn decide(
     };
     store.record_decision(feed_id, decision, status, action.as_ref(), now)?;
     recompute_triage(store)
+}
+
+/// Refuses the decisions the garden cannot apply: an unknown feed (`Error::UnknownFeed`),
+/// a buried feed (only keep, which restores it, applies), or a repair with no proposed
+/// repair (both `Error::Invalid`, with the CLI's sentences). `decide` does not call it:
+/// the caller checks first.
+pub fn check_decision(store: &Store, feed_id: FeedId, decision: Decision) -> Result<()> {
+    let Some(feed) = store.feeds()?.into_iter().find(|f| f.id == feed_id) else {
+        return Err(Error::UnknownFeed(feed_id));
+    };
+    if feed.state == "buried" && decision != Decision::Keep {
+        return Err(Error::Invalid(format!(
+            "Feed #{feed_id} is buried; only keep restores it."
+        )));
+    }
+    let repairable = store
+        .diagnosis(feed_id)?
+        .and_then(|d| d.action)
+        .is_some_and(|a| a.is_repair());
+    if decision == Decision::Repair && !repairable {
+        return Err(Error::Invalid(format!(
+            "Nothing to repair for feed #{feed_id}."
+        )));
+    }
+    Ok(())
 }
 
 pub fn undo(store: &Store) -> Result<Option<FeedId>> {
@@ -580,5 +605,41 @@ mod tests {
         })
         .unwrap();
         other.execute_batch("BEGIN IMMEDIATE; ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn check_decision_refuses_what_the_garden_cannot_apply_with_the_cli_s_sentences() {
+        let s = store();
+        let unknown = check_decision(&s, 99, Decision::Keep).unwrap_err();
+        assert!(
+            matches!(unknown, crate::Error::UnknownFeed(99)),
+            "{unknown:?}"
+        );
+        assert_eq!(unknown.to_string(), "No feed #99.");
+        for feed in [1, 3] {
+            // Burying is not a repair (1); no proposed action at all (3).
+            let nothing = check_decision(&s, feed, Decision::Repair).unwrap_err();
+            assert!(matches!(nothing, crate::Error::Invalid(_)), "{nothing:?}");
+            assert_eq!(
+                nothing.to_string(),
+                format!("Nothing to repair for feed #{feed}.")
+            );
+        }
+        for decision in [Decision::Keep, Decision::Bury] {
+            check_decision(&s, 1, decision).unwrap();
+        }
+        check_decision(&s, 2, Decision::Repair).unwrap();
+        check_decision(&s, 4, Decision::Repair).unwrap();
+
+        decide(&s, 3, Decision::Bury, now()).unwrap();
+        for decision in [Decision::Bury, Decision::Repair] {
+            let buried = check_decision(&s, 3, decision).unwrap_err();
+            assert_eq!(
+                buried.to_string(),
+                "Feed #3 is buried; only keep restores it.",
+                "{decision:?}"
+            );
+        }
+        check_decision(&s, 3, Decision::Keep).unwrap();
     }
 }

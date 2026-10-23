@@ -5,9 +5,8 @@ use std::process::ExitCode;
 
 use chrono::Utc;
 use ressac_core::garden;
-use ressac_core::model::{Decision, FeedId};
+use ressac_core::model::Decision;
 use ressac_core::service::{Event, Ressac};
-use ressac_core::store::Store;
 
 use super::{Globals, open_with_feeds, usage};
 use crate::cli::GardenCommand;
@@ -29,33 +28,14 @@ pub fn garden(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Refuses, as usage errors, the decisions the garden cannot apply: an unknown feed, a
-/// buried feed (only keep, which restores it, applies), or a repair with no proposed repair.
-fn check_decision(store: &Store, feed_id: FeedId, decision: Decision) -> anyhow::Result<()> {
-    let Some(feed) = store.feeds()?.into_iter().find(|f| f.id == feed_id) else {
-        return Err(usage(format!("No feed #{feed_id}.")));
-    };
-    if feed.state == "buried" && decision != Decision::Keep {
-        return Err(usage(format!(
-            "Feed #{feed_id} is buried; only keep restores it."
-        )));
-    }
-    let repairable = store
-        .diagnosis(feed_id)?
-        .and_then(|d| d.action)
-        .is_some_and(|a| a.is_repair());
-    if decision == Decision::Repair && !repairable {
-        return Err(usage(format!("Nothing to repair for feed #{feed_id}.")));
-    }
-    Ok(())
-}
-
 /// The refusals of `garden::decide` and `garden::undo` (an address another active feed
-/// already uses, a merge target that is not active) are usage errors (exit 2), as
-/// `check_decision`'s are; any other error stays fatal (exit 1).
+/// already uses, a merge target that is not active) and those of `garden::check_decision`
+/// (an unknown feed joins them) are usage errors (exit 2); any other error stays fatal
+/// (exit 1).
 fn decision_error(e: ressac_core::Error) -> anyhow::Error {
     match e {
         ressac_core::Error::Invalid(message) => usage(message),
+        e @ ressac_core::Error::UnknownFeed(_) => usage(e.to_string()),
         other => other.into(),
     }
 }
@@ -71,7 +51,7 @@ fn garden_command(
     match action {
         GardenCommand::Decide { feed_id, decision } => {
             let decision = Decision::from(decision);
-            check_decision(store, feed_id, decision)?;
+            garden::check_decision(store, feed_id, decision).map_err(decision_error)?;
             garden::decide(store, feed_id, decision, Utc::now()).map_err(decision_error)?;
             let event = Event::Decided {
                 feed_id,
@@ -126,5 +106,12 @@ mod tests {
         );
         let fatal = decision_error(ressac_core::Error::Io(std::io::Error::other("disk")));
         assert!(fatal.downcast_ref::<UsageError>().is_none());
+        let unknown = decision_error(ressac_core::Error::UnknownFeed(99));
+        assert_eq!(
+            unknown
+                .downcast_ref::<UsageError>()
+                .map(ToString::to_string),
+            Some("No feed #99.".to_string())
+        );
     }
 }
