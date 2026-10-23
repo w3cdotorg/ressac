@@ -22,9 +22,82 @@ Item {
         web.forceActiveFocus()
     }
 
+    // Space: scroll the page; done(true) when the key is spent (nothing to scroll yet, or scrolled),
+    // done(false) when the page is at its end or there is nothing to read.
+    function pageDown(entryId, done) {
+        if (entryId !== Reader.entryId) {          // the selected entry's page is not the one on screen yet
+            done(true)
+            return
+        }
+        if (!Reader.hasEntry) {
+            done(false)
+            return
+        }
+        pane.runAppScript(Reader.pageDownScript(String(web.url)), function (r) { done(r === "spent" || r === "scrolled") })
+    }
+
+    function openExternally(url) {
+        if (Recette.active)
+            console.warn("reader: open " + url)
+        else
+            Qt.openUrlExternally(url)
+    }
+
+    function copyText(text) {
+        clipboard.text = text
+        clipboard.selectAll()
+        clipboard.copy()
+    }
+
+    // Walk hook: a synthetic click in the app world reaches navigationRequested as LinkClickedNavigation.
+    function clickTitleLink() {
+        pane.runAppScript('document.querySelector("h1.title a").click()', function () {})
+    }
+
+    TextEdit { id: clipboard; visible: false }
+
+    // A fetch that failed without a stored error (a stored one is already in the page).
+    QQC2.Label {
+        id: notice
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: visible ? implicitHeight : 0
+        visible: Reader.runFailureNotice !== ""
+        text: Reader.runFailureNotice
+        color: Kirigami.Theme.disabledTextColor
+        wrapMode: Text.Wrap
+        leftPadding: 16
+        rightPadding: 16
+        topPadding: 6
+        bottomPadding: 6
+        background: Rectangle { color: Kirigami.Theme.alternateBackgroundColor }
+    }
+
+    QQC2.Menu {
+        id: menu
+        property string selection: ""
+        property string link: ""
+
+        QQC2.MenuItem {
+            text: "Copy"
+            enabled: menu.selection !== ""
+            onTriggered: web.triggerWebAction(WebEngineView.Copy)
+        }
+        QQC2.MenuItem {
+            text: "Copy Link"
+            visible: menu.link !== ""
+            height: visible ? implicitHeight : 0
+            onTriggered: pane.copyText(menu.link)
+        }
+    }
+
     WebEngineView {
         id: web
-        anchors.fill: parent
+        anchors.top: notice.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         visible: Reader.hasEntry || pane.proofing
         url: pane.proofing ? Reader.proofUrl : Reader.pageUrl
         backgroundColor: Reader.colorScheme === "dark" ? "#1C1C1E" : "#FFFFFF"
@@ -36,9 +109,31 @@ Item {
         settings.pluginsEnabled: false
         settings.localContentCanAccessFileUrls: false
 
-        onNavigationRequested: (request) => (String(request.url) === String(web.url)
-            && request.navigationType === WebEngineNavigationRequest.TypedNavigation && request.isMainFrame)
-            ? request.accept() : request.reject()
+        // Our own load is allowed; a clicked web link opens in the browser; everything else is refused.
+        onNavigationRequested: (request) => {
+            const d = Reader.decide(String(request.url), request.navigationType, request.isMainFrame, String(web.url))
+            if (d === "allow") {
+                request.accept()
+                return
+            }
+            request.reject()
+            if (d.startsWith("open:"))
+                pane.openExternally(d.slice(5))      // a "toggle:" answer is B8d's
+        }
+
+        onNewWindowRequested: (request) => {
+            const d = Reader.decide(String(request.requestedUrl), 0, true, "")
+            if (d.startsWith("open:"))
+                pane.openExternally(d.slice(5))
+        }
+
+        onContextMenuRequested: (request) => {
+            request.accepted = true
+            menu.selection = request.selectedText
+            const d = Reader.decide(String(request.linkUrl), 0, true, "")
+            menu.link = d.startsWith("open:") ? d.slice(5) : ""
+            menu.popup()
+        }
 
         onJavaScriptConsoleMessage: (level, message) => console.debug("reader page:", message)
 

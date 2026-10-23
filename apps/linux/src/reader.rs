@@ -6,17 +6,20 @@
 use std::cell::RefCell;
 use std::pin::Pin;
 
-use cxx_qt::CxxQtType;
+use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
+use ressac_core::service::{ExtractOutcome, NullSink};
 use ressac_core::store::{EntryDetail, FulltextRow};
 use ressac_ui::article::{
-    ASSET_PREFIX, ArticlePage, ColorScheme, FullText, PAGE_PREFIX, PROOF_PAGE, PROOF_SCRIPT,
-    PROOF_URL, RECETTE_PROBE, ReaderStyle, ReaderTheme, asset, page_url,
+    ASSET_PREFIX, ArticlePage, ColorScheme, FullText, FullTextStep, Navigation, PAGE_PREFIX,
+    PROOF_PAGE, PROOF_SCRIPT, PROOF_URL, RECETTE_PROBE, ReaderStyle, ReaderTheme, asset, decide,
+    full_article_help, page_down_script, page_url,
 };
 use ressac_ui::chrono;
 use ressac_ui::runs::read_failure;
 use ressac_ui::sanitize::is_web_url;
 use ressac_ui::settings::{Appearance, LineWidth, ReaderFont, effective_size};
+use ressac_ui::worker::JobResult;
 
 use crate::launcher::with_session;
 
@@ -43,6 +46,11 @@ pub mod qobject {
         #[qproperty(QString, link, READ = link, NOTIFY = state_changed)]
         #[qproperty(bool, is_starred, READ = is_starred, NOTIFY = state_changed)]
         #[qproperty(QString, proof_url, READ = proof_url, CONSTANT)]
+        #[qproperty(bool, is_showing_full_text, READ = is_showing_full_text, NOTIFY = state_changed)]
+        #[qproperty(bool, is_extracting, READ = is_extracting, NOTIFY = state_changed)]
+        #[qproperty(bool, can_request_full_text, READ = can_request_full_text, NOTIFY = state_changed)]
+        #[qproperty(QString, full_text_help, READ = full_text_help, NOTIFY = state_changed)]
+        #[qproperty(QString, run_failure_notice, READ = run_failure_notice, NOTIFY = state_changed)]
         type Reader = super::ReaderRust;
 
         fn entry_id(self: &Reader) -> i64;
@@ -62,6 +70,11 @@ pub mod qobject {
         fn link(self: &Reader) -> QString;
         fn is_starred(self: &Reader) -> bool;
         fn proof_url(self: &Reader) -> QString;
+        fn is_showing_full_text(self: &Reader) -> bool;
+        fn is_extracting(self: &Reader) -> bool;
+        fn can_request_full_text(self: &Reader) -> bool;
+        fn full_text_help(self: &Reader) -> QString;
+        fn run_failure_notice(self: &Reader) -> QString;
 
         /// Reads the selected entry again (the data changed) and rebuilds the page.
         #[qinvokable]
@@ -70,6 +83,25 @@ pub mod qobject {
         /// The recette's app-world probe of the proof page.
         #[qinvokable]
         fn probe_script(self: &Reader) -> QString;
+
+        /// The Full Article toggle: the feed's text, the stored article, or a fetch.
+        #[qinvokable]
+        fn request_full_text(self: Pin<&mut Reader>);
+
+        /// The link policy's answer for a navigation: "allow", "cancel", "open:<url>" or
+        /// "toggle:<n>". `kind` is `WebEngineNavigationRequest.navigationType`.
+        #[qinvokable]
+        fn decide(
+            self: &Reader,
+            url: &QString,
+            kind: i32,
+            main_frame: bool,
+            expected: &QString,
+        ) -> QString;
+
+        /// The app-world script of Space: scroll the page `expected` is, or say why not.
+        #[qinvokable]
+        fn page_down_script(self: &Reader, expected: &QString) -> QString;
 
         /// The entry, its flags or the page state changed.
         #[qsignal]
@@ -82,7 +114,13 @@ pub mod qobject {
         /// A read failed: tell the window's banner.
         #[qsignal]
         fn banner(self: Pin<&mut Reader>, message: &QString, show_log: bool);
+
+        /// The reader wrote to the database (a fetched full article): the lists reload.
+        #[qsignal]
+        fn wrote(self: Pin<&mut Reader>);
     }
+
+    impl cxx_qt::Threading for Reader {}
 }
 
 pub struct ReaderRust {
@@ -123,6 +161,11 @@ impl Default for ReaderRust {
 }
 
 impl ReaderRust {
+    /// The selected entry's id.
+    fn selected_id(&self) -> Option<i64> {
+        self.detail.as_ref().map(|detail| detail.row.entry_id)
+    }
+
     /// The page the current state asks for; `None` without an entry.
     fn wanted_page(&self) -> Option<ArticlePage> {
         let entry = self.detail.clone()?;
@@ -260,6 +303,104 @@ impl qobject::Reader {
 
     fn probe_script(&self) -> QString {
         QString::from(RECETTE_PROBE)
+    }
+
+    fn decide(&self, url: &QString, kind: i32, main_frame: bool, expected: &QString) -> QString {
+        let decision = decide(
+            Navigation::from_qt(kind),
+            &url.to_string(),
+            main_frame,
+            &expected.to_string(),
+        );
+        QString::from(decision.encode().as_str())
+    }
+
+    fn page_down_script(&self, expected: &QString) -> QString {
+        QString::from(page_down_script(&expected.to_string()).as_str())
+    }
+
+    fn is_showing_full_text(&self) -> bool {
+        let rust = self.rust();
+        rust.full_text.is_showing(rust.fulltext.as_ref())
+    }
+
+    fn is_extracting(&self) -> bool {
+        let rust = self.rust();
+        rust.full_text.is_extracting(rust.selected_id())
+    }
+
+    fn can_request_full_text(&self) -> bool {
+        let rust = self.rust();
+        rust.full_text
+            .can_request(rust.detail.as_ref().map(|detail| &detail.row))
+    }
+
+    fn full_text_help(&self) -> QString {
+        let rust = self.rust();
+        let failure = rust
+            .full_text
+            .failure(rust.selected_id(), rust.fulltext.as_ref());
+        QString::from(
+            full_article_help(
+                rust.detail.as_ref().map(|detail| &detail.row),
+                self.is_showing_full_text(),
+                self.is_extracting(),
+                failure.as_deref(),
+            )
+            .as_str(),
+        )
+    }
+
+    fn run_failure_notice(&self) -> QString {
+        let rust = self.rust();
+        let notice = rust
+            .full_text
+            .run_failure_notice(rust.selected_id(), rust.fulltext.as_ref());
+        QString::from(notice.unwrap_or_default().as_str())
+    }
+
+    fn request_full_text(mut self: Pin<&mut Self>) {
+        let rust = self.as_mut().rust_mut().get_mut();
+        let Some(row) = rust.detail.as_ref().map(|detail| detail.row.clone()) else {
+            return;
+        };
+        match rust.full_text.request(&row, rust.fulltext.as_ref()) {
+            FullTextStep::Nothing => {}
+            FullTextStep::ShowFeedText | FullTextStep::ShowStored => self.rebuild(),
+            FullTextStep::Extract(id) => {
+                self.as_mut().state_changed();
+                let qt = self.qt_thread();
+                let queued = with_session(|session| {
+                    session.worker.short(
+                        move |cx| cx.block_on(cx.app.extract_entry(id, &NullSink)),
+                        move |result| {
+                            let queued =
+                                qt.queue(move |reader| reader.extraction_finished(id, result));
+                            if queued.is_err() {
+                                tracing::debug!("the app quit before an extraction finished");
+                            }
+                        },
+                    );
+                });
+                if queued.is_none() {
+                    // No session (cannot happen once the window is up): the fetch cannot start.
+                    self.extraction_finished(id, Err(ressac_ui::worker::JobFailure::Panicked));
+                }
+            }
+        }
+    }
+
+    /// A fetch is over, back on the GUI thread: a failure becomes the notice, the stored
+    /// result (article or error) is read again, and the lists reload.
+    fn extraction_finished(mut self: Pin<&mut Self>, id: i64, result: JobResult<ExtractOutcome>) {
+        let selected = self.rust().selected_id();
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .full_text
+            .finished(id, selected, result);
+        self.as_mut().reload();
+        self.wrote();
     }
 
     fn reload(mut self: Pin<&mut Self>) {
