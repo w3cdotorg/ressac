@@ -638,6 +638,54 @@ impl Store {
         }))
     }
 
+    /// The first unread row of `list` after the entry `after` (the first of the list without
+    /// one), in list order: the app's `Queries.nextUnread`. `None` for the Journal (it is
+    /// whole and ranked), an empty search, or when nothing unread follows.
+    pub fn next_unread(
+        &self,
+        list: &ListQuery,
+        after: Option<i64>,
+        today_start: DateTime<Utc>,
+    ) -> Result<Option<ListCursor>> {
+        use rusqlite::OptionalExtension;
+        if list.source == Source::Journal {
+            return Ok(None);
+        }
+        let Some((mut condition, mut args)) = list_condition(list, today_start) else {
+            return Ok(None);
+        };
+        let cursor = |r: &Row<'_>| {
+            Ok(ListCursor {
+                published_at: r.get(0)?,
+                entry_id: r.get(1)?,
+            })
+        };
+        let conn = self.conn();
+        condition.push_str(" AND NOT is_read");
+        if let Some(id) = after {
+            let from: Option<String> = conn
+                .query_row("SELECT published_at FROM entry WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if let Some(published_at) = from {
+                condition.push_str(" AND (published_at, entry_id) < (?, ?)");
+                args.push(Value::Text(published_at));
+                args.push(Value::Integer(id));
+            }
+        }
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT published_at, entry_id FROM v_entry WHERE {condition} \
+                     ORDER BY published_at DESC, entry_id DESC LIMIT 1"
+                ),
+                params_from_iter(args.iter()),
+                cursor,
+            )
+            .optional()?)
+    }
+
     /// The rows of `list` at or above `floor` (all of them when `None`), with the counts of
     /// the whole list: the app's `Queries.page`. The Journal is in rank order, the other
     /// lists newest first.
@@ -1539,6 +1587,31 @@ pub(super) mod tests {
 
     /// Mac DataTests.entry_pages_stop_at_the_floor_and_count_the_whole_list. Folder 1 lists
     /// entries 1 (10-16), 3 (10-15), 2 (10-14); 5 is a buried feed's.
+    #[test]
+    fn next_unread_is_the_first_unread_row_after_an_entry() {
+        let s = Store::open_in_memory().unwrap();
+        add_feed(&s, 1, None, 0, None, "active", "daily");
+        add_entry(&s, 1, 1, "e1", "2026-10-03T08:00:00Z", false, false);
+        add_entry(&s, 2, 1, "e2", "2026-10-02T08:00:00Z", true, false);
+        add_entry(&s, 3, 1, "e3", "2026-10-01T08:00:00Z", false, false);
+        let next = |source: Source, after: Option<i64>| {
+            s.next_unread(&query(source), after, today())
+                .unwrap()
+                .map(|c| c.entry_id)
+        };
+        let feed = Source::Feed(1);
+        assert_eq!(next(feed, None), Some(1));
+        assert_eq!(next(feed, Some(1)), Some(3));
+        assert_eq!(next(feed, Some(3)), None);
+        assert_eq!(next(Source::Journal, None), None);
+        assert_eq!(
+            s.next_unread(&query(feed), Some(1), today())
+                .unwrap()
+                .map(|c| c.published_at),
+            Some("2026-10-01T08:00:00.000Z".to_string())
+        );
+    }
+
     #[test]
     fn list_rows_stop_at_the_floor_and_count_the_whole_list() {
         let s = library();

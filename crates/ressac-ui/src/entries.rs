@@ -4,6 +4,7 @@
 //! database; the caller does, then settles or reverts the local edit.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use ressac_core::model::{FeedId, parse_ts};
@@ -14,6 +15,8 @@ pub const PAGE_SIZE: usize = ressac_core::store::PAGE_SIZE;
 /// A page is scheduled when a row within this many of the end appears.
 pub const LOAD_MORE_MARGIN: usize = 20;
 pub const EXCERPT_CHARS: usize = 280;
+/// How long an entry stays selected before it is marked read.
+pub const AUTO_READ_DELAY: Duration = Duration::from_secs(1);
 pub const UNTITLED: &str = "Untitled";
 pub const NO_RESULTS: &str = "No results";
 pub const NO_UNREAD: &str = "No unread entries";
@@ -359,6 +362,84 @@ impl EntryList {
             entry_id: i64::MIN,
         }));
         self.reload(store, today_start).map(|_| ())
+    }
+
+    /// The row after `selected` (the first without a selection); the next page loads first
+    /// when `selected` is the last loaded row and the list has more. `None` at the end.
+    pub fn next_entry(
+        &mut self,
+        store: &Store,
+        selected: Option<i64>,
+        today_start: DateTime<Utc>,
+    ) -> ressac_core::Result<Option<i64>> {
+        let Some(index) = selected.and_then(|id| self.index_of(id)) else {
+            return Ok(self.rows.first().map(|r| r.entry_id));
+        };
+        if index + 1 >= self.rows.len() && self.has_more {
+            self.load_more(store, today_start)?;
+        }
+        Ok(self.rows.get(index + 1).map(|r| r.entry_id))
+    }
+
+    /// The row before `selected` (the first without a selection); never loads.
+    pub fn previous_entry(&self, selected: Option<i64>) -> Option<i64> {
+        match selected.and_then(|id| self.index_of(id)) {
+            Some(index) => index.checked_sub(1).map(|i| self.rows[i].entry_id),
+            None => self.rows.first().map(|r| r.entry_id),
+        }
+    }
+
+    /// The first unread row after `selected`, other than `selected` itself. Past the loaded
+    /// rows, one query finds the next unread one and the floor moves down to it.
+    pub fn next_unread(
+        &mut self,
+        store: &Store,
+        selected: Option<i64>,
+        today_start: DateTime<Utc>,
+    ) -> ressac_core::Result<Option<i64>> {
+        let start = selected
+            .and_then(|id| self.index_of(id))
+            .map_or(0, |index| index + 1);
+        if let Some(id) = self.unread_from(start, selected) {
+            return Ok(Some(id));
+        }
+        let Some(last) = self
+            .rows
+            .last()
+            .map(|r| r.entry_id)
+            .filter(|_| self.has_more)
+        else {
+            return Ok(None);
+        };
+        let Some(found) = store.next_unread(&self.query, Some(last), today_start)? else {
+            return Ok(None);
+        };
+        let below = self.floor.as_ref().is_none_or(|floor| {
+            (found.published_at.as_str(), found.entry_id)
+                < (floor.published_at.as_str(), floor.entry_id)
+        });
+        if below {
+            self.floor = Some(found);
+            self.reload(store, today_start)?;
+        }
+        Ok(self.unread_from(start, selected))
+    }
+
+    fn unread_from(&self, start: usize, selected: Option<i64>) -> Option<i64> {
+        self.rows
+            .iter()
+            .skip(start)
+            .find(|r| !r.is_read && Some(r.entry_id) != selected)
+            .map(|r| r.entry_id)
+    }
+
+    /// The selection has stayed on `entry_id` for [`AUTO_READ_DELAY`]: it is still selected,
+    /// loaded and unread.
+    pub fn auto_read_due(&self, selected: Option<i64>, entry_id: i64) -> bool {
+        selected == Some(entry_id)
+            && self
+                .index_of(entry_id)
+                .is_some_and(|index| !self.rows[index].is_read)
     }
 
     /// A row appeared on screen: `Some(generation)` when it is near the end and no page is
@@ -924,5 +1005,91 @@ mod tests {
         ));
         assert!(!l.reload(&store, today()).unwrap());
         assert_eq!(row_ids(&l), [ids[2], ids[0], ids[1]]);
+    }
+
+    /// Five entries of feed 1, 1 to 5 October, newest first in the returned ids.
+    fn five(read: impl Fn(usize) -> bool) -> (TestDb, Vec<i64>) {
+        let db = TestDb::new();
+        let ids = db.days(5, 1, read);
+        (db, ids)
+    }
+
+    #[test]
+    fn next_entry_starts_at_the_first_row_and_stops_at_the_last() {
+        let (db, ids) = five(|_| false);
+        let (store, mut l) = opened(&db, q(Source::Feed(1)), 10);
+        assert_eq!(l.next_entry(&store, None, today()).unwrap(), Some(ids[0]));
+        assert_eq!(
+            l.next_entry(&store, Some(ids[0]), today()).unwrap(),
+            Some(ids[1])
+        );
+        assert_eq!(l.next_entry(&store, Some(ids[4]), today()).unwrap(), None);
+    }
+
+    #[test]
+    fn next_entry_past_the_last_loaded_row_loads_the_next_page_first() {
+        let (db, ids) = five(|_| false);
+        let (store, mut l) = opened(&db, q(Source::Feed(1)), 2);
+        assert_eq!(l.rows().len(), 2);
+        assert_eq!(
+            l.next_entry(&store, Some(ids[1]), today()).unwrap(),
+            Some(ids[2])
+        );
+        assert_eq!(l.rows().len(), 4);
+    }
+
+    #[test]
+    fn previous_entry_never_loads_and_starts_at_the_first_row() {
+        let (db, ids) = five(|_| false);
+        let (_store, l) = opened(&db, q(Source::Feed(1)), 2);
+        assert_eq!(l.previous_entry(None), Some(ids[0]));
+        assert_eq!(l.previous_entry(Some(ids[0])), None);
+        assert_eq!(l.previous_entry(Some(ids[1])), Some(ids[0]));
+        assert_eq!(l.rows().len(), 2);
+    }
+
+    #[test]
+    fn next_unread_skips_read_rows_and_the_selection() {
+        // Rows 2 and 3 (days 4 and 3) are read.
+        let (db, ids) = five(|day| day == 4 || day == 3);
+        let (store, mut l) = opened(&db, q(Source::Feed(1)), 10);
+        assert_eq!(
+            l.next_unread(&store, Some(ids[0]), today()).unwrap(),
+            Some(ids[3])
+        );
+        assert_eq!(l.next_unread(&store, None, today()).unwrap(), Some(ids[0]));
+        assert_eq!(
+            l.next_unread(&store, Some(ids[4]), today()).unwrap(),
+            None,
+            "nothing after the last row"
+        );
+    }
+
+    #[test]
+    fn next_unread_beyond_the_loaded_rows_loads_down_to_it_with_one_query() {
+        // Only the oldest entry is unread.
+        let (db, ids) = five(|day| day != 1);
+        let (store, mut l) = opened(&db, q(Source::Feed(1)), 2);
+        assert_eq!(l.rows().len(), 2);
+        assert_eq!(
+            l.next_unread(&store, Some(ids[0]), today()).unwrap(),
+            Some(ids[4])
+        );
+        assert_eq!(l.rows().len(), 5);
+        assert!(!l.has_more());
+    }
+
+    #[test]
+    fn auto_read_is_due_only_for_the_entry_still_selected_and_unread() {
+        assert_eq!(AUTO_READ_DELAY, std::time::Duration::from_secs(1));
+        let (db, ids) = five(|_| false);
+        let (_store, mut l) = opened(&db, q(Source::Feed(1)), 10);
+        let (a, b) = (ids[0], ids[1]);
+        assert!(l.auto_read_due(Some(a), a));
+        assert!(!l.auto_read_due(Some(b), a));
+        assert!(!l.auto_read_due(None, a));
+        assert!(!l.auto_read_due(Some(999), 999), "not loaded");
+        let _ = l.set_read_local(&[a], true);
+        assert!(!l.auto_read_due(Some(a), a));
     }
 }
