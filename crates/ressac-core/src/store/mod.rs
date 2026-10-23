@@ -31,9 +31,9 @@ pub use feeds::{
 pub use fetch::{AttemptRecord, BACKLOG_DAYS, EntryRecord, FETCH_LOG_KEEP, FRESH_FOR_MINUTES};
 pub use health::TriageFacts;
 pub use library::{
-    CadenceDetail, EntryDetail, EntryPage, EntryRow, JournalItem, JournalView, ListCursor,
-    ListFilter, PAGE_SIZE, Source, SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot,
-    fts_query,
+    CadenceDetail, EntryDetail, EntryPage, EntryRow, FeedFacts, JournalItem, JournalView,
+    LIST_SNIPPET_CHARS, ListCursor, ListFilter, ListQuery, ListRows, ListedEntry, PAGE_SIZE,
+    Source, SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot, fts_query,
 };
 pub use reading::{FulltextRow, plain_text};
 pub use ticker::{TICKER_WINDOW_DAYS, TickerEntry};
