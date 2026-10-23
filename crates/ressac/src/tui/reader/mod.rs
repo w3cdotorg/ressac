@@ -308,7 +308,9 @@ impl<'a> Executor<'a> {
                     events.push(Event::DataChanged);
                     events
                 }),
-            Command::OpenUrl(url) => open::that(&url).map(|()| Vec::new()).map_err(Into::into),
+            Command::OpenUrl(url) => crate::open_in_browser(&url)
+                .map(|()| Vec::new())
+                .map_err(Into::into),
             Command::Extract(id) => {
                 let _ = self.tx.send(Msg::Event(Event::Progress {
                     label: EXTRACT_PROGRESS_LABEL.into(),

@@ -129,13 +129,14 @@ async fn run(cli: Cli, paths: Option<&ressac_core::paths::Paths>) -> anyhow::Res
     }
 }
 
-/// Opens a URL in the default browser; `RESSAC_NO_BROWSER=1` only logs it (tests).
+/// Opens a URL in the default browser without waiting for the launcher (`xdg-open` may run
+/// the browser in the foreground); `RESSAC_NO_BROWSER=1` only logs it (tests).
 fn open_in_browser(url: &str) -> std::io::Result<()> {
     if std::env::var_os("RESSAC_NO_BROWSER").is_some_and(|v| v == "1") {
         tracing::info!("RESSAC_NO_BROWSER: not opening {url}");
         return Ok(());
     }
-    open::that(url)
+    open::that_detached(url)
 }
 
 /// Daily-rotated log file in `dir` (`Paths::log_dir`: `~/Library/Logs/Ressac` on macOS,
