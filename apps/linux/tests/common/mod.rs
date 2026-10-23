@@ -59,6 +59,15 @@ impl Run {
     pub fn copy_fixture(&self) -> PathBuf {
         let db = self.home.join("r.sqlite");
         std::fs::copy(FIXTURE, &db).unwrap();
+        // Entry 6's full-article fetch (walk step 11) must never reach the network: a closed
+        // loopback port, refused by the core's address guard before any connection.
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "UPDATE entry SET url = 'http://127.0.0.1:9/walled' WHERE id = 6",
+                [],
+            )
+            .unwrap();
         db
     }
 }

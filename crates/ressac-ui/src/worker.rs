@@ -7,7 +7,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use ressac_core::Error;
 use ressac_core::service::{Event, EventSink, Ressac};
@@ -80,19 +81,19 @@ impl<F: Fn(&Event) + Send + Sync> EventSink for ForwardSink<F> {
 }
 
 /// Starts a FIFO thread with its own state (connection, runtime).
-fn spawn_lane(db: &Path) -> mpsc::Sender<ShortJob> {
+fn spawn_lane(db: &Path) -> (mpsc::Sender<ShortJob>, JoinHandle<()>) {
     let (jobs_tx, jobs) = mpsc::channel::<ShortJob>();
     let mut state = ShortState {
         db: db.to_path_buf(),
         app: None,
         runtime: None,
     };
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         for job in jobs {
             job(&mut state);
         }
     });
-    jobs_tx
+    (jobs_tx, handle)
 }
 
 /// Wraps a job and its callback for a lane: panics in either are caught (the lane carries on).
@@ -129,6 +130,8 @@ pub struct Worker {
     db: PathBuf,
     short: mpsc::Sender<ShortJob>,
     direct: mpsc::Sender<ShortJob>,
+    /// The two lane threads, joined by `shutdown`.
+    lanes: Vec<JoinHandle<()>>,
     /// The flag of the current (or last) long run; each long run gets its own.
     stop: Mutex<Arc<AtomicBool>>,
 }
@@ -136,10 +139,13 @@ pub struct Worker {
 impl Worker {
     /// Starts the short-run and direct-write threads; each opens the database on its first job.
     pub fn new(db: &Path) -> Worker {
+        let (short, short_thread) = spawn_lane(db);
+        let (direct, direct_thread) = spawn_lane(db);
         Worker {
             db: db.to_path_buf(),
-            short: spawn_lane(db),
-            direct: spawn_lane(db),
+            short,
+            direct,
+            lanes: vec![short_thread, direct_thread],
             stop: Mutex::new(Arc::new(AtomicBool::new(false))),
         }
     }
@@ -201,6 +207,30 @@ impl Worker {
         });
     }
 
+    /// Ends the worker before the process tears Qt down: stops the long run, closes the lanes
+    /// (each finishes the job it is running) and waits up to `wait` in all for them. True when
+    /// every lane ended; a lane still busy is logged and left to the process exit.
+    pub fn shutdown(mut self, wait: Duration) -> bool {
+        self.stop();
+        // Senders whose receivers are gone: dropping the real ones ends the lanes' loops.
+        self.short = mpsc::channel().0;
+        self.direct = mpsc::channel().0;
+        let deadline = Instant::now() + wait;
+        let mut all = true;
+        for lane in std::mem::take(&mut self.lanes) {
+            while !lane.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if lane.is_finished() {
+                let _ = lane.join();
+            } else {
+                tracing::warn!("a worker lane was still busy {wait:?} after the shutdown began");
+                all = false;
+            }
+        }
+        all
+    }
+
     /// Asks the current long job to stop; it checks its flag between feeds. The next long run
     /// starts with a fresh flag.
     pub fn stop(&self) {
@@ -225,6 +255,24 @@ mod tests {
     use std::time::Duration;
 
     const WAIT: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn shutdown_joins_idle_lanes_and_reports_a_busy_one() {
+        let db = TestDb::new();
+        let worker = Worker::new(&db.path);
+        assert!(worker.shutdown(WAIT));
+        let worker = Worker::new(&db.path);
+        worker.short(
+            |_| {
+                thread::sleep(Duration::from_millis(600));
+                Ok(())
+            },
+            |_| {},
+        );
+        let started = Instant::now();
+        assert!(!worker.shutdown(Duration::from_millis(50)));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
 
     /// Mac RunCoordinatorTests.short_runs_run_one_at_a_time_in_order.
     #[test]

@@ -85,6 +85,10 @@ void ressac_init_webengine()
     QtWebEngineQuick::initialize();
 }
 
+// Owned here so `ressac_destroy_application` can delete it before `main` returns: Qt and
+// Chromium must not tear down during static destruction with threads still running.
+static QApplication *g_application = nullptr;
+
 void ressac_create_application()
 {
     QCoreApplication::setOrganizationName(QStringLiteral("ressac"));
@@ -93,7 +97,7 @@ void ressac_create_application()
     static int argc = 1;
     static char arg0[] = "ressac-kde";
     static char *argv[] = {arg0, nullptr};
-    new QApplication(argc, argv);
+    g_application = new QApplication(argc, argv);
 
     QQuickWebEngineProfile *profile = QQuickWebEngineProfile::defaultProfile();
     if (!profile->isOffTheRecord()) {
@@ -112,6 +116,12 @@ void ressac_create_application()
         QIcon::setThemeName(QStringLiteral("breeze"));
     }
     QIcon::setFallbackThemeName(QStringLiteral("breeze"));
+}
+
+void ressac_destroy_application()
+{
+    delete g_application;
+    g_application = nullptr;
 }
 
 bool ressac_has_window()

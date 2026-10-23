@@ -202,8 +202,8 @@ impl qobject::Reader {
         }
         self.as_mut().rust_mut().get_mut().entry_id = value;
         self.as_mut().read(true);
-        self.as_mut().entry_id_changed();
-        self.rebuild();
+        self.as_mut().rebuild();
+        self.entry_id_changed();
     }
 
     fn color_scheme(&self) -> QString {
@@ -360,6 +360,10 @@ impl qobject::Reader {
     }
 
     fn request_full_text(mut self: Pin<&mut Self>) {
+        // Without a session (cannot happen once the window is up) there is nothing to fetch with.
+        if with_session(|_| ()).is_none() {
+            return;
+        }
         let rust = self.as_mut().rust_mut().get_mut();
         let Some(row) = rust.detail.as_ref().map(|detail| detail.row.clone()) else {
             return;
@@ -370,7 +374,7 @@ impl qobject::Reader {
             FullTextStep::Extract(id) => {
                 self.as_mut().state_changed();
                 let qt = self.qt_thread();
-                let queued = with_session(|session| {
+                with_session(|session| {
                     session.worker.short(
                         move |cx| cx.block_on(cx.app.extract_entry(id, &NullSink)),
                         move |result| {
@@ -382,10 +386,6 @@ impl qobject::Reader {
                         },
                     );
                 });
-                if queued.is_none() {
-                    // No session (cannot happen once the window is up): the fetch cannot start.
-                    self.extraction_finished(id, Err(ressac_ui::worker::JobFailure::Panicked));
-                }
             }
         }
     }

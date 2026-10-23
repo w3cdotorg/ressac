@@ -43,13 +43,13 @@ Kirigami.ApplicationWindow {
             menu.prepare(row); const again = menu.fullTextItem.checked                   // ... and reopens on a ticked feed
             menu.prepare({ feedId: 2, key: "feed:2", badge: 3, site: "x", preferFullText: false })
             console.warn("walk: 07-feed-menu first=" + first + " again=" + again + " other=" + menu.fullTextItem.checked + " feedId=" + menu.feedId + " badge=" + menu.badge) } },
-        { name: "07-full-article", enter: function () { SourcesModel.selectKey("feed:8"); EntriesModel.select(0)
-            console.warn("walk: 07-full-article entry=" + Reader.entryId + " showing=" + Reader.isShowingFullText) } },
-        { name: "08-feed-text", enter: function () { Reader.requestFullText(); console.warn("walk: 08-feed-text showing=" + Reader.isShowingFullText) } },
-        { name: "09-link", enter: function () { readingLoader.item.reader.clickTitleLink() } },
-        { name: "10-extraction", enter: function () { EntriesModel.select(1); Reader.requestFullText()
-            console.warn("walk: 10-extraction entry=" + Reader.entryId + " extracting=" + Reader.isExtracting) } },
-        { name: "11-notice", enter: function () { console.warn("walk: 11-notice showing=" + Reader.isShowingFullText + " help=" + Reader.fullTextHelp) } }
+        { name: "08-full-article", enter: function () { SourcesModel.selectKey("feed:8"); EntriesModel.select(0)
+            console.warn("walk: 08-full-article entry=" + Reader.entryId + " showing=" + Reader.isShowingFullText) } },
+        { name: "09-feed-text", enter: function () { Reader.requestFullText(); console.warn("walk: 09-feed-text showing=" + Reader.isShowingFullText) } },
+        { name: "10-link", enter: function () { readingLoader.item.reader.clickTitleLink() } },
+        { name: "11-extraction", enter: function () { EntriesModel.select(1); Reader.requestFullText()
+            console.warn("walk: 11-extraction entry=" + Reader.entryId + " extracting=" + Reader.isExtracting) } },
+        { name: "12-notice", enter: function () { console.warn("walk: 12-notice showing=" + Reader.isShowingFullText + " help=" + Reader.fullTextHelp) } }
     ]
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… walkSteps
@@ -67,6 +67,7 @@ Kirigami.ApplicationWindow {
                 Recette.prepareDefault(); root.useDefaultDatabase()
                 return
             }
+            if (Reader.isExtracting) { walkTimer.start(); return }   // a fetch in flight: grab again once it ends, and never quit during one
             root.walkIndex += 1
             if (Launcher.phase !== Launcher.Ready || root.walkIndex >= root.walkSteps.length) { Qt.exit(0); return }
             root.walkSteps[root.walkIndex].enter()

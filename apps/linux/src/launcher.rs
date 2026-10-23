@@ -37,6 +37,19 @@ fn install_session(session: Session) {
     SESSION.with(|slot| *slot.borrow_mut() = Some(session));
 }
 
+/// Ends the session at exit: the long run stopped, the worker's lanes joined (a lane busy
+/// beyond `SHUTDOWN_WAIT` is logged), the connection closed.
+pub(crate) fn shutdown_session() {
+    if let Some(session) = SESSION.with(|slot| slot.borrow_mut().take()) {
+        let Session { store, worker } = session;
+        worker.shutdown(SHUTDOWN_WAIT);
+        drop(store);
+    }
+}
+
+/// How long the exit waits for the worker's lanes.
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn drop_session() {
     SESSION.with(|slot| *slot.borrow_mut() = None);
 }

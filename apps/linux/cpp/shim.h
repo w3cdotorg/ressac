@@ -9,6 +9,9 @@ void ressac_init_webengine();
 // Names, a QApplication (the org.kde.desktop style paints with QStyle), desktop file name,
 // window icon, Quick Controls style, icon theme. Argument-free: Qt gets no command line.
 void ressac_create_application();
+// Deletes the application object (and with it the WebEngine profile); call after the QML engine
+// is gone and the worker threads are joined.
+void ressac_destroy_application();
 // True when a top-level QQuickWindow exists (Main.qml produced its window).
 bool ressac_has_window();
 // Runs the event loop of the application object.

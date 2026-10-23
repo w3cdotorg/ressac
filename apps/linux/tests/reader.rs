@@ -60,30 +60,23 @@ fn article_scripts_never_run_and_a_hostile_600_kb_entry_still_loads() {
 fn the_reader_shows_full_articles_sends_links_out_and_reports_a_failed_extraction() {
     let run = Run::new();
     let db = run.copy_fixture();
-    // Entry 6's extraction must fail without the network: a loopback address, refused by the core's guard.
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE entry SET url = 'http://127.0.0.1:9/walled' WHERE id = 6",
-            [],
-        )
-        .unwrap();
+    // `copy_fixture` points entry 6 at a closed loopback port: its extraction fails offline.
     let out = run.launch(Some(&db));
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert_clean(&out);
     for line in [
-        "walk: 07-full-article entry=5 showing=true",
-        "walk: 08-feed-text showing=false",
+        "walk: 08-full-article entry=5 showing=true",
+        "walk: 09-feed-text showing=false",
         "reader: open https://daringfireball.net/2026/10/tides",
-        "walk: 10-extraction entry=6 extracting=true",
-        "walk: 11-notice showing=false help=Full article unavailable: ",
+        "walk: 11-extraction entry=6 extracting=true",
+        "walk: 12-notice showing=false help=Full article unavailable: ",
     ] {
         assert!(err.contains(line), "{line} missing in {err}");
     }
     assert!(
         err.lines()
-            .any(|l| l.contains("walk: 11-notice") && l.ends_with("Click to try again")),
+            .any(|l| l.contains("walk: 12-notice") && l.ends_with("Click to try again")),
         "{err}"
     );
     let stored: String = rusqlite::Connection::open(&db)
@@ -95,7 +88,7 @@ fn the_reader_shows_full_articles_sends_links_out_and_reports_a_failed_extractio
         )
         .unwrap();
     assert_ne!(stored, "The page is behind a login."); // a new attempt was stored
-    for shot in ["07-full-article.png", "08-feed-text.png", "11-notice.png"] {
+    for shot in ["08-full-article.png", "09-feed-text.png", "12-notice.png"] {
         assert_drawn(&run.shots.join(shot));
     }
 }

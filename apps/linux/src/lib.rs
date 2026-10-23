@@ -29,6 +29,7 @@ mod shim {
 
         pub fn ressac_init_webengine();
         pub fn ressac_create_application();
+        pub fn ressac_destroy_application();
         pub fn ressac_has_window() -> bool;
         pub fn ressac_exec() -> i32;
         pub fn ressac_grab_window(path: &str) -> bool;
@@ -77,9 +78,16 @@ pub fn run() -> ExitCode {
     if let Some(engine) = engine.as_mut() {
         engine.load(&QUrl::from(MAIN_QML));
     }
-    if !shim::ressac_has_window() {
+    let code = if shim::ressac_has_window() {
+        u8::try_from(shim::ressac_exec()).unwrap_or(1)
+    } else {
         eprintln!("ressac-kde: the main window did not load (see the QML errors above)");
-        return ExitCode::from(1);
-    }
-    ExitCode::from(u8::try_from(shim::ressac_exec()).unwrap_or(1))
+        1
+    };
+    // Teardown in order, before `main` returns: the QML engine (and its singletons), the
+    // session (its worker threads joined), then the application and Chromium.
+    drop(engine);
+    launcher::shutdown_session();
+    shim::ressac_destroy_application();
+    ExitCode::from(code)
 }
