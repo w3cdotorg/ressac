@@ -40,7 +40,7 @@ Item {
 
                 Rectangle {
                     width: 8; height: 8; radius: 4
-                    color: delegate.model.read ? "transparent" : Kirigami.Theme.highlightColor
+                    color: delegate.model.read ? "transparent" : (delegate.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.highlightColor)
                     Layout.alignment: Qt.AlignTop
                     Layout.topMargin: Kirigami.Units.smallSpacing
                 }

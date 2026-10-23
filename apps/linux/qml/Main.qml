@@ -29,7 +29,13 @@ Kirigami.ApplicationWindow {
         { name: "05-banner", enter: function () { Runs.showBanner("The database is busy (is `ressac` running in a terminal?)", false)
             console.warn("walk: 05-banner visible=" + Runs.bannerVisible) } },
         { name: "06-garden", enter: function () { EntriesModel.searchText = ""; SourcesModel.selectKey("garden:needs-triage")
-            console.warn("walk: 06-garden active=" + EntriesModel.active + " unreadEnabled=" + !SourcesModel.isGarden) } }
+            console.warn("walk: 06-garden active=" + EntriesModel.active + " unreadEnabled=" + !SourcesModel.isGarden) } },
+        { name: "07-unread-filter", enter: function () {
+            const page = readingLoader.item
+            SourcesModel.selectKey("unread"); page.unreadButton.click()          // a user click on Unread ...
+            const clicked = EntriesModel.unreadOnly
+            EntriesModel.unreadOnly = false                                              // ... the model moves on its own
+            console.warn("walk: 07-unread-filter clicked=" + clicked + " all=" + page.allButton.checked + " unread=" + page.unreadButton.checked) } }
     ]
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… walkSteps
@@ -62,6 +68,7 @@ Kirigami.ApplicationWindow {
         padding: 0
 
         Loader {
+            id: readingLoader
             anchors.fill: parent
             active: Launcher.phase === Launcher.Ready
             source: Qt.resolvedUrl("ReadingPage.qml")

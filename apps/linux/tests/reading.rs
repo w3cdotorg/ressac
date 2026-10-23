@@ -20,7 +20,8 @@ fn the_reading_page_walks_sources_entries_search_banner_and_garden() {
             "03-starred.png",
             "04-search.png",
             "05-banner.png",
-            "06-garden.png"
+            "06-garden.png",
+            "07-unread-filter.png"
         ]
     );
     for shot in shots(&run) {
@@ -36,6 +37,7 @@ fn the_reading_page_walks_sources_entries_search_banner_and_garden() {
         "walk: 04-search entries=3",
         "walk: 05-banner visible=true",
         "walk: 06-garden active=false unreadEnabled=false",
+        "walk: 07-unread-filter clicked=true all=true unread=false",
     ] {
         assert!(err.contains(line), "{line} missing in {err}");
     }

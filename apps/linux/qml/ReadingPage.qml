@@ -9,6 +9,9 @@ Item {
 
     readonly property int progressInset: 10  // PROGRESS_INSET
 
+    property alias allButton: allButton
+    property alias unreadButton: unreadButton
+
     function reloadAll() {
         SourcesModel.reload()
         EntriesModel.reload()
@@ -42,20 +45,24 @@ Item {
 
                     QQC2.ButtonGroup { id: filterGroup }
 
+                    // `checked` follows the model; a user click writes the model through onToggled and the
+                    // Binding puts the binding back (a click would otherwise replace it for good).
                     QQC2.ToolButton {
+                        id: allButton
                         text: "All"
                         checkable: true
-                        checked: !EntriesModel.unreadOnly
                         QQC2.ButtonGroup.group: filterGroup
-                        onClicked: EntriesModel.unreadOnly = false
+                        onToggled: if (checked) EntriesModel.unreadOnly = false
+                        Binding { target: allButton; property: "checked"; value: !EntriesModel.unreadOnly; restoreMode: Binding.RestoreBindingOrValue }
                     }
 
                     QQC2.ToolButton {
+                        id: unreadButton
                         text: "Unread"
                         checkable: true
-                        checked: EntriesModel.unreadOnly
                         QQC2.ButtonGroup.group: filterGroup
-                        onClicked: EntriesModel.unreadOnly = true
+                        onToggled: if (checked) EntriesModel.unreadOnly = true
+                        Binding { target: unreadButton; property: "checked"; value: EntriesModel.unreadOnly; restoreMode: Binding.RestoreBindingOrValue }
                     }
                 }
 
@@ -78,9 +85,10 @@ Item {
                     indeterminate: Runs.progressFraction < 0
                     value: Math.max(0, Runs.progressFraction)
 
-                    TextMetrics { id: fullMetrics; text: Runs.progressText }
+                    TextMetrics { id: fullMetrics; font: pillLabel.font; text: Runs.progressText }
 
                     QQC2.Label {
+                        id: pillLabel
                         anchors.fill: parent
                         anchors.leftMargin: page.progressInset
                         anchors.rightMargin: page.progressInset
