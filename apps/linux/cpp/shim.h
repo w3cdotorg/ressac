@@ -16,9 +16,12 @@ void ressac_destroy_application();
 bool ressac_has_window();
 // Runs the event loop of the application object.
 int ressac_exec();
-// Saves the first visible QQuickWindow (WebEngine content included) to `path`; false when there
-// is none or the save fails.
+// Saves the focused window when it is a visible QQuickWindow, else the first visible one (WebEngine
+// content included), to `path`; false when there is none or the save fails.
 bool ressac_grab_window(rust::Str path);
+
+// The text on the clipboard ("" when it holds none).
+rust::String ressac_clipboard_text();
 
 // Installs the reading window's key filter on the first QQuickWindow: it sees ShortcutOverride and
 // KeyPress before the focused item (WebEngine included), asks Rust (`ressac_route_key`) and calls

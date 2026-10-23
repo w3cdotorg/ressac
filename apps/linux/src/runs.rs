@@ -19,7 +19,7 @@ use ressac_ui::chrono;
 use ressac_ui::live::{Invalidation, POLL_INTERVAL, should_poll};
 use ressac_ui::runs::{
     Admission, Banner, RunCoordinator, RunEnd, RunFailure, RunRequest, compact_progress_text,
-    fetch_options, progress_text, progress_width,
+    progress_text, progress_width,
 };
 use ressac_ui::sources::Selection;
 use ressac_ui::worker::{JobContext, JobResult};
@@ -259,8 +259,7 @@ impl qobject::Runs {
         self.start_long(
             request,
             move |cx, sink, stop| {
-                let options = fetch_options(cx.app.store(), &job_request)?;
-                cx.block_on(cx.app.refresh(options, sink, stop)).map(drop)
+                cx.block_on(ressac_ui::runs::fetch(cx.app, &job_request, sink, stop))
             },
             |_: &()| None,
             |_| {},

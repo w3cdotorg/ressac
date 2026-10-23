@@ -11,6 +11,8 @@
 #include <QtCore/QString>
 #include <QtCore/QStringList>
 #include <QtCore/QVariant>
+#include <QtGui/QClipboard>
+#include <QtGui/QFontDatabase>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QIcon>
 #include <QtGui/QImage>
@@ -219,6 +221,23 @@ void ressac_create_application()
         QIcon::setThemeName(QStringLiteral("breeze"));
     }
     QIcon::setFallbackThemeName(QStringLiteral("breeze"));
+
+    // The bundled faces, from the scheme's own table, so the font menu and the preview draw in them.
+    for (const char *file : {"Newsreader-Variable.ttf", "Newsreader-Italic-Variable.ttf",
+                             "AtkinsonHyperlegibleNext-Variable.ttf",
+                             "AtkinsonHyperlegibleNext-Italic-Variable.ttf"}) {
+        const std::string url = std::string("ressac:asset/") + file;
+        rust::String mime;
+        rust::Vec<std::uint8_t> body;
+        if (!ressac_scheme_serve(rust::Str(url.data(), url.size()), mime, body)) {
+            qWarning("ressac-kde: cannot read %s", file);
+            continue;
+        }
+        const QByteArray data(reinterpret_cast<const char *>(body.data()), static_cast<qsizetype>(body.size()));
+        if (QFontDatabase::addApplicationFontFromData(data) == -1) {
+            qWarning("ressac-kde: cannot register %s", file);
+        }
+    }
 }
 
 void ressac_destroy_application()
@@ -239,11 +258,21 @@ int ressac_exec()
 
 bool ressac_grab_window(rust::Str path)
 {
+    // The focused window (a Settings or Sea Chart window when one is up), else the first visible one.
+    if (auto *focused = qobject_cast<QQuickWindow *>(QGuiApplication::focusWindow());
+        focused != nullptr && focused->isVisible()) {
+        return focused->grabWindow().save(from_rust(path));
+    }
     QQuickWindow *window = first_quick_window(true);
     if (window == nullptr) {
         return false;
     }
     return window->grabWindow().save(from_rust(path));
+}
+
+rust::String ressac_clipboard_text()
+{
+    return to_rust(QGuiApplication::clipboard()->text());
 }
 
 void ressac_install_key_filter()

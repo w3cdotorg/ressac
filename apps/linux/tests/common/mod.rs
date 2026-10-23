@@ -72,11 +72,17 @@ impl Run {
     }
 }
 
-/// Not blank: at least the window's minimum size, and more than 1000 pixels unlike the top-left one.
+/// Not blank: at least the main window's minimum size, and more than 1000 pixels unlike the
+/// top-left one.
 pub fn assert_drawn(png: &Path) {
+    assert_drawn_min(png, 900, 500);
+}
+
+/// The same for a window of another size (Settings, the Sea Chart).
+pub fn assert_drawn_min(png: &Path, width: u32, height: u32) {
     let image = image::open(png).unwrap().to_rgba8();
     assert!(
-        image.width() >= 900 && image.height() >= 500,
+        image.width() >= width && image.height() >= height,
         "{}x{}",
         image.width(),
         image.height()

@@ -12,6 +12,7 @@ cxx.workspace = true
 cxx-qt.workspace = true
 cxx-qt-lib.workspace = true
 tracing.workspace = true
+url.workspace = true
 ressac-core = { path = "../../crates/ressac-core" }
 ressac-ui = { path = "../../crates/ressac-ui" }
 
