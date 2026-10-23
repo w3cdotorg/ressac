@@ -117,7 +117,10 @@ pub enum Event {
     },
 }
 
-pub trait EventSink {
+/// Receives a job's progress on the job's thread. `Send + Sync`, so one sink can be handed
+/// to a worker thread and its events forwarded across threads (the KDE app's runs); every
+/// sink of the workspace already is.
+pub trait EventSink: Send + Sync {
     fn emit(&self, event: &Event);
 }
 
@@ -1495,6 +1498,21 @@ mod tests {
             "the first unknown id: {feed:?}"
         );
         assert_eq!(feed.to_string(), "No feed #98.");
+    }
+
+    #[test]
+    fn an_event_sink_can_be_shared_across_threads() {
+        fn shareable<T: Send + Sync + ?Sized>() {}
+        shareable::<dyn EventSink>();
+        let recorder = Recorder::default();
+        let sink: &dyn EventSink = &recorder;
+        std::thread::scope(|s| {
+            s.spawn(|| sink.emit(&Event::Started { total: 2 }));
+        });
+        assert!(matches!(
+            recorder.0.lock().unwrap().as_slice(),
+            [Event::Started { total: 2 }]
+        ));
     }
 
     #[derive(Default)]
