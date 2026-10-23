@@ -41,6 +41,19 @@ pub use ticker::{TICKER_WINDOW_DAYS, TickerEntry};
 /// Highest schema version this binary knows.
 pub const SCHEMA_VERSION: i64 = 6;
 
+/// What a database path holds, as [`Store::probe`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaState {
+    /// No file at the path.
+    Missing,
+    /// The schema this binary knows ([`SCHEMA_VERSION`]).
+    Current,
+    /// An older schema (0 for an empty file): migrating it is possible.
+    Older(u32),
+    /// A schema newer than this binary knows.
+    Newer(u32),
+}
+
 /// Ordered migrations, embedded at compile time from the repository's `schema/` folder.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../../../schema/0001_init.sql")),
@@ -128,6 +141,25 @@ impl Store {
     /// `-shm` file cannot be read through a read-only connection.
     pub fn open_existing_query_only(path: &Path) -> Result<Self> {
         Self::open_existing_with(path, true)
+    }
+
+    /// What `path` holds, read without creating, migrating, backing up or changing the journal
+    /// mode (query-only, 250 ms busy timeout): the app decides from it whether to migrate
+    /// (after asking), refuse a newer database, or fail (spec §6).
+    pub fn probe(path: &Path) -> Result<SchemaState> {
+        match Self::open_existing_query_only(path) {
+            Ok(_) => Ok(SchemaState::Current),
+            Err(Error::DatabaseMissing(_)) => Ok(SchemaState::Missing),
+            Err(Error::SchemaMismatch { found, expected }) => {
+                match u32::try_from(found) {
+                    Ok(v) if found < expected => Ok(SchemaState::Older(v)),
+                    Ok(v) => Ok(SchemaState::Newer(v)),
+                    // A negative version is corruption, not a schema to migrate.
+                    Err(_) => Err(Error::SchemaMismatch { found, expected }),
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn open_existing_with(path: &Path, query_only: bool) -> Result<Self> {
@@ -1066,5 +1098,52 @@ mod tests {
             Err(Error::SchemaMismatch { found: 3, .. })
         ));
         assert_eq!(journal_mode_of(&raw), "delete");
+    }
+
+    #[test]
+    fn probe_reads_the_version_without_touching_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub/ressac.sqlite");
+        assert_eq!(Store::probe(&path).unwrap(), SchemaState::Missing);
+        assert!(!path.parent().unwrap().exists(), "nothing created");
+
+        drop(Store::open(&path).unwrap());
+        assert_eq!(Store::probe(&path).unwrap(), SchemaState::Current);
+
+        let raw = Connection::open(&path).unwrap();
+        raw.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))
+            .unwrap();
+        raw.execute("UPDATE schema_meta SET version = 3", [])
+            .unwrap();
+        assert_eq!(Store::probe(&path).unwrap(), SchemaState::Older(3));
+        let version: i64 = raw
+            .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3, "not migrated");
+        assert!(!path.with_extension("sqlite.bak-v3").exists(), "no backup");
+        assert_eq!(journal_mode_of(&raw), "delete", "journal mode untouched");
+
+        raw.execute("UPDATE schema_meta SET version = 99", [])
+            .unwrap();
+        assert_eq!(Store::probe(&path).unwrap(), SchemaState::Newer(99));
+        raw.execute("UPDATE schema_meta SET version = -1", [])
+            .unwrap();
+        assert!(matches!(
+            Store::probe(&path),
+            Err(Error::SchemaMismatch { found: -1, .. })
+        ));
+    }
+
+    #[test]
+    fn probe_calls_an_empty_file_older_and_refuses_a_file_that_is_not_a_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.sqlite");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(Store::probe(&empty).unwrap(), SchemaState::Older(0));
+        assert_eq!(std::fs::metadata(&empty).unwrap().len(), 0, "still empty");
+
+        let text = dir.path().join("notes.sqlite");
+        std::fs::write(&text, "plain text, not SQLite\n".repeat(200)).unwrap();
+        assert!(matches!(Store::probe(&text), Err(Error::Db(_))));
     }
 }
