@@ -13,7 +13,10 @@ use std::io::Cursor;
 
 use image::codecs::png::PngEncoder;
 use image::imageops::{self, FilterType};
-use image::{ExtendedColorType, ImageEncoder, ImageReader, Limits, RgbImage, RgbaImage};
+use image::{
+    DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, ImageReader, Limits, RgbImage,
+    RgbaImage,
+};
 use ressac_core::Error;
 use ressac_core::service::Ressac;
 
@@ -144,13 +147,7 @@ pub fn mosaic_from_rgba(image: &RgbaImage, columns: usize) -> MosaicImage {
             cells: vec![black; columns * rows],
         };
     }
-    let mut paper = RgbImage::new(image.width(), image.height());
-    for (source, target) in image.pixels().zip(paper.pixels_mut()) {
-        let alpha = u32::from(source.0[3]);
-        for k in 0..3 {
-            target.0[k] = (u32::from(source.0[k]) * alpha / 255) as u8;
-        }
-    }
+    let paper = over_black(image);
     let (w, h) = (width as u32, height as u32);
     let reduced;
     let source = if paper.width() > 2 * w || paper.height() > 2 * h {
@@ -314,6 +311,10 @@ fn percent_decode(text: &str) -> Option<String> {
     while i < bytes.len() {
         if bytes[i] == b'%' {
             let hex = text.get(i + 1..i + 3)?;
+            // Strict: `from_str_radix` alone would accept a leading '+'.
+            if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
             out.push(u8::from_str_radix(hex, 16).ok()?);
             i += 3;
         } else {
@@ -365,17 +366,36 @@ impl MosaicFailure {
     }
 }
 
+/// The only formats a feed's image may use. The decoder is picked from the bytes' magic
+/// number, so without this list a hostile feed reaches every decoder `image` carries (TIFF,
+/// OpenEXR, HDR, DDS, QOI, PNM…), the float ones with a weaker allocation record.
+fn is_allowed_format(format: ImageFormat) -> bool {
+    matches!(
+        format,
+        ImageFormat::Png
+            | ImageFormat::Jpeg
+            | ImageFormat::Gif
+            | ImageFormat::WebP
+            | ImageFormat::Bmp
+            | ImageFormat::Ico
+    )
+}
+
 /// Decodes a downloaded original into a small image for `mosaic_from_rgba`, and the columns
-/// its width gives (`max_columns` at most). The size is read from the header first: more than
-/// `MAX_SOURCE_PIXELS` is refused before any pixel is decoded. A GIF gives its first frame.
+/// its width gives (`max_columns` at most). Only PNG, JPEG, GIF, WebP, BMP and ICO are read
+/// (anything else is `Unreadable`). The size is read from the header first: more than
+/// `MAX_SOURCE_PIXELS` is refused before the decoder runs, and the decoder itself may allocate
+/// at most `MAX_DECODE_ALLOC`. A decoder that panics on hostile bytes is caught and reads as
+/// `Unreadable` (no cheap hostile fixture triggers one, so this is not tested). A GIF gives
+/// its first frame. Transparency is composited over black before the picture is reduced.
 pub fn decode(bytes: &[u8], max_columns: usize) -> Result<(RgbaImage, usize), MosaicFailure> {
-    let reader = |bytes: &[u8]| {
-        ImageReader::new(Cursor::new(bytes.to_vec()))
+    let reader = || {
+        ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
             .ok()
-            .filter(|reader| reader.format().is_some())
+            .filter(|reader| reader.format().is_some_and(is_allowed_format))
     };
-    let (width, height) = reader(bytes)
+    let (width, height) = reader()
         .ok_or(MosaicFailure::Unreadable)?
         .into_dimensions()
         .map_err(|_| MosaicFailure::Unreadable)?;
@@ -385,21 +405,36 @@ pub fn decode(bytes: &[u8], max_columns: usize) -> Result<(RgbaImage, usize), Mo
     if u64::from(width) * u64::from(height) > MAX_SOURCE_PIXELS {
         return Err(MosaicFailure::TooLarge);
     }
-    let mut decoder = reader(bytes).ok_or(MosaicFailure::Unreadable)?;
+    let mut decoder = reader().ok_or(MosaicFailure::Unreadable)?;
     let mut limits = Limits::default();
     limits.max_alloc = Some(MAX_DECODE_ALLOC);
     decoder.limits(limits);
-    let picture = decoder.decode().map_err(|_| MosaicFailure::Unreadable)?;
+    let picture = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder.decode()))
+        .map_err(|_| MosaicFailure::Unreadable)?
+        .map_err(|_| MosaicFailure::Unreadable)?;
     let columns = columns_for_width(width, max_columns);
     let (cols, rows) = grid(width, height, columns);
     // About two image pixels per font pixel, like the Mac's thumbnail.
     let long_side = (2 * (cols * CELL_WIDTH).max(rows * CELL_HEIGHT)) as u32;
-    let picture = if picture.width().max(picture.height()) > long_side {
-        picture.thumbnail(long_side, long_side)
+    let paper = DynamicImage::ImageRgb8(over_black(&picture.to_rgba8()));
+    let paper = if paper.width().max(paper.height()) > long_side {
+        paper.thumbnail(long_side, long_side)
     } else {
-        picture
+        paper
     };
-    Ok((picture.to_rgba8(), columns))
+    Ok((paper.to_rgba8(), columns))
+}
+
+/// `image` over the black paper: transparency reads as black.
+fn over_black(image: &RgbaImage) -> RgbImage {
+    let mut paper = RgbImage::new(image.width(), image.height());
+    for (source, target) in image.pixels().zip(paper.pixels_mut()) {
+        let alpha = u32::from(source.0[3]);
+        for k in 0..3 {
+            target.0[k] = (u32::from(source.0[k]) * alpha / 255) as u8;
+        }
+    }
+    paper
 }
 
 /// Decode, mosaic, PNG.
@@ -706,6 +741,47 @@ mod tests {
         ] {
             assert_eq!(decode(body, 40).unwrap_err(), MosaicFailure::Unreadable);
         }
+    }
+
+    #[test]
+    fn only_web_image_formats_are_decoded() {
+        let tiff = b"II*\0\x08\0\0\0\0\0\0\0".to_vec();
+        let qoi = b"qoif\0\0\0\x01\0\0\0\x01\x03\0\0\0\0\0\0\0\0\0\0\x01".to_vec();
+        let pnm = b"P6\n1 1\n255\n\x01\x02\x03".to_vec();
+        let hdr = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 1\n".to_vec();
+        for (name, body) in [("tiff", tiff), ("qoi", qoi), ("pnm", pnm), ("hdr", hdr)] {
+            let failure = decode(&body, 40).unwrap_err();
+            assert_eq!(failure, MosaicFailure::Unreadable, "{name}");
+            assert!(!failure.is_transient());
+        }
+        // The allowed ones still read.
+        for format in [ImageFormat::Png, ImageFormat::Bmp, ImageFormat::Gif] {
+            let bytes = encoded(&flat(1, 2, 3, 12, 12), format);
+            assert!(decode(&bytes, 40).is_ok(), "{format:?}");
+        }
+    }
+
+    #[test]
+    fn a_translucent_picture_reads_as_black_before_it_is_reduced() {
+        let clear = RgbaImage::from_pixel(240, 240, Rgba([255, 255, 255, 0]));
+        let (thumbnail, columns) = decode(&encoded(&clear, ImageFormat::Png), 40).unwrap();
+        assert!(thumbnail.pixels().all(|p| p.0 == [0, 0, 0, 255]));
+        assert!(
+            mosaic_from_rgba(&thumbnail, columns)
+                .cells
+                .iter()
+                .all(|c| *c == uniform(Color::Black))
+        );
+    }
+
+    #[test]
+    fn percent_decoding_is_strict() {
+        let good = "https%3A%2F%2Fexample.org%2Fa.png";
+        assert!(MosaicRequest::parse(&format!("ressac-mosaic:image?cols=4&src={good}")).is_some());
+        assert_eq!(
+            MosaicRequest::parse("ressac-mosaic:image?cols=4&src=https%3A%2F%2Fexample.org%2F%+f"),
+            None
+        );
     }
 
     fn crc32(bytes: &[u8]) -> u32 {

@@ -497,7 +497,7 @@ impl LinkDecision {
     }
 }
 
-pub const TOGGLE_SCHEME: &str = "ressac-toggle";
+pub use crate::sanitize::TOGGLE_SCHEME;
 
 /// Only the page the pane set loads (typed, main frame, under `PAGE_PREFIX`); a clicked link
 /// swaps a mosaic or, when it is a web address, opens in the browser; everything else (other

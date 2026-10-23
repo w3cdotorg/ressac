@@ -20,7 +20,6 @@ use url::Url;
 pub use depth::estimated_nesting_depth;
 use worker::memo;
 
-use crate::article::TOGGLE_SCHEME;
 use crate::mosaic::{CELL_HEIGHT, MAX_COLUMNS, MosaicRequest, columns_for_width, grid};
 pub use worker::{Gate, memo_stats, on_large_stack, shared_gate};
 
@@ -37,6 +36,9 @@ pub const MAX_WORKERS: usize = 2;
 pub const MEMO_CAPACITY: usize = 32;
 /// A virtual reservation, so no parse can exhaust its thread's stack.
 pub const WORKER_STACK_BYTES: usize = 256 << 20;
+
+/// The scheme of a mosaic box's toggle link (`ressac-toggle:<n>`).
+pub const TOGGLE_SCHEME: &str = "ressac-toggle";
 
 /// What becomes of images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

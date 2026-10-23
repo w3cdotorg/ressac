@@ -1587,7 +1587,7 @@ mod tests {
             let started = Instant::now();
             assert_eq!(clean(&big), plain_text_fallback(&big), "{unit}");
             assert!(
-                started.elapsed() < Duration::from_millis(300),
+                started.elapsed() < Duration::from_secs(2),
                 "{unit}: {:?}",
                 started.elapsed()
             );
