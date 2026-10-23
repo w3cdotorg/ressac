@@ -617,7 +617,7 @@ fn event_loop(
                 _ => {}
             }
         }
-        // The clock, and what Ressac.app or a job wrote.
+        // The clock, and what the app, another `ressac` or a job wrote.
         if last_tick.elapsed() >= tick_interval(state) {
             last_tick = Instant::now();
             let before = state.local;
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn data_version_moves_when_another_connection_writes() {
-        // Review Focus 2, loop side: what Ressac.app's writes look like to the reader.
+        // Review Focus 2, loop side: what another process's writes look like to the reader.
         let dir = tempfile::tempdir().unwrap();
         let (reader, db) = open_app(&dir);
         let before = reader.store().data_version().unwrap();
@@ -1146,10 +1146,7 @@ mod tests {
             matches!(events.as_slice(), [Event::JobDone(JobOutcome::Failed(_))]),
             "{events:?}"
         );
-        assert_eq!(
-            busy_or(&anyhow::anyhow!("database is locked")),
-            "The database is busy (is Ressac.app writing?)"
-        );
+        assert_eq!(busy_or(&anyhow::anyhow!("database is locked")), jobs::BUSY);
         assert_eq!(busy_or(&anyhow::anyhow!("boom")), "boom");
     }
 

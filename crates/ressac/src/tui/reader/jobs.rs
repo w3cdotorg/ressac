@@ -22,11 +22,14 @@ pub enum Msg {
 /// What the stopped job tells when it panicked.
 pub const PANICKED: &str = "The job stopped unexpectedly.";
 
-/// A busy database (Ressac.app writing for longer than the busy timeout) gets the spec's
-/// sentence; any other text is kept.
+/// What a busy database tells.
+pub const BUSY: &str = "The database is busy (is another Ressac writing?)";
+
+/// A busy database (the app or another `ressac` writing for longer than the busy timeout)
+/// gets `BUSY`; any other text is kept.
 pub fn sentence(text: String) -> String {
     if text.contains("database is locked") || text.contains("database table is locked") {
-        "The database is busy (is Ressac.app writing?)".into()
+        BUSY.into()
     } else {
         text
     }
@@ -287,7 +290,9 @@ mod tests {
 
     #[test]
     fn a_busy_database_gets_the_busy_sentence() {
-        let busy = "The database is busy (is Ressac.app writing?)";
+        assert_eq!(BUSY, "The database is busy (is another Ressac writing?)");
+        let busy = BUSY;
+        assert_eq!(sentence("database table is locked".into()), busy);
         assert_eq!(sentence("database is locked".into()), busy);
         assert_eq!(sentence("boom".into()), "boom");
         assert_eq!(

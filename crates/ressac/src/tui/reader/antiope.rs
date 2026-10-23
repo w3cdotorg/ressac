@@ -2671,7 +2671,7 @@ mod tests {
         assert!(text(&offline[2]).contains("RÉPÉTITION: RETRY"));
         let failed = rows(
             None,
-            &JournalPhase::Failed("The database is busy (is Ressac.app writing?)".into()),
+            &JournalPhase::Failed(crate::tui::reader::jobs::BUSY.into()),
         );
         assert!(failed.len() > 2, "a long reason wraps: {failed:?}");
         assert!(
