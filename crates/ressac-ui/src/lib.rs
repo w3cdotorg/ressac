@@ -3,6 +3,7 @@
 //! are always passed in.
 
 pub mod article;
+pub mod chart;
 pub mod entries;
 pub mod garden;
 pub mod journal;

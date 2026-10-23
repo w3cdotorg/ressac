@@ -3499,6 +3499,7 @@ dependencies = [
  "ressac-core",
  "rusqlite",
  "scraper",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

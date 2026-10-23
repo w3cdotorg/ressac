@@ -16,6 +16,8 @@ pub mod keys {
     pub const CHART_VIEW: &str = "chart.view";
     pub const CHART_INK: &str = "chart.ink";
     pub const CHART_ANIMATE: &str = "chart.animate";
+    pub const CHART_WINDOW_WIDTH: &str = "chart.window.width";
+    pub const CHART_WINDOW_HEIGHT: &str = "chart.window.height";
 }
 
 pub const READER_SIZE_DEFAULT: f64 = 17.0;
@@ -23,6 +25,9 @@ pub const READER_SIZE_MIN: f64 = 12.0;
 pub const READER_SIZE_MAX: f64 = 28.0;
 pub const ANTIOPE_SIZES: [f64; 4] = [15.0, 20.0, 25.0, 30.0];
 pub const ANTIOPE_SIZE_DEFAULT: f64 = 20.0;
+/// The Sea Chart window's size, in points: where it starts and the least it keeps.
+pub const CHART_WINDOW_DEFAULT: (u32, u32) = (1100, 720);
+pub const CHART_WINDOW_MIN: (u32, u32) = (640, 360);
 
 /// Declares a setting's enum with its stored spelling, once.
 macro_rules! stored_enum {
@@ -219,6 +224,8 @@ pub struct Settings {
     /// As stored (a leading `~` is expanded at launch); `None` is the default location.
     pub database_path: Option<String>,
     pub chart: ChartPrefs,
+    /// The Sea Chart window's width and height, never below [`CHART_WINDOW_MIN`].
+    pub chart_window: (u32, u32),
 }
 
 impl Default for Settings {
@@ -232,6 +239,7 @@ impl Default for Settings {
             reader_width: LineWidth::default(),
             database_path: None,
             chart: ChartPrefs::default(),
+            chart_window: CHART_WINDOW_DEFAULT,
         }
     }
 }
@@ -246,6 +254,18 @@ fn read_bool(store: &dyn SettingsStore, key: &str) -> Option<bool> {
 
 fn read_f64(store: &dyn SettingsStore, key: &str) -> Option<f64> {
     store.get(key)?.trim().parse().ok()
+}
+
+fn read_u32(store: &dyn SettingsStore, key: &str) -> Option<u32> {
+    store.get(key)?.trim().parse().ok()
+}
+
+/// A window size raised to the minimum.
+fn at_least_min((width, height): (u32, u32)) -> (u32, u32) {
+    (
+        width.max(CHART_WINDOW_MIN.0),
+        height.max(CHART_WINDOW_MIN.1),
+    )
 }
 
 fn read_enum<T>(store: &dyn SettingsStore, key: &str, parse: fn(&str) -> Option<T>) -> Option<T> {
@@ -285,6 +305,10 @@ impl Settings {
                     .unwrap_or(default.chart.ink),
                 animate: read_bool(store, keys::CHART_ANIMATE).unwrap_or(default.chart.animate),
             },
+            chart_window: at_least_min((
+                read_u32(store, keys::CHART_WINDOW_WIDTH).unwrap_or(CHART_WINDOW_DEFAULT.0),
+                read_u32(store, keys::CHART_WINDOW_HEIGHT).unwrap_or(CHART_WINDOW_DEFAULT.1),
+            )),
         }
     }
 
@@ -360,6 +384,23 @@ impl Settings {
     pub fn set_chart_animate(&mut self, store: &mut dyn SettingsStore, value: bool) -> bool {
         store.set(keys::CHART_ANIMATE, &value.to_string());
         replace(&mut self.chart.animate, value)
+    }
+
+    /// The Sea Chart window's size (raised to the minimum); both keys are written when the
+    /// size changed. Returns whether it did.
+    pub fn set_chart_window(
+        &mut self,
+        store: &mut dyn SettingsStore,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        let size = at_least_min((width, height));
+        let changed = replace(&mut self.chart_window, size);
+        if changed {
+            store.set(keys::CHART_WINDOW_WIDTH, &size.0.to_string());
+            store.set(keys::CHART_WINDOW_HEIGHT, &size.1.to_string());
+        }
+        changed
     }
 
     /// The size the look shown really draws at.
@@ -746,5 +787,28 @@ mod tests {
             Appearance::effective(Appearance::Native, true),
             Appearance::Native
         );
+    }
+
+    #[test]
+    fn the_chart_window_size_is_remembered_and_never_below_the_minimum() {
+        let mut store: BTreeMap<String, String> = BTreeMap::new();
+        let mut s = Settings::load(&store);
+        assert_eq!(s.chart_window, (1100, 720));
+        assert!(s.set_chart_window(&mut store, 1300, 800));
+        assert_eq!(
+            (
+                store["chart.window.width"].as_str(),
+                store["chart.window.height"].as_str()
+            ),
+            ("1300", "800")
+        );
+        assert!(!s.set_chart_window(&mut store, 1300, 800), "unchanged");
+        assert!(s.set_chart_window(&mut store, 100, 50));
+        assert_eq!(Settings::load(&store).chart_window, (640, 360));
+        let garbage = BTreeMap::from([
+            ("chart.window.width".to_string(), "wide".to_string()),
+            ("chart.window.height".to_string(), "-3".to_string()),
+        ]);
+        assert_eq!(Settings::load(&garbage).chart_window, (1100, 720));
     }
 }
