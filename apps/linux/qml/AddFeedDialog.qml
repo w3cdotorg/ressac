@@ -20,6 +20,14 @@ QQC2.Dialog {
 
     function accept() { if (Library.canAdd) Library.add() }
 
+    // Return adds even when a pop-up has the focus (its own Return only counts while its list is open).
+    function addOnReturn(event, combo) {
+        if (combo.popup.visible)
+            return
+        event.accepted = true
+        dialog.accept()
+    }
+
     Connections {
         target: Library
         function onAddChanged() {
@@ -70,14 +78,20 @@ QQC2.Dialog {
             Layout.fillWidth: true
 
             QQC2.ComboBox {
+                id: themeBox
                 Kirigami.FormData.label: "Theme"
+                Keys.onReturnPressed: (event) => dialog.addOnReturn(event, themeBox)
+                Keys.onEnterPressed: (event) => dialog.addOnReturn(event, themeBox)
                 model: Library.themeNames
                 currentIndex: Library.themeIndex
                 onActivated: (i) => Library.themeIndex = i
                 enabled: !Library.adding
             }
             QQC2.ComboBox {
+                id: folderBox
                 Kirigami.FormData.label: "Folder"
+                Keys.onReturnPressed: (event) => dialog.addOnReturn(event, folderBox)
+                Keys.onEnterPressed: (event) => dialog.addOnReturn(event, folderBox)
                 model: Library.folderTitles
                 currentIndex: Library.folderIndex
                 onActivated: (i) => Library.folderIndex = i

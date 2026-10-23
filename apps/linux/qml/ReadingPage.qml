@@ -48,6 +48,7 @@ Item {
     }
 
     function focusSidebar() { sourcesPane.focusList() }
+    function dragFeed(feedKey, targetKey) { return sourcesPane.dragFeed(feedKey, targetKey) }
     function focusGarden() { gardenPane.focusList() }
     function focusSearch() { searchField.forceActiveFocus() }
 

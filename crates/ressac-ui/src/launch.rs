@@ -123,6 +123,8 @@ const CUSTOM_NOTE: &str = "In Terminal, pass --db with this path to use the same
 pub const RESSAC_DB_NOTE: &str = "RESSAC_DB is set, so this launch uses it instead.";
 /// Shown once a new database has been chosen.
 pub const RELAUNCH_NOTE: &str = "Ressac opens the new database after a relaunch.";
+/// The relaunch button.
+pub const RELAUNCH_NOW: &str = "Relaunch Now";
 /// The file dialogs' titles (the Mac panels' messages).
 pub const CHOOSE_TITLE: &str = "Choose a Ressac database.";
 pub const NEW_TITLE: &str = "Ressac creates the database here on its next launch.";

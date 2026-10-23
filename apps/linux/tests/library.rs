@@ -47,6 +47,16 @@ fn first_run_imports_an_opml_then_adds_moves_exports_and_sets_the_database() {
         "walk: 17-add-known error=Already followed: Alpha. showLog=false",
         "walk: 17-closed open=false",
         "walk: 18-export started=true refused=false",
+        "walk: 21-drag moved=true ignored=false own=false notFeed=false",
+        "walk: 23-dragged selected=feed:2",
+        "walk: 23-drag-in moved=true",
+        "walk: 25-entry-drag plain=https://example.org/a moz=\"https://example.org/a\\nA title\" none=0",
+        "walk: 26-settings fonts=System Sans|System Serif|Newsreader|Atkinson Hyperlegible Next widths=Narrow|Medium|Wide|40 columns registered=true",
+        "note=Shared with the ressac command in Terminal. ressacDb=true",
+        "walk: 28-junk refusal=This file is not a usable Ressac database. relaunch=false",
+        "walk: 29-new refusal= relaunch=true stored=true note=In Terminal, pass --db with this path to use the same database.",
+        "settings: relaunch",
+        "walk: 30-default stored= note=Shared with the ressac command in Terminal.",
     ] {
         assert!(err.contains(line), "{line} missing in {err}");
     }
@@ -59,6 +69,33 @@ fn first_run_imports_an_opml_then_adds_moves_exports_and_sets_the_database() {
     ] {
         assert_drawn(&run.shots.join(shot));
     }
+    let data_line = err
+        .lines()
+        .find(|l| l.contains("walk: 27-data path="))
+        .unwrap();
+    assert!(
+        data_line.contains(&format!(
+            "path={}",
+            run.home.join("data/ressac/ressac.sqlite").display()
+        )),
+        "{data_line}"
+    );
+    assert!(
+        err.contains(&format!(
+            "open: file://{}",
+            run.home.join("state/ressac/logs").display()
+        )),
+        "{err}"
+    );
+    assert!(run.home.join("state/ressac/logs").is_dir());
+    assert_drawn_min(&run.shots.join("26-settings.png"), 540, 400);
+    assert_drawn_min(&run.shots.join("28-junk.png"), 540, 400);
+    let conf =
+        std::fs::read_to_string(run.home.join("config/ressac/ressac-kde.conf")).unwrap_or_default();
+    assert!(
+        !conf.contains("databasePath"),
+        "Use Default removed the key: {conf}"
+    );
     let conn = rusqlite::Connection::open(&db).unwrap();
     let folders: Vec<(i64, String)> = conn
         .prepare("SELECT id, name FROM folder ORDER BY id")
@@ -83,5 +120,17 @@ fn first_run_imports_an_opml_then_adds_moves_exports_and_sets_the_database() {
     assert!(
         exported.contains(r#"xmlUrl="http://127.0.0.22:9/beta.xml""#),
         "{exported}"
+    );
+    let placed: Vec<(i64, Option<i64>)> = conn
+        .prepare("SELECT id, folder_id FROM feed ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        placed,
+        [(1, Some(1)), (2, None), (3, Some(1))],
+        "Beta to the top level, Gamma into Walk"
     );
 }

@@ -54,6 +54,11 @@ Kirigami.ApplicationWindow {
     Connections { target: mainMenu.addFeed; function onTriggered() { root.addFeed() } }
     Connections { target: mainMenu.importOpml; function onTriggered() { root.importOpml() } }
     Connections { target: mainMenu.exportOpml; function onTriggered() { root.exportOpml() } }
+
+    SettingsWindow { id: settingsWindow; chrome: root }
+    function openSettings() { settingsWindow.show(); settingsWindow.raise(); settingsWindow.requestActivate() }
+    Binding { target: mainMenu.settings; property: "enabled"; value: true }
+    Connections { target: mainMenu.settings; function onTriggered() { root.openSettings() } }
     Connections { target: Library; function onAdded(key) { SourcesModel.selectKey(key) } }
     // `reloadAll` reaches the form's pop-ups: a database change under an open dialog.
     Connections { target: Runs; function onDatabaseChanged() { Library.reloadChoices() } }
@@ -87,7 +92,7 @@ Kirigami.ApplicationWindow {
     }
 
     function useDefaultDatabase() {
-        AppSettings.databasePath = ""
+        AppSettings.useDefaultLocation()
         Launcher.relaunch()
     }
 
@@ -305,6 +310,33 @@ Kirigami.ApplicationWindow {
         { name: "18-export", enter: function () { const home = String(StandardPaths.writableLocation(StandardPaths.HomeLocation))
             console.warn("walk: 18-export started=" + Library.exportTo(home + "/" + Library.exportName) + " refused=" + Library.exportTo("https://example.org/x.opml")) } },
         { name: "19-wait", enter: function () {} },
+        { name: "20-drag", enter: function () { SourcesModel.toggleExpanded(SourcesModel.rowOfKey("folder:1")); SourcesModel.selectKey("feed:2") } },
+        { name: "21-drag-root", enter: function () { console.warn("walk: 21-drag moved=" + readingLoader.item.dragFeed("feed:2", "heading:Feeds")
+            + " ignored=" + readingLoader.item.dragFeed("feed:3", "heading:Feeds") + " own=" + readingLoader.item.dragFeed("feed:1", "folder:1")
+            + " notFeed=" + readingLoader.item.dragFeed("folder:1", "heading:Feeds")) } },
+        { name: "22-wait", enter: function () {} },
+        { name: "23-dragged", enter: function () { console.warn("walk: 23-dragged selected=" + SourcesModel.selectedKey)
+            console.warn("walk: 23-drag-in moved=" + readingLoader.item.dragFeed("feed:3", "folder:1")) } },
+        { name: "24-wait", enter: function () {} },
+        { name: "25-entry-drag", enter: function () { const data = Library.entryDragData("https://example.org/a", "A title")
+            console.warn("walk: 25-entry-drag plain=" + data["text/plain"] + " moz=" + JSON.stringify(data["text/x-moz-url"])
+                + " none=" + Object.keys(Library.entryDragData("javascript:alert(1)", "x")).length) } },
+        { name: "26-settings", enter: function () { root.openSettings()
+            console.warn("walk: 26-settings fonts=" + AppSettings.fontTitles.join("|") + " widths=" + AppSettings.widthTitles.join("|")
+                + " registered=" + ["Newsreader", "Atkinson Hyperlegible Next"].every(f => Qt.fontFamilies().includes(f))) } },
+        { name: "27-data", enter: function () { settingsWindow.showPage("data")
+            console.warn("walk: 27-data path=" + AppSettings.resolvedDatabasePath + " note=" + AppSettings.databaseNote + " ressacDb=" + AppSettings.ressacDbSet) } },
+        { name: "28-junk", enter: function () { const home = String(StandardPaths.writableLocation(StandardPaths.HomeLocation))
+            AppSettings.chooseDatabase(home + "/junk.sqlite")
+            console.warn("walk: 28-junk refusal=" + AppSettings.databaseRefusal + " relaunch=" + AppSettings.needsRelaunch) } },
+        { name: "29-new", enter: function () { const home = String(StandardPaths.writableLocation(StandardPaths.HomeLocation))
+            AppSettings.chooseDatabase(home + "/new.sqlite")
+            console.warn("walk: 29-new refusal=" + AppSettings.databaseRefusal + " relaunch=" + AppSettings.needsRelaunch
+                + " stored=" + AppSettings.databasePath.endsWith("/new.sqlite") + " note=" + AppSettings.databaseNote)
+            settingsWindow.relaunchNow() } },
+        { name: "30-default", enter: function () { AppSettings.useDefaultLocation()
+            console.warn("walk: 30-default stored=" + AppSettings.databasePath + " note=" + AppSettings.databaseNote); settingsWindow.showLogs() } },
+        { name: "31-back", enter: function () { settingsWindow.close(); root.requestActivate() } },
     ]
     readonly property var steps: Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"

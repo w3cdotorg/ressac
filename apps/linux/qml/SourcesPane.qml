@@ -9,6 +9,23 @@ Item {
 
     function focusList() { list.forceActiveFocus() }
 
+    // The drop path of a pointer drag, for the recette: moves the proxy of `feedKey` over the row
+    // `targetKey` and drops it; true when the drop was accepted as a move.
+    function dragFeed(feedKey, targetKey) {
+        const from = list.itemAtIndex(SourcesModel.rowOfKey(feedKey)), to = list.itemAtIndex(SourcesModel.rowOfKey(targetKey))
+        if (!from || !to || from.dragProxy === null || to.dropArea === null)
+            return false
+        const proxy = from.dragProxy, area = to.dropArea
+        proxy.Drag.active = true
+        const p = proxy.parent.mapFromItem(area, area.width / 2, area.height / 2)
+        proxy.x = p.x
+        proxy.y = p.y
+        const action = proxy.Drag.drop()
+        proxy.x = 0
+        proxy.y = 0
+        return action === Qt.MoveAction
+    }
+
     ListView {
         id: list
         objectName: "sourcesList"
@@ -59,6 +76,64 @@ Item {
 
             contentItem: Loader {
                 sourceComponent: delegate.model.kind === "heading" ? headingContent : rowContent
+            }
+
+            readonly property alias dragProxy: proxy
+            readonly property alias dropArea: dropArea
+
+            // Feed rows: a 1x1 proxy carries the drag (an internal Qt Quick drag keyed by the feed MIME type); the
+            // drop reads its `payload` since internal drags carry no mime data.
+            Item {
+                id: proxy
+                readonly property string payload: String(delegate.model.feedId)
+                width: 1; height: 1
+                Drag.dragType: Drag.Internal
+                Drag.keys: [Library.feedMime]
+                Drag.supportedActions: Qt.MoveAction
+                Drag.proposedAction: Qt.MoveAction
+
+                QQC2.Label {
+                    visible: proxy.Drag.active
+                    text: delegate.model.title
+                    padding: Kirigami.Units.smallSpacing
+                    background: Rectangle { color: Kirigami.Theme.backgroundColor; radius: height / 2; border.color: Kirigami.Theme.highlightColor }
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                enabled: delegate.model.kind === "feed"
+                acceptedButtons: Qt.LeftButton
+                preventStealing: true
+                drag.target: proxy
+                drag.threshold: Kirigami.Units.gridUnit / 2
+                onPressed: (mouse) => { proxy.x = mouse.x; proxy.y = mouse.y }
+                drag.onActiveChanged: if (drag.active) proxy.Drag.active = true
+                onReleased: {
+                    if (proxy.Drag.active) proxy.Drag.drop()
+                    proxy.x = 0
+                    proxy.y = 0
+                }
+                onClicked: { list.forceActiveFocus(); SourcesModel.select(delegate.index) }
+            }
+
+            // Folder rows and the "Feeds" heading take a dropped feed.
+            DropArea {
+                id: dropArea
+                anchors.fill: parent
+                enabled: delegate.model.kind === "folder" || delegate.model.key === "heading:Feeds"
+                keys: [Library.feedMime]
+                onDropped: (drop) => {
+                    const payload = drop.source && drop.source.payload !== undefined ? drop.source.payload : drop.getDataAsString(Library.feedMime)
+                    if (SourcesModel.dropFeed(payload, delegate.model.key))
+                        drop.accept(Qt.MoveAction)
+                }
+                Rectangle {
+                    anchors.fill: parent
+                    visible: dropArea.containsDrag
+                    color: Kirigami.Theme.hoverColor
+                    opacity: 0.35
+                }
             }
 
             Component {

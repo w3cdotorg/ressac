@@ -10,11 +10,14 @@ use cxx_qt_lib::{QString, QStringList};
 use ressac_core::paths::Paths;
 use ressac_core::store::Store;
 use ressac_ui::chart::save_prefs;
-use ressac_ui::launch::{DatabaseChoice, choose_database, database_location, database_note};
-use ressac_ui::library::local_path;
+use ressac_ui::launch::{
+    CHOOSE_TITLE, DatabaseChoice, NEW_NAME, NEW_TITLE, RELAUNCH_NOTE, RELAUNCH_NOW, RESSAC_DB_NOTE,
+    choose_database, database_location, database_note,
+};
+use ressac_ui::library::{SQLITE_FILTER, local_path};
 use ressac_ui::settings::{
-    Appearance, CHART_WINDOW_MIN, ChartInk, ChartPrefs, ChartView, LineWidth, ReaderFont, Settings,
-    SettingsStore, TextSizeCommand,
+    Appearance, CHART_WINDOW_MIN, ChartInk, ChartPrefs, ChartView, LineWidth, PREVIEW_TEXT,
+    ReaderFont, SIZE_HINT, Settings, SettingsStore, TextSizeCommand,
 };
 
 use crate::shim;
@@ -85,7 +88,7 @@ pub mod qobject {
         #[qproperty(f64, reader_size, READ = reader_size, WRITE = set_reader_size, NOTIFY)]
         #[qproperty(f64, reader_size_antiope, READ = reader_size_antiope, WRITE = set_reader_size_antiope, NOTIFY)]
         #[qproperty(QString, reader_width, READ = reader_width, WRITE = set_reader_width, NOTIFY)]
-        #[qproperty(QString, database_path, READ = database_path, WRITE = set_database_path, NOTIFY)]
+        #[qproperty(QString, database_path, READ = database_path, NOTIFY)]
         #[qproperty(QString, chart_view, READ = chart_view, WRITE = set_chart_view, NOTIFY)]
         #[qproperty(QString, chart_ink, READ = chart_ink, WRITE = set_chart_ink, NOTIFY)]
         #[qproperty(bool, chart_animate, READ = chart_animate, WRITE = set_chart_animate, NOTIFY)]
@@ -96,6 +99,15 @@ pub mod qobject {
         #[qproperty(QStringList, font_families, READ, CONSTANT)]
         #[qproperty(QStringList, width_ids, READ, CONSTANT)]
         #[qproperty(QStringList, width_titles, READ, CONSTANT)]
+        #[qproperty(QString, preview_text, READ = preview_text, CONSTANT)]
+        #[qproperty(QString, size_hint, READ = size_hint, CONSTANT)]
+        #[qproperty(QString, choose_title, READ = choose_title, CONSTANT)]
+        #[qproperty(QString, new_title, READ = new_title, CONSTANT)]
+        #[qproperty(QString, new_name, READ = new_name, CONSTANT)]
+        #[qproperty(QString, sqlite_filter, READ = sqlite_filter, CONSTANT)]
+        #[qproperty(QString, relaunch_note, READ = relaunch_note, CONSTANT)]
+        #[qproperty(QString, relaunch_now, READ = relaunch_now, CONSTANT)]
+        #[qproperty(QString, ressac_db_note, READ = ressac_db_note, CONSTANT)]
         #[qproperty(QString, resolved_database_path, READ = resolved_database_path, NOTIFY = data_changed)]
         #[qproperty(QString, database_note, READ = database_note, NOTIFY = data_changed)]
         #[qproperty(bool, ressac_db_set, READ = ressac_db_set, CONSTANT)]
@@ -116,7 +128,6 @@ pub mod qobject {
         fn reader_width(self: &AppSettings) -> QString;
         fn set_reader_width(self: Pin<&mut AppSettings>, value: &QString);
         fn database_path(self: &AppSettings) -> QString;
-        fn set_database_path(self: Pin<&mut AppSettings>, value: &QString);
         fn chart_view(self: &AppSettings) -> QString;
         fn set_chart_view(self: Pin<&mut AppSettings>, value: &QString);
         fn chart_ink(self: &AppSettings) -> QString;
@@ -128,6 +139,15 @@ pub mod qobject {
         fn chart_window_height(self: &AppSettings) -> i32;
         fn set_chart_window_height(self: Pin<&mut AppSettings>, value: i32);
 
+        fn preview_text(self: &AppSettings) -> QString;
+        fn size_hint(self: &AppSettings) -> QString;
+        fn choose_title(self: &AppSettings) -> QString;
+        fn new_title(self: &AppSettings) -> QString;
+        fn new_name(self: &AppSettings) -> QString;
+        fn sqlite_filter(self: &AppSettings) -> QString;
+        fn relaunch_note(self: &AppSettings) -> QString;
+        fn relaunch_now(self: &AppSettings) -> QString;
+        fn ressac_db_note(self: &AppSettings) -> QString;
         fn resolved_database_path(self: &AppSettings) -> QString;
         fn database_note(self: &AppSettings) -> QString;
         fn ressac_db_set(self: &AppSettings) -> bool;
@@ -305,16 +325,6 @@ impl qobject::AppSettings {
         )
     }
 
-    fn set_database_path(mut self: Pin<&mut Self>, value: &QString) {
-        let value = value.to_string();
-        if self
-            .as_mut()
-            .write(|s, store| s.set_database_path(store, &value))
-        {
-            self.as_mut().database_path_changed();
-        }
-    }
-
     /// Where the database is (or will be created), as the launch resolves it; `""` when no
     /// location can be worked out.
     fn resolved_database_path(&self) -> QString {
@@ -333,6 +343,42 @@ impl qobject::AppSettings {
                 .unwrap_or_default()
                 .as_str(),
         )
+    }
+
+    fn preview_text(&self) -> QString {
+        QString::from(PREVIEW_TEXT)
+    }
+
+    fn size_hint(&self) -> QString {
+        QString::from(SIZE_HINT)
+    }
+
+    fn choose_title(&self) -> QString {
+        QString::from(CHOOSE_TITLE)
+    }
+
+    fn new_title(&self) -> QString {
+        QString::from(NEW_TITLE)
+    }
+
+    fn new_name(&self) -> QString {
+        QString::from(NEW_NAME)
+    }
+
+    fn sqlite_filter(&self) -> QString {
+        QString::from(SQLITE_FILTER)
+    }
+
+    fn relaunch_note(&self) -> QString {
+        QString::from(RELAUNCH_NOTE)
+    }
+
+    fn relaunch_now(&self) -> QString {
+        QString::from(RELAUNCH_NOW)
+    }
+
+    fn ressac_db_note(&self) -> QString {
+        QString::from(RESSAC_DB_NOTE)
     }
 
     fn database_note(&self) -> QString {

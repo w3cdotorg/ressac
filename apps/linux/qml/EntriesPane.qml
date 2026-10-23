@@ -105,6 +105,23 @@ Item {
                 }
                 Component.onCompleted: if (!isOverflow) EntriesModel.rowAppeared(index)
 
+                // Drag out as the entry's link and title (a platform drag; links that are not web addresses start nothing).
+                Drag.dragType: Drag.Automatic
+                Drag.supportedActions: Qt.CopyAction
+                Drag.mimeData: model.link !== "" ? Library.entryDragData(model.link, model.title) : ({})
+                Item { id: dragAnchor }
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: !delegate.isOverflow && delegate.model.link !== ""
+                    acceptedButtons: Qt.LeftButton
+                    preventStealing: true
+                    drag.target: dragAnchor
+                    drag.threshold: Kirigami.Units.gridUnit / 2
+                    drag.onActiveChanged: if (drag.active) delegate.Drag.active = true
+                    onReleased: { dragAnchor.x = 0; dragAnchor.y = 0 }
+                    onClicked: { list.forceActiveFocus(); EntriesModel.select(delegate.index) }
+                }
+
                 contentItem: ColumnLayout {
                     spacing: 0
 

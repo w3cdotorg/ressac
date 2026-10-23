@@ -31,6 +31,8 @@ pub const NO_FEEDS_TEXT: &str = "Drop an OPML file here, or choose one…";
 pub const CHOOSE_OPML: &str = "Choose OPML File…";
 pub const EXPORT_NAME: &str = "Ressac.opml";
 pub const OPML_FILTER: &str = "OPML files (*.opml)";
+/// Settings ▸ Data's file dialogs filter.
+pub const SQLITE_FILTER: &str = "SQLite databases (*.sqlite)";
 
 const UNCHARTED: &str = "Added to Uncharted waters.";
 const EM_SPACE: char = '\u{2003}';
@@ -182,19 +184,37 @@ impl AddFeedForm {
 
 /// The end of an add run started by the form `generation`: the open form takes it when it is
 /// that form; any other case (no form, or a newer one) only keeps the feed it added, so the end
-/// shows no error in and never closes a form that did not start it. The added feed, if any.
+/// shows no error in and never closes a form that did not start it. The added feed, if any,
+/// and whether the dialog closes (only the form that started the run, on success).
 pub fn settle_add(
     form: &mut Option<AddFeedForm>,
     generation: u64,
     end: RunEnd<AddedFeed>,
-) -> Option<AddedFeed> {
+) -> AddSettled {
     match form.as_mut().filter(|f| f.generation == generation) {
-        Some(form) => form.finished(end),
-        None => match end {
-            RunEnd::Done(feed) => Some(feed),
-            _ => None,
+        Some(own) => {
+            let feed = own.finished(end);
+            AddSettled {
+                closes_form: feed.is_some(),
+                feed,
+            }
+        }
+        None => AddSettled {
+            feed: match end {
+                RunEnd::Done(feed) => Some(feed),
+                _ => None,
+            },
+            closes_form: false,
         },
     }
+}
+
+/// What `settle_add` decided.
+#[derive(Debug, PartialEq)]
+pub struct AddSettled {
+    pub feed: Option<AddedFeed>,
+    /// The open form started the run and it succeeded: the dialog closes.
+    pub closes_form: bool,
 }
 
 /// The add job: `Ressac::add_feed`, the folder passed as its id (ids are resolved first).
@@ -721,16 +741,22 @@ mod tests {
             message: "Could not reach https://df.example: timed out.".into(),
             refusal: false,
         };
-        assert_eq!(settle_add(&mut form, stale, RunEnd::Failed(failure)), None);
+        let settled = settle_add(&mut form, stale, RunEnd::Failed(failure));
+        assert_eq!((settled.feed, settled.closes_form), (None, false));
         let new = form.as_ref().unwrap();
         assert_eq!((new.error(), new.is_running()), (None, true));
         // The old run succeeds: the feed is reported, the new form is neither closed nor reset.
-        let feed = settle_add(&mut form, stale, RunEnd::Done(added(None, None)));
-        assert_eq!(feed.map(|f| f.id), Some(20));
+        let settled = settle_add(&mut form, stale, RunEnd::Done(added(None, None)));
+        assert_eq!(settled.feed.map(|f| f.id), Some(20));
+        assert!(
+            !settled.closes_form,
+            "a stale run never closes a newer form"
+        );
         assert!(form.as_ref().unwrap().is_running());
         // Its own run still settles it.
         let own = form.as_ref().unwrap().generation();
-        assert!(settle_add(&mut form, own, RunEnd::Done(added(None, None))).is_some());
+        let own_end = settle_add(&mut form, own, RunEnd::Done(added(None, None)));
+        assert!(own_end.feed.is_some() && own_end.closes_form);
         assert!(!form.as_ref().unwrap().is_running());
     }
 

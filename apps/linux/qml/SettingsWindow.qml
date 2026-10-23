@@ -1,0 +1,214 @@
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls as QQC2
+import QtQuick.Dialogs
+import org.kde.kirigami as Kirigami
+import org.w3cdotorg.ressac
+
+// Settings (inventory §7.3): Reading (font, size, line width, preview) and Data (database, relaunch, logs).
+QQC2.ApplicationWindow {
+    id: settings
+    title: "Settings"
+    width: 560
+    minimumWidth: 540
+    height: 460
+    visible: false
+
+    // Main.qml's window (the log folder opens through it).
+    property var chrome: null
+
+    readonly property int fontIndex: Math.max(0, AppSettings.fontIds.indexOf(AppSettings.readerFont))
+    readonly property string previewFamily: AppSettings.fontFamilies[fontIndex] || Kirigami.Theme.defaultFont.family
+
+    function showPage(name) { tabs.currentIndex = name === "data" ? 1 : 0 }
+
+    // Quits only once the new instance has started (the Mac opens a new instance and terminates).
+    function relaunchNow() {
+        if (Recette.active) { console.warn("settings: relaunch"); return }
+        if (AppSettings.relaunch()) Qt.quit()
+    }
+
+    function showLogs() { if (chrome) chrome.openExternally(Library.logsUrl()) }
+
+    function folderOfDatabase() {
+        const path = AppSettings.resolvedDatabasePath
+        const slash = path.lastIndexOf("/")
+        return "file://" + encodeURI(slash > 0 ? path.substring(0, slash) : "/")
+    }
+
+    header: QQC2.TabBar {
+        id: tabs
+        QQC2.TabButton { text: "Reading" }
+        QQC2.TabButton { text: "Data" }
+    }
+
+    StackLayout {
+        anchors.fill: parent
+        currentIndex: tabs.currentIndex
+
+        Kirigami.FormLayout {
+            id: reading
+            Layout.margins: Kirigami.Units.largeSpacing
+
+            QQC2.ComboBox {
+                Kirigami.FormData.label: "Font:"
+                model: AppSettings.fontTitles
+                currentIndex: settings.fontIndex
+                onActivated: (i) => AppSettings.readerFont = AppSettings.fontIds[i]
+                delegate: QQC2.ItemDelegate {
+                    required property int index
+                    required property var modelData
+                    width: ListView.view ? ListView.view.width : implicitWidth
+                    text: modelData
+                    font.family: AppSettings.fontFamilies[index] || Kirigami.Theme.defaultFont.family
+                    highlighted: index === settings.fontIndex
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Text size:"
+                spacing: Kirigami.Units.smallSpacing
+                Kirigami.Icon { source: "format-font-size-less"; implicitWidth: Kirigami.Units.iconSizes.small; implicitHeight: Kirigami.Units.iconSizes.small }
+                QQC2.Slider {
+                    from: 12; to: 28; stepSize: 1
+                    snapMode: QQC2.Slider.SnapAlways
+                    value: AppSettings.readerSize
+                    onMoved: AppSettings.readerSize = value
+                }
+                Kirigami.Icon { source: "format-font-size-more"; implicitWidth: Kirigami.Units.iconSizes.small; implicitHeight: Kirigami.Units.iconSizes.small }
+                QQC2.Label {
+                    text: Math.round(AppSettings.readerSize) + " pt"
+                    font.features: { "tnum": 1 }
+                    color: Kirigami.Theme.disabledTextColor
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Line width:"
+                spacing: 0
+                QQC2.ButtonGroup { id: widthGroup }
+                Repeater {
+                    model: AppSettings.widthTitles
+                    QQC2.ToolButton {
+                        required property int index
+                        required property var modelData
+                        text: modelData
+                        checkable: true
+                        QQC2.ButtonGroup.group: widthGroup
+                        checked: AppSettings.widthIds[index] === AppSettings.readerWidth
+                        onClicked: AppSettings.readerWidth = AppSettings.widthIds[index]
+                    }
+                }
+            }
+
+            QQC2.Label {
+                Kirigami.FormData.label: "Preview:"
+                text: AppSettings.previewText
+                font.family: settings.previewFamily
+                font.pixelSize: Math.round(AppSettings.readerSize)
+                wrapMode: Text.Wrap
+                maximumLineCount: 3
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+
+            QQC2.Label {
+                text: AppSettings.sizeHint
+                font: Kirigami.Theme.smallFont
+                color: Kirigami.Theme.disabledTextColor
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+        }
+
+        Kirigami.FormLayout {
+            id: data
+            Layout.margins: Kirigami.Units.largeSpacing
+
+            ColumnLayout {
+                Kirigami.FormData.label: "Database:"
+                spacing: Kirigami.Units.smallSpacing
+                Layout.fillWidth: true
+
+                QQC2.TextField {
+                    readOnly: true
+                    text: AppSettings.resolvedDatabasePath
+                    Layout.fillWidth: true
+                    QQC2.ToolTip.text: text
+                    QQC2.ToolTip.visible: hovered && text !== ""
+                }
+                RowLayout {
+                    spacing: Kirigami.Units.smallSpacing
+                    QQC2.Button { text: "Choose…"; onClicked: chooseDb.open() }
+                    QQC2.Button {
+                        text: "New…"
+                        onClicked: {
+                            newDb.currentFolder = settings.folderOfDatabase()
+                            newDb.selectedFile = newDb.currentFolder + "/" + AppSettings.newName
+                            newDb.open()
+                        }
+                    }
+                    QQC2.Button {
+                        text: "Use Default"
+                        enabled: AppSettings.databasePath !== ""
+                        onClicked: AppSettings.useDefaultLocation()
+                    }
+                }
+                QQC2.Label {
+                    text: AppSettings.databaseNote
+                    font: Kirigami.Theme.smallFont
+                    color: Kirigami.Theme.disabledTextColor
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+                QQC2.Label {
+                    visible: AppSettings.ressacDbSet
+                    text: AppSettings.ressacDbNote
+                    font: Kirigami.Theme.smallFont
+                    color: Kirigami.Theme.disabledTextColor
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+                RowLayout {
+                    visible: AppSettings.databaseRefusal !== ""
+                    spacing: Kirigami.Units.smallSpacing
+                    Kirigami.Icon { source: "dialog-warning"; implicitWidth: Kirigami.Units.iconSizes.small; implicitHeight: Kirigami.Units.iconSizes.small }
+                    QQC2.Label {
+                        text: AppSettings.databaseRefusal
+                        color: Kirigami.Theme.negativeTextColor
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                }
+                RowLayout {
+                    visible: AppSettings.needsRelaunch
+                    spacing: Kirigami.Units.largeSpacing
+                    QQC2.Label { text: AppSettings.relaunchNote; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                    QQC2.Button { text: AppSettings.relaunchNow; onClicked: settings.relaunchNow() }
+                }
+            }
+
+            QQC2.Button {
+                Kirigami.FormData.label: "Logs:"
+                text: "Show Logs"
+                onClicked: settings.showLogs()
+            }
+        }
+    }
+
+    FileDialog {
+        id: chooseDb
+        title: AppSettings.chooseTitle
+        nameFilters: [AppSettings.sqliteFilter]
+        onAccepted: AppSettings.chooseDatabase(String(selectedFile))
+    }
+
+    FileDialog {
+        id: newDb
+        title: AppSettings.newTitle
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "sqlite"
+        nameFilters: [AppSettings.sqliteFilter]
+        onAccepted: AppSettings.chooseDatabase(String(selectedFile))
+    }
+}

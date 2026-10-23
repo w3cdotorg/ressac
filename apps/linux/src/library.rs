@@ -479,13 +479,9 @@ impl qobject::Library {
     /// cancel (and maybe a new form) the end is the no-form path (the note and `added`).
     fn add_finished(mut self: Pin<&mut Self>, generation: u64, end: RunEnd<AddedFeed>) {
         let rust = self.as_mut().rust_mut().get_mut();
-        let feed = library::settle_add(&mut rust.form, generation, end);
-        if let Some(feed) = feed {
-            if rust
-                .form
-                .as_ref()
-                .is_some_and(|f| f.generation() == generation)
-            {
+        let settled = library::settle_add(&mut rust.form, generation, end);
+        if let Some(feed) = settled.feed {
+            if settled.closes_form {
                 rust.form = None;
             }
             rust.note = added_note(&feed);
