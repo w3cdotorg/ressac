@@ -14,8 +14,8 @@ use std::io::Cursor;
 use image::codecs::png::PngEncoder;
 use image::imageops::{self, FilterType};
 use image::{
-    DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, ImageReader, Limits, RgbImage,
-    RgbaImage,
+    ColorType, DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat,
+    ImageReader, Limits, RgbImage, RgbaImage,
 };
 use ressac_core::Error;
 use ressac_core::service::Ressac;
@@ -36,15 +36,13 @@ pub const MAX_ROWS: usize = 100;
 /// Image pixels per cell when sizing a picture: a 120-pixel picture gets 10 columns.
 pub const PIXELS_PER_COLUMN: f64 = 12.0;
 /// Images with more pixels are refused unread (a PNG of 190 KB can announce 8000 × 8000).
-/// Sized to the memory actually held: the decoded picture (RGB8 or RGBA8, up to 4 bytes per
-/// pixel) plus its RGBA8 copy (4) stays under `MAX_DECODE_ALLOC` at 8 bytes per pixel.
+/// `decode` also checks the memory the colour type really needs against `MAX_DECODE_ALLOC`.
 pub const MAX_SOURCE_PIXELS: u64 = 16_000_000;
 pub const CACHE_BYTES: usize = 16 << 20;
 /// Downloads at once (the scheme handler's limit).
 pub const MAX_IN_FLIGHT: usize = 4;
 /// The most memory a decoder may allocate.
 const MAX_DECODE_ALLOC: u64 = 128 << 20;
-const _: () = assert!(MAX_SOURCE_PIXELS * 8 <= MAX_DECODE_ALLOC);
 /// What a cached failure costs.
 const FAILURE_COST: usize = 64;
 
@@ -386,36 +384,46 @@ fn is_allowed_format(format: ImageFormat) -> bool {
 
 /// Decodes a downloaded original into a small image for `mosaic_from_rgba`, and the columns
 /// its width gives (`max_columns` at most). Only PNG, JPEG, GIF, WebP, BMP and ICO are read
-/// (anything else is `Unreadable`). The size is read from the header first: more than
-/// `MAX_SOURCE_PIXELS` is refused before the decoder runs, and the decoder itself may allocate
-/// at most `MAX_DECODE_ALLOC`. Peak memory is about one decoded buffer, its RGBA8 form when it
-/// differs, and the thumbnail. A decoder that panics on hostile bytes is caught and reads as
-/// `Unreadable` (no cheap hostile fixture triggers one, so this is not tested). A GIF gives
-/// its first frame. Transparency is composited over black before the picture is reduced.
+/// (anything else is `Unreadable`). Before any pixel is decoded, the header gives the size and
+/// the colour type: more than `MAX_SOURCE_PIXELS`, or more memory than `MAX_DECODE_ALLOC` for
+/// the decoded buffer (its real bytes per pixel, 16-bit colour included) plus the RGBA8 copy
+/// that the reduction needs (none when it already is RGBA8), is `TooLarge`. The decoder itself
+/// is also limited to `MAX_DECODE_ALLOC`. A decoder that panics on hostile bytes, headers
+/// included, is caught and reads as `Unreadable` (no cheap hostile fixture triggers one, so
+/// this is not tested). A GIF gives its first frame. Peak memory is about one decoded buffer,
+/// its RGBA8 form when it differs, and the thumbnail.
 pub fn decode(bytes: &[u8], max_columns: usize) -> Result<(RgbaImage, usize), MosaicFailure> {
-    let reader = || {
-        ImageReader::new(Cursor::new(bytes))
-            .with_guessed_format()
-            .ok()
-            .filter(|reader| reader.format().is_some_and(is_allowed_format))
-    };
-    let (width, height) = reader()
-        .ok_or(MosaicFailure::Unreadable)?
-        .into_dimensions()
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        decode_guarded(bytes, max_columns)
+    }))
+    .unwrap_or(Err(MosaicFailure::Unreadable))
+}
+
+fn decode_guarded(bytes: &[u8], max_columns: usize) -> Result<(RgbaImage, usize), MosaicFailure> {
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .filter(|reader| reader.format().is_some_and(is_allowed_format))
+        .ok_or(MosaicFailure::Unreadable)?;
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    reader.limits(limits);
+    let decoder = reader
+        .into_decoder()
         .map_err(|_| MosaicFailure::Unreadable)?;
+    let (width, height) = decoder.dimensions();
     if width == 0 || height == 0 {
         return Err(MosaicFailure::Unreadable);
     }
-    if u64::from(width) * u64::from(height) > MAX_SOURCE_PIXELS {
+    let pixels = u64::from(width) * u64::from(height);
+    let color = decoder.color_type();
+    let copy = if color == ColorType::Rgba8 { 0 } else { 4 };
+    if pixels > MAX_SOURCE_PIXELS
+        || pixels * (u64::from(color.bytes_per_pixel()) + copy) > MAX_DECODE_ALLOC
+    {
         return Err(MosaicFailure::TooLarge);
     }
-    let mut decoder = reader().ok_or(MosaicFailure::Unreadable)?;
-    let mut limits = Limits::default();
-    limits.max_alloc = Some(MAX_DECODE_ALLOC);
-    decoder.limits(limits);
-    let picture = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder.decode()))
-        .map_err(|_| MosaicFailure::Unreadable)?
-        .map_err(|_| MosaicFailure::Unreadable)?;
+    let picture = DynamicImage::from_decoder(decoder).map_err(|_| MosaicFailure::Unreadable)?;
     let columns = columns_for_width(width, max_columns);
     let (cols, rows) = grid(width, height, columns);
     // About two image pixels per font pixel, like the Mac's thumbnail.
@@ -850,6 +858,42 @@ mod tests {
         let start = Instant::now();
         assert_eq!(decode(&png, 40).unwrap_err(), MosaicFailure::TooLarge);
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A 1 x 1 PNG of `colour`'s type whose header claims `width` x `height`, CRC fixed.
+    fn header_claiming(image: image::DynamicImage, width: u32, height: u32) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        image.write_to(&mut out, ImageFormat::Png).unwrap();
+        let mut png = out.into_inner();
+        png[16..20].copy_from_slice(&width.to_be_bytes());
+        png[20..24].copy_from_slice(&height.to_be_bytes());
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+        png
+    }
+
+    #[test]
+    fn the_cap_counts_the_real_bytes_per_pixel() {
+        let rgba16 = || {
+            image::DynamicImage::ImageRgba16(image::ImageBuffer::from_pixel(
+                1,
+                1,
+                Rgba([1u16, 2, 3, 4]),
+            ))
+        };
+        // 4000 x 4000 is within the pixel cap, but 8 + 4 bytes per pixel is 192 MB.
+        let big = header_claiming(rgba16(), 4000, 4000);
+        assert_eq!(decode(&big, 40).unwrap_err(), MosaicFailure::TooLarge);
+        // 2000 x 2000 is 48 MB: it passes the check (the one real pixel then fails to read).
+        let small = header_claiming(rgba16(), 2000, 2000);
+        assert_ne!(decode(&small, 40).unwrap_err(), MosaicFailure::TooLarge);
+        // An RGBA8 picture needs no copy: 4000 x 4000 x 4 = 64 MB passes.
+        let rgba8 = header_claiming(
+            image::DynamicImage::ImageRgba8(flat(1, 2, 3, 1, 1)),
+            4000,
+            4000,
+        );
+        assert_ne!(decode(&rgba8, 40).unwrap_err(), MosaicFailure::TooLarge);
     }
 
     #[test]
