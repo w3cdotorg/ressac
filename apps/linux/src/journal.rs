@@ -163,7 +163,7 @@ impl qobject::Journal {
             return;
         }
         let due = with_session(|session| is_due(&session.store, now, &Local)).unwrap_or(Ok(false));
-        let step = self.as_mut().rust_mut().get_mut().model.checked(due);
+        let step = self.as_mut().rust_mut().get_mut().model.checked(due, now);
         self.as_mut().state_changed();
         if step != Step::Build {
             return;

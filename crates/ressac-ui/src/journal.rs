@@ -292,7 +292,7 @@ impl JournalModel {
     }
 
     /// The due check's answer.
-    pub fn checked(&mut self, due: ressac_core::Result<bool>) -> Step {
+    pub fn checked(&mut self, due: ressac_core::Result<bool>, now: DateTime<Utc>) -> Step {
         match due {
             Ok(false) => {
                 self.phase = Phase::Idle;
@@ -307,6 +307,8 @@ impl JournalModel {
             Err(error) => {
                 self.phase = Phase::Failed(format!("{COULD_NOT_READ}{error}"));
                 self.busy = false;
+                // The minute tick retries the check once the wait is over, as for a failed build.
+                self.not_before = Some(now + AUTOMATIC_RETRY_DELAY);
                 Step::Nothing
             }
         }
@@ -740,7 +742,10 @@ mod tests {
         let mut m = JournalModel::default();
         assert!(m.begin(Trigger::Automatic, at("2026-10-16T05:59:00Z"), &tokyo));
         assert_eq!(
-            m.checked(is_due(&store, at("2026-10-16T05:59:00Z"), &tokyo)),
+            m.checked(
+                is_due(&store, at("2026-10-16T05:59:00Z"), &tokyo),
+                at("2026-10-16T05:59:00Z"),
+            ),
             Step::Nothing
         );
         assert!(
@@ -749,7 +754,10 @@ mod tests {
         );
         assert!(m.begin(Trigger::Automatic, at("2026-10-16T06:00:00Z"), &Paris));
         assert_eq!(
-            m.checked(is_due(&store, at("2026-10-16T06:00:00Z"), &Paris)),
+            m.checked(
+                is_due(&store, at("2026-10-16T06:00:00Z"), &Paris),
+                at("2026-10-16T06:00:00Z"),
+            ),
             Step::Build
         );
     }
@@ -785,14 +793,14 @@ mod tests {
         let mut m = JournalModel::default();
         let mut now = at(T0); // 09:30 Paris
         assert!(m.begin(Trigger::Automatic, now, &Paris));
-        m.checked(Ok(false));
+        m.checked(Ok(false), at(T0));
         let mut turned = Vec::new();
         while now < at("2026-10-17T07:30:00Z") {
             now += mins(1);
             if m.clock_tick(now, &Paris) {
                 turned.push(now);
                 assert!(m.begin(Trigger::Automatic, now, &Paris));
-                m.checked(Ok(false));
+                m.checked(Ok(false), at(T0));
             }
         }
         assert_eq!(turned, [at("2026-10-17T02:00:00Z")]);
@@ -803,7 +811,7 @@ mod tests {
         let mut m = JournalModel::default();
         let start = at(T0);
         assert!(m.begin(Trigger::Automatic, start, &Paris));
-        assert_eq!(m.checked(Ok(true)), Step::Build);
+        assert_eq!(m.checked(Ok(true), at(T0)), Step::Build);
         m.finished(RunEnd::Done(EditionOutcome::Offline), start);
         // `begin` recorded the clock: the day has not turned, so only the wait can fire.
         assert!(!m.minute_check(start + mins(1), &Paris));
@@ -812,7 +820,7 @@ mod tests {
         assert!(m.minute_check(ready, &Paris));
         assert!(m.begin(Trigger::Automatic, ready, &Paris));
         assert!(!m.minute_check(ready, &Paris), "busy: one check at a time");
-        assert_eq!(m.checked(Ok(true)), Step::Build);
+        assert_eq!(m.checked(Ok(true), at(T0)), Step::Build);
         m.finished(
             RunEnd::Failed(RunFailure {
                 message: "boom".into(),
@@ -827,7 +835,7 @@ mod tests {
         assert!(m.minute_check(ready + mins(15), &Paris));
         // Built: nothing more to replay.
         assert!(m.begin(Trigger::Automatic, ready + mins(15), &Paris));
-        assert_eq!(m.checked(Ok(true)), Step::Build);
+        assert_eq!(m.checked(Ok(true), at(T0)), Step::Build);
         m.finished(RunEnd::Done(built()), ready + mins(15));
         assert!(!m.minute_check(ready + mins(60), &Paris));
     }
@@ -854,7 +862,7 @@ mod tests {
     fn a_due_edition_is_built_and_shown() {
         let mut m = JournalModel::default();
         assert!(m.begin(Trigger::Automatic, at(T0), &Paris));
-        assert_eq!(m.checked(Ok(true)), Step::Build);
+        assert_eq!(m.checked(Ok(true), at(T0)), Step::Build);
         assert_eq!(m.phase(), &Phase::Building { done: 0, total: 0 });
         m.finished(RunEnd::Done(built()), at(T0));
         assert_eq!(m.phase(), &Phase::Idle);
@@ -865,7 +873,7 @@ mod tests {
     fn building_reports_its_progress() {
         let mut m = JournalModel::default();
         m.begin(Trigger::Automatic, at(T0), &Paris);
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         m.event(&Event::Started { total: 3 });
         for feed_id in [1, 2] {
             m.event(&Event::FeedDone {
@@ -881,11 +889,11 @@ mod tests {
     fn offline_keeps_the_edition_due_and_retry_builds_it() {
         let mut m = JournalModel::default();
         m.begin(Trigger::Automatic, at(T0), &Paris);
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         m.finished(RunEnd::Done(EditionOutcome::Offline), at(T0));
         assert_eq!(m.phase(), &Phase::Offline);
         assert!(m.begin(Trigger::Retry, at(T0), &Paris), "Retry never waits");
-        assert_eq!(m.checked(Ok(true)), Step::Build);
+        assert_eq!(m.checked(Ok(true), at(T0)), Step::Build);
     }
 
     #[test]
@@ -901,7 +909,7 @@ mod tests {
         assert_eq!(runs.banner(), None);
         let mut m = JournalModel::default();
         m.begin(Trigger::Automatic, at(T0), &Paris);
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         m.finished(RunEnd::Done(EditionOutcome::NotDue), at(T0));
         assert_eq!(m.phase(), &Phase::Idle);
     }
@@ -943,7 +951,7 @@ mod tests {
         ] {
             let mut m = JournalModel::default();
             m.begin(Trigger::Automatic, at(T0), &Paris);
-            m.checked(Ok(true));
+            m.checked(Ok(true), at(T0));
             m.finished(end, at(T0));
             assert_eq!(m.phase(), &Phase::Failed(message.into()));
             let mut relaunched = JournalModel::default(); // the wait is in memory only
@@ -963,7 +971,7 @@ mod tests {
         for end in [failed("disk full"), RunEnd::Done(EditionOutcome::Offline)] {
             let mut m = JournalModel::default();
             m.begin(Trigger::Automatic, at(T0), &Paris);
-            m.checked(Ok(true));
+            m.checked(Ok(true), at(T0));
             m.finished(end, at(T0));
             assert!(!m.begin(Trigger::Automatic, at(T0) + mins(5), &Paris));
             assert!(m.begin(Trigger::Automatic, at(T0) + mins(16), &Paris));
@@ -974,10 +982,10 @@ mod tests {
     fn retry_builds_during_the_window_and_a_manual_failure_restarts_it() {
         let mut m = JournalModel::default();
         m.begin(Trigger::Automatic, at(T0), &Paris);
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         m.finished(failed("disk full"), at(T0));
         assert!(m.begin(Trigger::Retry, at(T0) + mins(10), &Paris));
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         m.finished(failed("disk full"), at(T0) + mins(10));
         assert!(
             !m.begin(Trigger::Automatic, at(T0) + mins(20), &Paris),
@@ -990,10 +998,10 @@ mod tests {
     fn a_success_clears_the_window() {
         let mut m = JournalModel::default();
         m.begin(Trigger::Automatic, at(T0), &Paris);
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         m.finished(failed("disk full"), at(T0));
         m.begin(Trigger::Retry, at(T0), &Paris);
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         m.finished(RunEnd::Done(built()), at(T0));
         assert!(m.begin(Trigger::Automatic, at(T0) + mins(1), &Paris));
     }
@@ -1002,10 +1010,10 @@ mod tests {
     fn finding_the_edition_not_due_clears_the_window() {
         let mut m = JournalModel::default();
         m.begin(Trigger::Automatic, at(T0), &Paris);
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         m.finished(failed("disk full"), at(T0));
         assert!(m.begin(Trigger::Retry, at(T0) + mins(2), &Paris));
-        assert_eq!(m.checked(Ok(false)), Step::Nothing); // built in a terminal meanwhile
+        assert_eq!(m.checked(Ok(false), at(T0)), Step::Nothing); // built in a terminal meanwhile
         assert_eq!(m.phase(), &Phase::Idle);
         assert!(m.begin(Trigger::Automatic, at(T0) + mins(3), &Paris));
     }
@@ -1014,7 +1022,7 @@ mod tests {
     fn a_clock_moved_backwards_expires_the_window() {
         let mut m = JournalModel::default();
         m.begin(Trigger::Automatic, at(T0), &Paris);
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         m.finished(failed("disk full"), at(T0));
         assert!(m.begin(Trigger::Automatic, at(T0) - mins(60), &Paris));
     }
@@ -1029,7 +1037,7 @@ mod tests {
         );
         let mut m = JournalModel::default();
         m.begin(Trigger::Automatic, at(T0), &Paris);
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         m.finished(RunEnd::Refused, at(T0));
         assert_eq!(m.phase(), &Phase::Due);
         assert!(m.phase().offers_retry());
@@ -1044,7 +1052,7 @@ mod tests {
         let mut m = JournalModel::default();
         assert!(m.begin(Trigger::Automatic, at(T0), &Paris));
         assert!(!m.begin(Trigger::Automatic, at(T0), &Paris));
-        m.checked(Ok(true));
+        m.checked(Ok(true), at(T0));
         assert!(!m.begin(Trigger::Retry, at(T0), &Paris));
         m.finished(RunEnd::Done(built()), at(T0));
         assert!(m.begin(Trigger::Automatic, at(T0), &Paris));
@@ -1055,7 +1063,10 @@ mod tests {
         let mut m = JournalModel::default();
         m.begin(Trigger::Automatic, at(T0), &Paris);
         assert_eq!(
-            m.checked(Err(ressac_core::Error::Invalid("disk I/O error".into()))),
+            m.checked(
+                Err(ressac_core::Error::Invalid("disk I/O error".into())),
+                at(T0)
+            ),
             Step::Nothing
         );
         assert_eq!(
@@ -1063,5 +1074,19 @@ mod tests {
             &Phase::Failed("Could not read the database: disk I/O error".into())
         );
         assert!(!m.is_busy());
+    }
+
+    #[test]
+    fn a_failed_due_check_is_retried_by_the_minute_tick_after_the_wait() {
+        let mut m = JournalModel::default();
+        m.begin(Trigger::Automatic, at(T0), &Paris);
+        m.checked(
+            Err(ressac_core::Error::Invalid("disk I/O error".into())),
+            at(T0),
+        );
+        assert!(!m.begin(Trigger::Automatic, at(T0) + mins(5), &Paris));
+        assert!(!m.minute_check(at(T0) + mins(5), &Paris));
+        assert!(m.minute_check(at(T0) + mins(16), &Paris));
+        assert!(m.begin(Trigger::Automatic, at(T0) + mins(16), &Paris));
     }
 }

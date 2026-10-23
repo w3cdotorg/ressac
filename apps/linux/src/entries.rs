@@ -445,6 +445,13 @@ impl qobject::EntriesModel {
             .iter()
             .map(|row| (row.entry_id, row.feed_id))
             .collect();
+        if rust.edition.is_none() {
+            // The edition could not be read (a banner says so): the entries stand in plain
+            // slots rather than a blank list.
+            return shown
+                .map(|shown| Slot::Entry { shown, section: "" })
+                .collect();
+        }
         let mut by_id: HashMap<i64, Shown> = shown.map(|s| (s.row.entry_id, s)).collect();
         let mut slots = Vec::new();
         for section in sections(&listed, rust.edition.as_ref()) {
