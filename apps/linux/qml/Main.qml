@@ -20,7 +20,17 @@ Kirigami.ApplicationWindow {
     }
 
     // --screenshot (spec §8.2): grab the settled launch screen, then each walk step (ready only), then quit.
-    readonly property var walkSteps: []          // B2 onwards: { name: "02-…", enter: function () { … } }
+    readonly property var walkSteps: [           // { name: "02-…", enter: function () { … } }, ready only
+        { name: "02-folder-blogs", enter: function () { SourcesModel.selectKey("folder:1"); SourcesModel.toggleExpanded(SourcesModel.rowOfKey("folder:1"))
+            console.warn("walk: 02-folder-blogs entries=" + EntriesModel.rowCount() + " expanded=" + (SourcesModel.rowOfKey("feed:1") >= 0)) } },
+        { name: "03-starred", enter: function () { EntriesModel.select(0); EntriesModel.toggleStarred(0)
+            console.warn("walk: 03-starred selected=" + EntriesModel.selectedEntryId) } },
+        { name: "04-search", enter: function () { EntriesModel.searchText = "comic"; console.warn("walk: 04-search entries=" + EntriesModel.rowCount()) } },
+        { name: "05-banner", enter: function () { Runs.showBanner("The database is busy (is `ressac` running in a terminal?)", false)
+            console.warn("walk: 05-banner visible=" + Runs.bannerVisible) } },
+        { name: "06-garden", enter: function () { EntriesModel.searchText = ""; SourcesModel.selectKey("garden:needs-triage")
+            console.warn("walk: 06-garden active=" + EntriesModel.active + " unreadEnabled=" + !SourcesModel.isGarden) } }
+    ]
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… walkSteps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }
@@ -49,6 +59,13 @@ Kirigami.ApplicationWindow {
 
     pageStack.initialPage: Kirigami.Page {
         globalToolBarStyle: Kirigami.ApplicationHeaderStyle.None
+        padding: 0
+
+        Loader {
+            anchors.fill: parent
+            active: Launcher.phase === Launcher.Ready
+            source: Qt.resolvedUrl("ReadingPage.qml")
+        }
 
         ColumnLayout {
             anchors.centerIn: parent
@@ -99,13 +116,6 @@ Kirigami.ApplicationWindow {
                     text: "Quit Ressac"
                     onClicked: Qt.quit()
                 }
-            }
-
-            Kirigami.PlaceholderMessage {
-                visible: Launcher.phase === Launcher.Ready
-                text: "Ressac"
-                explanation: Launcher.databasePath
-                Layout.fillWidth: true
             }
         }
     }
