@@ -20,9 +20,41 @@ fn ressac(home: &Path, args: &[&str]) -> Output {
         .args(["--db", home.join("db.sqlite").to_str().unwrap()])
         .args(args)
         .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("XDG_CACHE_HOME")
         .env("RESSAC_ALLOW_PRIVATE_ARTICLES", "1")
         .output()
         .expect("binary runs")
+}
+
+/// The layout's log directory for `home` (macOS frozen; XDG defaults, the tests clear `XDG_*`).
+fn log_dir(home: &Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Logs/Ressac")
+    } else {
+        home.join(".local/state/ressac/logs")
+    }
+}
+
+#[test]
+fn a_run_creates_the_layout_s_log_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let out = ressac(home.path(), &["export"]);
+    assert!(log_dir(home.path()).is_dir(), "{out:?}");
+}
+
+#[test]
+fn db_help_names_the_layout_s_default() {
+    let home = tempfile::tempdir().unwrap();
+    let help = stdout(&ressac(home.path(), &["--help"]));
+    let expected = if cfg!(target_os = "macos") {
+        "Database file [default: ~/Library/Application Support/Ressac/ressac.sqlite]"
+    } else {
+        "Database file [default: ~/.local/share/ressac/ressac.sqlite, or $XDG_DATA_HOME/ressac/ressac.sqlite]"
+    };
+    assert!(help.contains(expected), "{help}");
 }
 
 fn stdout(o: &Output) -> String {
@@ -1289,7 +1321,7 @@ fn ticker_open_is_silent() {
 fn ticker_survives_an_unwritable_log_directory() {
     use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
-    let logs = home.path().join("Library/Logs/Ressac");
+    let logs = log_dir(home.path());
     std::fs::create_dir_all(&logs).unwrap();
     std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o500)).unwrap();
     let out = ressac(home.path(), &["ticker", "--tmux"]);

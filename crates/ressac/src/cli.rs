@@ -14,7 +14,14 @@ use ressac_core::store::pages::PageKind;
     about = "Tidy your RSS subscriptions, then read them calmly"
 )]
 pub struct Cli {
-    /// Database file [default: ~/Library/Application Support/Ressac/ressac.sqlite]
+    #[cfg_attr(
+        target_os = "macos",
+        doc = "Database file [default: ~/Library/Application Support/Ressac/ressac.sqlite]"
+    )]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        doc = "Database file [default: ~/.local/share/ressac/ressac.sqlite, or $XDG_DATA_HOME/ressac/ressac.sqlite]"
+    )]
     #[arg(long, env = "RESSAC_DB", global = true)]
     pub db: Option<PathBuf>,
     /// Print one JSON object per line instead of human-readable output

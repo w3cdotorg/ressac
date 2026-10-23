@@ -6,7 +6,7 @@ mod output;
 mod ticker;
 mod tui;
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +20,10 @@ use commands::{Globals, INTERRUPTED, USAGE, UsageError};
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let _log_guard = init_logging(cli.verbose);
+    let paths = ressac_core::paths::Paths::from_env().ok();
+    let _log_guard = paths
+        .as_ref()
+        .and_then(|p| init_logging(&p.log_dir(), cli.verbose));
     match run(cli).await {
         Ok(code) => code,
         Err(e) if is_broken_pipe(&e) => ExitCode::SUCCESS,
@@ -126,12 +129,12 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
     open::that(url)
 }
 
-/// Daily-rotated log file in ~/Library/Logs/Ressac, mirrored to stderr with `-v`.
-fn init_logging(verbose: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+/// Daily-rotated log file in `dir` (`Paths::log_dir`: `~/Library/Logs/Ressac` on macOS,
+/// `$XDG_STATE_HOME/ressac/logs` on Linux), mirrored to stderr with `-v`.
+fn init_logging(dir: &Path, verbose: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_appender::rolling::{RollingFileAppender, Rotation};
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-    let dir = PathBuf::from(std::env::var_os("HOME")?).join("Library/Logs/Ressac");
-    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::create_dir_all(dir).ok()?;
     // `rolling::daily` panics when the directory is not writable; a status-bar helper must
     // never print that, so no file logging in that case.
     let appender = RollingFileAppender::builder()

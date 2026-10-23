@@ -85,12 +85,19 @@ pub struct Store {
     path: Option<PathBuf>,
 }
 
-/// `$HOME/Library/Application Support/Ressac/ressac.sqlite`.
+/// The default database of [`crate::paths::Paths::from_env`]. Without a usable `HOME` it logs the
+/// error and falls back to the macOS-style path under whatever `HOME` holds (empty if unset).
 pub fn default_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    home.join("Library/Application Support/Ressac/ressac.sqlite")
+    match crate::paths::Paths::from_env() {
+        Ok(paths) => paths.database(),
+        Err(e) => {
+            tracing::error!("cannot resolve the default database path: {e}");
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default()
+                .join("Library/Application Support/Ressac/ressac.sqlite")
+        }
+    }
 }
 
 impl Store {
@@ -355,6 +362,18 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn default_path_is_under_the_xdg_data_directory() {
+        let p = default_path();
+        assert!(p.ends_with("ressac/ressac.sqlite"), "{p:?}");
+        assert!(
+            !p.to_string_lossy().contains("Library/Application Support"),
+            "{p:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn default_path_is_under_application_support() {
         let p = default_path();
