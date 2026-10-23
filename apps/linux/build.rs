@@ -52,7 +52,8 @@ mod qt {
         .qt_module("Quick")
         .qt_module("QuickControls2")
         .qt_module("Widgets")
-        .qt_module("WebEngineQuick");
+        .qt_module("WebEngineQuick")
+        .qt_module("WebEngineCore");
         // SAFETY: only adds one warning switch to the builder's own cc::Build. gcc 16 prints
         // -Wsfinae-incomplete for Qt headers next to rust/cxx.h (spike gotcha 7); not ours to fix.
         unsafe {

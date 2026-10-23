@@ -1,5 +1,8 @@
 #include "shim.h"
 
+#include "ressac-kde/src/lib.cxx.h"
+
+#include <QtCore/QBuffer>
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QSettings>
@@ -9,6 +12,10 @@
 #include <QtGui/QImage>
 #include <QtQuick/QQuickWindow>
 #include <QtQuickControls2/QQuickStyle>
+#include <QtWebEngineCore/QWebEngineUrlRequestJob>
+#include <QtWebEngineCore/QWebEngineUrlScheme>
+#include <QtWebEngineCore/QWebEngineUrlSchemeHandler>
+#include <QtWebEngineQuick/QQuickWebEngineProfile>
 #include <QtWebEngineQuick/QtWebEngineQuick>
 #include <QtWidgets/QApplication>
 
@@ -42,10 +49,38 @@ QSettings open(rust::Str file)
     return QSettings(from_rust(file), QSettings::IniFormat);
 }
 
+// Serves ressac:page/<entry> and ressac:asset/<file> from Rust, on the GUI thread.
+class RessacSchemeHandler : public QWebEngineUrlSchemeHandler
+{
+public:
+    using QWebEngineUrlSchemeHandler::QWebEngineUrlSchemeHandler;
+
+    void requestStarted(QWebEngineUrlRequestJob *job) override
+    {
+        const std::string url = job->requestUrl().toString(QUrl::FullyEncoded).toStdString();
+        rust::String mime;
+        rust::Vec<std::uint8_t> body;
+        if (!ressac_scheme_serve(rust::Str(url.data(), url.size()), mime, body)) {
+            job->fail(QWebEngineUrlRequestJob::UrlNotFound);
+            return;
+        }
+        auto *buffer = new QBuffer(job);
+        buffer->setData(QByteArray(reinterpret_cast<const char *>(body.data()),
+                                   static_cast<qsizetype>(body.size())));
+        buffer->open(QIODevice::ReadOnly);
+        job->reply(QByteArray(mime.data(), static_cast<qsizetype>(mime.size())), buffer);
+    }
+};
+
 } // namespace
 
 void ressac_init_webengine()
 {
+    // Before QtWebEngineQuick::initialize().
+    QWebEngineUrlScheme scheme(QByteArrayLiteral("ressac"));
+    scheme.setSyntax(QWebEngineUrlScheme::Syntax::Path);
+    QWebEngineUrlScheme::registerScheme(scheme);
+
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     QtWebEngineQuick::initialize();
 }
@@ -59,6 +94,12 @@ void ressac_create_application()
     static char arg0[] = "ressac-kde";
     static char *argv[] = {arg0, nullptr};
     new QApplication(argc, argv);
+
+    QQuickWebEngineProfile *profile = QQuickWebEngineProfile::defaultProfile();
+    if (!profile->isOffTheRecord()) {
+        qWarning("ressac-kde: the default web profile is not off the record");
+    }
+    profile->installUrlSchemeHandler("ressac", new RessacSchemeHandler(qApp));
 
     QGuiApplication::setDesktopFileName(QStringLiteral("org.w3cdotorg.ressac"));
     QGuiApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("org.w3cdotorg.ressac")));

@@ -4,6 +4,7 @@
 
 mod entries;
 mod launcher;
+mod reader;
 mod recette;
 mod rows;
 mod runs;
@@ -16,6 +17,9 @@ use cxx_qt_lib::{QQmlApplicationEngine, QUrl};
 use ressac_core::logging;
 use ressac_core::paths::Paths;
 use ressac_ui::launch::parse_args;
+
+// Named by the `shim` bridge's `extern "Rust"` block (cxx looks it up in this scope).
+use reader::ressac_scheme_serve;
 
 /// What cxx-qt-lib does not wrap (`cpp/shim.h`).
 #[cxx::bridge]
@@ -33,6 +37,11 @@ mod shim {
         pub fn ressac_settings_get(file: &str, key: &str, value: &mut String) -> bool;
         pub fn ressac_settings_set(file: &str, key: &str, value: &str) -> bool;
         pub fn ressac_settings_remove(file: &str, key: &str) -> bool;
+    }
+
+    extern "Rust" {
+        /// The `ressac:` scheme handler's lookup (`reader.rs`).
+        fn ressac_scheme_serve(url: &str, mime: &mut String, body: &mut Vec<u8>) -> bool;
     }
 }
 
