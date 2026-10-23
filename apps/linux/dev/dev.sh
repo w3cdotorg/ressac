@@ -85,6 +85,13 @@ sh_in_container() {
   fi
 }
 
+check() {
+  up
+  local tty
+  tty=$(tty_flag)
+  docker exec "$tty" -u ressac -w "$MOUNT" "$NAME" bash scripts/check-linux.sh
+}
+
 [ "$#" -ge 1 ] || usage
 cmd=$1
 shift
@@ -92,5 +99,6 @@ case "$cmd" in
   image) preflight; build_image ;;
   up) up ;;
   sh) sh_in_container "$@" ;;
+  check) check ;;
   *) usage ;;
 esac
