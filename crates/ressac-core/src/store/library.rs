@@ -789,6 +789,16 @@ impl Store {
         Ok(())
     }
 
+    /// `set_read` for several entries in one transaction: a busy database leaves none changed.
+    pub fn set_read_many(&self, ids: &[i64], read: bool, now: DateTime<Utc>) -> Result<()> {
+        let tx = self.conn().unchecked_transaction()?;
+        for id in ids {
+            self.set_read(*id, read, now)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn set_starred(&self, entry_id: i64, starred: bool, now: DateTime<Utc>) -> Result<()> {
         self.conn().execute(
             "UPDATE entry SET starred_at = ?2 WHERE id = ?1",

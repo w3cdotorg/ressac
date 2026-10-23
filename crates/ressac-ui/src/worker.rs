@@ -6,7 +6,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use ressac_core::Error;
@@ -79,30 +79,68 @@ impl<F: Fn(&Event) + Send + Sync> EventSink for ForwardSink<F> {
     }
 }
 
+/// Starts a FIFO thread with its own state (connection, runtime).
+fn spawn_lane(db: &Path) -> mpsc::Sender<ShortJob> {
+    let (jobs_tx, jobs) = mpsc::channel::<ShortJob>();
+    let mut state = ShortState {
+        db: db.to_path_buf(),
+        app: None,
+        runtime: None,
+    };
+    thread::spawn(move || {
+        for job in jobs {
+            job(&mut state);
+        }
+    });
+    jobs_tx
+}
+
+/// Wraps a job and its callback for a lane: panics in either are caught (the lane carries on).
+fn lane_job<T: Send + 'static>(
+    job: impl FnOnce(&JobContext<'_>) -> ressac_core::Result<T> + Send + 'static,
+    done: impl FnOnce(JobResult<T>) + Send + 'static,
+) -> ShortJob {
+    Box::new(move |state| {
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            if state.runtime.is_none() {
+                state.runtime = Some(runtime()?);
+            }
+            if state.app.is_none() {
+                state.app = Some(Ressac::open(&state.db)?);
+            }
+            let (Some(app), Some(runtime)) = (&state.app, &state.runtime) else {
+                unreachable!("both were just set");
+            };
+            job(&JobContext { app, runtime })
+        }));
+        // A failed open is tried again by the next job.
+        finish(outcome(caught), done);
+    })
+}
+
+/// Runs `done`, logging a panic instead of letting it end the thread.
+fn finish<T>(result: JobResult<T>, done: impl FnOnce(JobResult<T>)) {
+    if catch_unwind(AssertUnwindSafe(|| done(result))).is_err() {
+        tracing::error!("a job's completion callback panicked");
+    }
+}
+
 pub struct Worker {
     db: PathBuf,
     short: mpsc::Sender<ShortJob>,
-    stop: Arc<AtomicBool>,
+    direct: mpsc::Sender<ShortJob>,
+    /// The flag of the current (or last) long run; each long run gets its own.
+    stop: Mutex<Arc<AtomicBool>>,
 }
 
 impl Worker {
-    /// Starts the short-run thread; the database is opened by the first job.
+    /// Starts the short-run and direct-write threads; each opens the database on its first job.
     pub fn new(db: &Path) -> Worker {
-        let (short, jobs) = mpsc::channel::<ShortJob>();
-        let mut state = ShortState {
-            db: db.to_path_buf(),
-            app: None,
-            runtime: None,
-        };
-        thread::spawn(move || {
-            for job in jobs {
-                job(&mut state);
-            }
-        });
         Worker {
             db: db.to_path_buf(),
-            short,
-            stop: Arc::new(AtomicBool::new(false)),
+            short: spawn_lane(db),
+            direct: spawn_lane(db),
+            stop: Mutex::new(Arc::new(AtomicBool::new(false))),
         }
     }
 
@@ -117,25 +155,19 @@ impl Worker {
         job: impl FnOnce(&JobContext<'_>) -> ressac_core::Result<T> + Send + 'static,
         done: impl FnOnce(JobResult<T>) + Send + 'static,
     ) {
-        let run: ShortJob = Box::new(move |state| {
-            let caught = catch_unwind(AssertUnwindSafe(|| {
-                if state.runtime.is_none() {
-                    state.runtime = Some(runtime()?);
-                }
-                if state.app.is_none() {
-                    state.app = Some(Ressac::open(&state.db)?);
-                }
-                let (Some(app), Some(runtime)) = (&state.app, &state.runtime) else {
-                    unreachable!("both were just set");
-                };
-                job(&JobContext { app, runtime })
-            }));
-            // A failed open is tried again by the next job.
-            let result = outcome(caught);
-            let _ = catch_unwind(AssertUnwindSafe(|| done(result)));
-        });
         // The thread ends only when the worker is gone, so a failed send has no one to tell.
-        let _ = self.short.send(run);
+        let _ = self.short.send(lane_job(job, done));
+    }
+
+    /// Queues a direct write (read, star, mark all, full-text preference) on its own thread
+    /// and connection, ordered among direct writes only, so it never waits behind a short
+    /// job such as a network extraction.
+    pub fn direct<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&JobContext<'_>) -> ressac_core::Result<T> + Send + 'static,
+        done: impl FnOnce(JobResult<T>) + Send + 'static,
+    ) {
+        let _ = self.direct.send(lane_job(job, done));
     }
 
     /// Runs a job on a new thread with its own connection and runtime. `events` receives the
@@ -149,7 +181,8 @@ impl Worker {
         done: impl FnOnce(JobResult<T>) + Send + 'static,
     ) {
         let db = self.db.clone();
-        let stop = self.stop.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        *self.stop.lock().unwrap_or_else(|e| e.into_inner()) = stop.clone();
         thread::spawn(move || {
             let caught = catch_unwind(AssertUnwindSafe(|| {
                 let app = Ressac::open(&db)?;
@@ -164,14 +197,17 @@ impl Worker {
                     stop,
                 )
             }));
-            let result = outcome(caught);
-            let _ = catch_unwind(AssertUnwindSafe(|| done(result)));
+            finish(outcome(caught), done);
         });
     }
 
-    /// Asks the running long job to stop; it checks the flag between feeds.
+    /// Asks the current long job to stop; it checks its flag between feeds. The next long run
+    /// starts with a fresh flag.
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .store(true, Ordering::Relaxed);
     }
 }
 
@@ -185,7 +221,7 @@ impl Drop for Worker {
 mod tests {
     use super::*;
     use crate::test_db::TestDb;
-    use std::sync::{Mutex, mpsc};
+    use std::sync::mpsc;
     use std::time::Duration;
 
     const WAIT: Duration = Duration::from_secs(10);
@@ -313,5 +349,63 @@ mod tests {
         assert!(rx.recv_timeout(WAIT).unwrap());
         assert_ne!(gui.data_version().unwrap(), before);
         assert!(db.read_at(id).is_some());
+    }
+
+    #[test]
+    fn stop_then_a_second_long_run_sees_false() {
+        let db = TestDb::new();
+        let worker = Worker::new(&db.path);
+        let (tx, rx) = mpsc::channel();
+        let first = tx.clone();
+        worker.long(
+            |_, _, _| Ok(()),
+            |_| {},
+            move |r| first.send(r.is_ok()).unwrap(),
+        );
+        assert!(rx.recv_timeout(WAIT).unwrap());
+        worker.stop();
+        worker.long(
+            |_, _, stop| Ok(stop.load(Ordering::Relaxed)),
+            |_| {},
+            move |r| tx.send(r.unwrap()).unwrap(),
+        );
+        assert!(
+            !rx.recv_timeout(WAIT).unwrap(),
+            "the new run starts with a fresh flag"
+        );
+    }
+
+    #[test]
+    fn a_blocked_short_job_does_not_delay_a_direct_write() {
+        let db = TestDb::new();
+        let id = db.entry(1, "2026-10-01T08:00:00.000Z", false);
+        let worker = Worker::new(&db.path);
+        let (release, wait) = mpsc::channel::<()>();
+        let (tx, rx) = mpsc::channel();
+        let short_tx = tx.clone();
+        worker.short(
+            move |_| {
+                wait.recv_timeout(WAIT).unwrap();
+                Ok("short")
+            },
+            move |r| short_tx.send(r.unwrap()).unwrap(),
+        );
+        worker.direct(
+            move |cx| {
+                cx.app
+                    .store()
+                    .set_read(id, true, chrono::Utc::now())
+                    .map(|()| "direct")
+            },
+            move |r| tx.send(r.unwrap()).unwrap(),
+        );
+        assert_eq!(
+            rx.recv_timeout(WAIT).unwrap(),
+            "direct",
+            "the short job is still blocked"
+        );
+        assert!(db.read_at(id).is_some());
+        release.send(()).unwrap();
+        assert_eq!(rx.recv_timeout(WAIT).unwrap(), "short");
     }
 }
