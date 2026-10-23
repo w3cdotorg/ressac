@@ -1,7 +1,7 @@
 //! The reading window's single-key commands (spec §7.2; the Mac's `ReadingKeyRouter`): Qt key
 //! events decoded to a [`Key`], the focused item's chain of tokens classified to a
-//! [`KeyFocus`], the Native map from both to a [`Command`], which keys the menus never see,
-//! and the verb the QML page performs. Antiope's keys (B8a) extend [`command`].
+//! [`KeyFocus`], the Native and Antiope maps from both to a [`Command`], which keys the menus never
+//! see, and the verb the QML page performs.
 
 use crate::settings::Appearance;
 
@@ -33,6 +33,10 @@ pub mod focus {
     pub const ENTRIES_LIST: &str = "entriesList";
     pub const READER_PANE: &str = "readerPane";
     pub const READING_PAGE: &str = "readingPage";
+    /// Antiope's three columns: the index list, the entries list, the reader column.
+    pub const ANTIOPE_INDEX: &str = "antiopeIndex";
+    pub const ANTIOPE_ENTRIES: &str = "antiopeEntries";
+    pub const ANTIOPE_READER: &str = "antiopeReader";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +83,28 @@ pub enum Command {
     FocusEntryList,
     /// `←` in the list.
     FocusSidebar,
+    /// Antiope: a digit of the page number being typed.
+    PageDigit(u8),
+    /// Antiope: CORRECTION (Backspace) erases the last digit.
+    PageCorrect,
+    /// Antiope: ANNULATION (Esc) cancels the page number.
+    PageCancel,
+    /// Antiope: SOMMAIRE (Alt+S), page 100.
+    Sommaire,
+    /// Antiope: GUIDE (Alt+G, `?`), page 899.
+    Guide,
+    /// Antiope: RÉPÉTITION (Alt+R) refreshes, or retries the edition.
+    Repetition,
+    /// Antiope: `i` swaps the article's images between mosaics and originals.
+    ToggleImages,
+    /// Antiope: `→` moves to the next column.
+    NextColumn,
+    /// Antiope: `←` moves to the previous column.
+    PreviousColumn,
+    /// Antiope: `↓` in the index.
+    NextIndexRow,
+    /// Antiope: `↑` in the index.
+    PreviousIndexRow,
 }
 
 const HELD: u32 = qt::SHIFT | qt::CONTROL | qt::ALT | qt::META;
@@ -134,11 +160,11 @@ pub fn classify(chain: &[&str]) -> KeyFocus {
         KeyFocus::Window
     } else if has(focus::POPUP) || first == Some(focus::TEXT) {
         KeyFocus::TextInput
-    } else if has(focus::WEB) || has(focus::READER_PANE) {
+    } else if has(focus::WEB) || has(focus::READER_PANE) || has(focus::ANTIOPE_READER) {
         KeyFocus::Reader
-    } else if has(focus::ENTRIES_LIST) {
+    } else if has(focus::ENTRIES_LIST) || has(focus::ANTIOPE_ENTRIES) {
         KeyFocus::EntryList
-    } else if has(focus::SOURCES_LIST) {
+    } else if has(focus::SOURCES_LIST) || has(focus::ANTIOPE_INDEX) {
         KeyFocus::Sidebar
     } else if matches!(first, Some(focus::ITEM | focus::READING_PAGE)) {
         KeyFocus::Window
@@ -149,13 +175,66 @@ pub fn classify(chain: &[&str]) -> KeyFocus {
 
 /// NetNewsWire's rules: letters and Space act wherever the window is not typing; `↓` and `↑`
 /// are `j` and `k` in the list and the reader, the sidebar keeps its own; `→` leaves the
-/// sidebar for the list and `←` comes back. Antiope's keys (B8a) are tried first in Antiope.
-pub fn command(key: Key, focus: KeyFocus, _look: Appearance) -> Option<Command> {
+/// sidebar for the list and `←` comes back. In Antiope its own keys are tried first.
+pub fn command(key: Key, focus: KeyFocus, look: Appearance) -> Option<Command> {
     if focus == KeyFocus::TextInput {
         return None;
     }
+    if look == Appearance::Antiope
+        && let Some(command) = antiope_command(key, focus)
+    {
+        return Some(command);
+    }
     native_command(key, focus)
 }
+
+/// The Antiope keys (the Mac's `ReadingKeyRouter`): page digits, CORRECTION, ANNULATION,
+/// SOMMAIRE, GUIDE, RÉPÉTITION, images, the columns and the index rows.
+fn antiope_command(key: Key, focus: KeyFocus) -> Option<Command> {
+    match key {
+        Key::Digit(d) => Some(Command::PageDigit(d)),
+        Key::Delete => Some(Command::PageCorrect),
+        Key::Escape => Some(Command::PageCancel),
+        Key::Option('s') => Some(Command::Sommaire),
+        Key::Option('g') | Key::Question => Some(Command::Guide),
+        Key::Option('r') => Some(Command::Repetition),
+        Key::Letter('i') => Some(Command::ToggleImages),
+        Key::Right if focus != KeyFocus::Control => Some(Command::NextColumn),
+        Key::Left if focus != KeyFocus::Control => Some(Command::PreviousColumn),
+        Key::Down if focus == KeyFocus::Sidebar => Some(Command::NextIndexRow),
+        Key::Up if focus == KeyFocus::Sidebar => Some(Command::PreviousIndexRow),
+        _ => None,
+    }
+}
+
+/// Antiope's keys that do their job once per press: a held one is only spent (a held digit
+/// never types three). CORRECTION and the index arrows repeat.
+pub fn acts_once_per_press(command: Command) -> bool {
+    matches!(
+        command,
+        Command::PageDigit(_)
+            | Command::PageCancel
+            | Command::Sommaire
+            | Command::Guide
+            | Command::Repetition
+            | Command::ToggleImages
+            | Command::NextColumn
+            | Command::PreviousColumn
+    )
+}
+
+const PAGE_DIGIT_VERBS: [&str; 10] = [
+    "pageDigit0",
+    "pageDigit1",
+    "pageDigit2",
+    "pageDigit3",
+    "pageDigit4",
+    "pageDigit5",
+    "pageDigit6",
+    "pageDigit7",
+    "pageDigit8",
+    "pageDigit9",
+];
 
 fn native_command(key: Key, focus: KeyFocus) -> Option<Command> {
     use KeyFocus::*;
@@ -182,8 +261,12 @@ pub fn claims_override(key: Key, focus: KeyFocus, look: Appearance) -> bool {
 }
 
 /// The name `ReadingPage.perform` switches on. A held toggle only spends the key, and a held
-/// Space never moves on to the next entry.
+/// Space never moves on to the next entry; an Antiope key that acts once per press is
+/// `spent` (consumed, nothing done).
 pub fn verb(command: Command, repeat: bool) -> &'static str {
+    if repeat && acts_once_per_press(command) {
+        return "spent";
+    }
     match (command, repeat) {
         (Command::Advance, true) => "advanceHeld",
         (Command::ToggleRead, true) => "toggleReadHeld",
@@ -195,6 +278,17 @@ pub fn verb(command: Command, repeat: bool) -> &'static str {
         (Command::ToggleStar, false) => "toggleStar",
         (Command::FocusEntryList, _) => "focusEntryList",
         (Command::FocusSidebar, _) => "focusSidebar",
+        (Command::PageDigit(d), _) => PAGE_DIGIT_VERBS[usize::from(d.min(9))],
+        (Command::PageCorrect, _) => "pageCorrect",
+        (Command::PageCancel, _) => "pageCancel",
+        (Command::Sommaire, _) => "sommaire",
+        (Command::Guide, _) => "guide",
+        (Command::Repetition, _) => "repetition",
+        (Command::ToggleImages, _) => "toggleImages",
+        (Command::NextColumn, _) => "nextColumn",
+        (Command::PreviousColumn, _) => "previousColumn",
+        (Command::NextIndexRow, _) => "nextIndexRow",
+        (Command::PreviousIndexRow, _) => "previousIndexRow",
     }
 }
 
@@ -501,6 +595,221 @@ mod tests {
             Route {
                 claims_override: true,
                 verb: Some("toggleReadHeld")
+            }
+        );
+    }
+
+    #[test]
+    fn antiope_keys_map_to_their_commands() {
+        use KeyFocus::*;
+        for focus in [Sidebar, EntryList, Reader, Window, Control] {
+            for d in 0..=9 {
+                assert_eq!(
+                    command(Key::Digit(d), focus, Appearance::Antiope),
+                    Some(Command::PageDigit(d))
+                );
+            }
+            assert_eq!(
+                command(Key::Delete, focus, Appearance::Antiope),
+                Some(Command::PageCorrect)
+            );
+            assert_eq!(
+                command(Key::Escape, focus, Appearance::Antiope),
+                Some(Command::PageCancel)
+            );
+            assert_eq!(
+                command(Key::Option('s'), focus, Appearance::Antiope),
+                Some(Command::Sommaire)
+            );
+            assert_eq!(
+                command(Key::Option('g'), focus, Appearance::Antiope),
+                Some(Command::Guide)
+            );
+            assert_eq!(
+                command(Key::Question, focus, Appearance::Antiope),
+                Some(Command::Guide)
+            );
+            assert_eq!(
+                command(Key::Option('r'), focus, Appearance::Antiope),
+                Some(Command::Repetition)
+            );
+            assert_eq!(
+                command(Key::Letter('i'), focus, Appearance::Antiope),
+                Some(Command::ToggleImages)
+            );
+        }
+        for focus in [Sidebar, EntryList, Reader, Window] {
+            assert_eq!(
+                command(Key::Right, focus, Appearance::Antiope),
+                Some(Command::NextColumn)
+            );
+            assert_eq!(
+                command(Key::Left, focus, Appearance::Antiope),
+                Some(Command::PreviousColumn)
+            );
+        }
+        assert_eq!(command(Key::Right, Control, Appearance::Antiope), None);
+        assert_eq!(
+            command(Key::Down, Sidebar, Appearance::Antiope),
+            Some(Command::NextIndexRow)
+        );
+        assert_eq!(
+            command(Key::Up, Sidebar, Appearance::Antiope),
+            Some(Command::PreviousIndexRow)
+        );
+        assert_eq!(
+            command(Key::Down, EntryList, Appearance::Antiope),
+            Some(Command::NextEntry)
+        );
+        assert_eq!(
+            command(Key::Up, Reader, Appearance::Antiope),
+            Some(Command::PreviousEntry)
+        );
+        assert_eq!(command(Key::Option('x'), Reader, Appearance::Antiope), None);
+    }
+
+    /// Review Focus 2.
+    #[test]
+    fn digits_in_a_text_field_never_become_page_numbers() {
+        for look in [Appearance::Native, Appearance::Antiope] {
+            for key in [
+                Key::Digit(4),
+                Key::Delete,
+                Key::Escape,
+                Key::Option('s'),
+                Key::Option('g'),
+                Key::Option('r'),
+                Key::Question,
+                Key::Letter('i'),
+                Key::Left,
+                Key::Right,
+                Key::Up,
+                Key::Down,
+            ] {
+                assert_eq!(command(key, KeyFocus::TextInput, look), None, "{key:?}");
+            }
+        }
+        assert_eq!(
+            route(
+                0x34,
+                "4",
+                0,
+                false,
+                &[focus::TEXT, "antiopePrompt", focus::READING_PAGE],
+                Appearance::Antiope
+            ),
+            Route {
+                claims_override: false,
+                verb: None
+            }
+        );
+    }
+
+    #[test]
+    fn reading_and_garden_letters_keep_their_meaning_in_antiope() {
+        for focus in [KeyFocus::EntryList, KeyFocus::Reader] {
+            for l in ['j', 'k', 'm', 's'] {
+                assert_eq!(
+                    command(Key::Letter(l), focus, Appearance::Antiope),
+                    command(Key::Letter(l), focus, Appearance::Native)
+                );
+            }
+            for l in ['r', 'b', 'u', 'o', 'w'] {
+                assert_eq!(command(Key::Letter(l), focus, Appearance::Antiope), None);
+            }
+        }
+    }
+
+    #[test]
+    fn held_antiope_keys_act_once_per_press() {
+        for c in [
+            Command::PageDigit(4),
+            Command::PageCancel,
+            Command::Sommaire,
+            Command::Guide,
+            Command::Repetition,
+            Command::ToggleImages,
+            Command::NextColumn,
+            Command::PreviousColumn,
+        ] {
+            assert!(acts_once_per_press(c));
+            assert_eq!(verb(c, true), "spent", "{c:?}");
+        }
+        assert_eq!(
+            [
+                verb(Command::PageCorrect, true),
+                verb(Command::NextIndexRow, true)
+            ],
+            ["pageCorrect", "nextIndexRow"]
+        );
+        assert_eq!(
+            [
+                verb(Command::PageDigit(0), false),
+                verb(Command::PageDigit(9), false),
+                verb(Command::ToggleImages, false)
+            ],
+            ["pageDigit0", "pageDigit9", "toggleImages"]
+        );
+    }
+
+    #[test]
+    fn antiope_columns_classify_their_focus() {
+        assert_eq!(
+            classify(&[focus::ANTIOPE_INDEX, "antiopeView", focus::READING_PAGE]),
+            KeyFocus::Sidebar
+        );
+        assert_eq!(
+            classify(&[focus::ITEM, focus::ANTIOPE_ENTRIES, "antiopeView"]),
+            KeyFocus::EntryList
+        );
+        assert_eq!(
+            classify(&[focus::ANTIOPE_READER, "antiopeView"]),
+            KeyFocus::Reader
+        );
+        assert_eq!(
+            classify(&[focus::WEB, "web", focus::READER_PANE, "antiopeView"]),
+            KeyFocus::Reader
+        );
+        assert_eq!(
+            route(
+                0x34,
+                "4",
+                0,
+                false,
+                &[focus::ANTIOPE_INDEX],
+                Appearance::Antiope
+            ),
+            Route {
+                claims_override: true,
+                verb: Some("pageDigit4")
+            }
+        );
+        assert_eq!(
+            route(
+                0x53,
+                "s",
+                qt::ALT,
+                false,
+                &[focus::ANTIOPE_ENTRIES],
+                Appearance::Antiope
+            ),
+            Route {
+                claims_override: true,
+                verb: Some("sommaire")
+            }
+        );
+        assert_eq!(
+            route(
+                0x34,
+                "4",
+                0,
+                true,
+                &[focus::ANTIOPE_INDEX],
+                Appearance::Antiope
+            ),
+            Route {
+                claims_override: true,
+                verb: Some("spent")
             }
         );
     }
