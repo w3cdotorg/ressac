@@ -5,17 +5,20 @@
 //! every reload) and sends decisions, undo, safe repairs, rhythm and theme through the
 //! short door of `Runs`. The inspector's getters are in `garden_inspector.rs`.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QString, QStringList, QVariant};
-use ressac_core::model::{Decision, FeedId};
+use ressac_core::model::{Action, Decision, FeedId};
+use ressac_core::store::AttemptRecord;
 use ressac_ui::chrono::{self, Utc};
 use ressac_ui::garden::{
     ARCHIVED_COPY, BURIED_NOTE, COULD_NOT_READ_GARDEN, Command, GardenVisit, Grouping,
     HISTORY_TITLE, Inspector, LOG_LINES, NO_FEED_TEXT, NO_FEED_TITLE, NOT_FETCHED, RHYTHM_CHOICES,
     apply_button_title, apply_confirm_label, apply_question, chip, load, rhythm_choice,
-    rhythm_label, safe_repair_preview, status_glyph, theme_choice, tooltip, unread_label,
+    rhythm_label, safe_repair_preview, status_glyph, theme_choice, theme_names, tooltip,
+    unread_label,
 };
 use ressac_ui::live::plan_rows;
 use ressac_ui::runs::{RunEnd, RunRequest};
@@ -85,7 +88,7 @@ pub mod qobject {
         #[qproperty(QString, reason, READ = reason, NOTIFY = inspector_changed)]
         #[qproperty(QString, rhythm_line, READ = rhythm_line, NOTIFY = inspector_changed)]
         #[qproperty(i32, rhythm_index, READ = rhythm_index, NOTIFY = inspector_changed)]
-        #[qproperty(QStringList, theme_names, READ = theme_names, NOTIFY = inspector_changed)]
+        #[qproperty(QStringList, theme_names, READ = theme_names, NOTIFY = themes_changed)]
         #[qproperty(i32, theme_index, READ = theme_index, NOTIFY = inspector_changed)]
         #[qproperty(QStringList, evidence, READ = evidence, NOTIFY = inspector_changed)]
         #[qproperty(QStringList, remarks, READ = remarks, NOTIFY = inspector_changed)]
@@ -233,6 +236,10 @@ pub mod qobject {
         #[qsignal]
         fn selection_changed(self: Pin<&mut Garden>);
 
+        /// The Theme picker's items changed.
+        #[qsignal]
+        fn themes_changed(self: Pin<&mut Garden>);
+
         /// The inspector's content changed.
         #[qsignal]
         fn inspector_changed(self: Pin<&mut Garden>);
@@ -276,7 +283,17 @@ pub struct TableRow {
 pub struct GardenRust {
     pub(crate) visit: GardenVisit,
     rows: Vec<TableRow>,
+    /// Each table row's position, by feed.
+    row_index: HashMap<FeedId, usize>,
     pub(crate) inspector: Option<Inspector>,
+    /// The inspector's fetch log and the feed it was read for: read again only when the
+    /// selected feed changes or a decision touched it.
+    log: Vec<AttemptRecord>,
+    log_feed: Option<FeedId>,
+    /// The visit's safe repairs, as of the last sync (five properties read them).
+    repairs: Vec<(FeedId, Action)>,
+    /// The Theme picker's items, as of the last sync.
+    pub(crate) theme_names: Vec<String>,
 }
 
 /// The value of `role` (a name of [`ROLES`]) for a row.
@@ -342,7 +359,7 @@ impl qobject::Garden {
     }
 
     fn repair_count(&self) -> usize {
-        self.rust().visit.safe_repairs().len()
+        self.rust().repairs.len()
     }
 
     fn safe_repair_count(&self) -> i32 {
@@ -358,8 +375,8 @@ impl qobject::Garden {
     }
 
     fn apply_preview(&self) -> QString {
-        let visit = &self.rust().visit;
-        QString::from(safe_repair_preview(&visit.snapshot().rows, &visit.safe_repairs()).as_str())
+        let rust = self.rust();
+        QString::from(safe_repair_preview(&rust.visit.snapshot().rows, &rust.repairs).as_str())
     }
 
     fn apply_confirm_label(&self) -> QString {
@@ -439,10 +456,9 @@ impl qobject::Garden {
 
     fn row_of_feed(&self, feed_id: i64) -> i32 {
         self.rust()
-            .rows
-            .iter()
-            .position(|row| row.feed_id == feed_id)
-            .map_or(-1, to_i32)
+            .row_index
+            .get(&feed_id)
+            .map_or(-1, |at| to_i32(*at))
     }
 
     /// The table the visit lists now, in section order.
@@ -487,6 +503,20 @@ impl qobject::Garden {
         for op in plan_rows(&self.rust().rows, &new, |row| row.feed_id) {
             self.as_mut().apply(op);
         }
+        self.as_mut().rust_mut().get_mut().row_index = self
+            .rust()
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(at, row)| (row.feed_id, at))
+            .collect();
+        let repairs = self.rust().visit.safe_repairs();
+        self.as_mut().rust_mut().get_mut().repairs = repairs;
+        let names = theme_names(&self.rust().visit.snapshot().themes);
+        if names != self.rust().theme_names {
+            self.as_mut().rust_mut().get_mut().theme_names = names;
+            self.as_mut().themes_changed();
+        }
         self.as_mut().refresh_inspector();
         self.as_mut().state_changed();
         if (self.selected_row(), self.selected_feed_id()) != before {
@@ -496,18 +526,23 @@ impl qobject::Garden {
 
     /// The selected feed's inspector, with its fetch log.
     fn refresh_inspector(mut self: Pin<&mut Self>) {
-        let log = self
-            .selected_feed()
-            .and_then(|feed| with_session(|session| session.store.attempts(feed, LOG_LINES)))
-            .and_then(|read| {
-                read.inspect_err(|error| tracing::warn!("cannot read the fetch log: {error}"))
-                    .ok()
-            })
-            .unwrap_or_default();
+        let feed = self.selected_feed();
+        if self.rust().log_feed != feed {
+            let log = feed
+                .and_then(|feed| with_session(|session| session.store.attempts(feed, LOG_LINES)))
+                .and_then(|read| {
+                    read.inspect_err(|error| tracing::warn!("cannot read the fetch log: {error}"))
+                        .ok()
+                })
+                .unwrap_or_default();
+            let rust = self.as_mut().rust_mut().get_mut();
+            rust.log = log;
+            rust.log_feed = feed;
+        }
         let inspector = self
             .rust()
             .visit
-            .inspector(&log, Utc::now(), &chrono::Local);
+            .inspector(&self.rust().log, Utc::now(), &chrono::Local);
         if inspector != self.rust().inspector {
             self.as_mut().rust_mut().get_mut().inspector = inspector;
             self.inspector_changed();
@@ -518,16 +553,13 @@ impl qobject::Garden {
         match Selection::parse_key(&key.to_string()) {
             Some(Selection::Garden(scope)) => {
                 self.as_mut().rust_mut().get_mut().visit.enter(scope);
-                self.as_mut().reload();
+                self.reload();
             }
             _ => {
                 self.as_mut().rust_mut().get_mut().visit.leave();
-                self.as_mut().sync();
+                self.sync();
             }
         }
-        self.as_mut().state_changed();
-        self.as_mut().selection_changed();
-        self.inspector_changed();
     }
 
     fn reload(mut self: Pin<&mut Self>) {
@@ -603,11 +635,12 @@ impl qobject::Garden {
     fn run_decision(self: Pin<&mut Self>, decision: Decision) {
         let Some(feed) = self.target() else { return };
         let qt = self.qt_thread();
+        let epoch = self.rust().visit.epoch();
         submit_short(
             RunRequest::Decide(feed, decision),
             move |cx| ressac_ui::garden::decide(cx.app.store(), feed, decision, Utc::now()),
             move |end| {
-                let queued = qt.queue(move |garden| garden.decision_ended(feed, end));
+                let queued = qt.queue(move |garden| garden.decision_ended(epoch, feed, end));
                 if queued.is_err() {
                     tracing::debug!("the app quit before a decision finished");
                 }
@@ -617,10 +650,18 @@ impl qobject::Garden {
 
     /// A decision run ended, on the GUI thread: a recorded one stays listed, dimmed. (A
     /// failure or a refusal is the banner's, from `Runs`; the reload is `databaseChanged`'s.)
-    fn decision_ended(mut self: Pin<&mut Self>, feed: FeedId, end: RunEnd<()>) {
+    /// A run that ended in another visit (the scope changed meanwhile) only reloads: the
+    /// decision did land, but its memory belongs to the visit that asked.
+    fn decision_ended(mut self: Pin<&mut Self>, epoch: u64, feed: FeedId, end: RunEnd<()>) {
         if let RunEnd::Done(()) = end {
-            self.as_mut().rust_mut().get_mut().visit.decided(feed);
-            self.sync();
+            if self.rust().visit.epoch() == epoch {
+                let rust = self.as_mut().rust_mut().get_mut();
+                rust.visit.decided(feed);
+                rust.log_feed = None;
+                self.sync();
+            } else {
+                self.reload();
+            }
         }
     }
 
@@ -633,11 +674,12 @@ impl qobject::Garden {
             return;
         }
         let qt = self.qt_thread();
+        let epoch = self.rust().visit.epoch();
         submit_short(
             RunRequest::Undo,
             |cx| ressac_core::garden::undo(cx.app.store()),
             move |end| {
-                let queued = qt.queue(move |garden| garden.undo_ended(end));
+                let queued = qt.queue(move |garden| garden.undo_ended(epoch, end));
                 if queued.is_err() {
                     tracing::debug!("the app quit before an undo finished");
                 }
@@ -645,10 +687,16 @@ impl qobject::Garden {
         );
     }
 
-    fn undo_ended(mut self: Pin<&mut Self>, end: RunEnd<Option<FeedId>>) {
+    fn undo_ended(mut self: Pin<&mut Self>, epoch: u64, end: RunEnd<Option<FeedId>>) {
         if let RunEnd::Done(undone) = end {
-            self.as_mut().rust_mut().get_mut().visit.undone(undone);
-            self.sync();
+            if self.rust().visit.epoch() == epoch {
+                let rust = self.as_mut().rust_mut().get_mut();
+                rust.visit.undone(undone);
+                rust.log_feed = None;
+                self.sync();
+            } else {
+                self.reload();
+            }
         }
     }
 

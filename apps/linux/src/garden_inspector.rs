@@ -4,7 +4,7 @@
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QStringList};
-use ressac_ui::garden::{Inspector, theme_names};
+use ressac_ui::garden::Inspector;
 
 use crate::garden::{qobject::Garden, string_list};
 use crate::rows::to_i32;
@@ -68,10 +68,9 @@ impl Garden {
             .map_or(-1, |r| to_i32(r.index))
     }
 
+    /// The pickers' items, as of the last sync.
     pub(crate) fn theme_names(&self) -> QStringList {
-        let names = self.rust().visit.snapshot().themes.as_slice();
-        let names = theme_names(names);
-        string_list(names.iter().map(String::as_str))
+        string_list(self.rust().theme_names.iter().map(String::as_str))
     }
 
     /// −1 hides the Theme picker.

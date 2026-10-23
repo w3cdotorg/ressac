@@ -19,6 +19,8 @@ use crate::sources::GardenScope;
 #[derive(Debug, Clone, Default)]
 pub struct GardenVisit {
     scope: Option<GardenScope>,
+    /// Counts the visits: a run that outlives its visit compares it before touching the next.
+    epoch: u64,
     snapshot: Snapshot,
     /// Every feed seen needing triage during the visit.
     seen_in_queue: HashSet<FeedId>,
@@ -42,12 +44,20 @@ impl GardenVisit {
             return;
         }
         self.reset();
+        self.epoch += 1;
         self.scope = Some(scope);
     }
 
     pub fn leave(&mut self) {
         self.reset();
+        self.epoch += 1;
         self.scope = None;
+    }
+
+    /// Identifies the current visit (it changes when another scope is entered or the garden
+    /// is left).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     fn reset(&mut self) {
@@ -441,5 +451,25 @@ mod tests {
         v.enter(GardenScope::NeedsTriage);
         assert_eq!(v.grouping(), Grouping::Rhythm);
         assert!(!v.is_dimmed(8) && v.selected().is_none());
+    }
+
+    #[test]
+    fn a_visit_has_an_epoch_that_changes_with_the_scope() {
+        let mut v = GardenVisit::default();
+        v.enter(GardenScope::NeedsTriage);
+        let first = v.epoch();
+        v.enter(GardenScope::NeedsTriage);
+        assert_eq!(v.epoch(), first, "the same scope is the same visit");
+        v.enter(GardenScope::All);
+        let second = v.epoch();
+        assert_ne!(second, first);
+        v.leave();
+        assert_ne!(v.epoch(), second);
+        v.enter(GardenScope::All);
+        assert_ne!(
+            v.epoch(),
+            second,
+            "a new visit of the same scope is another visit"
+        );
     }
 }
