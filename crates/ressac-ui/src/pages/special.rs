@@ -9,24 +9,11 @@ use chrono::TimeZone;
 use ressac_core::edition::Section;
 use ressac_core::model::FeedId;
 use ressac_core::store::{EditionOverflowRow, JournalItem, JournalView};
-use unicode_segmentation::UnicodeSegmentation;
 
 use super::frame::{empty_line, entry_lines, progress_text};
-use super::{DirRow, Line, LineRole, PageDirectory, ReaderPage};
+use super::{DirRow, Line, LineRole, PageDirectory, ReaderPage, blank_line, len, wide};
 use crate::journal::{self, Phase};
 use crate::teletext::{CellLine, CellSpan, Color, DatePattern, date};
-
-fn wide(count: usize) -> i64 {
-    i64::try_from(count).unwrap_or(i64::MAX)
-}
-
-fn len(text: &str) -> usize {
-    text.graphemes(true).count()
-}
-
-fn blank_line(id: impl Into<String>, width: usize) -> Line {
-    Line::new(id, LineRole::Blank, CellLine::blank(width))
-}
 
 /// The wave of the app icon in half-block mosaics, repeated across the page.
 pub const WAVE_TOP: &str = " ▄▀▀▄   ";
@@ -173,8 +160,8 @@ pub const GUIDE_SECTIONS: [GuideSection; 5] = [
     },
 ];
 
-/// The key column, wide enough for ` CTRL SHIFT R`.
-pub const GUIDE_KEY_CELLS: usize = 13;
+/// The key column: a leading cell, the longest keys (`CTRL SHIFT R`), and one blank cell before the action.
+pub const GUIDE_KEY_CELLS: usize = 14;
 
 /// For each section: a blank row, the heading black on green, then one row per key, the keys
 /// in cyan and the action in white. Every row is exactly `width` cells.
@@ -317,12 +304,11 @@ where
                 Some(entry.row.entry_id) == selected,
                 cells,
             ));
-            let last_of_feed =
-                index + 1 == entries.len() || entries[index + 1].row.feed_id != entry.row.feed_id;
+            let last_of_feed = !entries[index + 1..]
+                .iter()
+                .any(|later| later.row.feed_id == entry.row.feed_id);
             if last_of_feed
-                && let Some(more) = overflow
-                    .iter()
-                    .find(|o| o.feed_id == entry.row.feed_id && !placed.contains(&o.feed_id))
+                && let Some(more) = overflow.iter().find(|o| o.feed_id == entry.row.feed_id)
             {
                 placed.insert(more.feed_id);
                 lines.push(overflow_line(more, cells));
@@ -658,7 +644,7 @@ mod tests {
             GUIDE_SECTIONS
                 .iter()
                 .flat_map(|s| s.keys)
-                .all(|k| k.keys.len() < GUIDE_KEY_CELLS)
+                .all(|k| k.keys.len() + 2 <= GUIDE_KEY_CELLS)
         );
     }
 
@@ -668,8 +654,8 @@ mod tests {
         assert_eq!(lines[0], CellLine::blank(40));
         assert!(t(&lines[1].spans[0]).starts_with(" PAGES"));
         assert!(lines[1].spans[0].fg == Color::Black && lines[1].spans[0].bg == Color::Green);
-        assert_eq!(t(&lines[2].spans[0]), " 0-9         ");
-        assert_eq!(lines[2].spans[0].cells(), 13);
+        assert_eq!(t(&lines[2].spans[0]), " 0-9          ");
+        assert_eq!(lines[2].spans[0].cells(), 14);
         assert_eq!(lines[2].spans[0].fg, Color::Cyan);
         assert_eq!(lines[2].spans[1].fg, Color::White);
         assert!(lines.iter().all(|l| all_spans(l, |s| s.fg != Color::Blue)));
@@ -954,8 +940,8 @@ mod tests {
     }
 
     #[test]
-    fn a_feeds_overflow_is_placed_once() {
-        // Two runs of one feed in a section: the overflow row follows the first run only.
+    fn a_feeds_overflow_follows_its_last_entry_of_the_section() {
+        // Two runs of one feed in a section: the overflow row follows the feed's last entry.
         let items = vec![
             journal_item(1, Section::Wire, 1, 10, "Actualité", Some("One"), false),
             journal_item(2, Section::Wire, 2, 11, "Other", Some("Two"), false),
@@ -965,10 +951,21 @@ mod tests {
         let lines = page(&view, None);
         let ids: HashSet<_> = lines.iter().map(|l| l.id.clone()).collect();
         assert_eq!(ids.len(), lines.len());
+        let roles: Vec<LineRole> = lines.iter().map(|l| l.role.clone()).collect();
         assert_eq!(
-            lines
+            roles[roles.len() - 2..],
+            [
+                LineRole::Entry(3),
+                LineRole::Overflow {
+                    feed: 10,
+                    page: Some(412)
+                }
+            ]
+        );
+        assert_eq!(
+            roles
                 .iter()
-                .filter(|l| matches!(l.role, LineRole::Overflow { .. }))
+                .filter(|r| matches!(r, LineRole::Overflow { .. }))
                 .count(),
             1
         );

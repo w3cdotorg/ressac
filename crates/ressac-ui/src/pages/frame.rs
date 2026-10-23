@@ -11,6 +11,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
     AntiopeColumn, DirRow, INDEX_CELLS, Line, LineRole, PageDirectory, PageEntry, ReservedPage,
+    len, wide,
 };
 use crate::entries::display_title;
 use crate::journal::Phase;
@@ -55,14 +56,6 @@ pub fn rolling_page(now: DateTime<Utc>) -> u16 {
     100 + u16::try_from(tenths.rem_euclid(800)).unwrap_or(0)
 }
 
-fn cells(count: usize) -> i64 {
-    i64::try_from(count).unwrap_or(i64::MAX)
-}
-
-fn len(text: &str) -> usize {
-    text.graphemes(true).count()
-}
-
 /// The page in yellow (red when not found) and `RESSAC` in white on the left; the date in cyan
 /// and the time in yellow at the right edge. Exactly `width` cells: when the window is narrow,
 /// the time keeps its cells first, then the date, then the page. `right_margin` blank cells
@@ -104,17 +97,17 @@ where
     let page_cells = take(len(&page) + 1);
     let name_cells = remaining;
     let mut spans = vec![
-        CellSpan::new(&page, cells(page_cells), color),
+        CellSpan::new(&page, wide(page_cells), color),
         CellSpan::new(
             if shows_name { "RESSAC" } else { "" },
-            cells(name_cells),
+            wide(name_cells),
             Color::White,
         ),
-        CellSpan::new(&day, cells(day_cells), Color::Cyan),
-        CellSpan::new(&time, cells(time_cells), Color::Yellow),
+        CellSpan::new(&day, wide(day_cells), Color::Cyan),
+        CellSpan::new(&time, wide(time_cells), Color::Yellow),
     ];
     if margin > 0 {
-        spans.push(CellSpan::new("", cells(margin), Color::White));
+        spans.push(CellSpan::new("", wide(margin), Color::White));
     }
     CellLine::new(spans)
 }
@@ -157,7 +150,7 @@ pub fn column_title(
     blank_when_inactive: bool,
 ) -> CellLine {
     if blank_when_inactive && !active {
-        return CellLine::new(vec![CellSpan::new("", cells(width), Color::Cyan)]);
+        return CellLine::new(vec![CellSpan::new("", wide(width), Color::Cyan)]);
     }
     let mut label = column_label(column).to_string();
     if let Some(unread) = unread_only {
@@ -165,7 +158,7 @@ pub fn column_title(
     }
     let line = CellLine::new(vec![CellSpan::new(
         &format!(" {label}"),
-        cells(width),
+        wide(width),
         Color::Cyan,
     )]);
     if active {
@@ -223,19 +216,15 @@ pub fn index_line(
         Color::Yellow
     };
     let line = CellLine::new(vec![
-        CellSpan::new(
-            &format!("{} ", row.number),
-            cells(number_cells),
-            Color::Cyan,
-        ),
-        CellSpan::new(&format!("{indent}{title}"), cells(title_cells), title_color),
+        CellSpan::new(&format!("{} ", row.number), wide(number_cells), Color::Cyan),
+        CellSpan::new(&format!("{indent}{title}"), wide(title_cells), title_color),
         CellSpan::new(
             &if count.is_empty() {
                 String::new()
             } else {
                 format!(" {count}")
             },
-            cells(count_cells),
+            wide(count_cells),
             count_color,
         ),
     ]);
@@ -323,13 +312,13 @@ pub fn entry_lines(
             let line = CellLine::new(vec![
                 CellSpan::new(
                     if index == 0 && !read { "●" } else { "" },
-                    cells(marker_cells),
+                    wide(marker_cells),
                     Color::Yellow,
                 ),
-                CellSpan::new(text, cells(title_cells), Color::White),
+                CellSpan::new(text, wide(title_cells), Color::White),
                 CellSpan::new(
                     if index == 0 && starred { " *" } else { "" },
-                    cells(star_cells),
+                    wide(star_cells),
                     Color::White,
                 ),
             ]);
@@ -355,7 +344,7 @@ pub fn no_entry_line(width: usize) -> CellLine {
 /// The run-failure notice: reverse video, black on red, one row of exactly `width` cells.
 pub fn failure_notice_line(notice: &str, width: usize) -> CellLine {
     CellLine::new(vec![
-        CellSpan::new(&format!(" {notice}"), cells(width), Color::Black).on(Color::Red),
+        CellSpan::new(&format!(" {notice}"), wide(width), Color::Black).on(Color::Red),
     ])
 }
 
@@ -404,7 +393,7 @@ impl MinitelKey {
     pub fn line(self) -> CellLine {
         let label = self.label();
         CellLine::new(vec![
-            CellSpan::new(&format!(" {label} "), cells(len(label) + 2), Color::Black)
+            CellSpan::new(&format!(" {label} "), wide(len(label) + 2), Color::Black)
                 .on(Color::Cyan),
         ])
     }
@@ -485,7 +474,7 @@ pub fn status(
 pub fn hint_line(hint: &Hint, width: usize) -> CellLine {
     CellLine::new(vec![CellSpan::new(
         &format!(" {}", hint.text),
-        cells(width),
+        wide(width),
         hint.color,
     )])
 }
@@ -497,7 +486,7 @@ pub const SEARCH_LABEL: &str = "SEARCH? ";
 pub fn search_label_line(width: usize) -> CellLine {
     CellLine::new(vec![CellSpan::new(
         &format!(" {SEARCH_LABEL}"),
-        cells(width.min(SEARCH_LABEL.len() + 1)),
+        wide(width.min(SEARCH_LABEL.len() + 1)),
         Color::Cyan,
     )])
 }
@@ -522,7 +511,7 @@ impl BannerRow {
 pub fn banner_row(message: &str, show_log: bool, cells_wide: usize) -> BannerRow {
     let key = |label: &str| {
         CellLine::new(vec![
-            CellSpan::new(label, cells(len(label)), Color::Yellow).on(Color::Red),
+            CellSpan::new(label, wide(len(label)), Color::Yellow).on(Color::Red),
         ])
     };
     let log = show_log.then(|| key(" LOG "));
@@ -532,8 +521,7 @@ pub fn banner_row(message: &str, show_log: bool, cells_wide: usize) -> BannerRow
         .saturating_sub(dismiss.width());
     BannerRow {
         message: CellLine::new(vec![
-            CellSpan::new(&format!(" {message}"), cells(message_cells), Color::White)
-                .on(Color::Red),
+            CellSpan::new(&format!(" {message}"), wide(message_cells), Color::White).on(Color::Red),
         ]),
         log,
         dismiss,

@@ -771,7 +771,7 @@ pub fn toggle_all_images_script() -> String {
 /// position. App JavaScript; the page's own stays off.
 pub fn subpage_script(text: &str) -> String {
     format!(
-        r#"const line = document.getElementById("subpage"); if (line) {{ line.textContent = {}; }}"#,
+        r#"(() => {{ const line = document.getElementById("subpage"); if (line) {{ line.textContent = {}; }} }})()"#,
         js_string(text)
     )
 }
@@ -1413,6 +1413,8 @@ mod tests {
         assert!(script.contains(r#"getElementById("subpage")"#));
         assert!(script.contains(&js_string("412 3/20")));
         assert!(script.contains("textContent"));
+        // Evaluated twice in one document: no top-level declaration.
+        assert!(script.starts_with("(() => {") && script.ends_with("})()"));
         assert!(subpage_script(r#""</script>"#).contains(r#"\"\u003c/script>"#));
     }
 

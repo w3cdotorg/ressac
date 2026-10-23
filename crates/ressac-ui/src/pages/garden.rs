@@ -12,25 +12,13 @@ use ressac_core::model::FeedId;
 use ressac_core::store::{AttemptRecord, CadenceDetail};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{AntiopeColumn, Line, LineRole};
+use super::{AntiopeColumn, Line, LineRole, blank_line, len, wide};
 use crate::garden::{
     GardenRow, Inspector, Progress, RHYTHM_CHOICES, chip, empty_message, outcome, progress,
     rhythm_index, rhythm_text, sections, unread_label,
 };
 use crate::sources::GardenScope;
 use crate::teletext::{CellLine, CellSpan, Color, DatePattern, date};
-
-fn wide(count: usize) -> i64 {
-    i64::try_from(count).unwrap_or(i64::MAX)
-}
-
-fn len(text: &str) -> usize {
-    text.graphemes(true).count()
-}
-
-fn blank_line(id: impl Into<String>, cells: usize) -> Line {
-    Line::new(id, LineRole::Blank, CellLine::blank(cells))
-}
 
 /// A status in its teletext colour. Fossil's is blue, and blue never colours text, so its
 /// heading is reverse video (see [`heading_style`]).
@@ -319,8 +307,8 @@ impl Page {
 
 /// The inspector as a teletext page `cells` wide: name and folder path, the status in double
 /// height, the rhythm and theme rows, then evidence, remarks, links, redirects and the fetch
-/// log. `cadence` is the selected feed's own; `theme_names` is `garden::theme_names` (empty
-/// leaves the Theme rows out); `log` is the feed's fetch log, newest first.
+/// log. `cadence` is the selected feed's own; `theme_names` is `garden::theme_names` ("None" alone, no
+/// themes defined, leaves the Theme rows out); `log` is the feed's fetch log, newest first.
 pub fn inspector_page<Tz: TimeZone>(
     inspector: Option<&Inspector>,
     cadence: Option<&CadenceDetail>,
@@ -373,7 +361,7 @@ where
         page.labelled("Rhythm", &rhythm_text(cadence, now));
         page.lines.extend(cadence_choices(cadence, cells));
     }
-    if let Some(current) = inspector.theme.filter(|_| !theme_names.is_empty()) {
+    if let Some(current) = inspector.theme.filter(|_| theme_names.len() > 1) {
         page.blank();
         page.labelled("Theme", theme_names.get(current).map_or("", String::as_str));
         page.lines
@@ -1265,6 +1253,18 @@ mod tests {
         );
         let ids: HashSet<_> = lines.iter().map(|l| l.id.clone()).collect();
         assert_eq!(ids.len(), lines.len());
+    }
+
+    #[test]
+    fn no_theme_rows_without_a_defined_theme() {
+        // Through the real call: no themes still gives ["None"], a one-row picker nobody needs.
+        let names = theme_names(&[]);
+        assert_eq!(names, ["None"]);
+        let row = unphotographable();
+        let inspector = inspect(&row, None, &[], None, &[]);
+        let lines = inspector_page(Some(&inspector), None, &names, &[], 60, now(), &Utc);
+        assert!(!lines.iter().any(|l| matches!(l.role, LineRole::Theme(_))));
+        assert!(!lines.iter().any(|l| l.text().starts_with("THEME")));
     }
 
     #[test]

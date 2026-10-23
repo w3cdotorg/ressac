@@ -18,6 +18,20 @@ pub mod frame;
 pub mod garden;
 pub mod special;
 
+/// Cells as the `i64` count `CellSpan::new` takes.
+pub(crate) fn wide(count: usize) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
+}
+
+/// Graphemes of `text`: one per cell.
+pub(crate) fn len(text: &str) -> usize {
+    unicode_segmentation::UnicodeSegmentation::graphemes(text, true).count()
+}
+
+pub(crate) fn blank_line(id: impl Into<String>, cells: usize) -> Line {
+    Line::new(id, LineRole::Blank, CellLine::blank(cells))
+}
+
 /// The index column's width, in cells.
 pub const INDEX_CELLS: usize = 22;
 /// The entries column's width, in cells.
@@ -543,6 +557,7 @@ impl AntiopeNav {
 
     /// A click on an entry or a jump brings the article back.
     pub fn show_article(&mut self) {
+        self.advancing_to_end = false;
         self.reader_page = ReaderPage::Article;
     }
 
@@ -573,6 +588,7 @@ impl AntiopeNav {
     /// and changes nothing else.
     pub fn jump(&mut self, number: u16, ctx: &NavContext<'_>) -> Outcome {
         self.entry.cancel();
+        self.advancing_to_end = false;
         let Some(destination) = ctx.directory.destination(number) else {
             self.not_found = Some((number, ctx.now + NOT_FOUND_FOR));
             return Outcome::handled(vec![Effect::NotFound]);
@@ -1490,6 +1506,34 @@ mod tests {
             handled(vec![Effect::MarkRead(EDITION_LAST)])
         );
         assert_eq!(fresh.land_on_end(None), handled(vec![]));
+    }
+
+    #[test]
+    fn a_jump_or_a_click_clears_the_pending_page_down() {
+        let (d, now) = (PageDirectory::new(&paged_snapshot()), Instant::now());
+        let c = on_the_last_entry(&d, now, false);
+        for leave in [0, 1, 2] {
+            let mut nav = AntiopeNav::default();
+            assert_eq!(
+                nav.handle(Command::Advance, &c),
+                handled(vec![Effect::PageDownThenEnd(EDITION_LAST)])
+            );
+            match leave {
+                0 => {
+                    nav.jump(101, &c);
+                }
+                1 => {
+                    nav.jump(999, &c); // an unknown page also leaves
+                }
+                _ => nav.show_article(),
+            }
+            // The page-down that never finished no longer blocks the next Space.
+            assert_eq!(
+                nav.handle(Command::Advance, &on_the_last_entry(&d, now, false)),
+                handled(vec![Effect::PageDownThenEnd(EDITION_LAST)]),
+                "leave {leave}"
+            );
+        }
     }
 
     #[test]
