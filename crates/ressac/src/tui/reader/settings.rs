@@ -1,5 +1,6 @@
 //! The terminal's own settings (spec §5, The look setting): the look and whether images show,
-//! in `terminal.json` next to the database. A missing or unreadable file means the defaults;
+//! in `terminal.json` (`Paths::terminal_settings`: next to the database on macOS,
+//! `$XDG_CONFIG_HOME/ressac/` on Linux). A missing or unreadable file means the defaults;
 //! saving never blocks reading (the caller ignores a failed save, beyond a message).
 
 use std::path::{Path, PathBuf};
@@ -43,9 +44,13 @@ impl TerminalSettings {
         std::fs::rename(&tmp, path)
     }
 
-    /// `~/Library/Application Support/Ressac/terminal.json`, next to the default database.
+    /// `terminal.json` from the layout: `~/Library/Application Support/Ressac/` (next to the
+    /// default database) on macOS, `$XDG_CONFIG_HOME/ressac/` on Linux. Without a usable home
+    /// it falls back to next to the default database.
     pub fn default_path() -> PathBuf {
-        ressac_core::store::default_path().with_file_name("terminal.json")
+        ressac_core::paths::Paths::from_env()
+            .map(|p| p.terminal_settings())
+            .unwrap_or_else(|_| ressac_core::store::default_path().with_file_name("terminal.json"))
     }
 }
 
@@ -103,6 +108,19 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_default_path_is_in_the_config_directory() {
+        let path = TerminalSettings::default_path();
+        assert!(path.ends_with("ressac/terminal.json"), "{path:?}");
+        assert_ne!(
+            path.parent(),
+            ressac_core::store::default_path().parent(),
+            "{path:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_default_path_sits_next_to_the_database() {
         let path = TerminalSettings::default_path();
