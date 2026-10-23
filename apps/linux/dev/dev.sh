@@ -53,12 +53,18 @@ run_container() {
 up() {
   preflight
   [ -n "$(image_id)" ] || build_image
-  local want have state
+  local want have state src
   want=$(image_id)
   have=$(docker inspect -f '{{.Image}}' "$NAME" 2>/dev/null || true)
   if [ -z "$have" ]; then
     run_container
   elif [ "$have" != "$want" ]; then
+    echo "$NAME: recreating, the image changed" >&2
+    docker rm -f "$NAME" >/dev/null
+    run_container
+  elif src=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "'"$MOUNT"'"}}{{.Source}}{{end}}{{end}}' "$NAME") \
+    && [ "$src" != "$repo" ]; then
+    echo "$NAME: recreating, $MOUNT was mounted from ${src:-nowhere}, not $repo" >&2
     docker rm -f "$NAME" >/dev/null
     run_container
   else

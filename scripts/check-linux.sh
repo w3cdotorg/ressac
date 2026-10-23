@@ -39,6 +39,7 @@ leftover=$(find "$scratch/home" "$scratch/xdg" -mindepth 1 2>/dev/null | head -n
 $leftover"
 
 # Layout smoke test: a fresh HOME and no XDG_* must give the XDG layout.
+test -x "$target/debug/ressac" || die "layout smoke: $target/debug/ressac missing"
 smoke="$scratch/smoke"
 mkdir "$smoke"
 env -u RESSAC_DB -u RUST_LOG -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u XDG_CACHE_HOME \
