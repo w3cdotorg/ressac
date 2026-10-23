@@ -9,6 +9,7 @@ pub mod journal;
 pub mod keys;
 pub mod launch;
 pub mod live;
+pub mod pages;
 pub mod runs;
 pub mod sanitize;
 pub mod settings;
