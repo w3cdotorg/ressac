@@ -7,10 +7,11 @@ use std::time::Duration;
 use chrono::offset::MappedLocalTime;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use ressac_core::edition::Section;
-use ressac_core::model::FeedId;
+use ressac_core::garden::GardenRow;
+use ressac_core::model::{Action, Cadence, Decision, Diagnosis, Evidence, FeedId, Remark, Status};
 use ressac_core::store::{
-    EditionOverflowRow, EditionRecord, EntryRow, JournalItem, JournalView, SourceCounts,
-    SourceNode, SourceNodeKind, SourcesSnapshot, Store,
+    DecisionRecord, EditionOverflowRow, EditionRecord, EntryRow, JournalItem, JournalView,
+    SourceCounts, SourceNode, SourceNodeKind, SourcesSnapshot, Store,
 };
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -498,5 +499,100 @@ pub fn journal_view(
             page: Some(412),
             hidden_count: 12,
         }],
+    }
+}
+
+/// A feed of the garden: active, in `Blogs`, diagnosed as `status` when given.
+pub fn garden_row(id: FeedId, title: &str, status: Option<Status>) -> GardenRow {
+    GardenRow {
+        feed_id: id,
+        title: title.into(),
+        folder_path: "Blogs".into(),
+        top_folder: "Blogs".into(),
+        xml_url: format!("https://feeds.example.org/{id}"),
+        html_url: None,
+        wayback_url: None,
+        buried: false,
+        diagnosis: status.map(|status| Diagnosis {
+            status,
+            reason: String::new(),
+            evidence: Evidence::default(),
+            remarks: vec![],
+            action: None,
+            hijack_score: 0.0,
+            cadence: Cadence::default(),
+        }),
+        decision: None,
+        recent: vec![],
+        attempts: vec![],
+    }
+}
+
+/// Builders for the garden rows of the tests.
+pub trait GardenRowExt {
+    fn folder(self, path: Option<&str>) -> Self;
+    fn buried(self) -> Self;
+    fn action(self, action: Action) -> Self;
+    fn decided(self, decision: Decision) -> Self;
+    fn site(self, url: &str) -> Self;
+    fn wayback(self, url: &str) -> Self;
+    fn reason(self, text: &str) -> Self;
+    fn evidence(self, bullets: &[&str]) -> Self;
+    fn remarks(self, remarks: Vec<Remark>) -> Self;
+}
+
+impl GardenRowExt for GardenRow {
+    fn folder(mut self, path: Option<&str>) -> Self {
+        self.folder_path = path.unwrap_or_default().into();
+        self.top_folder = self
+            .folder_path
+            .split(" / ")
+            .next()
+            .unwrap_or_default()
+            .into();
+        self
+    }
+    fn buried(mut self) -> Self {
+        self.buried = true;
+        self
+    }
+    fn action(mut self, action: Action) -> Self {
+        self.diagnosis.as_mut().expect("a diagnosed row").action = Some(action);
+        self
+    }
+    fn decided(mut self, decision: Decision) -> Self {
+        self.decision = Some(DecisionRecord {
+            id: 1,
+            feed_id: self.feed_id,
+            decision,
+            status_at_decision: self.status(),
+            action: None,
+            decided_at: at("2026-10-10T08:00:00Z"),
+        });
+        self
+    }
+    fn site(mut self, url: &str) -> Self {
+        self.html_url = Some(url.into());
+        self
+    }
+    fn wayback(mut self, url: &str) -> Self {
+        self.wayback_url = Some(url.into());
+        self
+    }
+    fn reason(mut self, text: &str) -> Self {
+        self.diagnosis.as_mut().expect("a diagnosed row").reason = text.into();
+        self
+    }
+    fn evidence(mut self, bullets: &[&str]) -> Self {
+        self.diagnosis
+            .as_mut()
+            .expect("a diagnosed row")
+            .evidence
+            .bullets = bullets.iter().map(|b| (*b).to_string()).collect();
+        self
+    }
+    fn remarks(mut self, remarks: Vec<Remark>) -> Self {
+        self.diagnosis.as_mut().expect("a diagnosed row").remarks = remarks;
+        self
     }
 }
