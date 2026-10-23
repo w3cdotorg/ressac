@@ -16,7 +16,9 @@ use std::process::ExitCode;
 use cxx_qt_lib::{QQmlApplicationEngine, QUrl};
 use ressac_core::logging;
 use ressac_core::paths::Paths;
+use ressac_ui::keys;
 use ressac_ui::launch::parse_args;
+use ressac_ui::settings::Appearance;
 
 // Named by the `shim` bridge's `extern "Rust"` block (cxx looks it up in this scope).
 use reader::ressac_scheme_serve;
@@ -33,6 +35,8 @@ mod shim {
         pub fn ressac_has_window() -> bool;
         pub fn ressac_exec() -> i32;
         pub fn ressac_grab_window(path: &str) -> bool;
+        pub fn ressac_install_key_filter();
+        pub fn ressac_send_key(key: i32, modifiers: u32, text: &str) -> bool;
 
         pub fn ressac_settings_default_file() -> String;
         pub fn ressac_settings_get(file: &str, key: &str, value: &mut String) -> bool;
@@ -43,7 +47,51 @@ mod shim {
     extern "Rust" {
         /// The `ressac:` scheme handler's lookup (`reader.rs`).
         fn ressac_scheme_serve(url: &str, mime: &mut String, body: &mut Vec<u8>) -> bool;
+
+        /// The window key filter's question (`ressac_ui::keys::route`): fills `verb` (empty
+        /// when the key maps to no command) and returns whether the key's `ShortcutOverride`
+        /// is claimed.
+        fn ressac_route_key(
+            key: i32,
+            text: &str,
+            modifiers: u32,
+            repeat: bool,
+            chain: &str,
+            look: &str,
+            verb: &mut String,
+        ) -> bool;
     }
+}
+
+/// The window key filter's question (`cpp/shim.cpp`), answered by `ressac_ui::keys`: the tokens
+/// of the focused chain arrive joined with `|`, the verb goes back empty when the key maps to
+/// no command, and the result says whether the `ShortcutOverride` is claimed.
+fn ressac_route_key(
+    key: i32,
+    text: &str,
+    modifiers: u32,
+    repeat: bool,
+    chain: &str,
+    look: &str,
+    verb: &mut String,
+) -> bool {
+    let chain: Vec<&str> = chain.split('|').filter(|t| !t.is_empty()).collect();
+    let route = keys::route(
+        key,
+        text,
+        modifiers,
+        repeat,
+        &chain,
+        Appearance::parse(look).unwrap_or_default(),
+    );
+    *verb = route.verb.unwrap_or("").into();
+    route.claims_override
+}
+
+/// What `Recette.key` sends (B3f): a stand-in until its `#[qinvokable]` calls the shim itself.
+#[expect(dead_code, reason = "Recette.key replaces it in B3f")]
+pub(crate) fn send_key(key: i32, modifiers: u32, text: &str) -> bool {
+    shim::ressac_send_key(key, modifiers, text)
 }
 
 const MAIN_QML: &str = "qrc:/qt/qml/org/w3cdotorg/ressac/qml/Main.qml";
@@ -79,6 +127,7 @@ pub fn run() -> ExitCode {
         engine.load(&QUrl::from(MAIN_QML));
     }
     let code = if shim::ressac_has_window() {
+        shim::ressac_install_key_filter();
         u8::try_from(shim::ressac_exec()).unwrap_or(1)
     } else {
         eprintln!("ressac-kde: the main window did not load (see the QML errors above)");

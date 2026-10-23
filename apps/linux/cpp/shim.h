@@ -20,6 +20,14 @@ int ressac_exec();
 // is none or the save fails.
 bool ressac_grab_window(rust::Str path);
 
+// Installs the reading window's key filter on the first QQuickWindow: it sees ShortcutOverride and
+// KeyPress before the focused item (WebEngine included), asks Rust (`ressac_route_key`) and calls
+// the QML `readingPage.perform(verb)`. Once per process; call after the window exists.
+void ressac_install_key_filter();
+// Test hook of the walk: sends ShortcutOverride, KeyPress and KeyRelease to the first visible
+// QQuickWindow (`modifiers` are Qt::KeyboardModifier bits); true when the KeyPress was consumed.
+bool ressac_send_key(std::int32_t key, std::uint32_t modifiers, rust::Str text);
+
 // QSettings on an explicit INI file, opened per call. `set` and `remove` sync and report
 // whether the file was written.
 rust::String ressac_settings_default_file();

@@ -7,7 +7,7 @@ use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
-use ressac_ui::settings::{Settings, SettingsStore};
+use ressac_ui::settings::{Appearance, Settings, SettingsStore, TextSizeCommand, effective_size};
 
 use crate::shim;
 
@@ -101,6 +101,12 @@ pub mod qobject {
         fn set_chart_ink(self: Pin<&mut AppSettings>, value: &QString);
         fn chart_animate(self: &AppSettings) -> bool;
         fn set_chart_animate(self: Pin<&mut AppSettings>, value: bool);
+
+        /// View ▸ Bigger / Smaller / Actual Size on `look` (`native` or `antiope`): `command` is
+        /// `bigger`, `smaller` or `actualSize`. Returns the size now shown; an unknown command
+        /// writes nothing.
+        #[qinvokable]
+        fn resize(self: Pin<&mut AppSettings>, look: &QString, command: &QString) -> f64;
     }
 }
 
@@ -225,6 +231,34 @@ impl qobject::AppSettings {
         {
             self.as_mut().database_path_changed();
         }
+    }
+
+    fn resize(mut self: Pin<&mut Self>, look: &QString, command: &QString) -> f64 {
+        let look = Appearance::parse(&look.to_string()).unwrap_or_default();
+        let command = match command.to_string().as_str() {
+            "bigger" => Some(TextSizeCommand::Bigger),
+            "smaller" => Some(TextSizeCommand::Smaller),
+            "actualSize" => Some(TextSizeCommand::ActualSize),
+            _ => None,
+        };
+        let stored = |settings: &Settings| match look {
+            Appearance::Native => settings.reader_size,
+            Appearance::Antiope => settings.reader_size_antiope,
+        };
+        let before = stored(&self.rust().settings);
+        let Some(command) = command else {
+            return effective_size(before, look);
+        };
+        let AppSettingsRust { store, settings } = self.as_mut().rust_mut().get_mut();
+        let size = settings.resize(store, look, command);
+        let after = stored(settings);
+        if after != before {
+            match look {
+                Appearance::Native => self.reader_size_changed(),
+                Appearance::Antiope => self.reader_size_antiope_changed(),
+            }
+        }
+        size
     }
 
     fn chart_view(&self) -> QString {

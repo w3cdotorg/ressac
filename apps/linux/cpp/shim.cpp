@@ -5,11 +5,17 @@
 #include <QtCore/QBuffer>
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
+#include <QtCore/QMetaObject>
+#include <QtCore/QPointer>
 #include <QtCore/QSettings>
 #include <QtCore/QString>
+#include <QtCore/QStringList>
+#include <QtCore/QVariant>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QIcon>
 #include <QtGui/QImage>
+#include <QtGui/QKeyEvent>
+#include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickWindow>
 #include <QtQuickControls2/QQuickStyle>
 #include <QtWebEngineCore/QWebEngineUrlRequestJob>
@@ -70,6 +76,103 @@ public:
         buffer->open(QIODevice::ReadOnly);
         job->reply(QByteArray(mime.data(), static_cast<qsizetype>(mime.size())), buffer);
     }
+};
+
+// Takes the reading keys before the focused item sees them, WebEngine's delegate included (QML
+// `Keys` on an ancestor only sees what Chromium declined, a round trip later). The ShortcutOverride
+// is accepted for a key the router claims, so no single-letter Action or Shortcut fires; the
+// KeyPress then asks `readingPage.perform(verb)` and is consumed when it acted.
+class ReadingKeyFilter : public QObject
+{
+public:
+    ReadingKeyFilter(QQuickWindow *window, QObject *parent)
+        : QObject(parent)
+        , m_window(window)
+    {
+    }
+
+    bool eventFilter(QObject *obj, QEvent *e) override
+    {
+        if (obj != m_window || (e->type() != QEvent::ShortcutOverride && e->type() != QEvent::KeyPress)) {
+            return false;
+        }
+        QQuickItem *page = readingPage();
+        if (page == nullptr) {
+            return false;
+        }
+        const auto *k = static_cast<QKeyEvent *>(e);
+        const std::string text = k->text().toStdString();
+        const std::string chain = focusChain().toStdString();
+        const std::string look = page->property("look").toString().toStdString();
+        rust::String verb;
+        const bool claims = ressac_route_key(k->key(), rust::Str(text.data(), text.size()),
+                                             static_cast<std::uint32_t>(k->modifiers()), k->isAutoRepeat(),
+                                             rust::Str(chain.data(), chain.size()),
+                                             rust::Str(look.data(), look.size()), verb);
+        if (e->type() == QEvent::ShortcutOverride) {
+            if (claims) {
+                e->accept();
+                return true;
+            }
+            return false;
+        }
+        if (verb.empty()) {
+            return false;
+        }
+        QVariant result;
+        const QString name = QString::fromUtf8(verb.data(), static_cast<qsizetype>(verb.size()));
+        QMetaObject::invokeMethod(page, "perform", Qt::DirectConnection, Q_RETURN_ARG(QVariant, result),
+                                  Q_ARG(QVariant, QVariant(name)));
+        return result.toBool();
+    }
+
+private:
+    // The QQuickItem named `readingPage`, depth first from the content item.
+    QQuickItem *readingPage()
+    {
+        if (m_page == nullptr) {
+            m_page = find(m_window->contentItem());
+        }
+        return m_page;
+    }
+
+    static QQuickItem *find(QQuickItem *parent)
+    {
+        for (QQuickItem *child : parent->childItems()) {
+            if (child->objectName() == QLatin1String("readingPage")) {
+                return child;
+            }
+            if (QQuickItem *found = find(child)) {
+                return found;
+            }
+        }
+        return nullptr;
+    }
+
+    // One token per item from the focused one up, joined with `|` (`keys::classify`'s input).
+    QString focusChain() const
+    {
+        QStringList tokens;
+        for (QQuickItem *item = m_window->activeFocusItem(); item != nullptr; item = item->parentItem()) {
+            if (item->inherits("QQuickPopupItem")) {
+                tokens << QStringLiteral("popup");
+            } else if (item->inherits("QQuickTextInput") || item->inherits("QQuickTextEdit")) {
+                tokens << QStringLiteral("text");
+            } else if (item->inherits("QQuickWebEngineView")) {
+                tokens << QStringLiteral("web");
+            } else if (item->inherits("QQuickAbstractButton")) {
+                tokens << QStringLiteral("control");
+            } else if (!item->objectName().isEmpty()) {
+                tokens << item->objectName();
+            } else {
+                tokens << QStringLiteral("item");
+            }
+        }
+        return tokens.join(QLatin1Char('|'));
+    }
+
+    QQuickWindow *m_window;
+    QPointer<QQuickItem> m_page;
 };
 
 } // namespace
@@ -141,6 +244,35 @@ bool ressac_grab_window(rust::Str path)
         return false;
     }
     return window->grabWindow().save(from_rust(path));
+}
+
+void ressac_install_key_filter()
+{
+    static bool installed = false;
+    QQuickWindow *window = first_quick_window(false);
+    if (installed || window == nullptr) {
+        return;
+    }
+    installed = true;
+    window->installEventFilter(new ReadingKeyFilter(window, window));
+}
+
+bool ressac_send_key(std::int32_t key, std::uint32_t modifiers, rust::Str text)
+{
+    QQuickWindow *window = first_quick_window(true);
+    if (window == nullptr) {
+        return false;
+    }
+    const Qt::KeyboardModifiers mods(modifiers);
+    const QString t = from_rust(text);
+    QKeyEvent override(QEvent::ShortcutOverride, key, mods, t);
+    override.ignore();
+    QCoreApplication::sendEvent(window, &override);
+    QKeyEvent press(QEvent::KeyPress, key, mods, t);
+    const bool consumed = QCoreApplication::sendEvent(window, &press);
+    QKeyEvent release(QEvent::KeyRelease, key, mods, t);
+    QCoreApplication::sendEvent(window, &release);
+    return consumed;
 }
 
 rust::String ressac_settings_default_file()

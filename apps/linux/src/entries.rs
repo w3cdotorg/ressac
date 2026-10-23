@@ -8,9 +8,9 @@ use std::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QString, QVariant};
 use ressac_core::clock::today_start;
-use ressac_core::store::{ListFilter, ListQuery, Source};
-use ressac_ui::chrono::{self, Utc};
-use ressac_ui::entries::{EntryList, ListRow, LocalEdit, relative_date};
+use ressac_core::store::{ListFilter, ListQuery, Source, Store};
+use ressac_ui::chrono::{self, DateTime, Utc};
+use ressac_ui::entries::{AUTO_READ_DELAY, EntryList, ListRow, LocalEdit, relative_date};
 use ressac_ui::live::plan_rows;
 use ressac_ui::runs::{DirectWrite, read_failure, write_failure};
 use ressac_ui::sources::Selection;
@@ -62,6 +62,11 @@ pub mod qobject {
         #[qproperty(bool, active, READ = active, NOTIFY = list_changed)]
         #[qproperty(QString, empty_text, READ = empty_text, NOTIFY = list_changed)]
         #[qproperty(bool, can_mark_all_read, READ = can_mark_all_read, NOTIFY = list_changed)]
+        #[qproperty(bool, can_navigate, READ = can_navigate, NOTIFY = list_changed)]
+        #[qproperty(bool, can_toggle, READ = can_toggle, NOTIFY = selected_state_changed)]
+        #[qproperty(bool, selected_read, READ = selected_read, NOTIFY = selected_state_changed)]
+        #[qproperty(bool, selected_starred, READ = selected_starred, NOTIFY = selected_state_changed)]
+        #[qproperty(i32, auto_read_delay, READ = auto_read_delay, CONSTANT)]
         type EntriesModel = super::EntriesModelRust;
 
         fn search_text(self: &EntriesModel) -> QString;
@@ -70,6 +75,11 @@ pub mod qobject {
         fn active(self: &EntriesModel) -> bool;
         fn empty_text(self: &EntriesModel) -> QString;
         fn can_mark_all_read(self: &EntriesModel) -> bool;
+        fn can_navigate(self: &EntriesModel) -> bool;
+        fn can_toggle(self: &EntriesModel) -> bool;
+        fn selected_read(self: &EntriesModel) -> bool;
+        fn selected_starred(self: &EntriesModel) -> bool;
+        fn auto_read_delay(self: &EntriesModel) -> i32;
 
         fn set_unread_only(self: Pin<&mut EntriesModel>, unread_only: bool);
         fn set_search_text(self: Pin<&mut EntriesModel>, text: &QString);
@@ -117,6 +127,32 @@ pub mod qobject {
         #[qinvokable]
         fn select(self: Pin<&mut EntriesModel>, row: i32);
 
+        /// Selects the loaded row of `entry_id`; nothing for an unknown one.
+        #[qinvokable]
+        fn select_entry(self: Pin<&mut EntriesModel>, entry_id: i64);
+
+        /// Selects row 0 when nothing is selected.
+        #[qinvokable]
+        fn select_first_if_none(self: Pin<&mut EntriesModel>);
+
+        /// `j` and `↓`: selects the next row, marking the unread one it leaves as read; false at
+        /// the end of the list (nothing moved).
+        #[qinvokable]
+        fn select_next(self: Pin<&mut EntriesModel>) -> bool;
+
+        /// `k` and `↑`: selects the previous row, no read mark; false at the top.
+        #[qinvokable]
+        fn select_previous(self: Pin<&mut EntriesModel>) -> bool;
+
+        /// Space at the end of a page: the next unread row, marking the unread one it leaves.
+        #[qinvokable]
+        fn select_next_unread(self: Pin<&mut EntriesModel>) -> bool;
+
+        /// The selection stayed on `entry_id` for `autoReadDelay`: marks it read when it still
+        /// is the selected, loaded, unread row.
+        #[qinvokable]
+        fn auto_read(self: Pin<&mut EntriesModel>, entry_id: i64);
+
         #[qinvokable]
         fn toggle_read(self: Pin<&mut EntriesModel>, row: i32);
 
@@ -135,6 +171,10 @@ pub mod qobject {
 
         #[qsignal]
         fn list_changed(self: Pin<&mut EntriesModel>);
+
+        /// Whether the selected row exists, is read or is starred changed.
+        #[qsignal]
+        fn selected_state_changed(self: Pin<&mut EntriesModel>);
 
         /// A failed read or write: for the window's banner.
         #[qsignal]
@@ -184,8 +224,12 @@ struct View {
     active: bool,
     empty_text: &'static str,
     can_mark_all_read: bool,
+    can_navigate: bool,
     selected_row: i32,
     selected_entry_id: i64,
+    can_toggle: bool,
+    selected_read: bool,
+    selected_starred: bool,
 }
 
 fn role_value(shown: &Shown, role: &str) -> QVariant {
@@ -251,6 +295,39 @@ impl qobject::EntriesModel {
             .is_some_and(EntryList::can_mark_all_read)
     }
 
+    /// Whether the keys can move through the list: a list is shown and has rows.
+    fn can_navigate(&self) -> bool {
+        self.rust()
+            .list
+            .as_ref()
+            .is_some_and(|list| !list.rows().is_empty())
+    }
+
+    fn can_toggle(&self) -> bool {
+        self.rust().list.is_some() && self.selected_shown().is_some()
+    }
+
+    fn selected_read(&self) -> bool {
+        self.selected_shown().is_some_and(|shown| shown.row.is_read)
+    }
+
+    fn selected_starred(&self) -> bool {
+        self.selected_shown()
+            .is_some_and(|shown| shown.row.is_starred)
+    }
+
+    fn auto_read_delay(&self) -> i32 {
+        i32::try_from(AUTO_READ_DELAY.as_millis()).unwrap_or(i32::MAX)
+    }
+
+    fn selected_shown(&self) -> Option<&Shown> {
+        let selected = self.rust().selected?;
+        self.rust()
+            .shown
+            .iter()
+            .find(|shown| shown.row.entry_id == selected)
+    }
+
     fn view(&self) -> View {
         let rust = self.rust();
         View {
@@ -261,8 +338,12 @@ impl qobject::EntriesModel {
                 .and_then(EntryList::empty_text)
                 .unwrap_or(""),
             can_mark_all_read: self.can_mark_all_read(),
+            can_navigate: self.can_navigate(),
             selected_row: self.selected_row(),
             selected_entry_id: self.selected_entry_id(),
+            can_toggle: self.can_toggle(),
+            selected_read: self.selected_read(),
+            selected_starred: self.selected_starred(),
         }
     }
 
@@ -298,10 +379,29 @@ impl qobject::EntriesModel {
         {
             self.as_mut().selection_changed();
         }
-        if (after.active, after.empty_text, after.can_mark_all_read)
-            != (before.active, before.empty_text, before.can_mark_all_read)
-        {
-            self.list_changed();
+        if (
+            after.active,
+            after.empty_text,
+            after.can_mark_all_read,
+            after.can_navigate,
+        ) != (
+            before.active,
+            before.empty_text,
+            before.can_mark_all_read,
+            before.can_navigate,
+        ) {
+            self.as_mut().list_changed();
+        }
+        if (
+            after.can_toggle,
+            after.selected_read,
+            after.selected_starred,
+        ) != (
+            before.can_toggle,
+            before.selected_read,
+            before.selected_starred,
+        ) {
+            self.selected_state_changed();
         }
     }
 
@@ -503,13 +603,109 @@ impl qobject::EntriesModel {
         self.sync(&before);
     }
 
-    fn toggle_read(mut self: Pin<&mut Self>, row: i32) {
+    fn select_entry(mut self: Pin<&mut Self>, entry_id: i64) {
+        if self.rust().selected == Some(entry_id)
+            || !self
+                .rust()
+                .shown
+                .iter()
+                .any(|shown| shown.row.entry_id == entry_id)
+        {
+            return;
+        }
+        let before = self.view();
+        self.as_mut().rust_mut().get_mut().selected = Some(entry_id);
+        self.sync(&before);
+    }
+
+    fn select_first_if_none(self: Pin<&mut Self>) {
+        if self.rust().selected.is_some() {
+            return;
+        }
+        if let Some(id) = self.rust().shown.first().map(|shown| shown.row.entry_id) {
+            self.select_entry(id);
+        }
+    }
+
+    /// Moves the selection to what `find` answers; `leaving` marks the unread row left behind
+    /// as read (the optimistic write of `toggleRead`). True when the selection moved.
+    fn step(
+        mut self: Pin<&mut Self>,
+        leaving: bool,
+        find: impl FnOnce(
+            &mut EntryList,
+            &Store,
+            Option<i64>,
+            DateTime<Utc>,
+        ) -> ressac_core::Result<Option<i64>>,
+    ) -> bool {
+        let before = self.view();
+        let selected = self.rust().selected;
+        let today = today_start(chrono::Local::now());
+        let found = with_session(|session| {
+            let rust = self.as_mut().rust_mut().get_mut();
+            rust.list
+                .as_mut()
+                .map(|list| find(list, &session.store, selected, today))
+        });
+        // The search may have loaded rows.
+        self.as_mut().sync(&before);
+        let target = match found {
+            Some(Some(Ok(target))) => target,
+            Some(Some(Err(error))) => {
+                self.report_read(&error);
+                return false;
+            }
+            _ => return false,
+        };
+        let Some(target) = target.filter(|id| Some(*id) != selected) else {
+            return false;
+        };
+        if leaving && let Some(id) = selected.filter(|_| !self.selected_read()) {
+            self.as_mut().set_read(id, true);
+        }
+        self.select_entry(target);
+        true
+    }
+
+    fn select_next(self: Pin<&mut Self>) -> bool {
+        self.step(true, EntryList::next_entry)
+    }
+
+    fn select_previous(self: Pin<&mut Self>) -> bool {
+        self.step(false, |list, _, selected, _| {
+            Ok(list.previous_entry(selected))
+        })
+    }
+
+    fn select_next_unread(self: Pin<&mut Self>) -> bool {
+        self.step(true, EntryList::next_unread)
+    }
+
+    fn auto_read(self: Pin<&mut Self>, entry_id: i64) {
+        let due = self
+            .rust()
+            .list
+            .as_ref()
+            .is_some_and(|list| list.auto_read_due(self.rust().selected, entry_id));
+        if due {
+            self.set_read(entry_id, true);
+        }
+    }
+
+    fn toggle_read(self: Pin<&mut Self>, row: i32) {
         let Some((id, read)) = self
             .shown_at(row)
             .map(|shown| (shown.row.entry_id, !shown.row.is_read))
         else {
             return;
         };
+        self.set_read(id, read);
+    }
+
+    /// The optimistic read write: the row changes at once, the worker's answer settles or
+    /// reverts it (with a banner).
+    fn set_read(mut self: Pin<&mut Self>, id: i64, read: bool) {
         let before = self.view();
         let edit = self
             .as_mut()
