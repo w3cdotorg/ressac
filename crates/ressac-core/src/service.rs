@@ -306,6 +306,17 @@ impl Ressac {
         )
     }
 
+    /// Opens the database only when it exists and holds at least one feed: the first-run
+    /// rule of the commands that need feeds. `None` otherwise (no file, or no feed yet), and
+    /// nothing is created. It prints nothing: the caller shows the first-run hint.
+    pub fn open_with_feeds(path: &Path) -> Result<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let app = Self::open(path)?;
+        Ok((app.store().feed_count()? > 0).then_some(app))
+    }
+
     pub fn with_parts(store: Store, limits: FetchLimits, wayback_base: &str) -> Result<Self> {
         let host_gap = limits.per_host_gap;
         Ok(Self {
@@ -1379,6 +1390,30 @@ mod tests {
                 "{e:?}"
             );
         }
+    }
+
+    #[test]
+    fn open_with_feeds_opens_only_a_database_that_has_feeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sub/ressac.sqlite");
+        assert!(Ressac::open_with_feeds(&db).unwrap().is_none());
+        assert!(
+            !db.parent().unwrap().exists(),
+            "a missing database is not created"
+        );
+
+        drop(Ressac::open(&db).unwrap());
+        assert!(
+            Ressac::open_with_feeds(&db).unwrap().is_none(),
+            "no feed yet"
+        );
+
+        Ressac::open(&db)
+            .unwrap()
+            .import_opml(r#"<opml><body><outline text="A" xmlUrl="https://a.example.org/feed"/></body></opml>"#, false)
+            .unwrap();
+        let app = Ressac::open_with_feeds(&db).unwrap().expect("one feed");
+        assert_eq!(app.store().feed_count().unwrap(), 1);
     }
 
     /// News (folder 1) holds A (feed 1) and Sub (folder 2) with B (feed 2); C (feed 3) is at the top level.
