@@ -63,6 +63,20 @@ pub struct TestDb {
 }
 
 impl TestDb {
+    /// The fixture as it is: its diagnoses, decisions, fetch log and buried feed 4.
+    pub fn full() -> TestDb {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ressac.sqlite");
+        std::fs::copy(FIXTURE, &path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.busy_timeout(Duration::from_secs(10)).unwrap();
+        TestDb {
+            path,
+            _dir: dir,
+            conn,
+        }
+    }
+
     /// A copy of the fixture with no entries, editions or health rows and every feed active.
     pub fn new() -> TestDb {
         let dir = tempfile::tempdir().unwrap();

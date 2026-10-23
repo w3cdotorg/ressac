@@ -4,6 +4,7 @@
 
 pub mod article;
 pub mod entries;
+pub mod garden;
 pub mod journal;
 pub mod keys;
 pub mod launch;
