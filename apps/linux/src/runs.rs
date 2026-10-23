@@ -360,6 +360,10 @@ impl qobject::Runs {
 
     /// Queues a short run on the worker (they overlap a long run and one another's order is
     /// kept); `end` runs on the GUI thread once the run is concluded.
+    #[expect(
+        dead_code,
+        reason = "the garden (B5) is the first caller of the short door"
+    )]
     fn start_short<T: Send + 'static>(
         mut self: Pin<&mut Self>,
         request: RunRequest,
@@ -390,6 +394,10 @@ impl qobject::Runs {
     }
 
     /// A short run ended, on the GUI thread.
+    #[expect(
+        dead_code,
+        reason = "the garden (B5) is the first caller of the short door"
+    )]
     fn short_finished<T>(
         mut self: Pin<&mut Self>,
         request: RunRequest,
@@ -487,6 +495,10 @@ pub(crate) fn submit_long<T: Send + 'static>(
 
 /// Queues a short run (any number may overlap a long one, in order) through the coordinator;
 /// `end` runs on the GUI thread.
+#[expect(
+    dead_code,
+    reason = "the garden (B5) is the first caller of the short door"
+)]
 pub(crate) fn submit_short<T: Send + 'static>(
     request: RunRequest,
     job: impl FnOnce(&JobContext<'_>) -> ressac_core::Result<T> + Send + 'static,
