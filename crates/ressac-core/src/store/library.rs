@@ -441,6 +441,16 @@ impl Store {
         })
     }
 
+    /// Unread entries of each buried feed (absent: none). `v_unread_count` covers active feeds only.
+    pub fn buried_unread(&self) -> Result<HashMap<FeedId, usize>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT e.feed_id, COUNT(*) FROM entry e JOIN feed f ON f.id = e.feed_id \
+             WHERE f.state = 'buried' AND e.read_at IS NULL GROUP BY e.feed_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as usize)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// The entries of `source` (spec §4, Entry lists): newest first, pages of `PAGE_SIZE`
     /// strictly older than `after`; the Journal in rank order and whole.
     pub fn entries(
@@ -1812,5 +1822,24 @@ pub(super) mod tests {
             (facts[&2].status, facts[&3].status),
             (Some(Status::Dead), None)
         );
+    }
+
+    #[test]
+    fn buried_unread_counts_the_unread_entries_of_buried_feeds_only() {
+        let s = Store::open_in_memory().unwrap();
+        add_feed(&s, 1, None, 1, None, "active", "daily");
+        add_feed(&s, 4, None, 2, None, "buried", "daily");
+        add_entry(&s, 1, 1, "a", "2026-10-15T08:00:00Z", false, false);
+        add_entry(&s, 2, 4, "b", "2026-10-15T08:00:00Z", false, false);
+        add_entry(&s, 3, 4, "c", "2026-10-15T09:00:00Z", false, false);
+        add_entry(&s, 4, 4, "d", "2026-10-15T10:00:00Z", true, false);
+        assert_eq!(s.buried_unread().unwrap(), HashMap::from([(4, 2)]));
+        s.conn()
+            .execute(
+                "UPDATE entry SET read_at = '2026-10-16T08:00:00.000Z' WHERE feed_id = 4",
+                [],
+            )
+            .unwrap();
+        assert!(s.buried_unread().unwrap().is_empty());
     }
 }

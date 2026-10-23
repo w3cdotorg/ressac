@@ -216,6 +216,15 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Each themed feed's theme key (buried feeds included).
+    pub fn feed_theme_keys(&self) -> Result<HashMap<FeedId, String>> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT f.id, t.key FROM feed f JOIN theme t ON t.id = f.theme_id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// The theme `given` names: its key exactly, else its name compared case-insensitively
     /// after trimming. `UnknownTheme` (listing the valid keys) when neither matches. Every
     /// place that turns typed text into a theme goes through here.
@@ -965,5 +974,19 @@ mod tests {
             serde_json::to_value(&chart).unwrap(),
             serde_json::json!({"themes": [], "feeds": {}, "territories": []})
         );
+    }
+
+    #[test]
+    fn feed_theme_keys_map_each_themed_feed_to_its_key() {
+        let s = store_with_feeds(2);
+        s.import_chart(&import(&["a", "b"], &[], vec![]), false)
+            .unwrap();
+        s.set_feed_theme(2, Some("b")).unwrap();
+        assert_eq!(
+            s.feed_theme_keys().unwrap(),
+            HashMap::from([(2, "b".to_string())])
+        );
+        s.set_feed_theme(2, None).unwrap();
+        assert!(s.feed_theme_keys().unwrap().is_empty());
     }
 }
