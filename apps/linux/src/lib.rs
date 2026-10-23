@@ -2,10 +2,12 @@
 //! library is empty elsewhere so `cargo test --workspace` needs no Qt.
 #![cfg(target_os = "linux")]
 
+mod entries;
 mod launcher;
 mod recette;
 mod runs;
 mod settings;
+mod sources;
 
 use std::process::ExitCode;
 
