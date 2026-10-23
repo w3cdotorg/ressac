@@ -4,6 +4,7 @@
 
 mod launcher;
 mod recette;
+mod runs;
 mod settings;
 
 use std::process::ExitCode;

@@ -15,16 +15,17 @@ use ressac_ui::launch::{
     LaunchPhase, LaunchStep, after_migration, after_probe, cannot_open, database_location,
 };
 use ressac_ui::settings::{SettingsStore, keys};
+use ressac_ui::worker::Worker;
 
 use crate::settings::QSettingsStore;
 
 const NO_HOME: &str = "HOME is not set to an absolute path";
 
 /// The database the GUI thread has open once the launch is ready.
-#[expect(dead_code, reason = "read by B2c's models")]
 pub(crate) struct Session {
-    pub db: PathBuf,
     pub store: Store,
+    /// The job threads (runs, direct writes); `worker.db()` is the database path.
+    pub worker: Worker,
 }
 
 thread_local! {
@@ -41,7 +42,6 @@ fn drop_session() {
 }
 
 /// Runs `f` on the open session; `None` before the launch is ready (and off the GUI thread).
-#[expect(dead_code, reason = "read by B2c's models")]
 pub(crate) fn with_session<R>(f: impl FnOnce(&Session) -> R) -> Option<R> {
     SESSION.with(|slot| slot.borrow().as_ref().map(f))
 }
@@ -168,8 +168,8 @@ impl qobject::Launcher {
             LaunchStep::Open => match Store::open_existing(db) {
                 Ok(store) => {
                     install_session(Session {
-                        db: db.to_path_buf(),
                         store,
+                        worker: Worker::new(db),
                     });
                     self.set_phase(LaunchPhase::Ready);
                 }
