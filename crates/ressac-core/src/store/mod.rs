@@ -44,11 +44,11 @@ pub const SCHEMA_VERSION: i64 = 6;
 /// What a database path holds, as [`Store::probe`] reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemaState {
-    /// No file at the path.
+    /// No file at the path, or an empty (0-byte) one.
     Missing,
     /// The schema this binary knows ([`SCHEMA_VERSION`]).
     Current,
-    /// An older schema (0 for an empty file): migrating it is possible.
+    /// An older schema: migrating it is possible.
     Older(u32),
     /// A schema newer than this binary knows.
     Newer(u32),
@@ -147,6 +147,10 @@ impl Store {
     /// mode (query-only, 250 ms busy timeout): the app decides from it whether to migrate
     /// (after asking), refuse a newer database, or fail (spec §6).
     pub fn probe(path: &Path) -> Result<SchemaState> {
+        // A 0-byte file counts as missing (as on the Mac): the first open creates the schema.
+        if std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == 0) {
+            return Ok(SchemaState::Missing);
+        }
         match Self::open_existing_query_only(path) {
             Ok(_) => Ok(SchemaState::Current),
             Err(Error::DatabaseMissing(_)) => Ok(SchemaState::Missing),
@@ -154,7 +158,7 @@ impl Store {
                 match u32::try_from(found) {
                     Ok(v) if found < expected => Ok(SchemaState::Older(v)),
                     Ok(v) => Ok(SchemaState::Newer(v)),
-                    // A negative version is corruption, not a schema to migrate.
+                    // Negative or larger than u32: corruption, not a schema to migrate.
                     Err(_) => Err(Error::SchemaMismatch { found, expected }),
                 }
             }
@@ -1135,11 +1139,11 @@ mod tests {
     }
 
     #[test]
-    fn probe_calls_an_empty_file_older_and_refuses_a_file_that_is_not_a_database() {
+    fn probe_calls_an_empty_file_missing_and_refuses_a_file_that_is_not_a_database() {
         let dir = tempfile::tempdir().unwrap();
         let empty = dir.path().join("empty.sqlite");
         std::fs::write(&empty, b"").unwrap();
-        assert_eq!(Store::probe(&empty).unwrap(), SchemaState::Older(0));
+        assert_eq!(Store::probe(&empty).unwrap(), SchemaState::Missing);
         assert_eq!(std::fs::metadata(&empty).unwrap().len(), 0, "still empty");
 
         let text = dir.path().join("notes.sqlite");
