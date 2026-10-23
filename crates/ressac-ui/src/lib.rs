@@ -7,6 +7,7 @@ pub mod launch;
 pub mod live;
 pub mod settings;
 pub mod sources;
+pub mod worker;
 
 /// The chrono the app's types use, so the KDE bridges pass the clock in with the same chrono.
 pub use chrono;
