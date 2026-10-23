@@ -2,7 +2,7 @@
 //! visit that remembers the feeds seen in the queue and those decided here, so they stay listed
 //! (dimmed) until the scope is left; the selection moves on as feeds leave the queue.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -24,6 +24,11 @@ pub struct GardenVisit {
     seen_in_queue: HashSet<FeedId>,
     /// Feeds decided from this window during the visit.
     decided_this_visit: HashSet<FeedId>,
+    /// `seen_in_queue` and `decided_this_visit` together, kept up to date where they change
+    /// (the table asks per row).
+    retained: HashSet<FeedId>,
+    /// Each snapshot row's position, by feed.
+    index: HashMap<FeedId, usize>,
     selected: Option<FeedId>,
     grouping: Grouping,
     message: Option<&'static str>,
@@ -49,6 +54,8 @@ impl GardenVisit {
         self.snapshot = Snapshot::default();
         self.seen_in_queue.clear();
         self.decided_this_visit.clear();
+        self.retained.clear();
+        self.index.clear();
         self.selected = None;
         self.message = None;
         self.confirming = false;
@@ -68,6 +75,14 @@ impl GardenVisit {
                 .filter(|r| r.needs_triage())
                 .map(|r| r.feed_id),
         );
+        self.index = self
+            .snapshot
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(at, r)| (r.feed_id, at))
+            .collect();
+        self.refresh_retained();
         let ordered = self.ordered();
         if self.scope == Some(GardenScope::NeedsTriage) {
             self.selected = selection_after_update(
@@ -91,19 +106,22 @@ impl GardenVisit {
     }
 
     pub fn row(&self, feed: FeedId) -> Option<&GardenRow> {
-        self.snapshot.rows.iter().find(|r| r.feed_id == feed)
+        self.index
+            .get(&feed)
+            .and_then(|at| self.snapshot.rows.get(*at))
     }
 
-    fn retained(&self) -> HashSet<FeedId> {
-        self.seen_in_queue
+    fn refresh_retained(&mut self) {
+        self.retained = self
+            .seen_in_queue
             .union(&self.decided_this_visit)
             .copied()
-            .collect()
+            .collect();
     }
 
     pub fn visible(&self) -> Vec<&GardenRow> {
         self.scope.map_or_else(Vec::new, |scope| {
-            visible_rows(&self.snapshot.rows, scope, &self.retained())
+            visible_rows(&self.snapshot.rows, scope, &self.retained)
         })
     }
 
@@ -127,7 +145,7 @@ impl GardenVisit {
 
     pub fn is_dimmed(&self, feed: FeedId) -> bool {
         match (self.scope, self.row(feed)) {
-            (Some(scope), Some(row)) => is_dimmed(row, scope, &self.retained()),
+            (Some(scope), Some(row)) => is_dimmed(row, scope, &self.retained),
             _ => false,
         }
     }
@@ -181,12 +199,14 @@ impl GardenVisit {
     /// A decision on `feed` was recorded from this window.
     pub fn decided(&mut self, feed: FeedId) {
         self.decided_this_visit.insert(feed);
+        self.refresh_retained();
     }
 
     /// The last decision was undone (`feed`: the one it concerned, when known).
     pub fn undone(&mut self, feed: Option<FeedId>) {
         if let Some(feed) = feed {
             self.decided_this_visit.remove(&feed);
+            self.refresh_retained();
         }
     }
 
@@ -388,5 +408,38 @@ mod tests {
             (Some("The cemetery is empty"), None)
         );
         assert_eq!(visit(GardenScope::All, &store).empty_text(), None);
+    }
+
+    #[test]
+    fn leaving_forgets_the_visit_but_not_the_grouping() {
+        let (_db, store) = fixture();
+        let mut v = visit(GardenScope::All, &store);
+        v.set_grouping(Grouping::Rhythm);
+        v.leave();
+        assert_eq!(
+            (v.scope(), v.ordered(), v.selected(), v.empty_text()),
+            (None, vec![], None, None)
+        );
+        assert!(v.visible().is_empty() && v.count_label().is_empty());
+        assert!(v.row(6).is_none(), "the snapshot is gone");
+        v.enter(GardenScope::All);
+        assert_eq!(
+            v.grouping(),
+            Grouping::Rhythm,
+            "entering keeps the grouping"
+        );
+        v.update(load(&store).unwrap());
+        assert_eq!(headers(&v)[0], "⚡ DAILY · 1");
+    }
+
+    #[test]
+    fn entering_another_scope_keeps_the_grouping_and_drops_the_memory() {
+        let (_db, store) = fixture();
+        let mut v = visit(GardenScope::All, &store);
+        v.set_grouping(Grouping::Rhythm);
+        v.decided(8);
+        v.enter(GardenScope::NeedsTriage);
+        assert_eq!(v.grouping(), Grouping::Rhythm);
+        assert!(!v.is_dimmed(8) && v.selected().is_none());
     }
 }

@@ -268,4 +268,48 @@ mod tests {
         let i = inspect(&store, 7);
         assert_eq!((i.site, i.wayback), (None, None));
     }
+
+    #[test]
+    fn fetch_dates_are_shown_in_the_given_time_zone() {
+        let (_db, store) = fixture();
+        let zone = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        let mut v = GardenVisit::default();
+        v.enter(GardenScope::All);
+        v.update(load(&store).unwrap());
+        v.select(7);
+        let i = v
+            .inspector(
+                &store.attempts(7, LOG_LINES).unwrap(),
+                at("2026-10-16T09:00:00Z"),
+                &zone,
+            )
+            .unwrap();
+        assert_eq!(i.log[0].at, "Oct 10, 2026, 9:00 AM");
+    }
+
+    #[test]
+    fn an_unchecked_feed_has_no_reason_evidence_or_proposal() {
+        let (_db, store) = fixture();
+        let mut v = GardenVisit::default();
+        v.enter(GardenScope::All);
+        v.update(load(&store).unwrap());
+        let unchecked = v
+            .snapshot()
+            .rows
+            .iter()
+            .find(|r| r.status() == Status::Unchecked)
+            .expect("the fixture has an unchecked feed")
+            .feed_id;
+        v.select(unchecked);
+        let log = store.attempts(unchecked, LOG_LINES).unwrap();
+        assert!(log.is_empty(), "never fetched: the window says NOT_FETCHED");
+        let i = v.inspector(&log, at("2026-10-16T09:00:00Z"), &Utc).unwrap();
+        assert_eq!(
+            (i.status_line.as_str(), i.status_color, i.reason.as_str()),
+            ("❔ Unchecked", "", "")
+        );
+        assert!(i.evidence.is_empty() && i.remarks.is_empty());
+        assert_eq!(i.proposed, None);
+        assert!(!i.can_repair);
+    }
 }

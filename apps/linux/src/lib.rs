@@ -3,6 +3,8 @@
 #![cfg(target_os = "linux")]
 
 mod entries;
+mod garden;
+mod garden_inspector;
 mod journal;
 mod launcher;
 mod reader;
