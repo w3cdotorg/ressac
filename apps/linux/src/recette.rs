@@ -37,7 +37,7 @@ pub mod qobject {
         fn grab(self: &Recette, name: &QString) -> bool;
 
         /// Test hook of the walk: sends a key (a `Qt::Key`, its text, `Qt::KeyboardModifier` bits)
-        /// to the window as the keyboard would, through its key filter; true when it was consumed.
+        /// to the window as the keyboard would, through its key filter; the result of the KeyPress's sendEvent (handled or accepted, not necessarily by the filter).
         #[qinvokable]
         fn key(self: &Recette, key: i32, text: &QString, modifiers: i32) -> bool;
 

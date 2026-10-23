@@ -101,6 +101,9 @@ Item {
             handled = EntriesModel.canToggle
             if (handled) EntriesModel.toggleStarred(EntriesModel.selectedRow)
             break
+        case "spent":
+            handled = true                           // a held one-shot key (Antiope's) is consumed, as on the Mac
+            break
         case "toggleReadHeld":
         case "toggleStarHeld":
             handled = EntriesModel.canToggle        // spent: a held key never toggles again
@@ -323,7 +326,7 @@ Item {
         }
     }
 
-    Timer { id: advanceGuard; interval: 3000; onTriggered: page.advancing = false }
+    Timer { id: advanceGuard; interval: 3000; onTriggered: { page.advanceGeneration++; page.advancing = false } }
 
     // 1 s on an unread selection marks it read (the selection must stay on it).
     Timer {

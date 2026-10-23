@@ -160,7 +160,7 @@ private:
                 tokens << QStringLiteral("text");
             } else if (item->inherits("QQuickWebEngineView")) {
                 tokens << QStringLiteral("web");
-            } else if (item->inherits("QQuickAbstractButton")) {
+            } else if (item->inherits("QQuickControl")) {
                 tokens << QStringLiteral("control");
             } else if (!item->objectName().isEmpty()) {
                 tokens << item->objectName();
