@@ -3494,8 +3494,11 @@ dependencies = [
 name = "ressac-ui"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "ressac-core",
+ "rusqlite",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
