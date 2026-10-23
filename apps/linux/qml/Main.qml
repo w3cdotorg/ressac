@@ -83,10 +83,44 @@ Kirigami.ApplicationWindow {
         { name: "24-text-size", enter: function () { mainMenu.closeMenus(); const before = AppSettings.readerSize
             mainMenu.biggerText.trigger(); const bigger = AppSettings.readerSize
             mainMenu.actualSize.trigger(); console.warn("walk: 24-text-size bigger=" + bigger + " actual=" + AppSettings.readerSize)
-            AppSettings.readerSize = before } }          // the walk leaves the setting as it found it
+            AppSettings.readerSize = before } },         // the walk leaves the setting as it found it
+        // The fixture: edition 1 built 2026-10-10T08:00Z with 1 unreachable feed; This Week has entries 5 and 6
+        // (Daring Fireball), The Wire entry 1 (xkcd.com) then "+2 more in xkcd.com".
+        { name: "23-journal", enter: function () { SourcesModel.selectKey("journal")
+            console.warn("walk: 23-journal rows=" + EntriesModel.rowCount() + " phase=" + Journal.phase + " placeholder=" + Journal.placeholder
+                + " header=" + Journal.header + " focus=" + readingLoader.item.focusName()) } }
     ]
+    // The `journal` walk: the test points every active feed at a closed loopback port, and the launch trigger builds at once.
+    readonly property var journalSteps: [
+        { name: "02-journal", enter: function () { SourcesModel.selectKey("journal"); console.warn("walk: 02-journal phase=" + Journal.phase) } },
+        { name: "03-wait", enter: function () {} },
+        { name: "04-wait", enter: function () {} },
+        { name: "05-offline", enter: function () { console.warn("walk: 05-offline phase=" + Journal.phase + " placeholder=" + Journal.placeholder
+            + " retry=" + Journal.offersRetry + " banner=" + Runs.bannerMessage) } },
+        { name: "06-retry", enter: function () { Journal.retry(); console.warn("walk: 06-retry phase=" + Journal.phase) } },
+        { name: "07-wait", enter: function () {} },
+        { name: "08-retried", enter: function () { const after = Journal.phase; Journal.trigger()
+            console.warn("walk: 08-retried phase=" + after + " after-trigger=" + Journal.phase) } },
+        // A fetch in flight turns the build away: the edition stays due, and Retry builds it once the fetch is over.
+        { name: "09-busy", enter: function () { Runs.refreshAll(); Journal.retry(); console.warn("walk: 09-busy active=" + Runs.longRunActive) } },
+        { name: "10-wait", enter: function () {} },
+        { name: "11-refused", enter: function () { console.warn("walk: 11-refused phase=" + Journal.phase + " retry=" + Journal.offersRetry + " active=" + Runs.longRunActive) } },
+        { name: "12-retry-again", enter: function () { Journal.retry(); console.warn("walk: 12-retry-again phase=" + Journal.phase) } },
+        { name: "13-wait", enter: function () {} },
+        { name: "14-offline-again", enter: function () { console.warn("walk: 14-offline-again phase=" + Journal.phase) } }
+    ]
+    // The `mark-all` walk: on a fresh copy of the fixture, Mark All as Read in the Journal marks the edition's
+    // entries (1, 5, 6) and never the entries outside it (the overflow's hidden ones, 3 and 4).
+    readonly property var markAllSteps: [
+        { name: "02-journal", enter: function () { SourcesModel.selectKey("journal")
+            console.warn("walk: 02-journal rows=" + EntriesModel.rowCount() + " can=" + EntriesModel.canMarkAllRead) } },
+        { name: "03-mark-all", enter: function () { EntriesModel.markAllRead()
+            console.warn("walk: 03-mark-all can=" + EntriesModel.canMarkAllRead) } },
+        { name: "04-marked", enter: function () { console.warn("walk: 04-marked rows=" + EntriesModel.rowCount() + " header=" + Journal.header) } }
+    ]
+    readonly property var steps: Recette.walk === "journal" ? journalSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
-    property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… walkSteps
+    property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }
     function slug() { return Launcher.phase === Launcher.Ready ? "ready" : Launcher.phase === Launcher.TooNew ? "too-new" : "failed" }
     function startWalkIfSettled() { if (Recette.active && walkIndex === -2 && settled()) { walkIndex = -1; walkTimer.start() } }
@@ -94,17 +128,17 @@ Kirigami.ApplicationWindow {
     Timer {
         id: walkTimer; interval: 400
         onTriggered: {
-            const name = root.walkIndex < 0 ? (root.pressedDefault ? "02-" : "01-") + root.slug() : root.walkSteps[root.walkIndex].name
+            const name = root.walkIndex < 0 ? (root.pressedDefault ? "02-" : "01-") + root.slug() : root.steps[root.walkIndex].name
             if (!Recette.grab(name)) { Qt.exit(1); return }
             if (root.walkIndex === -1 && !root.pressedDefault && Recette.pressDefault !== "" && root.settled() && Launcher.phase !== Launcher.Ready) {
                 root.pressedDefault = true; root.walkIndex = -2
                 Recette.prepareDefault(); root.useDefaultDatabase()
                 return
             }
-            if (Reader.isExtracting) { walkTimer.start(); return }   // a fetch in flight: grab again once it ends, and never quit during one
+            if (Reader.isExtracting || Runs.longRunActive) { walkTimer.start(); return }   // a fetch or a build in flight: grab again once it ends, and never quit during one
             root.walkIndex += 1
-            if (Launcher.phase !== Launcher.Ready || root.walkIndex >= root.walkSteps.length) { Qt.exit(0); return }
-            root.walkSteps[root.walkIndex].enter()
+            if (Launcher.phase !== Launcher.Ready || root.walkIndex >= root.steps.length) { Qt.exit(0); return }
+            root.steps[root.walkIndex].enter()
             walkTimer.start()
         }
     }

@@ -17,6 +17,8 @@ Item {
     property string look: "native"
     readonly property alias reader: readerPane
     readonly property bool searchFocused: searchField.activeFocus
+    // The morning edition builds by itself, except in the screenshot walks that do not test it.
+    readonly property bool editionTriggers: !Recette.active || Recette.walk === "journal"
 
     // The last key verb the window filter asked for and whether it acted (the walk reads them).
     property string lastVerb: ""
@@ -132,6 +134,7 @@ Item {
         SourcesModel.reload()
         EntriesModel.reload()
         Reader.reload()
+        Journal.reload()
     }
 
     ColumnLayout {
@@ -350,7 +353,18 @@ Item {
     }
 
     Timer { interval: Live.pollInterval; repeat: true; running: Live.polling; onTriggered: Live.poll() }
-    Timer { interval: 60000; repeat: true; running: true; onTriggered: Live.minuteTick() }
+    Timer {
+        interval: 60000; repeat: true; running: true
+        onTriggered: { Live.minuteTick(); if (page.editionTriggers) Journal.minuteTick() }
+    }
+
+    Connections {
+        target: Qt.application
+        function onStateChanged() {
+            if (Qt.application.state === Qt.ApplicationActive && page.editionTriggers)
+                Journal.trigger()
+        }
+    }
 
     Binding {
         target: Live
@@ -360,6 +374,7 @@ Item {
 
     Connections { target: EntriesModel; function onUnreadOnlyChanged() { page.syncFilter() } }
     Connections { target: Reader; function onBanner(m, l) { Runs.showBanner(m, l) } }
+    Connections { target: Journal; function onBanner(message, showLog) { Runs.showBanner(message, showLog) } }
     Connections { target: Reader; function onWrote() { page.reloadAll() } }
     Connections { target: Live; function onInvalidated() { page.reloadAll() } }
     Connections { target: Runs; function onDatabaseChanged() { page.reloadAll() } }
@@ -367,7 +382,14 @@ Item {
     Connections { target: EntriesModel; function onWrote() { page.reloadAll() } }
     Connections { target: SourcesModel; function onBanner(m, l) { Runs.showBanner(m, l) } }
     Connections { target: EntriesModel; function onBanner(m, l) { Runs.showBanner(m, l) } }
-    Connections { target: SourcesModel; function onSelectionChanged() { EntriesModel.showSource(SourcesModel.selectedKey) } }
+    Connections {
+        target: SourcesModel
+        function onSelectionChanged() {
+            EntriesModel.showSource(SourcesModel.selectedKey)
+            if (SourcesModel.selectedKey === "journal")
+                entriesPane.focusList()      // as on the Mac, the list takes the keyboard in the Journal
+        }
+    }
 
     Binding { target: Reader; property: "entryId"; value: EntriesModel.selectedEntryId }
     Binding {
@@ -381,8 +403,12 @@ Item {
 
     Component.onCompleted: {
         page.syncFilter()
+        void Runs.canRefresh     // creates Runs now: the edition's build starts its run through it
         Reader.reload()
         SourcesModel.reload()
         EntriesModel.showSource(SourcesModel.selectedKey)
+        Journal.reload()
+        if (page.editionTriggers)
+            Journal.trigger()
     }
 }
