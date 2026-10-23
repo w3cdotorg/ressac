@@ -5,6 +5,8 @@
 use ressac_core::Error;
 use ressac_core::paths::PathsError;
 use ressac_core::store::SchemaState;
+
+use crate::settings::{Settings, SettingsStore};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -114,6 +116,65 @@ pub fn location_problem(probe: &Result<SchemaState, Error>) -> Option<&'static s
     }
 }
 
+/// Settings ▸ Data: the sentence under the path when the default location is used.
+const DEFAULT_NOTE: &str = "Shared with the ressac command in Terminal.";
+const CUSTOM_NOTE: &str = "In Terminal, pass --db with this path to use the same database.";
+/// Shown when `RESSAC_DB` overrides the setting.
+pub const RESSAC_DB_NOTE: &str = "RESSAC_DB is set, so this launch uses it instead.";
+/// Shown once a new database has been chosen.
+pub const RELAUNCH_NOTE: &str = "Ressac opens the new database after a relaunch.";
+/// The file dialogs' titles (the Mac panels' messages).
+pub const CHOOSE_TITLE: &str = "Choose a Ressac database.";
+pub const NEW_TITLE: &str = "Ressac creates the database here on its next launch.";
+/// The suggested file name of a new database.
+pub const NEW_NAME: &str = "ressac.sqlite";
+
+/// The note under the Data page's path: the default location, or a chosen one.
+pub fn database_note(stored: Option<&str>) -> &'static str {
+    match stored {
+        None => DEFAULT_NOTE,
+        Some(_) => CUSTOM_NOTE,
+    }
+}
+
+/// What choosing a database in Settings ▸ Data did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseChoice {
+    /// The path was already the setting: nothing changed.
+    Unchanged,
+    /// The setting was written; the next launch opens it.
+    Stored,
+    /// The file was refused (the sentence); the setting stays.
+    Refused(&'static str),
+}
+
+/// Applies a path chosen in Settings ▸ Data (blank means the default location). A newer or
+/// unreadable file is refused and the setting stays; a missing path or an empty file is
+/// accepted (the next launch creates it).
+pub fn choose_database(
+    settings: &mut Settings,
+    store: &mut dyn SettingsStore,
+    path: &str,
+    probe: impl FnOnce(&Path) -> Result<SchemaState, Error>,
+) -> DatabaseChoice {
+    let path = path.trim();
+    if path.is_empty() {
+        return if settings.set_database_path(store, "") {
+            DatabaseChoice::Stored
+        } else {
+            DatabaseChoice::Unchanged
+        };
+    }
+    if settings.database_path.as_deref() == Some(path) {
+        return DatabaseChoice::Unchanged;
+    }
+    if let Some(refusal) = location_problem(&probe(Path::new(path))) {
+        return DatabaseChoice::Refused(refusal);
+    }
+    settings.set_database_path(store, path);
+    DatabaseChoice::Stored
+}
+
 /// The command line.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Options {
@@ -163,11 +224,131 @@ pub fn parse_args(
 mod tests {
     use super::*;
     use ressac_core::store::Store;
+    use std::collections::BTreeMap;
 
     fn invalid(s: &str) -> Error {
         Error::Invalid(s.to_string())
     }
     const DB: &str = "/d/r.sqlite";
+
+    fn probe(path: &Path) -> Result<SchemaState, ressac_core::Error> {
+        Store::probe(path)
+    }
+
+    fn schema_file(dir: &Path, name: &str, version: i64) -> PathBuf {
+        let path = dir.join(name);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL); INSERT INTO schema_meta VALUES ({version})"
+        ))
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn a_non_sqlite_file_is_refused_and_the_setting_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("junk.sqlite");
+        std::fs::write(&junk, "this is not sqlite, just some text padding").unwrap();
+        let mut store =
+            BTreeMap::from([("databasePath".to_string(), "/old/path.sqlite".to_string())]);
+        let mut settings = Settings::load(&store);
+        assert_eq!(
+            choose_database(&mut settings, &mut store, junk.to_str().unwrap(), probe),
+            DatabaseChoice::Refused(NOT_A_DATABASE)
+        );
+        assert_eq!(store["databasePath"], "/old/path.sqlite");
+        assert_eq!(settings.database_path.as_deref(), Some("/old/path.sqlite"));
+    }
+
+    #[test]
+    fn a_v1_file_a_missing_path_and_an_empty_file_are_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = schema_file(dir.path(), "v1.sqlite", 1);
+        let mut store = BTreeMap::new();
+        let mut settings = Settings::load(&store);
+        assert_eq!(
+            choose_database(&mut settings, &mut store, v1.to_str().unwrap(), probe),
+            DatabaseChoice::Stored
+        );
+        assert_eq!(store["databasePath"], v1.to_str().unwrap());
+        let fresh = dir.path().join("new.sqlite");
+        assert_eq!(
+            choose_database(&mut settings, &mut store, fresh.to_str().unwrap(), probe),
+            DatabaseChoice::Stored
+        );
+        assert!(
+            !fresh.exists(),
+            "created by the next launch, not by Settings"
+        );
+        let empty = dir.path().join("empty.sqlite");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(
+            choose_database(&mut settings, &mut store, empty.to_str().unwrap(), probe),
+            DatabaseChoice::Stored
+        );
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let future = schema_file(dir.path(), "future.sqlite", 99);
+        let mut store = BTreeMap::new();
+        let mut settings = Settings::load(&store);
+        assert_eq!(
+            choose_database(&mut settings, &mut store, future.to_str().unwrap(), probe),
+            DatabaseChoice::Refused(NEWER_DATABASE)
+        );
+        assert!(!store.contains_key("databasePath"));
+    }
+
+    #[test]
+    fn the_same_path_changes_nothing_and_blank_is_use_default() {
+        let mut store = BTreeMap::from([("databasePath".to_string(), "/a/r.sqlite".to_string())]);
+        let mut settings = Settings::load(&store);
+        let never = |_: &Path| -> Result<SchemaState, ressac_core::Error> { panic!("not probed") };
+        assert_eq!(
+            choose_database(&mut settings, &mut store, "/a/r.sqlite", never),
+            DatabaseChoice::Unchanged
+        );
+        assert_eq!(
+            choose_database(&mut settings, &mut store, "", never),
+            DatabaseChoice::Stored
+        );
+        assert!(!store.contains_key("databasePath") && settings.database_path.is_none());
+        assert_eq!(
+            choose_database(&mut settings, &mut store, "", never),
+            DatabaseChoice::Unchanged
+        );
+    }
+
+    #[test]
+    fn the_data_notes_follow_the_setting() {
+        assert_eq!(
+            database_note(None),
+            "Shared with the ressac command in Terminal."
+        );
+        assert_eq!(
+            database_note(Some("/a/r.sqlite")),
+            "In Terminal, pass --db with this path to use the same database."
+        );
+        assert_eq!(
+            RESSAC_DB_NOTE,
+            "RESSAC_DB is set, so this launch uses it instead."
+        );
+        assert_eq!(
+            RELAUNCH_NOTE,
+            "Ressac opens the new database after a relaunch."
+        );
+        assert_eq!(
+            (CHOOSE_TITLE, NEW_TITLE, NEW_NAME),
+            (
+                "Choose a Ressac database.",
+                "Ressac creates the database here on its next launch.",
+                "ressac.sqlite"
+            )
+        );
+    }
 
     #[test]
     fn the_database_location_follows_ressac_db_then_the_setting_then_the_default() {

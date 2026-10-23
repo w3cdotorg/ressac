@@ -79,7 +79,46 @@ stored_enum!(
     ChartInk { #[default] Bleu => "bleu", Nuit => "nuit" }
 );
 
+impl ReaderFont {
+    /// The Settings picker's title.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::SystemSans => "System Sans",
+            Self::SystemSerif => "System Serif",
+            Self::Newsreader => "Newsreader",
+            Self::Atkinson => "Atkinson Hyperlegible Next",
+        }
+    }
+
+    /// The Qt font family; `""` is the system's default sans.
+    pub fn family(self) -> &'static str {
+        match self {
+            Self::SystemSans => "",
+            Self::SystemSerif => "serif",
+            Self::Newsreader => "Newsreader",
+            Self::Atkinson => "Atkinson Hyperlegible Next",
+        }
+    }
+}
+
+/// The Settings page's font preview sentence.
+pub const PREVIEW_TEXT: &str =
+    "The quick brown fox jumps over 1 234 lazy dogs. Il1 O0, « l'écart » se creuse.";
+/// The hint under the size slider.
+pub const SIZE_HINT: &str =
+    "Ctrl++ and Ctrl+− change the text size while you read; Ctrl+0 restores it.";
+
 impl LineWidth {
+    /// The Settings picker's title.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Narrow => "Narrow",
+            Self::Medium => "Medium",
+            Self::Wide => "Wide",
+            Self::Forty => "40 columns",
+        }
+    }
+
     /// The column's maximum width, in characters.
     pub fn max_ch(self) -> u32 {
         match self {
@@ -457,6 +496,35 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn fonts_and_widths_have_their_settings_titles() {
+        assert_eq!(
+            ReaderFont::ALL.map(ReaderFont::title),
+            [
+                "System Sans",
+                "System Serif",
+                "Newsreader",
+                "Atkinson Hyperlegible Next"
+            ]
+        );
+        assert_eq!(
+            ReaderFont::ALL.map(ReaderFont::family),
+            ["", "serif", "Newsreader", "Atkinson Hyperlegible Next"]
+        );
+        assert_eq!(
+            LineWidth::ALL.map(LineWidth::title),
+            ["Narrow", "Medium", "Wide", "40 columns"]
+        );
+        assert_eq!(
+            PREVIEW_TEXT,
+            "The quick brown fox jumps over 1 234 lazy dogs. Il1 O0, « l'écart » se creuse."
+        );
+        assert_eq!(
+            SIZE_HINT,
+            "Ctrl++ and Ctrl+− change the text size while you read; Ctrl+0 restores it."
+        );
     }
 
     #[test]

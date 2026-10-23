@@ -14,6 +14,7 @@ use ressac_core::{Error, Result};
 
 use crate::runs::{RunEnd, RunRequest};
 use crate::sanitize::is_web_url;
+use crate::sources::{FOLDER_KEY_PREFIX, HEADING_KEY_PREFIX, HEADINGS};
 
 pub const FEED_MIME: &str = "application/x-ressac-feed";
 pub const ADD_TITLE: &str = "Add a Feed";
@@ -384,10 +385,10 @@ pub fn feed_from_payload(text: &str) -> Option<FeedId> {
 
 /// Where a sidebar row accepts a feed: a folder, or the "Feeds" heading (the top level).
 pub fn drop_target(key: &str) -> Option<Option<FolderId>> {
-    if key == "heading:Feeds" {
+    if key.strip_prefix(HEADING_KEY_PREFIX) == Some(HEADINGS[1]) {
         return Some(None);
     }
-    key.strip_prefix("folder:")
+    key.strip_prefix(FOLDER_KEY_PREFIX)
         .and_then(feed_from_payload)
         .map(Some)
 }

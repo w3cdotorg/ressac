@@ -12,6 +12,11 @@ use ressac_core::store::{FeedFacts, Source, SourceNode, SourceNodeKind, SourcesS
 /// The sidebar's section titles, in order.
 pub const HEADINGS: [&str; 4] = ["Smart Lists", "Feeds", "Rhythm", "Garden"];
 
+/// The key prefix of a heading row (`heading:Feeds`); a heading selects nothing.
+pub const HEADING_KEY_PREFIX: &str = "heading:";
+/// The key prefix of a folder row (`folder:7`), shared with [`Selection::key`].
+pub const FOLDER_KEY_PREFIX: &str = "folder:";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GardenScope {
     NeedsTriage,
@@ -71,7 +76,7 @@ impl Selection {
             Selection::Source(Source::Unread) => "unread".into(),
             Selection::Source(Source::Today) => "today".into(),
             Selection::Source(Source::Starred) => "starred".into(),
-            Selection::Source(Source::Folder(id)) => format!("folder:{id}"),
+            Selection::Source(Source::Folder(id)) => format!("{FOLDER_KEY_PREFIX}{id}"),
             Selection::Source(Source::Feed(id)) => format!("feed:{id}"),
             Selection::Source(Source::Cadence(group)) => format!("rhythm:{}", group.as_str()),
             Selection::Garden(scope) => scope.key().to_string(),
@@ -170,7 +175,13 @@ impl SidebarRow {
     }
 
     fn heading(title: &str) -> Self {
-        Self::new(RowKind::Heading, format!("heading:{title}"), title, "", 0)
+        Self::new(
+            RowKind::Heading,
+            format!("{HEADING_KEY_PREFIX}{title}"),
+            title,
+            "",
+            0,
+        )
     }
 
     /// What the row selects; headings select nothing.
@@ -259,6 +270,23 @@ impl SidebarTree {
     pub fn set(&mut self, snapshot: SourcesSnapshot, facts: HashMap<FeedId, FeedFacts>) {
         self.snapshot = Some(snapshot);
         self.facts = facts;
+    }
+
+    /// The Feeds section's tree (empty until a snapshot is loaded).
+    pub fn nodes(&self) -> &[SourceNode] {
+        self.snapshot.as_ref().map_or(&[], |s| s.tree.as_slice())
+    }
+
+    /// The first-run screen's predicate: a snapshot is loaded and no active feed is in it.
+    /// Never true before the first load, so the screen does not flash at launch.
+    pub fn is_empty_library(&self) -> bool {
+        self.snapshot.as_ref().is_some_and(|s| !has_feed(&s.tree))
+    }
+
+    /// The folder above a feed in the sidebar: `Some(None)` at the top level, `None` when
+    /// the feed is not in the sidebar (buried, unknown).
+    pub fn folder_of(&self, feed: FeedId) -> Option<Option<FolderId>> {
+        folder_above(self.nodes(), None, feed)
     }
 
     pub fn rows(&self) -> Vec<SidebarRow> {
@@ -383,6 +411,24 @@ impl SidebarTree {
     }
 }
 
+fn has_feed(nodes: &[SourceNode]) -> bool {
+    nodes.iter().any(|node| match node.kind {
+        SourceNodeKind::Feed { .. } => true,
+        SourceNodeKind::Folder { .. } => has_feed(&node.children),
+    })
+}
+
+fn folder_above(
+    nodes: &[SourceNode],
+    folder: Option<FolderId>,
+    feed: FeedId,
+) -> Option<Option<FolderId>> {
+    nodes.iter().find_map(|node| match &node.kind {
+        SourceNodeKind::Feed { id, .. } => (*id == feed).then_some(folder),
+        SourceNodeKind::Folder { id, .. } => folder_above(&node.children, Some(*id), feed),
+    })
+}
+
 /// Collects the folders above `target` (`(is_folder, id)`); true when it was found.
 fn find_path(nodes: &[SourceNode], target: (bool, i64), path: &mut Vec<FolderId>) -> bool {
     for node in nodes {
@@ -425,6 +471,55 @@ mod tests {
         rows.iter()
             .find(|r| r.key == key)
             .unwrap_or_else(|| panic!("no row {key}"))
+    }
+
+    #[test]
+    fn the_feed_s_folder_comes_from_the_sidebar_tree() {
+        let db = TestDb::new();
+        db.execute("UPDATE feed SET state = 'buried' WHERE id = 4");
+        let store = db.store();
+        let mut tree = SidebarTree::default();
+        assert!(
+            !tree.is_empty_library(),
+            "not loaded yet: never the first-run screen"
+        );
+        assert!(tree.nodes().is_empty());
+        tree.load(&store, today()).unwrap();
+        assert!(!tree.is_empty_library());
+        assert_eq!(
+            tree.folder_of(2),
+            Some(Some(2)),
+            "Orange Drenka sits in potes"
+        );
+        assert_eq!(tree.folder_of(1), Some(Some(1)));
+        assert_eq!(
+            tree.folder_of(4),
+            None,
+            "a buried feed is not in the sidebar"
+        );
+        assert_eq!(tree.folder_of(999), None);
+    }
+
+    #[test]
+    fn a_library_without_active_feeds_is_empty() {
+        let db = TestDb::new();
+        db.execute("UPDATE feed SET state = 'buried'");
+        let store = db.store();
+        let mut tree = SidebarTree::default();
+        tree.load(&store, today()).unwrap();
+        assert!(tree.is_empty_library());
+    }
+
+    #[test]
+    fn row_keys_use_the_shared_prefixes() {
+        assert_eq!(
+            SidebarRow::heading(HEADINGS[1]).key,
+            format!("{HEADING_KEY_PREFIX}{}", HEADINGS[1])
+        );
+        assert_eq!(
+            Selection::Source(Source::Folder(7)).key(),
+            format!("{FOLDER_KEY_PREFIX}7")
+        );
     }
 
     #[test]
