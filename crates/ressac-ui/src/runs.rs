@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use ressac_core::Error;
+use ressac_core::logging::redact_address;
 use ressac_core::model::{CadenceGroup, Decision, FeedId, FolderId};
 use ressac_core::service::{Event, RefreshOptions, check_subset};
 use ressac_core::store::{Source, Store};
@@ -119,6 +120,25 @@ impl RunRequest {
         }
     }
 
+    /// The request as the log may show it: `add`'s address can carry `user:pass@` or `?token=`.
+    pub fn log_label(&self) -> String {
+        match self {
+            RunRequest::Add {
+                address,
+                theme,
+                folder,
+            } => format!(
+                "{:?}",
+                RunRequest::Add {
+                    address: redact_address(address),
+                    theme: theme.clone(),
+                    folder: *folder,
+                }
+            ),
+            other => format!("{other:?}"),
+        }
+    }
+
     pub fn failure(&self, failure: &JobFailure) -> RunFailure {
         RunFailure {
             message: failure.message(),
@@ -187,7 +207,7 @@ impl RunCoordinator {
             return Admission::Start;
         }
         if self.long_active {
-            tracing::info!("refused {request:?}: a long run is active");
+            tracing::info!("refused {}: a long run is active", request.log_label());
             return Admission::Refused;
         }
         self.long_active = true;
@@ -429,6 +449,7 @@ pub fn fetch_options(store: &Store, request: &RunRequest) -> ressac_core::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::entries::EntryList;
     use crate::sources::GardenScope;
     use crate::test_db::*;
@@ -437,6 +458,33 @@ mod tests {
     use ressac_core::store::{ListFilter, ListQuery};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn log_label_redacts_the_address_add_takes() {
+        let add = RunRequest::Add {
+            address: "https://u:p@host.example/f?token=abc".into(),
+            theme: Some("tech".into()),
+            folder: Some(3),
+        };
+        assert_eq!(
+            add.log_label(),
+            r#"Add { address: "https://host.example/f?...", theme: Some("tech"), folder: Some(3) }"#
+        );
+        let bare = RunRequest::Add {
+            address: "intranet#k".into(),
+            theme: None,
+            folder: None,
+        };
+        assert_eq!(
+            bare.log_label(),
+            r#"Add { address: "intranet", theme: None, folder: None }"#
+        );
+        assert_eq!(
+            RunRequest::MoveFeed(12, None).log_label(),
+            "MoveFeed(12, None)"
+        );
+        assert_eq!(RunRequest::FetchAll.log_label(), "FetchAll");
+    }
 
     fn busy() -> Error {
         Error::Db(rusqlite::Error::SqliteFailure(
