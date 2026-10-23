@@ -2,6 +2,9 @@
 //! the Theme and Rhythm pickers, over the core's `GardenRow`. The Mac's `GardenModel` and
 //! `GardenStore`; the KDE window (B5c, B5d) and Antiope's garden pages (B8) draw them.
 
+mod inspector;
+mod visit;
+
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
@@ -9,7 +12,9 @@ use ressac_core::Result;
 use ressac_core::model::{Action, CadenceGroup, Decision, ErrorKind, FeedId, Hop, Remark, Status};
 use ressac_core::store::{AttemptRecord, CadenceDetail, Store, ThemeDef};
 
+pub use inspector::*;
 pub use ressac_core::garden::{GardenRow, Progress, progress, safe_repairs};
+pub use visit::GardenVisit;
 
 use crate::keys::qt;
 use crate::sanitize::is_web_url;
