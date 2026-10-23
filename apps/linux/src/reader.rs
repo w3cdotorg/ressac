@@ -15,6 +15,7 @@ use ressac_ui::article::{
     PROOF_PAGE, PROOF_SCRIPT, PROOF_URL, RECETTE_PROBE, ReaderStyle, ReaderTheme, asset, decide,
     full_article_help, page_down_script, page_url,
 };
+use ressac_ui::chart;
 use ressac_ui::chrono;
 use ressac_ui::runs::read_failure;
 use ressac_ui::sanitize::is_web_url;
@@ -541,6 +542,14 @@ pub fn ressac_scheme_serve(url: &str, mime: &mut String, body: &mut Vec<u8>) -> 
     let kind = if url == PROOF_URL {
         body.extend_from_slice(PROOF_PAGE.as_bytes());
         HTML
+    } else if let Some(path) = url.strip_prefix(chart::PREFIX) {
+        match (chart::file(path), crate::chart::file_bytes(path)) {
+            (Some(known), Some(bytes)) => {
+                body.extend_from_slice(bytes);
+                known.mime
+            }
+            _ => return false,
+        }
     } else if url.starts_with(PAGE_PREFIX) {
         if !write_stored_page(url, body) {
             return false;

@@ -9,10 +9,12 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QStringList};
 use ressac_core::paths::Paths;
 use ressac_core::store::Store;
+use ressac_ui::chart::save_prefs;
 use ressac_ui::launch::{DatabaseChoice, choose_database, database_location, database_note};
 use ressac_ui::library::local_path;
 use ressac_ui::settings::{
-    Appearance, LineWidth, ReaderFont, Settings, SettingsStore, TextSizeCommand,
+    Appearance, CHART_WINDOW_MIN, ChartInk, ChartPrefs, ChartView, LineWidth, ReaderFont, Settings,
+    SettingsStore, TextSizeCommand,
 };
 
 use crate::shim;
@@ -87,6 +89,8 @@ pub mod qobject {
         #[qproperty(QString, chart_view, READ = chart_view, WRITE = set_chart_view, NOTIFY)]
         #[qproperty(QString, chart_ink, READ = chart_ink, WRITE = set_chart_ink, NOTIFY)]
         #[qproperty(bool, chart_animate, READ = chart_animate, WRITE = set_chart_animate, NOTIFY)]
+        #[qproperty(i32, chart_window_width, READ = chart_window_width, WRITE = set_chart_window_width, NOTIFY)]
+        #[qproperty(i32, chart_window_height, READ = chart_window_height, WRITE = set_chart_window_height, NOTIFY)]
         #[qproperty(QStringList, font_ids, READ, CONSTANT)]
         #[qproperty(QStringList, font_titles, READ, CONSTANT)]
         #[qproperty(QStringList, font_families, READ, CONSTANT)]
@@ -119,6 +123,10 @@ pub mod qobject {
         fn set_chart_ink(self: Pin<&mut AppSettings>, value: &QString);
         fn chart_animate(self: &AppSettings) -> bool;
         fn set_chart_animate(self: Pin<&mut AppSettings>, value: bool);
+        fn chart_window_width(self: &AppSettings) -> i32;
+        fn set_chart_window_width(self: Pin<&mut AppSettings>, value: i32);
+        fn chart_window_height(self: &AppSettings) -> i32;
+        fn set_chart_window_height(self: Pin<&mut AppSettings>, value: i32);
 
         fn resolved_database_path(self: &AppSettings) -> QString;
         fn database_note(self: &AppSettings) -> QString;
@@ -142,6 +150,17 @@ pub mod qobject {
         /// The Data page's texts changed (path, note, refusal, relaunch rule).
         #[qsignal]
         fn data_changed(self: Pin<&mut AppSettings>);
+
+        /// What the Sea Chart page chose (`Chart.prefsReported`): view and ink always, animate
+        /// not under Reduce Motion. An unknown view or ink word stores nothing.
+        #[qinvokable]
+        fn save_chart_prefs(
+            self: Pin<&mut AppSettings>,
+            view: &QString,
+            ink: &QString,
+            animate: bool,
+            reduce: bool,
+        );
 
         /// View ▸ Bigger / Smaller / Actual Size on `look` (`native` or `antiope`): `command` is
         /// `bigger`, `smaller` or `actualSize`. Returns the size now shown; an unknown command
@@ -440,7 +459,78 @@ impl qobject::AppSettings {
             self.as_mut().chart_animate_changed();
         }
     }
+
+    fn chart_window_width(&self) -> i32 {
+        chart_extent(self.rust().settings.chart_window.0, CHART_WINDOW_MIN.0)
+    }
+
+    fn set_chart_window_width(mut self: Pin<&mut Self>, value: i32) {
+        let width = chart_extent(u32::try_from(value).unwrap_or(0), CHART_WINDOW_MIN.0);
+        let height = self.chart_window_height();
+        if self.as_mut().write_chart_window(width, height) {
+            self.as_mut().chart_window_width_changed();
+        }
+    }
+
+    fn chart_window_height(&self) -> i32 {
+        chart_extent(self.rust().settings.chart_window.1, CHART_WINDOW_MIN.1)
+    }
+
+    fn set_chart_window_height(mut self: Pin<&mut Self>, value: i32) {
+        let width = self.chart_window_width();
+        let height = chart_extent(u32::try_from(value).unwrap_or(0), CHART_WINDOW_MIN.1);
+        if self.as_mut().write_chart_window(width, height) {
+            self.as_mut().chart_window_height_changed();
+        }
+    }
+
+    /// Stores both dimensions (each setter keeps the other); true when the size changed.
+    fn write_chart_window(self: Pin<&mut Self>, width: i32, height: i32) -> bool {
+        let (width, height) = (
+            u32::try_from(width).unwrap_or(0),
+            u32::try_from(height).unwrap_or(0),
+        );
+        self.write(|s, store| s.set_chart_window(store, width, height))
+    }
+
+    fn save_chart_prefs(
+        mut self: Pin<&mut Self>,
+        view: &QString,
+        ink: &QString,
+        animate: bool,
+        reduce: bool,
+    ) {
+        let (Some(view), Some(ink)) = (
+            ChartView::parse(&view.to_string()),
+            ChartInk::parse(&ink.to_string()),
+        ) else {
+            return;
+        };
+        let AppSettingsRust {
+            store, settings, ..
+        } = self.as_mut().rust_mut().get_mut();
+        let before = settings.chart;
+        save_prefs(settings, store, &ChartPrefs { view, ink, animate }, reduce);
+        let after = settings.chart;
+        if before.view != after.view {
+            self.as_mut().chart_view_changed();
+        }
+        if before.ink != after.ink {
+            self.as_mut().chart_ink_changed();
+        }
+        if before.animate != after.animate {
+            self.chart_animate_changed();
+        }
+    }
 }
+
+/// The Sea Chart window's size as the window may use it: never below the minimum, never above
+/// what a corrupt settings file could ask a window to be.
+fn chart_extent(value: u32, minimum: u32) -> i32 {
+    i32::try_from(value.clamp(minimum, CHART_WINDOW_MAX)).unwrap_or(i32::MAX)
+}
+
+const CHART_WINDOW_MAX: u32 = 16384;
 
 fn string_list<const N: usize>(items: [&str; N]) -> QStringList {
     let mut list = QStringList::default();
@@ -496,6 +586,15 @@ mod tests {
             Settings::load(&QSettingsStore::at(q.file())).reader_size_antiope,
             25.0
         );
+    }
+
+    #[test]
+    fn a_stored_chart_window_size_is_clamped_to_sane_bounds() {
+        assert_eq!(chart_extent(1100, CHART_WINDOW_MIN.0), 1100);
+        assert_eq!(chart_extent(10, CHART_WINDOW_MIN.0), 640);
+        assert_eq!(chart_extent(0, CHART_WINDOW_MIN.1), 360);
+        assert_eq!(chart_extent(u32::MAX, CHART_WINDOW_MIN.0), 16384);
+        assert_eq!(chart_extent(16384, CHART_WINDOW_MIN.1), 16384);
     }
 
     #[test]

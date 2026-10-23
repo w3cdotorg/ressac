@@ -2,11 +2,13 @@
 //! library is empty elsewhere so `cargo test --workspace` needs no Qt.
 #![cfg(target_os = "linux")]
 
+mod chart;
 mod entries;
 mod garden;
 mod garden_inspector;
 mod journal;
 mod launcher;
+mod library;
 mod reader;
 mod recette;
 mod rows;
@@ -39,6 +41,7 @@ mod shim {
         pub fn ressac_exec() -> i32;
         pub fn ressac_grab_window(path: &str) -> bool;
         pub fn ressac_install_key_filter();
+        pub fn ressac_clipboard_text() -> String;
         pub fn ressac_send_key(key: i32, modifiers: u32, text: &str) -> bool;
 
         pub fn ressac_settings_default_file() -> String;
