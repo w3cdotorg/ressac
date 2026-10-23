@@ -20,29 +20,31 @@ fn reading_keys_reach_the_router_before_the_lists_the_reader_and_the_menus() {
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert_clean(&out);
     for line in [
-        "walk: 12-j-in-sidebar selected=1 focus=sidebar",
-        "walk: 13-arrows-in-list selected=3 focus=entries",
-        "walk: 14-space-in-reader selected=4",
-        "walk: 15-text-field search=j selected=-1",
-        "walk: 16-garden-keys verb=previousEntry handled=false",
-        "walk: 17-auto-read selected=4 read=false page=ressac:page/4-",
-        "walk: 20-auto-read-done read=true page=ressac:page/4-",
+        "walk: 13-j-in-sidebar selected=1 focus=sidebar",
+        "walk: 14-arrows-in-list selected=3 focus=entries",
+        "walk: 15-space-in-reader selected=4",
+        "walk: 16-text-field search=j selected=-1",
+        "walk: 17-garden-keys verb=previousEntry handled=false",
+        "walk: 18-auto-read selected=4 read=false page=ressac:page/4-",
+        "walk: 21-auto-read-done read=true page=ressac:page/4-",
+        "walk: 23-menu read=Mark as Unread enabled=true star=Unstar",
+        "walk: 24-text-size bigger=18 actual=17",
     ] {
         assert!(err.contains(line), "{line} missing in {err}");
     }
     // The reader's own item has the focus (not a list), and k, j, m, m, s, s still act.
     let line = err
         .lines()
-        .find(|l| l.contains("walk: 21-reader-keys"))
-        .unwrap_or_else(|| panic!("walk 21 in {err}"));
+        .find(|l| l.contains("walk: 22-reader-keys"))
+        .unwrap_or_else(|| panic!("walk 22 in {err}"));
     assert!(
         line.contains("focus=reader item=QtWebEngineCore::RenderWidgetHostViewQtDelegateItem")
             && line.ends_with(" k=1 j=4 m=false m2=true s=false s2=true"),
         "{line}"
     );
     assert_eq!(
-        page_of(&err, "walk: 17-auto-read"),
-        page_of(&err, "walk: 20-auto-read-done")
+        page_of(&err, "walk: 18-auto-read"),
+        page_of(&err, "walk: 21-auto-read-done")
     ); // marking read never reloads
     let conn = rusqlite::Connection::open(&db).unwrap();
     let read: Vec<i64> = conn

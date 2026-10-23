@@ -51,23 +51,23 @@ Kirigami.ApplicationWindow {
             console.warn("walk: 11-extraction entry=" + Reader.entryId + " extracting=" + Reader.isExtracting) } },
         { name: "12-notice", enter: function () { console.warn("walk: 12-notice showing=" + Reader.isShowingFullText + " help=" + Reader.fullTextHelp) } },
         // Keys go through Recette.key (the window filter, then the page's perform), as a user's would.
-        { name: "12-j-in-sidebar", enter: function () { SourcesModel.selectKey("feed:1"); readingLoader.item.focusSidebar(); Recette.key(Qt.Key_J, "j", 0)
-            console.warn("walk: 12-j-in-sidebar selected=" + EntriesModel.selectedEntryId + " focus=" + readingLoader.item.focusName()) } },
-        { name: "13-arrows-in-list", enter: function () { Recette.key(Qt.Key_Right, "", 0); Recette.key(Qt.Key_Down, "", 0)
-            console.warn("walk: 13-arrows-in-list selected=" + EntriesModel.selectedEntryId + " focus=" + readingLoader.item.focusName()) } },
-        { name: "14-space-in-reader", enter: function () { readingLoader.item.reader.focusWeb(); Recette.key(Qt.Key_Space, " ", 0) } },
-        { name: "15-text-field", enter: function () { console.warn("walk: 14-space-in-reader selected=" + EntriesModel.selectedEntryId)
+        { name: "13-j-in-sidebar", enter: function () { SourcesModel.selectKey("feed:1"); readingLoader.item.focusSidebar(); Recette.key(Qt.Key_J, "j", 0)
+            console.warn("walk: 13-j-in-sidebar selected=" + EntriesModel.selectedEntryId + " focus=" + readingLoader.item.focusName()) } },
+        { name: "14-arrows-in-list", enter: function () { Recette.key(Qt.Key_Right, "", 0); Recette.key(Qt.Key_Down, "", 0)
+            console.warn("walk: 14-arrows-in-list selected=" + EntriesModel.selectedEntryId + " focus=" + readingLoader.item.focusName()) } },
+        { name: "15-space-in-reader", enter: function () { readingLoader.item.reader.focusWeb(); Recette.key(Qt.Key_Space, " ", 0) } },
+        { name: "16-text-field", enter: function () { console.warn("walk: 15-space-in-reader selected=" + EntriesModel.selectedEntryId)
             readingLoader.item.focusSearch(); Recette.key(Qt.Key_J, "j", 0)
-            console.warn("walk: 15-text-field search=" + EntriesModel.searchText + " selected=" + EntriesModel.selectedEntryId) } },
-        { name: "16-garden-keys", enter: function () { EntriesModel.searchText = ""; SourcesModel.selectKey("garden:needs-triage"); readingLoader.item.focusSidebar(); Recette.key(Qt.Key_K, "k", 0)
-            console.warn("walk: 16-garden-keys verb=" + readingLoader.item.lastVerb + " handled=" + readingLoader.item.lastHandled) } },
-        { name: "17-auto-read", enter: function () { SourcesModel.selectKey("starred"); EntriesModel.select(1)
-            console.warn("walk: 17-auto-read selected=" + EntriesModel.selectedEntryId + " read=" + EntriesModel.selectedRead + " page=" + Reader.pageUrl) } },
-        { name: "18-auto-read-wait", enter: function () {} },
-        { name: "19-auto-read-wait", enter: function () {} },
-        { name: "20-auto-read-done", enter: function () { console.warn("walk: 20-auto-read-done read=" + EntriesModel.selectedRead + " page=" + Reader.pageUrl) } },
+            console.warn("walk: 16-text-field search=" + EntriesModel.searchText + " selected=" + EntriesModel.selectedEntryId) } },
+        { name: "17-garden-keys", enter: function () { EntriesModel.searchText = ""; SourcesModel.selectKey("garden:needs-triage"); readingLoader.item.focusSidebar(); Recette.key(Qt.Key_K, "k", 0)
+            console.warn("walk: 17-garden-keys verb=" + readingLoader.item.lastVerb + " handled=" + readingLoader.item.lastHandled) } },
+        { name: "18-auto-read", enter: function () { SourcesModel.selectKey("starred"); EntriesModel.select(1)
+            console.warn("walk: 18-auto-read selected=" + EntriesModel.selectedEntryId + " read=" + EntriesModel.selectedRead + " page=" + Reader.pageUrl) } },
+        { name: "19-auto-read-wait-a", enter: function () {} },
+        { name: "20-auto-read-wait-b", enter: function () {} },
+        { name: "21-auto-read-done", enter: function () { console.warn("walk: 21-auto-read-done read=" + EntriesModel.selectedRead + " page=" + Reader.pageUrl) } },
         // The reader (WebEngine's own item) has the focus: k, j, m, m, s, s still reach the router first.
-        { name: "21-reader-keys", enter: function () {
+        { name: "22-reader-keys", enter: function () {
             const page = readingLoader.item
             page.reader.focusWeb()
             const focus = page.focusName() + " item=" + String(root.activeFocusItem).split("(")[0]
@@ -77,7 +77,13 @@ Kirigami.ApplicationWindow {
             Recette.key(Qt.Key_M, "m", 0); const m2 = EntriesModel.selectedRead
             Recette.key(Qt.Key_S, "s", 0); const s = EntriesModel.selectedStarred
             Recette.key(Qt.Key_S, "s", 0); const s2 = EntriesModel.selectedStarred
-            console.warn("walk: 21-reader-keys focus=" + focus + " k=" + k + " j=" + j + " m=" + m + " m2=" + m2 + " s=" + s + " s2=" + s2) } }
+            console.warn("walk: 22-reader-keys focus=" + focus + " k=" + k + " j=" + j + " m=" + m + " m2=" + m2 + " s=" + s + " s2=" + s2) } },
+        { name: "23-menu", enter: function () { mainMenu.openMenu("article")
+            console.warn("walk: 23-menu read=" + mainMenu.toggleRead.text + " enabled=" + mainMenu.toggleRead.enabled + " star=" + mainMenu.toggleStar.text) } },
+        { name: "24-text-size", enter: function () { mainMenu.closeMenus(); const before = AppSettings.readerSize
+            mainMenu.biggerText.trigger(); const bigger = AppSettings.readerSize
+            mainMenu.actualSize.trigger(); console.warn("walk: 24-text-size bigger=" + bigger + " actual=" + AppSettings.readerSize)
+            AppSettings.readerSize = before } }          // the walk leaves the setting as it found it
     ]
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… walkSteps
@@ -105,6 +111,8 @@ Kirigami.ApplicationWindow {
     Timer { interval: 60000; running: Recette.active; onTriggered: { console.error("ressac-kde: the screenshot walk timed out"); Qt.exit(1) } }
 
     Component.onCompleted: { Launcher.launch(); root.startWalkIfSettled() }
+
+    menuBar: MainMenu { id: mainMenu; page: readingLoader.item }
 
     pageStack.initialPage: Kirigami.Page {
         globalToolBarStyle: Kirigami.ApplicationHeaderStyle.None

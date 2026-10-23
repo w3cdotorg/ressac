@@ -1,0 +1,76 @@
+//! The menu bar is spec §7.2's table (read from the QML file, on every platform).
+const MENU: &str = include_str!("../qml/MainMenu.qml");
+
+#[test]
+fn the_shortcuts_are_the_spec_table() {
+    for want in [
+        r#"shortcut: "Ctrl+N""#,
+        r#"shortcut: "Ctrl+O""#,
+        r#"shortcut: "Ctrl+Shift+E""#,
+        r#"shortcut: "Ctrl+R""#,
+        r#"shortcut: "Ctrl+Shift+R""#,
+        r#"sequence: "F5""#,
+        "shortcut: StandardKey.Find",
+        r#"shortcut: "Ctrl+Alt+U""#,
+        "shortcut: StandardKey.ZoomIn",
+        "shortcut: StandardKey.ZoomOut",
+        r#"shortcut: "Ctrl+0""#,
+        r#"shortcut: "Ctrl+Shift+M""#,
+        r#"shortcut: "Ctrl+Shift+A""#,
+        r#"shortcut: "Ctrl+Return""#,
+        r#"shortcut: "Ctrl+Shift+,""#,
+        "shortcut: StandardKey.Quit",
+        r#"shortcut: "J""#,
+        r#"shortcut: "K""#,
+        r#"shortcut: "Space""#,
+        r#"shortcut: "M""#,
+        r#"shortcut: "S""#,
+    ] {
+        assert!(MENU.contains(want), "{want}");
+    }
+    for title in [
+        "Add Feed…",
+        "Import OPML…",
+        "Export OPML…",
+        "Refresh All Feeds",
+        "Settings…",
+        "Quit Ressac",
+        "Search",
+        "Show Unread Only",
+        "Bigger Text",
+        "Smaller Text",
+        "Actual Size",
+        "Sea Chart",
+        "Next Entry",
+        "Previous Entry",
+        "Scroll Down or Next Unread",
+        "Mark as Read",
+        "Mark as Unread",
+        "Star",
+        "Unstar",
+        "Mark All as Read",
+        "Full Article",
+        "Open in Browser",
+    ] {
+        assert!(MENU.contains(&format!("\"{title}\"")), "{title}");
+    }
+}
+
+#[test]
+fn menu_mnemonics_never_use_s_g_or_r() {
+    let titles: Vec<&str> = MENU
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("title: \""))
+        .map(|t| t.trim_end_matches('"'))
+        .collect();
+    assert_eq!(titles, ["&File", "&Edit", "&View", "G&o", "&Article"]);
+    for title in titles {
+        let mnemonic = title
+            .split('&')
+            .nth(1)
+            .and_then(|r| r.chars().next())
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(!['s', 'g', 'r'].contains(&mnemonic), "{title}");
+    }
+}
