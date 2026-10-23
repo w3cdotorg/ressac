@@ -97,36 +97,52 @@ Item {
             TapHandler {
                 acceptedButtons: Qt.RightButton
                 enabled: delegate.model.kind === "feed"
-                onTapped: { feedMenu.row = delegate.model; feedMenu.popup() }
+                onTapped: {
+                    feedMenu.prepare({ feedId: delegate.model.feedId, key: delegate.model.key, badge: delegate.model.badge,
+                                       site: delegate.model.site, preferFullText: delegate.model.preferFullText })
+                    feedMenu.popup()
+                }
             }
         }
     }
 
-    // One menu for every feed row; `row` is the model of the row it was opened on.
+    property alias feedMenu: feedMenu
+
+    // One menu for every feed row. `prepare` copies the row's values into plain properties (the
+    // delegate's model may go stale) and sets the checkmark by hand (a toggle would break a binding).
     QQC2.Menu {
         id: feedMenu
-        property var row: ({})
+        property int feedId: 0
+        property string key: ""
+        property int badge: 0
+        property string site: ""
+        property alias fullTextItem: fullTextItem
+
+        function prepare(row) {
+            feedId = row.feedId; key = row.key; badge = row.badge; site = row.site
+            fullTextItem.checked = row.preferFullText
+        }
 
         QQC2.MenuItem {
             text: "Refresh"
             enabled: Runs.canRefresh
-            onTriggered: Runs.refreshFeed(feedMenu.row.feedId)
+            onTriggered: Runs.refreshFeed(feedMenu.feedId)
         }
         QQC2.MenuItem {
+            id: fullTextItem
             text: "Always Fetch Full Article"
             checkable: true
-            checked: feedMenu.row.preferFullText === true
-            onTriggered: SourcesModel.setPreferFullText(feedMenu.row.feedId, checked)
+            onTriggered: SourcesModel.setPreferFullText(feedMenu.feedId, checked)
         }
         QQC2.MenuItem {
             text: "Mark All as Read"
-            enabled: feedMenu.row.badge > 0
-            onTriggered: EntriesModel.markAllReadIn(feedMenu.row.key)
+            enabled: feedMenu.badge > 0
+            onTriggered: EntriesModel.markAllReadIn(feedMenu.key)
         }
         QQC2.MenuItem {
             text: "Open Site"
-            enabled: feedMenu.row.site !== undefined && feedMenu.row.site !== ""
-            onTriggered: Qt.openUrlExternally(feedMenu.row.site)
+            enabled: feedMenu.site !== ""
+            onTriggered: Qt.openUrlExternally(feedMenu.site)
         }
     }
 }

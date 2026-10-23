@@ -38,6 +38,7 @@ fn the_reading_page_walks_sources_entries_search_banner_and_garden() {
         "walk: 05-banner visible=true",
         "walk: 06-garden active=false unreadEnabled=false",
         "walk: 07-unread-filter clicked=true all=true unread=false",
+        "walk: 07-feed-menu first=true again=true other=false feedId=2 badge=3",
     ] {
         assert!(err.contains(line), "{line} missing in {err}");
     }

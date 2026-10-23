@@ -35,7 +35,14 @@ Kirigami.ApplicationWindow {
             SourcesModel.selectKey("unread"); page.unreadButton.click()          // a user click on Unread ...
             const clicked = EntriesModel.unreadOnly
             EntriesModel.unreadOnly = false                                              // ... the model moves on its own
-            console.warn("walk: 07-unread-filter clicked=" + clicked + " all=" + page.allButton.checked + " unread=" + page.unreadButton.checked) } }
+            console.warn("walk: 07-unread-filter clicked=" + clicked + " all=" + page.allButton.checked + " unread=" + page.unreadButton.checked)
+            const menu = page.sourcesPane.feedMenu
+            const row = { feedId: 1, key: "feed:1", badge: 0, site: "", preferFullText: true }
+            menu.prepare(row); const first = menu.fullTextItem.checked
+            menu.fullTextItem.checked = false                                            // the user unticks it ...
+            menu.prepare(row); const again = menu.fullTextItem.checked                   // ... and reopens on a ticked feed
+            menu.prepare({ feedId: 2, key: "feed:2", badge: 3, site: "x", preferFullText: false })
+            console.warn("walk: 07-feed-menu first=" + first + " again=" + again + " other=" + menu.fullTextItem.checked + " feedId=" + menu.feedId + " badge=" + menu.badge) } }
     ]
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… walkSteps

@@ -11,6 +11,12 @@ Item {
 
     property alias allButton: allButton
     property alias unreadButton: unreadButton
+    property alias sourcesPane: sourcesPane
+
+    function syncFilter() {
+        allButton.checked = !EntriesModel.unreadOnly
+        unreadButton.checked = EntriesModel.unreadOnly
+    }
 
     function reloadAll() {
         SourcesModel.reload()
@@ -45,15 +51,14 @@ Item {
 
                     QQC2.ButtonGroup { id: filterGroup }
 
-                    // `checked` follows the model; a user click writes the model through onToggled and the
-                    // Binding puts the binding back (a click would otherwise replace it for good).
+                    // `checked` is synced imperatively from the model (syncFilter), never bound: a click and the
+                    // group's exclusive uncheck write it directly. A click writes the model through onToggled.
                     QQC2.ToolButton {
                         id: allButton
                         text: "All"
                         checkable: true
                         QQC2.ButtonGroup.group: filterGroup
                         onToggled: if (checked) EntriesModel.unreadOnly = false
-                        Binding { target: allButton; property: "checked"; value: !EntriesModel.unreadOnly; restoreMode: Binding.RestoreBindingOrValue }
                     }
 
                     QQC2.ToolButton {
@@ -62,7 +67,6 @@ Item {
                         checkable: true
                         QQC2.ButtonGroup.group: filterGroup
                         onToggled: if (checked) EntriesModel.unreadOnly = true
-                        Binding { target: unreadButton; property: "checked"; value: EntriesModel.unreadOnly; restoreMode: Binding.RestoreBindingOrValue }
                     }
                 }
 
@@ -162,6 +166,7 @@ Item {
         value: page.Window.window !== null && page.Window.window.active && page.Window.window.visibility !== Window.Minimized
     }
 
+    Connections { target: EntriesModel; function onUnreadOnlyChanged() { page.syncFilter() } }
     Connections { target: Live; function onInvalidated() { page.reloadAll() } }
     Connections { target: Runs; function onDatabaseChanged() { page.reloadAll() } }
     Connections { target: SourcesModel; function onWrote() { page.reloadAll() } }
@@ -171,6 +176,7 @@ Item {
     Connections { target: SourcesModel; function onSelectionChanged() { EntriesModel.showSource(SourcesModel.selectedKey) } }
 
     Component.onCompleted: {
+        page.syncFilter()
         SourcesModel.reload()
         EntriesModel.showSource(SourcesModel.selectedKey)
     }
