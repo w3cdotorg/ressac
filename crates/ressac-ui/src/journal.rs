@@ -3,12 +3,13 @@
 
 use std::fmt::Display;
 
-use chrono::TimeZone;
-use ressac_core::edition::Section;
+use chrono::{DateTime, TimeDelta, TimeZone, Utc};
+use ressac_core::edition::{Section, day_start};
 use ressac_core::model::FeedId;
-use ressac_core::store::{EditionOverflowRow, JournalView};
+use ressac_core::service::{EditionOutcome, Event};
+use ressac_core::store::{EditionOverflowRow, JournalView, Store};
 
-use crate::runs;
+use crate::runs::{self, COULD_NOT_READ, RunEnd, RunFailure};
 
 pub const BUILDING: &str = runs::EDITION_LABEL;
 pub const END_LINE: &str = "That's the edition.";
@@ -16,6 +17,10 @@ pub const EMPTY_LINE: &str = "Nothing new this morning.";
 pub const NO_EDITION: &str = "No edition yet";
 pub const OFFLINE: &str = "Offline: no edition yet";
 pub const RETRY: &str = "Retry";
+pub const OFFLINE_REFUSAL: &str = "The network is unreachable: no edition built.";
+pub const INTERRUPTED: &str = "Interrupted.";
+/// After a failure, automatic triggers leave the edition alone for this long.
+pub const AUTOMATIC_RETRY_DELAY: TimeDelta = TimeDelta::minutes(15);
 
 pub const SECTIONS: [Section; 3] = [Section::Front, Section::Week, Section::Wire];
 
@@ -188,15 +193,177 @@ pub fn placeholder(phase: &Phase, view: Option<&JournalView>) -> Option<String> 
     }
 }
 
+/// The 04:00 day start seen at a clock check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockCheck {
+    pub day_start: DateTime<Utc>,
+}
+
+impl ClockCheck {
+    pub fn at<Tz: TimeZone>(now: DateTime<Utc>, tz: &Tz) -> ClockCheck {
+        ClockCheck {
+            day_start: day_start(now.with_timezone(tz)),
+        }
+    }
+}
+
+/// The day start of `now`, in the zone as it is now, differs from the one `last_check` saw:
+/// 04:00 passed, the machine resumed across it, or the time zone changed.
+pub fn due_after<Tz: TimeZone>(last_check: &ClockCheck, now: DateTime<Utc>, tz: &Tz) -> bool {
+    ClockCheck::at(now, tz) != *last_check
+}
+
+/// No edition built since the 04:00 day start of `now` in `tz`.
+pub fn is_due<Tz: TimeZone>(
+    store: &Store,
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> ressac_core::Result<bool> {
+    store.edition_due(day_start(now.with_timezone(tz)))
+}
+
+/// An outcome the run reads as a failure: the banner's sentence, and whether it is a refusal
+/// (shown without Show Log).
+pub fn edition_failure(outcome: &EditionOutcome) -> Option<RunFailure> {
+    match outcome {
+        EditionOutcome::Offline => Some(RunFailure {
+            message: OFFLINE_REFUSAL.into(),
+            refusal: true,
+        }),
+        EditionOutcome::Interrupted => Some(RunFailure {
+            message: INTERRUPTED.into(),
+            refusal: false,
+        }),
+        EditionOutcome::Built(_) | EditionOutcome::NotDue => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    /// Launch, the app becoming active, the minute check: waits out a failure.
+    Automatic,
+    /// The Retry button: never waits.
+    Retry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Nothing,
+    /// Start the build as a long run.
+    Build,
+}
+
+/// The phase machine (the Mac's `JournalModel`): one check or build at a time, the 15-minute
+/// wait after a failure (in memory only) and the clock check.
+#[derive(Debug, Clone, Default)]
+pub struct JournalModel {
+    phase: Phase,
+    busy: bool,
+    not_before: Option<DateTime<Utc>>,
+    clock: Option<ClockCheck>,
+}
+
+impl JournalModel {
+    pub fn phase(&self) -> &Phase {
+        &self.phase
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy
+    }
+
+    /// A trigger fired: true when the caller should now check whether an edition is due
+    /// (`is_due`, then `checked`). Records the clock check either way, so the minute tick
+    /// fires once per day start.
+    pub fn begin<Tz: TimeZone>(&mut self, trigger: Trigger, now: DateTime<Utc>, tz: &Tz) -> bool {
+        self.clock = Some(ClockCheck::at(now, tz));
+        if self.busy {
+            return false;
+        }
+        if trigger == Trigger::Automatic
+            && let Some(not_before) = self.not_before
+            && now < not_before
+            && not_before - now <= AUTOMATIC_RETRY_DELAY
+        {
+            return false;
+        }
+        self.busy = true;
+        true
+    }
+
+    /// The due check's answer.
+    pub fn checked(&mut self, due: ressac_core::Result<bool>) -> Step {
+        match due {
+            Ok(false) => {
+                self.phase = Phase::Idle;
+                self.not_before = None;
+                self.busy = false;
+                Step::Nothing
+            }
+            Ok(true) => {
+                self.phase = Phase::Building { done: 0, total: 0 };
+                Step::Build
+            }
+            Err(error) => {
+                self.phase = Phase::Failed(format!("{COULD_NOT_READ}{error}"));
+                self.busy = false;
+                Step::Nothing
+            }
+        }
+    }
+
+    /// A build event, counted only while building.
+    pub fn event(&mut self, event: &Event) {
+        let Phase::Building { done, total } = &mut self.phase else {
+            return;
+        };
+        match event {
+            Event::Started { total: n } => {
+                *done = 0;
+                *total = *n;
+            }
+            Event::FeedDone { .. } => *done += 1,
+            _ => {}
+        }
+    }
+
+    pub fn finished(&mut self, end: RunEnd<EditionOutcome>, now: DateTime<Utc>) {
+        self.busy = false;
+        self.phase = match end {
+            RunEnd::Done(EditionOutcome::Built(_) | EditionOutcome::NotDue) => Phase::Idle,
+            RunEnd::Done(EditionOutcome::Offline) => Phase::Offline,
+            RunEnd::Done(EditionOutcome::Interrupted) => Phase::Failed(INTERRUPTED.into()),
+            RunEnd::Refused => Phase::Due,
+            RunEnd::Failed(failure) => Phase::Failed(failure.message),
+        };
+        self.not_before = matches!(self.phase, Phase::Offline | Phase::Failed(_))
+            .then(|| now + AUTOMATIC_RETRY_DELAY);
+    }
+
+    /// The once-a-minute wall-clock check: no check yet, or the 04:00 day start moved since
+    /// the last one (04:00 passed, a resume across it, a time-zone change).
+    pub fn clock_tick<Tz: TimeZone>(&self, now: DateTime<Utc>, tz: &Tz) -> bool {
+        self.clock
+            .as_ref()
+            .is_none_or(|last| due_after(last, now, tz))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::entries::EntryList;
-    use crate::runs::DirectWrite;
-    use crate::test_db::{TestDb, at, today};
+    use crate::live::Invalidation;
+    use crate::runs::{Admission, Banner, RunCoordinator, RunFailure, RunRequest};
+    use crate::runs::{DirectWrite, RunEnd};
+    use crate::test_db::{Paris, TestDb, at, today};
+    use EditionOutcome::Built;
     use chrono::FixedOffset;
+    use chrono::TimeDelta;
+    use ressac_core::clock::today_start;
     use ressac_core::edition::Section;
     use ressac_core::model::FeedId;
+    use ressac_core::service::{EditionOutcome, EditionReport, Event};
     use ressac_core::store::{
         EditionOverflowRow, EditionRecord, EntryRow, JournalItem, JournalView, ListFilter,
         ListQuery, Source,
@@ -506,5 +673,347 @@ mod tests {
             list.next_unread(&store, Some(second), today()).unwrap(),
             None
         );
+    }
+
+    fn built() -> EditionOutcome {
+        Built(EditionReport {
+            id: 1,
+            entries: 0,
+            front: 0,
+            week: 0,
+            wire: 0,
+            overflow: 0,
+            unreachable: 0,
+        })
+    }
+
+    fn failed(m: &str) -> RunEnd<EditionOutcome> {
+        RunEnd::Failed(RunFailure {
+            message: m.into(),
+            refusal: false,
+        })
+    }
+
+    fn mins(n: i64) -> TimeDelta {
+        TimeDelta::minutes(n)
+    }
+
+    const T0: &str = "2026-10-16T07:30:00Z";
+
+    /// Master Review Focus 5.
+    #[test]
+    fn due_after_notices_a_resume_across_four_and_a_zone_change() {
+        let night = ClockCheck::at(at("2026-10-15T23:30:00Z"), &Paris); // 01:30 Paris
+        assert!(!due_after(&night, at("2026-10-16T01:59:00Z"), &Paris)); // 03:59
+        assert!(due_after(&night, at("2026-10-16T05:30:00Z"), &Paris)); // asleep six hours, awake at 07:30
+        let morning = ClockCheck::at(at("2026-10-16T03:00:00Z"), &Paris); // 05:00 Paris
+        assert!(!due_after(&morning, at("2026-10-16T09:00:00Z"), &Paris)); // six hours that do not cross 04:00
+        let tokyo = FixedOffset::east_opt(9 * 3600).unwrap();
+        assert!(due_after(&morning, at("2026-10-16T03:01:00Z"), &tokyo)); // the zone changed: 12:01 in Tokyo, another day start
+        assert!(!due_after(
+            &ClockCheck::at(at("2026-10-16T03:01:00Z"), &tokyo),
+            at("2026-10-16T03:02:00Z"),
+            &tokyo
+        ));
+    }
+
+    #[test]
+    fn a_zone_change_while_running_makes_the_edition_due_at_the_next_tick() {
+        let db = TestDb::new();
+        db.built("2026-10-15T20:30:00.000Z"); // 05:30 in Tokyo, Friday's edition there
+        let store = db.store();
+        let tokyo = FixedOffset::east_opt(9 * 3600).unwrap();
+        let mut m = JournalModel::default();
+        assert!(m.begin(Trigger::Automatic, at("2026-10-16T05:59:00Z"), &tokyo));
+        assert_eq!(
+            m.checked(is_due(&store, at("2026-10-16T05:59:00Z"), &tokyo)),
+            Step::Nothing
+        );
+        assert!(
+            m.clock_tick(at("2026-10-16T06:00:00Z"), &Paris),
+            "moved to Paris: 08:00 there, another 04:00"
+        );
+        assert!(m.begin(Trigger::Automatic, at("2026-10-16T06:00:00Z"), &Paris));
+        assert_eq!(
+            m.checked(is_due(&store, at("2026-10-16T06:00:00Z"), &Paris)),
+            Step::Build
+        );
+    }
+
+    #[test]
+    fn today_moves_to_the_new_midnight_after_a_zone_change() {
+        let mut seen = Invalidation::default();
+        assert!(!seen.day_seen(today_start(
+            at("2026-10-16T06:00:00Z").with_timezone(&Paris)
+        )));
+        assert!(!seen.day_seen(today_start(
+            at("2026-10-16T06:01:00Z").with_timezone(&Paris)
+        )));
+        let los_angeles = FixedOffset::west_opt(7 * 3600).unwrap(); // still 15 October there
+        assert!(seen.day_seen(today_start(
+            at("2026-10-16T06:02:00Z").with_timezone(&los_angeles)
+        )));
+    }
+
+    #[test]
+    fn the_day_turns_at_four_local_time_across_dst() {
+        let tick =
+            |last: &str, now: &str| due_after(&ClockCheck::at(at(last), &Paris), at(now), &Paris);
+        assert!(tick("2026-10-25T02:59:00Z", "2026-10-25T03:00:00Z")); // 25 October: 04:00 Paris is 03:00 UTC
+        assert!(!tick("2026-10-25T02:58:00Z", "2026-10-25T02:59:00Z"));
+        assert!(tick("2026-03-29T01:59:00Z", "2026-03-29T02:00:00Z")); // 29 March: 04:00 Paris is 02:00 UTC
+        assert!(!tick("2026-03-29T01:58:00Z", "2026-03-29T01:59:00Z"));
+        assert!(tick("2026-10-17T01:59:00Z", "2026-10-17T02:00:00Z")); // summer time: 02:00 UTC
+    }
+
+    #[test]
+    fn the_minute_tick_turns_once_at_four() {
+        let mut m = JournalModel::default();
+        let mut now = at(T0); // 09:30 Paris
+        assert!(m.begin(Trigger::Automatic, now, &Paris));
+        m.checked(Ok(false));
+        let mut turned = Vec::new();
+        while now < at("2026-10-17T07:30:00Z") {
+            now += mins(1);
+            if m.clock_tick(now, &Paris) {
+                turned.push(now);
+                assert!(m.begin(Trigger::Automatic, now, &Paris));
+                m.checked(Ok(false));
+            }
+        }
+        assert_eq!(turned, [at("2026-10-17T02:00:00Z")]);
+    }
+
+    #[test]
+    fn an_edition_built_after_four_is_not_due_and_one_built_before_belongs_to_yesterday() {
+        let db = TestDb::new();
+        let store = db.store();
+        assert!(is_due(&store, at(T0), &Paris).unwrap(), "no edition at all");
+        db.built("2026-10-16T01:30:00.000Z"); // 03:30 Paris: yesterday's
+        assert!(is_due(&store, at(T0), &Paris).unwrap());
+        db.built("2026-10-16T02:30:00.000Z"); // 04:30 Paris
+        assert!(!is_due(&store, at(T0), &Paris).unwrap());
+    }
+
+    #[test]
+    fn before_four_the_day_is_still_yesterday() {
+        let db = TestDb::new();
+        db.built("2026-10-15T05:00:00.000Z"); // yesterday 07:00
+        assert!(!is_due(&db.store(), at("2026-10-16T01:30:00Z"), &Paris).unwrap()); // 03:30 Paris
+    }
+
+    #[test]
+    fn a_due_edition_is_built_and_shown() {
+        let mut m = JournalModel::default();
+        assert!(m.begin(Trigger::Automatic, at(T0), &Paris));
+        assert_eq!(m.checked(Ok(true)), Step::Build);
+        assert_eq!(m.phase(), &Phase::Building { done: 0, total: 0 });
+        m.finished(RunEnd::Done(built()), at(T0));
+        assert_eq!(m.phase(), &Phase::Idle);
+        assert!(!m.is_busy());
+    }
+
+    #[test]
+    fn building_reports_its_progress() {
+        let mut m = JournalModel::default();
+        m.begin(Trigger::Automatic, at(T0), &Paris);
+        m.checked(Ok(true));
+        m.event(&Event::Started { total: 3 });
+        for feed_id in [1, 2] {
+            m.event(&Event::FeedDone {
+                feed_id,
+                title: "A".into(),
+                error: None,
+            });
+        }
+        assert_eq!(m.phase(), &Phase::Building { done: 2, total: 3 });
+    }
+
+    #[test]
+    fn offline_keeps_the_edition_due_and_retry_builds_it() {
+        let mut m = JournalModel::default();
+        m.begin(Trigger::Automatic, at(T0), &Paris);
+        m.checked(Ok(true));
+        m.finished(RunEnd::Done(EditionOutcome::Offline), at(T0));
+        assert_eq!(m.phase(), &Phase::Offline);
+        assert!(m.begin(Trigger::Retry, at(T0), &Paris), "Retry never waits");
+        assert_eq!(m.checked(Ok(true)), Step::Build);
+    }
+
+    #[test]
+    fn an_edition_built_meanwhile_elsewhere_is_simply_shown() {
+        assert_eq!(edition_failure(&EditionOutcome::NotDue), None);
+        let mut runs = RunCoordinator::default();
+        let request = RunRequest::BuildEdition { rebuild: false };
+        runs.admit(&request);
+        assert_eq!(
+            runs.conclude(&request, Ok(EditionOutcome::NotDue), edition_failure),
+            RunEnd::Done(EditionOutcome::NotDue)
+        );
+        assert_eq!(runs.banner(), None);
+        let mut m = JournalModel::default();
+        m.begin(Trigger::Automatic, at(T0), &Paris);
+        m.checked(Ok(true));
+        m.finished(RunEnd::Done(EditionOutcome::NotDue), at(T0));
+        assert_eq!(m.phase(), &Phase::Idle);
+    }
+
+    #[test]
+    fn an_offline_refusal_keeps_its_banner() {
+        let mut runs = RunCoordinator::default();
+        let request = RunRequest::BuildEdition { rebuild: false };
+        runs.admit(&request);
+        runs.event(
+            &request,
+            &Event::NetworkUnreachable {
+                failed: 11,
+                attempted: 11,
+            },
+        );
+        assert_eq!(
+            runs.conclude(&request, Ok(EditionOutcome::Offline), edition_failure),
+            RunEnd::Done(EditionOutcome::Offline)
+        );
+        assert_eq!(
+            runs.banner(),
+            Some(&Banner {
+                message: "The network is unreachable: no edition built.".into(),
+                show_log: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_failed_or_stopped_build_leaves_the_edition_due() {
+        for (end, message) in [
+            (failed("disk full"), "disk full"),
+            (
+                failed("The job stopped unexpectedly."),
+                "The job stopped unexpectedly.",
+            ),
+            (RunEnd::Done(EditionOutcome::Interrupted), "Interrupted."),
+        ] {
+            let mut m = JournalModel::default();
+            m.begin(Trigger::Automatic, at(T0), &Paris);
+            m.checked(Ok(true));
+            m.finished(end, at(T0));
+            assert_eq!(m.phase(), &Phase::Failed(message.into()));
+            let mut relaunched = JournalModel::default(); // the wait is in memory only
+            assert!(relaunched.begin(Trigger::Automatic, at(T0) + mins(1), &Paris));
+        }
+        assert_eq!(
+            edition_failure(&EditionOutcome::Interrupted),
+            Some(RunFailure {
+                message: "Interrupted.".into(),
+                refusal: false
+            })
+        );
+    }
+
+    #[test]
+    fn automatic_triggers_wait_fifteen_minutes_after_a_failure() {
+        for end in [failed("disk full"), RunEnd::Done(EditionOutcome::Offline)] {
+            let mut m = JournalModel::default();
+            m.begin(Trigger::Automatic, at(T0), &Paris);
+            m.checked(Ok(true));
+            m.finished(end, at(T0));
+            assert!(!m.begin(Trigger::Automatic, at(T0) + mins(5), &Paris));
+            assert!(m.begin(Trigger::Automatic, at(T0) + mins(16), &Paris));
+        }
+    }
+
+    #[test]
+    fn retry_builds_during_the_window_and_a_manual_failure_restarts_it() {
+        let mut m = JournalModel::default();
+        m.begin(Trigger::Automatic, at(T0), &Paris);
+        m.checked(Ok(true));
+        m.finished(failed("disk full"), at(T0));
+        assert!(m.begin(Trigger::Retry, at(T0) + mins(10), &Paris));
+        m.checked(Ok(true));
+        m.finished(failed("disk full"), at(T0) + mins(10));
+        assert!(
+            !m.begin(Trigger::Automatic, at(T0) + mins(20), &Paris),
+            "10 minutes after the manual failure"
+        );
+        assert!(m.begin(Trigger::Automatic, at(T0) + mins(26), &Paris));
+    }
+
+    #[test]
+    fn a_success_clears_the_window() {
+        let mut m = JournalModel::default();
+        m.begin(Trigger::Automatic, at(T0), &Paris);
+        m.checked(Ok(true));
+        m.finished(failed("disk full"), at(T0));
+        m.begin(Trigger::Retry, at(T0), &Paris);
+        m.checked(Ok(true));
+        m.finished(RunEnd::Done(built()), at(T0));
+        assert!(m.begin(Trigger::Automatic, at(T0) + mins(1), &Paris));
+    }
+
+    #[test]
+    fn finding_the_edition_not_due_clears_the_window() {
+        let mut m = JournalModel::default();
+        m.begin(Trigger::Automatic, at(T0), &Paris);
+        m.checked(Ok(true));
+        m.finished(failed("disk full"), at(T0));
+        assert!(m.begin(Trigger::Retry, at(T0) + mins(2), &Paris));
+        assert_eq!(m.checked(Ok(false)), Step::Nothing); // built in a terminal meanwhile
+        assert_eq!(m.phase(), &Phase::Idle);
+        assert!(m.begin(Trigger::Automatic, at(T0) + mins(3), &Paris));
+    }
+
+    #[test]
+    fn a_clock_moved_backwards_expires_the_window() {
+        let mut m = JournalModel::default();
+        m.begin(Trigger::Automatic, at(T0), &Paris);
+        m.checked(Ok(true));
+        m.finished(failed("disk full"), at(T0));
+        assert!(m.begin(Trigger::Automatic, at(T0) - mins(60), &Paris));
+    }
+
+    #[test]
+    fn a_build_turned_away_by_another_long_run_stays_due() {
+        let mut runs = RunCoordinator::default();
+        runs.admit(&RunRequest::FetchAll);
+        assert_eq!(
+            runs.admit(&RunRequest::BuildEdition { rebuild: false }),
+            Admission::Refused
+        );
+        let mut m = JournalModel::default();
+        m.begin(Trigger::Automatic, at(T0), &Paris);
+        m.checked(Ok(true));
+        m.finished(RunEnd::Refused, at(T0));
+        assert_eq!(m.phase(), &Phase::Due);
+        assert!(m.phase().offers_retry());
+        assert!(
+            m.begin(Trigger::Automatic, at(T0) + mins(1), &Paris),
+            "no wait after a refusal"
+        );
+    }
+
+    #[test]
+    fn a_second_trigger_during_a_build_does_nothing() {
+        let mut m = JournalModel::default();
+        assert!(m.begin(Trigger::Automatic, at(T0), &Paris));
+        assert!(!m.begin(Trigger::Automatic, at(T0), &Paris));
+        m.checked(Ok(true));
+        assert!(!m.begin(Trigger::Retry, at(T0), &Paris));
+        m.finished(RunEnd::Done(built()), at(T0));
+        assert!(m.begin(Trigger::Automatic, at(T0), &Paris));
+    }
+
+    #[test]
+    fn a_database_error_while_checking_fails_with_its_sentence() {
+        let mut m = JournalModel::default();
+        m.begin(Trigger::Automatic, at(T0), &Paris);
+        assert_eq!(
+            m.checked(Err(ressac_core::Error::Invalid("disk I/O error".into()))),
+            Step::Nothing
+        );
+        assert_eq!(
+            m.phase(),
+            &Phase::Failed("Could not read the database: disk I/O error".into())
+        );
+        assert!(!m.is_busy());
     }
 }

@@ -11,7 +11,7 @@ use ressac_core::service::{Event, RefreshOptions, check_subset};
 use ressac_core::store::{Source, Store};
 
 use crate::sources::Selection;
-use crate::worker::JobFailure;
+use crate::worker::{JobFailure, JobResult};
 
 pub const EDITION_LABEL: &str = "Building this morning's edition…";
 pub const FETCHING_FEEDS: &str = "Fetching feeds";
@@ -163,6 +163,15 @@ pub enum Admission {
     Refused,
 }
 
+/// How a run ended for the one who asked (the Mac's `RunOutcome`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunEnd<T> {
+    Done(T),
+    /// Turned away at admission: another long run was active.
+    Refused,
+    Failed(RunFailure),
+}
+
 /// One long run at a time; short runs overlap it.
 #[derive(Debug, Clone, Default)]
 pub struct RunCoordinator {
@@ -264,6 +273,28 @@ impl RunCoordinator {
                 });
             }
             Err(_) => {}
+        }
+    }
+
+    /// `finish` for a job's own result: a job failure, or a value `failure_of` reads as one
+    /// (an offline edition), sets the banner as `finish` does; the value goes back as `Done`.
+    pub fn conclude<T>(
+        &mut self,
+        request: &RunRequest,
+        result: JobResult<T>,
+        failure_of: impl FnOnce(&T) -> Option<RunFailure>,
+    ) -> RunEnd<T> {
+        match result {
+            Err(job) => {
+                let failure = request.failure(&job);
+                self.finish(request, Err(&failure));
+                RunEnd::Failed(failure)
+            }
+            Ok(value) => {
+                let failure = failure_of(&value);
+                self.finish(request, failure.as_ref().map_or(Ok(()), Err));
+                RunEnd::Done(value)
+            }
         }
     }
 
@@ -977,5 +1008,33 @@ mod tests {
         );
         terminal.join().unwrap();
         assert_eq!(db.read_at(ids[0]), None);
+    }
+
+    #[test]
+    fn conclude_hands_a_job_failure_back_and_shows_its_banner() {
+        let mut runs = RunCoordinator::default();
+        runs.admit(&RunRequest::FetchAll);
+        let end = runs.conclude::<()>(&RunRequest::FetchAll, Err(JobFailure::Panicked), |_| None);
+        assert_eq!(
+            end,
+            RunEnd::Failed(RunFailure {
+                message: "The job stopped unexpectedly.".into(),
+                refusal: false
+            })
+        );
+        assert_eq!(
+            runs.banner(),
+            Some(&Banner {
+                message: "The job stopped unexpectedly.".into(),
+                show_log: true
+            })
+        );
+        assert!(!runs.long_run_active());
+        runs.admit(&RunRequest::FetchAll);
+        assert_eq!(
+            runs.conclude(&RunRequest::FetchAll, Ok(()), |_| None),
+            RunEnd::Done(())
+        );
+        assert_eq!(runs.banner(), None);
     }
 }

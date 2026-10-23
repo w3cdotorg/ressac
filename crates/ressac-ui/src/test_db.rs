@@ -185,7 +185,6 @@ impl TestDb {
 
     /// A new latest edition built at `built_at`, with no entries; its window is the one
     /// `edition()` writes.
-    #[allow(dead_code, reason = "used by the journal tests (B4a)")]
     pub fn built(&self, built_at: &str) -> i64 {
         let id: i64 = self
             .conn
@@ -204,7 +203,6 @@ impl TestDb {
     }
 
     /// `hidden` entries of `feed` left out of `edition`'s `section` by the caps.
-    #[allow(dead_code, reason = "used by the journal tests (B4a)")]
     pub fn overflow(&self, edition: i64, feed: i64, section: &str, hidden: u32) {
         self.conn
             .execute(
@@ -257,10 +255,8 @@ impl TestDb {
 /// Europe/Paris for 2026 only (a copy of core `edition.rs`'s test zone): CEST (+2) from
 /// 2026-03-29 01:00 UTC to 2026-10-25 01:00 UTC, CET (+1) otherwise.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code, reason = "used by the journal tests (B4a)")]
 pub struct Paris;
 
-#[allow(dead_code, reason = "used by the journal tests (B4a)")]
 impl Paris {
     fn offset_at_utc(utc: &NaiveDateTime) -> FixedOffset {
         let summer_from = NaiveDate::from_ymd_opt(2026, 3, 29)
