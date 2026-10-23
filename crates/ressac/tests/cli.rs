@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use ressac_core::model::{Action, Cadence, Diagnosis, Evidence, FeedId, Status};
 use ressac_core::store::Store;
@@ -2371,4 +2372,107 @@ async fn feed_move_unknown_exit_2() {
         assert_eq!(stderr(&out), message, "{args:?}");
         assert!(out.stdout.is_empty(), "{args:?}");
     }
+}
+
+/// `ressac fetch` on four feeds of one host that answer after `delay`, started in the
+/// background. Returns once the server has seen a request: the signal listeners are in place.
+#[cfg(unix)]
+async fn slow_fetch(
+    server: &MockServer,
+    delay: Duration,
+) -> (tempfile::TempDir, std::process::Child) {
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(channel("Slow", ""), "application/rss+xml")
+                .set_delay(delay),
+        )
+        .mount(server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let outlines: String = (1..=4)
+        .map(|i| {
+            format!(
+                r#"<outline text="S{i}" xmlUrl="{}/s{i}.xml"/>"#,
+                server.uri()
+            )
+        })
+        .collect();
+    let opml = home.path().join("slow.opml");
+    std::fs::write(&opml, format!("<opml><body>{outlines}</body></opml>")).unwrap();
+    assert!(
+        ressac_async(home.path(), &["import", opml.to_str().unwrap()])
+            .await
+            .status
+            .success()
+    );
+    let child = hermetic(home.path())
+        .args([
+            "--db",
+            home.path().join("db.sqlite").to_str().unwrap(),
+            "fetch",
+        ])
+        .env("RESSAC_ALLOW_PRIVATE_ARTICLES", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the fetch never reached the server"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    (home, child)
+}
+
+#[cfg(unix)]
+fn signal(name: &str, pid: u32) {
+    let status = Command::new("kill")
+        .args([name, &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_stops_a_fetch_like_a_first_ctrl_c() {
+    let server = MockServer::start().await;
+    let (_home, child) = slow_fetch(&server, Duration::from_millis(1500)).await;
+    signal("-TERM", child.id());
+    let out = tokio::task::spawn_blocking(move || child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+    assert!(stderr(&out).contains("Interrupted: "), "{}", stderr(&out));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_second_signal_of_either_kind_leaves_at_once() {
+    let server = MockServer::start().await;
+    let (_home, child) = slow_fetch(&server, Duration::from_secs(20)).await;
+    let started = Instant::now();
+    signal("-TERM", child.id());
+    // Two signals sent together may be delivered as one.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    signal("-INT", child.id());
+    let out = tokio::task::spawn_blocking(move || child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "waited for the slow feed"
+    );
 }

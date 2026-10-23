@@ -49,6 +49,57 @@ fn is_broken_pipe(e: &anyhow::Error) -> bool {
     })
 }
 
+/// The commands that read `Globals::stop`. Only these catch SIGTERM: the readers and the
+/// garden TUI never look at the flag, so a handled SIGTERM would leave them running.
+fn honours_stop(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Add { .. }
+            | Command::Fetch { .. }
+            | Command::Check { .. }
+            | Command::Edition { .. }
+    )
+}
+
+/// Ctrl-C, and SIGTERM when asked for (Unix only), as one stream of interrupts.
+struct Interrupts {
+    #[cfg(unix)]
+    term: Option<tokio::signal::unix::Signal>,
+}
+
+impl Interrupts {
+    /// Installs the listeners now (before dispatch); `with_term` adds SIGTERM.
+    fn new(with_term: bool) -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let term = if with_term {
+                signal(SignalKind::terminate()).ok()
+            } else {
+                None
+            };
+            Self { term }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = with_term;
+            Self {}
+        }
+    }
+
+    /// Waits for the next interrupt; false when no listener could be installed.
+    async fn next(&mut self) -> bool {
+        #[cfg(unix)]
+        if let Some(term) = self.term.as_mut() {
+            return tokio::select! {
+                r = tokio::signal::ctrl_c() => r.is_ok(),
+                t = term.recv() => t.is_some(),
+            };
+        }
+        tokio::signal::ctrl_c().await.is_ok()
+    }
+}
+
 async fn run(cli: Cli, paths: Option<&ressac_core::paths::Paths>) -> anyhow::Result<ExitCode> {
     let db = cli
         .db
@@ -56,12 +107,14 @@ async fn run(cli: Cli, paths: Option<&ressac_core::paths::Paths>) -> anyhow::Res
         .unwrap_or_else(ressac_core::store::default_path);
     let stop = Arc::new(AtomicBool::new(false));
     {
-        // First Ctrl-C: stop scheduling and finish cleanly. Second one: leave now.
+        // First Ctrl-C (or SIGTERM, for the commands that watch the flag): stop scheduling
+        // and finish cleanly. Second one: leave now.
         let stop = stop.clone();
+        let mut interrupts = Interrupts::new(cli.command.as_ref().is_some_and(honours_stop));
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
+            if interrupts.next().await {
                 stop.store(true, Ordering::Relaxed);
-                if tokio::signal::ctrl_c().await.is_ok() {
+                if interrupts.next().await {
                     std::process::exit(INTERRUPTED.into());
                 }
             }
@@ -162,4 +215,36 @@ fn init_logging(dir: &Path, verbose: bool) -> Option<tracing_appender::non_block
         .try_init()
         .ok()?;
     Some(guard)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        Cli::parse_from(std::iter::once("ressac").chain(args.iter().copied()))
+            .command
+            .unwrap()
+    }
+
+    #[test]
+    fn only_the_commands_that_watch_the_stop_flag_catch_sigterm() {
+        for args in [
+            &["add", "http://e.org/feed"][..],
+            &["fetch"],
+            &["check"],
+            &["edition", "build"],
+        ] {
+            assert!(honours_stop(&parse(args)), "{args:?}");
+        }
+        // The readers and the garden TUI die at once on SIGTERM, as before.
+        for args in [
+            &["read"][..],
+            &["garden"],
+            &["export"],
+            &["import", "x.opml"],
+        ] {
+            assert!(!honours_stop(&parse(args)), "{args:?}");
+        }
+    }
 }
