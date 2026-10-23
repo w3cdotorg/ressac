@@ -1585,8 +1585,6 @@ pub(super) mod tests {
         }
     }
 
-    /// Mac DataTests.entry_pages_stop_at_the_floor_and_count_the_whole_list. Folder 1 lists
-    /// entries 1 (10-16), 3 (10-15), 2 (10-14); 5 is a buried feed's.
     #[test]
     fn next_unread_is_the_first_unread_row_after_an_entry() {
         let s = Store::open_in_memory().unwrap();
@@ -1612,6 +1610,32 @@ pub(super) mod tests {
         );
     }
 
+    #[test]
+    fn next_unread_handles_empty_searches_missing_entries_and_other_sources() {
+        let s = library();
+        let first = |q: &ListQuery, after: Option<i64>| {
+            s.next_unread(q, after, today())
+                .unwrap()
+                .map(|c| c.entry_id)
+        };
+        let blank = ListQuery {
+            search: Some("  ".into()),
+            ..query(Source::Unread)
+        };
+        assert_eq!(first(&blank, None), None, "a search without words is empty");
+        assert_eq!(
+            first(&query(Source::Unread), Some(999)),
+            first(&query(Source::Unread), None),
+            "an unknown entry reads as no entry"
+        );
+        assert_eq!(
+            first(&query(Source::Cadence(CadenceGroup::Daily)), None),
+            Some(1)
+        );
+    }
+
+    /// Mac DataTests.entry_pages_stop_at_the_floor_and_count_the_whole_list. Folder 1 lists
+    /// entries 1 (10-16), 3 (10-15), 2 (10-14); 5 is a buried feed's.
     #[test]
     fn list_rows_stop_at_the_floor_and_count_the_whole_list() {
         let s = library();

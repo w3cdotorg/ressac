@@ -414,14 +414,11 @@ impl EntryList {
         let Some(found) = store.next_unread(&self.query, Some(last), today_start)? else {
             return Ok(None);
         };
-        let below = self.floor.as_ref().is_none_or(|floor| {
-            (found.published_at.as_str(), found.entry_id)
-                < (floor.published_at.as_str(), floor.entry_id)
-        });
-        if below {
-            self.floor = Some(found);
-            self.reload(store, today_start)?;
-        }
+        self.floor = Some(found);
+        self.reload(store, today_start)?;
+        let start = selected
+            .and_then(|id| self.index_of(id))
+            .map_or(0, |index| index + 1);
         Ok(self.unread_from(start, selected))
     }
 
