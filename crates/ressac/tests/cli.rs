@@ -15,15 +15,46 @@ const FIXTURE: &str = concat!(
     "/../../tests/fixtures/vienna-like.opml"
 );
 
+/// Variables of the developer's shell that would move the files a run reads or writes.
+const SCRUBBED: [&str; 6] = [
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "RESSAC_DB",
+    "RUST_LOG",
+];
+
+/// The binary with `HOME` set to `home` and none of `SCRUBBED` inherited. Sets no `--db`
+/// (clap refuses it twice): callers add it.
+fn hermetic(home: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ressac"));
+    cmd.env("HOME", home);
+    for var in SCRUBBED {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
+#[test]
+fn every_run_drops_the_developer_s_xdg_variables() {
+    let home = tempfile::tempdir().unwrap();
+    let cmd = hermetic(home.path());
+    let envs: HashMap<_, _> = cmd.get_envs().collect();
+    assert_eq!(
+        envs.get(std::ffi::OsStr::new("HOME")),
+        Some(&Some(home.path().as_os_str()))
+    );
+    for var in SCRUBBED {
+        // `get_envs` reports a removed variable as `None`.
+        assert_eq!(envs.get(std::ffi::OsStr::new(var)), Some(&None), "{var}");
+    }
+}
+
 fn ressac(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ressac"))
+    hermetic(home)
         .args(["--db", home.join("db.sqlite").to_str().unwrap()])
         .args(args)
-        .env("HOME", home)
-        .env_remove("XDG_DATA_HOME")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_STATE_HOME")
-        .env_remove("XDG_CACHE_HOME")
         .env("RESSAC_ALLOW_PRIVATE_ARTICLES", "1")
         .output()
         .expect("binary runs")
@@ -224,13 +255,12 @@ fn closed_stdout_does_not_panic() {
             .success()
     );
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ressac"))
+    let mut child = hermetic(home.path())
         .args([
             "--db",
             home.path().join("db.sqlite").to_str().unwrap(),
             "export",
         ])
-        .env("HOME", home.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1304,10 +1334,9 @@ fn ticker_on_a_missing_database_prints_an_empty_line() {
 #[test]
 fn ticker_open_is_silent() {
     let home = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_ressac"))
+    let out = hermetic(home.path())
         .args(["--db", home.path().join("db.sqlite").to_str().unwrap()])
         .args(["ticker", "open", "rs1"])
-        .env("HOME", home.path())
         .env("RESSAC_NO_BROWSER", "1")
         .output()
         .expect("binary runs");
@@ -1706,10 +1735,9 @@ fn feed_theme_unknown_key_exits_2() {
 
 /// `ressac` with the production private-address guard back on.
 fn ressac_guarded(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ressac"))
+    hermetic(home)
         .args(["--db", home.join("db.sqlite").to_str().unwrap()])
         .args(args)
-        .env("HOME", home)
         .env_remove("RESSAC_ALLOW_PRIVATE_ARTICLES")
         .output()
         .expect("binary runs")
