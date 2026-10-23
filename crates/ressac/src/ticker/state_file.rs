@@ -1,5 +1,6 @@
-//! The ticker's state on disk (`ticker.json`, next to `terminal.json`) and the lock that
-//! serialises the `ressac ticker` processes tmux starts.
+//! The ticker's state on disk (`Paths::ticker_state`: `ticker.json` for the default database,
+//! `ticker-<hash>.json` for any other, in the state directory) and the lock that serialises
+//! the `ressac ticker` processes tmux starts.
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions, TryLockError};
@@ -10,10 +11,6 @@ use std::time::{Duration, Instant};
 use super::TickerState;
 
 const POLL: Duration = Duration::from_millis(20);
-
-pub fn default_path() -> PathBuf {
-    ressac_core::store::default_path().with_file_name("ticker.json")
-}
 
 /// The saved state; a missing or unreadable file means a fresh start.
 pub fn load(path: &Path) -> TickerState {

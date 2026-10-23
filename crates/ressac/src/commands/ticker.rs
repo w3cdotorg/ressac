@@ -65,12 +65,25 @@ fn pick(
     width: usize,
     now: DateTime<Utc>,
 ) -> anyhow::Result<String> {
+    if !g.db.exists() {
+        // Nothing to show, and nothing worth creating a directory or a lock file for.
+        tracing::debug!(
+            "ticker: no database at {}, printing nothing",
+            g.db.display()
+        );
+        return Ok(String::new());
+    }
+    if let Some(dir) = state_path.parent()
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        tracing::warn!("ticker: cannot create {}: {e}", dir.display());
+        return Ok(String::new());
+    }
     let guard = match state_file::lock(state_path, LOCK_WAIT) {
         Ok(guard) => guard,
         Err(e) => {
-            // No state directory is the normal case when Ressac never ran: not worth a warning.
-            let missing = e.kind() == std::io::ErrorKind::NotFound;
-            if missing {
+            // The directory vanished between the two steps: nothing to show.
+            if e.kind() == std::io::ErrorKind::NotFound {
                 tracing::debug!("ticker: no state directory, printing nothing: {e}");
             } else {
                 tracing::warn!("ticker: cannot open the state lock, printing nothing: {e}");
@@ -255,11 +268,37 @@ mod tests {
     }
 
     #[test]
-    fn show_in_a_missing_directory_creates_nothing() {
+    fn show_creates_the_state_directory_when_the_database_exists() {
         let mut f = fixture();
-        f.state = f.dir.path().join("missing/ticker.json");
+        f.state = f.dir.path().join("state/ressac/ticker.json");
+        assert_ne!(show_at(&f, NOW), "\n");
+        assert!(f.state.exists());
+    }
+
+    #[test]
+    fn show_on_a_missing_database_creates_nothing() {
+        let mut f = fixture();
+        f.g.db = f.dir.path().join("missing.sqlite");
+        f.state = f.dir.path().join("state/ticker.json");
         assert_eq!(show_at(&f, NOW), "\n");
-        assert!(!f.dir.path().join("missing").exists());
+        assert!(!f.dir.path().join("state").exists());
+        assert!(!f.g.db.exists());
+    }
+
+    #[test]
+    fn show_on_a_missing_database_leaves_an_existing_state_directory_empty() {
+        // Linux: logging has created `$XDG_STATE_HOME/ressac/logs`, so the directory is there.
+        let mut f = fixture();
+        f.g.db = f.dir.path().join("missing.sqlite");
+        let state = f.dir.path().join("state");
+        std::fs::create_dir_all(state.join("logs")).unwrap();
+        f.state = state.join("ticker.json");
+        assert_eq!(show_at(&f, NOW), "\n");
+        let names: Vec<_> = std::fs::read_dir(&state)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("logs")]);
     }
 
     #[test]

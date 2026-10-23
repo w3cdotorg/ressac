@@ -6,6 +6,7 @@ mod output;
 mod ticker;
 mod tui;
 
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ async fn main() -> ExitCode {
     let _log_guard = paths
         .as_ref()
         .and_then(|p| init_logging(&p.log_dir(), cli.verbose));
-    match run(cli).await {
+    match run(cli, paths.as_ref()).await {
         Ok(code) => code,
         Err(e) if is_broken_pipe(&e) => ExitCode::SUCCESS,
         Err(e) => match e.downcast_ref::<UsageError>() {
@@ -48,7 +49,7 @@ fn is_broken_pipe(e: &anyhow::Error) -> bool {
     })
 }
 
-async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+async fn run(cli: Cli, paths: Option<&ressac_core::paths::Paths>) -> anyhow::Result<ExitCode> {
     let db = cli
         .db
         .clone()
@@ -105,14 +106,22 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             tmux,
             width,
             action: None,
-        } => commands::ticker::show(
-            &g,
-            &ticker::state_file::default_path(),
-            tmux,
-            width,
-            Utc::now(),
-            &mut out,
-        ),
+        } => match paths {
+            Some(p) => commands::ticker::show(
+                &g,
+                &p.ticker_state(&g.db),
+                tmux,
+                width,
+                Utc::now(),
+                &mut out,
+            ),
+            None => {
+                // No usable HOME: nothing to show, like every other ticker failure.
+                tracing::debug!("ticker: no state directory (no home), printing nothing");
+                writeln!(out)?;
+                Ok(ExitCode::SUCCESS)
+            }
+        },
         Command::Ticker {
             action: Some(TickerCommand::Open { token }),
             ..

@@ -1329,6 +1329,144 @@ fn ticker_on_a_missing_database_prints_an_empty_line() {
     assert_eq!(stdout(&out), "\n");
     assert_eq!(stderr(&out), "");
     assert!(!home.path().join("db.sqlite").exists());
+    assert!(ticker_files(&state_dir(home.path())).is_empty());
+    #[cfg(target_os = "macos")]
+    assert!(!state_dir(home.path()).exists());
+}
+
+/// Where the layout keeps the ticker state for `home` (macOS: beside the default database).
+fn state_dir(home: &Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Ressac")
+    } else {
+        home.join(".local/state/ressac")
+    }
+}
+
+/// The layout's default database for `home`.
+fn default_db(home: &Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Ressac/ressac.sqlite")
+    } else {
+        home.join(".local/share/ressac/ressac.sqlite")
+    }
+}
+
+/// The names starting with `ticker` in `dir`, sorted (none when `dir` is missing).
+fn ticker_files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|it| {
+            it.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("ticker"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn is_hashed_ticker_name(name: &str) -> bool {
+    name.strip_prefix("ticker-")
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .is_some_and(|hex| {
+            hex.len() == 16
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+}
+
+#[test]
+fn the_default_database_keeps_ticker_json() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(
+        hermetic(home.path())
+            .args(["import", FIXTURE])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(default_db(home.path()).exists());
+    let out = hermetic(home.path())
+        .args(["ticker", "--tmux"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        ticker_files(&state_dir(home.path())),
+        ["ticker.json", "ticker.json.lock"]
+    );
+}
+
+#[test]
+fn each_database_gets_its_own_ticker_state() {
+    let home = tempfile::tempdir().unwrap();
+    for db in ["one.sqlite", "two.sqlite"] {
+        let db = home.path().join(db);
+        let db = db.to_str().unwrap();
+        assert!(
+            hermetic(home.path())
+                .args(["--db", db, "import", FIXTURE])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            hermetic(home.path())
+                .args(["--db", db, "ticker", "--tmux"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    let states: Vec<String> = ticker_files(&state_dir(home.path()))
+        .into_iter()
+        .filter(|n| n.ends_with(".json"))
+        .collect();
+    assert_eq!(states.len(), 2, "{states:?}");
+    assert!(
+        states.iter().all(|n| is_hashed_ticker_name(n)),
+        "{states:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn one_database_named_four_ways_shares_one_ticker_state() {
+    // `./r.sqlite` from its folder, the absolute path, a `..` detour, a symlink.
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("dbs");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let db = dir.join("r.sqlite");
+    assert!(
+        hermetic(home.path())
+            .args(["--db", db.to_str().unwrap(), "import", FIXTURE])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    std::os::unix::fs::symlink(&db, dir.join("link.sqlite")).unwrap();
+    for spelling in [
+        "./r.sqlite".to_string(),
+        db.to_str().unwrap().to_string(),
+        dir.join("sub/../r.sqlite").to_str().unwrap().to_string(),
+        dir.join("link.sqlite").to_str().unwrap().to_string(),
+    ] {
+        let out = hermetic(home.path())
+            .current_dir(&dir)
+            .args(["--db", spelling.as_str(), "ticker", "--tmux"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{spelling}: {out:?}");
+    }
+    let files = ticker_files(&state_dir(home.path()));
+    assert_eq!(files.len(), 2, "one state and its lock: {files:?}");
+    assert!(is_hashed_ticker_name(&files[0]), "{files:?}");
+    assert_eq!(files[1], format!("{}.lock", files[0]));
 }
 
 #[test]
