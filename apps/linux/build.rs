@@ -41,7 +41,7 @@ mod qt {
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
             is_bridge(&text)
         });
-        cxx_qt_build::CxxQtBuilder::new_qml_module(
+        let builder = cxx_qt_build::CxxQtBuilder::new_qml_module(
             cxx_qt_build::QmlModule::new("org.w3cdotorg.ressac")
                 .qml_files(sources("qml", "qml"))
                 .depend("QtQuick"),
@@ -52,7 +52,14 @@ mod qt {
         .qt_module("Quick")
         .qt_module("QuickControls2")
         .qt_module("Widgets")
-        .qt_module("WebEngineQuick")
+        .qt_module("WebEngineQuick");
+        // SAFETY: only adds one warning switch to the builder's own cc::Build. gcc 16 prints
+        // -Wsfinae-incomplete for Qt headers next to rust/cxx.h (spike gotcha 7); not ours to fix.
+        unsafe {
+            builder.cc_builder(|cc| {
+                cc.flag_if_supported("-Wno-sfinae-incomplete");
+            })
+        }
         .build();
     }
 }
