@@ -7,12 +7,31 @@ import org.w3cdotorg.ressac
 Item {
     id: pane
 
+    function focusList() { list.forceActiveFocus() }
+
     ListView {
         id: list
+        objectName: "sourcesList"
         anchors.fill: parent
         clip: true
+        focus: true
+        keyNavigationEnabled: false        // the arrows select (below); currentIndex follows the model
         model: SourcesModel
         currentIndex: SourcesModel.selectedRow
+
+        // ↑ and ↓ select the previous and next row, skipping headings (select leaves selectedRow alone for them).
+        function step(direction) {
+            let i = SourcesModel.selectedRow
+            if (i < 0 && direction < 0)
+                i = count
+            for (i += direction; i >= 0 && i < count; i += direction) {
+                SourcesModel.select(i)
+                if (SourcesModel.selectedRow === i)
+                    return
+            }
+        }
+        Keys.onUpPressed: step(-1)
+        Keys.onDownPressed: step(1)
 
         Connections {
             target: SourcesModel
@@ -30,9 +49,13 @@ Item {
 
             width: ListView.view.width
             highlighted: ListView.isCurrentItem
+            focusPolicy: Qt.NoFocus
             hoverEnabled: model.kind !== "heading"
             enabled: model.selectable || model.kind === "heading"
-            onClicked: if (model.kind !== "heading") SourcesModel.select(index)
+            onClicked: {
+                list.forceActiveFocus()
+                if (model.kind !== "heading") SourcesModel.select(index)
+            }
 
             contentItem: Loader {
                 sourceComponent: delegate.model.kind === "heading" ? headingContent : rowContent

@@ -36,6 +36,11 @@ pub mod qobject {
         #[qinvokable]
         fn grab(self: &Recette, name: &QString) -> bool;
 
+        /// Test hook of the walk: sends a key (a `Qt::Key`, its text, `Qt::KeyboardModifier` bits)
+        /// to the window as the keyboard would, through its key filter; true when it was consumed.
+        #[qinvokable]
+        fn key(self: &Recette, key: i32, text: &QString, modifiers: i32) -> bool;
+
         /// Test hook of the walk: with `press_default` set to `drop-db`, forgets `RESSAC_DB` so the
         /// relaunch after "Use Default Database" reaches the default location.
         #[qinvokable]
@@ -75,6 +80,15 @@ impl qobject::Recette {
             // environment at that point (the migration worker only touches the database).
             unsafe { std::env::remove_var("RESSAC_DB") };
         }
+    }
+
+    fn key(&self, key: i32, text: &QString, modifiers: i32) -> bool {
+        self.rust().active
+            && shim::ressac_send_key(
+                key,
+                u32::try_from(modifiers).unwrap_or(0),
+                &text.to_string(),
+            )
     }
 
     fn grab(&self, name: &QString) -> bool {

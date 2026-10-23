@@ -7,10 +7,14 @@ import org.w3cdotorg.ressac
 Item {
     id: pane
 
+    function focusList() { list.forceActiveFocus() }
+
     ListView {
         id: list
+        objectName: "entriesList"
         anchors.fill: parent
         clip: true
+        keyNavigationEnabled: false        // the window's key filter moves the selection
         visible: EntriesModel.active
         model: EntriesModel
         currentIndex: EntriesModel.selectedRow
@@ -32,7 +36,8 @@ Item {
             readonly property color dimColor: highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.disabledTextColor
             width: ListView.view.width
             highlighted: ListView.isCurrentItem
-            onClicked: EntriesModel.select(index)
+            focusPolicy: Qt.NoFocus
+            onClicked: { list.forceActiveFocus(); EntriesModel.select(index) }
             Component.onCompleted: EntriesModel.rowAppeared(index)
 
             contentItem: RowLayout {

@@ -88,12 +88,6 @@ fn ressac_route_key(
     route.claims_override
 }
 
-/// What `Recette.key` sends (B3f): a stand-in until its `#[qinvokable]` calls the shim itself.
-#[expect(dead_code, reason = "Recette.key replaces it in B3f")]
-pub(crate) fn send_key(key: i32, modifiers: u32, text: &str) -> bool {
-    shim::ressac_send_key(key, modifiers, text)
-}
-
 const MAIN_QML: &str = "qrc:/qt/qml/org/w3cdotorg/ressac/qml/Main.qml";
 
 /// Starts the application and runs its event loop; the process exit code.

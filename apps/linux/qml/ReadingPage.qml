@@ -7,6 +7,8 @@ import org.w3cdotorg.ressac
 Item {
     id: page
 
+    objectName: "readingPage"          // the window key filter finds the page by this name
+
     readonly property int progressInset: 10  // PROGRESS_INSET
 
     property alias allButton: allButton
@@ -14,6 +16,109 @@ Item {
     property alias sourcesPane: sourcesPane
     property string look: "native"
     readonly property alias reader: readerPane
+    readonly property bool searchFocused: searchField.activeFocus
+
+    // The last key verb the window filter asked for and whether it acted (the walk reads them).
+    property string lastVerb: ""
+    property bool lastHandled: false
+    // One Space at a time: set while a page-down is in flight, a second Space is spent.
+    property bool advancing: false
+    property int advanceGeneration: 0
+
+    function focusWithin(item) {
+        let f = page.Window.window ? page.Window.window.activeFocusItem : null
+        while (f) {
+            if (f === item)
+                return true
+            f = f.parent
+        }
+        return false
+    }
+
+    function focusName() {
+        if (searchFocused) return "search"
+        if (focusWithin(sourcesPane)) return "sidebar"
+        if (focusWithin(entriesPane)) return "entries"
+        if (focusWithin(readerPane)) return "reader"
+        return "other"
+    }
+
+    function focusSidebar() { sourcesPane.focusList() }
+    function focusSearch() { searchField.forceActiveFocus() }
+
+    function openInBrowser() {
+        if (Reader.link !== "")
+            readerPane.openExternally(Reader.link)
+    }
+
+    // Space: scroll the page, and at its end move to the next unread entry (marking the one left as read).
+    // A held Space only scrolls; a second Space while one is in flight is spent.
+    function advance(held) {
+        if (advancing)
+            return
+        advancing = true
+        const generation = ++advanceGeneration
+        const id = EntriesModel.selectedEntryId
+        readerPane.pageDown(id, function (spentOrScrolled) {
+            if (generation !== advanceGeneration)
+                return
+            advancing = false
+            if (spentOrScrolled || held || EntriesModel.selectedEntryId !== id)
+                return
+            EntriesModel.selectNextUnread()
+        })
+        // A page that never answers must not wedge Space for good.
+        advanceGuard.restart()
+    }
+
+    // The verb the window filter (cpp/shim.cpp, keys::route) asks for: true when the key was acted on or
+    // spent, false to let it through to the focused item. Antiope's verbs are B8's (its advancing-to-end
+    // flag must be cleared on every path of its own advance, as `advancing` is here).
+    function perform(verb) {
+        let handled = false
+        switch (verb) {
+        case "nextEntry":
+            handled = EntriesModel.canNavigate
+            if (handled) EntriesModel.selectNext()
+            break
+        case "previousEntry":
+            handled = EntriesModel.canNavigate
+            if (handled) EntriesModel.selectPrevious()
+            break
+        case "advance":
+        case "advanceHeld":
+            handled = EntriesModel.canNavigate
+            if (handled) advance(verb === "advanceHeld")
+            break
+        case "toggleRead":
+            handled = EntriesModel.canToggle
+            if (handled) {
+                if (EntriesModel.selectedRead) autoRead.stop()
+                EntriesModel.toggleRead(EntriesModel.selectedRow)
+            }
+            break
+        case "toggleStar":
+            handled = EntriesModel.canToggle
+            if (handled) EntriesModel.toggleStarred(EntriesModel.selectedRow)
+            break
+        case "toggleReadHeld":
+        case "toggleStarHeld":
+            handled = EntriesModel.canToggle        // spent: a held key never toggles again
+            break
+        case "focusEntryList":
+            if (!SourcesModel.isGarden) EntriesModel.selectFirstIfNone()
+            entriesPane.focusList()
+            handled = true
+            break
+        case "focusSidebar":
+            sourcesPane.focusList()
+            handled = true
+            break
+        }
+        lastVerb = verb
+        lastHandled = handled
+        return handled
+    }
 
     function syncFilter() {
         allButton.checked = !EntriesModel.unreadOnly
@@ -40,7 +145,8 @@ Item {
                 Item { Layout.fillWidth: true }
 
                 Kirigami.SearchField {
-                    id: search
+                    id: searchField
+                    objectName: "search"
                     placeholderText: "Search"
                     text: EntriesModel.searchText
                     onTextChanged: EntriesModel.searchText = text
@@ -150,7 +256,7 @@ Item {
                     icon.name: "internet-web-browser"
                     display: QQC2.AbstractButton.IconOnly
                     enabled: Reader.link !== ""
-                    onClicked: readerPane.openExternally(Reader.link)
+                    onClicked: page.openInBrowser()
                     QQC2.ToolTip.text: "Open in Browser (Ctrl+Return)"
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -213,6 +319,29 @@ Item {
                 id: readerPane
                 QQC2.SplitView.fillWidth: true
                 QQC2.SplitView.minimumWidth: 300
+            }
+        }
+    }
+
+    Timer { id: advanceGuard; interval: 3000; onTriggered: page.advancing = false }
+
+    // 1 s on an unread selection marks it read (the selection must stay on it).
+    Timer {
+        id: autoRead
+        interval: EntriesModel.autoReadDelay
+        property real entryId: -1
+        onTriggered: EntriesModel.autoRead(entryId)
+    }
+
+    Connections {
+        target: EntriesModel
+        function onSelectionChanged() {
+            if (EntriesModel.selectedEntryId !== autoRead.entryId) {
+                autoRead.entryId = EntriesModel.selectedEntryId
+                if (autoRead.entryId >= 0)
+                    autoRead.restart()
+                else
+                    autoRead.stop()
             }
         }
     }
