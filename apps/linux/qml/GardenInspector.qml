@@ -11,6 +11,14 @@ Item {
 
     signal openUrl(string url)
 
+    // A selectable label takes the focus when clicked; the garden's keys must still work there.
+    component Selectable: Kirigami.SelectableLabel {
+        Keys.onPressed: (event) => {
+            if (!(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)))
+                event.accepted = Garden.key(event.text, event.modifiers)
+        }
+    }
+
     Kirigami.PlaceholderMessage {
         anchors.centerIn: parent
         width: parent.width - Kirigami.Units.gridUnit * 4
@@ -32,7 +40,7 @@ Item {
             y: 20
             spacing: 14
 
-            Kirigami.SelectableLabel {
+            Selectable {
                 Layout.fillWidth: true
                 text: Garden.title
                 font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.4
@@ -154,7 +162,7 @@ Item {
                     text: "Proposed"
                     color: Kirigami.Theme.disabledTextColor
                 }
-                Kirigami.SelectableLabel {
+                Selectable {
                     visible: Garden.proposed !== ""
                     Layout.fillWidth: true
                     text: Garden.proposed
@@ -167,7 +175,7 @@ Item {
                     text: "Decision"
                     color: Kirigami.Theme.disabledTextColor
                 }
-                Kirigami.SelectableLabel {
+                Selectable {
                     visible: Garden.decision !== ""
                     Layout.fillWidth: true
                     text: Garden.decision
@@ -179,7 +187,7 @@ Item {
                     text: "Feed"
                     color: Kirigami.Theme.disabledTextColor
                 }
-                Kirigami.SelectableLabel {
+                Selectable {
                     Layout.fillWidth: true
                     text: Garden.feedUrl
                     wrapMode: Text.WrapAnywhere
@@ -261,7 +269,7 @@ Item {
                     font.weight: Font.DemiBold
                 }
 
-                Kirigami.SelectableLabel {
+                Selectable {
                     Layout.fillWidth: true
                     visible: Garden.redirects.length > 0
                     text: Garden.redirects.join("\n")

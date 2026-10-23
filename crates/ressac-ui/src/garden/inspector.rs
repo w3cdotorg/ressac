@@ -102,7 +102,18 @@ impl Inspector {
                 index: rhythm_index(c),
             }),
             theme: (!buried).then(|| theme_index(themes, theme_key)),
-            evidence: diagnosis.map_or_else(Vec::new, |d| d.evidence.bullets.clone()),
+            evidence: diagnosis.map_or_else(Vec::new, |d| {
+                // A bullet with nothing but a label and punctuation ("Clue: .") says nothing.
+                d.evidence
+                    .bullets
+                    .iter()
+                    .filter(|b| {
+                        let words = b.trim_matches(|c: char| !c.is_alphanumeric());
+                        !words.is_empty() && words != "Clue"
+                    })
+                    .cloned()
+                    .collect()
+            }),
             remarks: diagnosis.map_or_else(Vec::new, |d| {
                 d.remarks.iter().map(remark_sentence).collect()
             }),

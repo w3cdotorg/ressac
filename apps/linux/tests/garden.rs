@@ -39,6 +39,22 @@ fn the_garden_walk_triages_repairs_undoes_and_sets_rhythm_and_theme() {
             .any(|l| l.contains("walk: 17-set-done") && l.ends_with(" (set by you)")),
         "{err}"
     );
+    // The highlighted row is the selected feed's, after every step that moves rows.
+    for step in ["02-triage", "05-kept", "09-applied", "12-undone"] {
+        let line = err
+            .lines()
+            .find(|l| l.contains(&format!("walk: {step} ")))
+            .unwrap();
+        let field = |name: &str| {
+            line.split(&format!(" {name}="))
+                .nth(1)
+                .and_then(|r| r.split(' ').next())
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(field("current"), field("row"), "{line}");
+        assert_ne!(field("row"), "-1", "{line}");
+    }
     for shot in [
         "02-triage.png",
         "06-confirm.png",

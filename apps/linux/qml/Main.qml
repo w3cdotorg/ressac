@@ -10,7 +10,7 @@ Kirigami.ApplicationWindow {
     title: "Ressac"
     width: 1100
     height: 720
-    minimumWidth: 900
+    minimumWidth: 960
     minimumHeight: 500
     visible: true
 
@@ -123,20 +123,20 @@ Kirigami.ApplicationWindow {
     readonly property var gardenSteps: [
         { name: "02-triage", enter: function () { SourcesModel.selectKey("garden:needs-triage")
             console.warn("walk: 02-triage count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId + " rows=" + Garden.rowCount()
-                + " apply=" + Garden.applyTitle + " focus=" + readingLoader.item.focusName() + " sections=" + Garden.sectionTitles.join("|")) } },
+                + " apply=" + Garden.applyTitle + " focus=" + readingLoader.item.focusName() + " sections=" + Garden.sectionTitles.join("|") + " current=" + readingLoader.item.garden.currentRow + " row=" + Garden.selectedRow) } },
         { name: "03-keep", enter: function () { Recette.key(Qt.Key_K, "k", 0) } },
         { name: "04-wait", enter: function () {} },
         { name: "05-kept", enter: function () { console.warn("walk: 05-kept count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId
-            + " rows=" + Garden.rowCount() + " kept6=" + (Garden.rowOfFeed(6) >= 0)) } },
+            + " rows=" + Garden.rowCount() + " kept6=" + (Garden.rowOfFeed(6) >= 0) + " current=" + readingLoader.item.garden.currentRow + " row=" + Garden.selectedRow) } },
         { name: "06-confirm", enter: function () { Recette.key(Qt.Key_R, "R", Qt.ShiftModifier)
             console.warn("walk: 06-confirm confirming=" + Garden.confirming + " question=" + Garden.applyQuestion
                 + " preview=" + Garden.applyPreview + " confirm=" + Garden.applyConfirmLabel) } },
         { name: "07-apply", enter: function () { readingLoader.item.garden.acceptRepairs() } },
         { name: "08-wait", enter: function () {} },
-        { name: "09-applied", enter: function () { console.warn("walk: 09-applied count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId) } },
+        { name: "09-applied", enter: function () { console.warn("walk: 09-applied count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId + " current=" + readingLoader.item.garden.currentRow + " row=" + Garden.selectedRow) } },
         { name: "10-undo", enter: function () { Recette.key(Qt.Key_U, "u", 0) } },
         { name: "11-wait", enter: function () {} },
-        { name: "12-undone", enter: function () { console.warn("walk: 12-undone count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId) } },
+        { name: "12-undone", enter: function () { console.warn("walk: 12-undone count=" + Garden.countLabel + " selected=" + Garden.selectedFeedId + " current=" + readingLoader.item.garden.currentRow + " row=" + Garden.selectedRow) } },
         { name: "13-all-rhythm", enter: function () { SourcesModel.selectKey("garden:all"); Garden.grouping = "rhythm"
             console.warn("walk: 13-all-rhythm count=" + Garden.countLabel + " sections=" + Garden.sectionTitles.join("|")) } },
         { name: "14-inspector", enter: function () { Garden.selectFeed(8)

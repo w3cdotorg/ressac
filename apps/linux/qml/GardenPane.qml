@@ -11,6 +11,7 @@ Item {
 
     function focusList() { list.forceActiveFocus() }
     function acceptRepairs() { repairs.accept() }
+    readonly property alias currentRow: list.currentIndex
 
     ColumnLayout {
         anchors.fill: parent
@@ -117,7 +118,9 @@ Item {
             clip: true
             focus: true
             model: Garden
-            currentIndex: Garden.selectedRow
+            // Set only by `follow()` (the arrows ask the model through Keys below), so a row move never
+            // leaves the highlight on a stale row nor selects another feed.
+            currentIndex: -1
 
             section.property: "section"
             section.delegate: Kirigami.ListSectionHeader {
@@ -194,18 +197,27 @@ Item {
                 onClicked: { Garden.select(index); list.forceActiveFocus() }
             }
 
-            Connections {
-                target: Garden
-                function onSelectionChanged() {
-                    list.currentIndex = Garden.selectedRow
-                    if (list.currentIndex >= 0)
-                        list.positionViewAtIndex(list.currentIndex, ListView.Contain)
-                }
+            function follow() {
+                currentIndex = Garden.selectedRow
+                if (currentIndex >= 0)
+                    positionViewAtIndex(currentIndex, ListView.Contain)
             }
 
-            // The arrows (ListView's own key navigation) move currentIndex, which selects.
-            onCurrentIndexChanged: if (currentIndex !== Garden.selectedRow && currentIndex >= 0) Garden.select(currentIndex)
+            // The table's rows move after the selection signal: follow again once they have.
+            Connections {
+                target: Garden
+                function onSelectionChanged() { list.follow(); Qt.callLater(list.follow) }
+                function onRowsInserted() { Qt.callLater(list.follow) }
+                function onRowsRemoved() { Qt.callLater(list.follow) }
+                function onRowsMoved() { Qt.callLater(list.follow) }
+                function onModelReset() { Qt.callLater(list.follow) }
+                function onLayoutChanged() { Qt.callLater(list.follow) }
+            }
 
+            Component.onCompleted: follow()
+
+            Keys.onUpPressed: if (Garden.selectedRow > 0) Garden.select(Garden.selectedRow - 1)
+            Keys.onDownPressed: if (Garden.selectedRow < count - 1) Garden.select(Garden.selectedRow + 1)
             Keys.onPressed: (event) => { event.accepted = Garden.key(event.text, event.modifiers) }
         }
     }
@@ -233,7 +245,9 @@ Item {
 
         footer: QQC2.DialogButtonBox {
             QQC2.Button {
+                id: confirmButton
                 text: Garden.applyConfirmLabel
+                highlighted: true
                 QQC2.DialogButtonBox.buttonRole: QQC2.DialogButtonBox.AcceptRole
             }
             QQC2.Button {
@@ -243,7 +257,8 @@ Item {
         }
 
         onAccepted: Garden.applySafe()
-        onClosed: Garden.confirming = false
+        onOpened: confirmButton.forceActiveFocus()
+        onClosed: { Garden.confirming = false; list.forceActiveFocus() }
     }
 
     Connections {

@@ -498,7 +498,6 @@ impl qobject::Garden {
 
     /// Applies the visit's table, the inspector and the signals for what moved.
     fn sync(mut self: Pin<&mut Self>) {
-        let before = (self.selected_row(), self.selected_feed_id());
         let new = self.table_rows();
         for op in plan_rows(&self.rust().rows, &new, |row| row.feed_id) {
             self.as_mut().apply(op);
@@ -519,9 +518,9 @@ impl qobject::Garden {
         }
         self.as_mut().refresh_inspector();
         self.as_mut().state_changed();
-        if (self.selected_row(), self.selected_feed_id()) != before {
-            self.selection_changed();
-        }
+        // Always: a decision moves the selection before the sync, and the rows move in it, so
+        // the selected row is not comparable with an earlier one. The table's follower is idempotent.
+        self.selection_changed();
     }
 
     /// The selected feed's inspector, with its fetch log.
