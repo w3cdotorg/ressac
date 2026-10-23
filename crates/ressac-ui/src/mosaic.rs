@@ -35,13 +35,16 @@ pub const MAX_COLUMNS: usize = 40;
 pub const MAX_ROWS: usize = 100;
 /// Image pixels per cell when sizing a picture: a 120-pixel picture gets 10 columns.
 pub const PIXELS_PER_COLUMN: f64 = 12.0;
-/// Images with more pixels are refused unread: a PNG of 190 KB can announce 8000 × 8000.
-pub const MAX_SOURCE_PIXELS: u64 = 40_000_000;
+/// Images with more pixels are refused unread (a PNG of 190 KB can announce 8000 × 8000).
+/// Sized to the memory actually held: the decoded picture (RGB8 or RGBA8, up to 4 bytes per
+/// pixel) plus its RGBA8 copy (4) stays under `MAX_DECODE_ALLOC` at 8 bytes per pixel.
+pub const MAX_SOURCE_PIXELS: u64 = 16_000_000;
 pub const CACHE_BYTES: usize = 16 << 20;
 /// Downloads at once (the scheme handler's limit).
 pub const MAX_IN_FLIGHT: usize = 4;
 /// The most memory a decoder may allocate.
 const MAX_DECODE_ALLOC: u64 = 128 << 20;
+const _: () = assert!(MAX_SOURCE_PIXELS * 8 <= MAX_DECODE_ALLOC);
 /// What a cached failure costs.
 const FAILURE_COST: usize = 64;
 
@@ -385,7 +388,8 @@ fn is_allowed_format(format: ImageFormat) -> bool {
 /// its width gives (`max_columns` at most). Only PNG, JPEG, GIF, WebP, BMP and ICO are read
 /// (anything else is `Unreadable`). The size is read from the header first: more than
 /// `MAX_SOURCE_PIXELS` is refused before the decoder runs, and the decoder itself may allocate
-/// at most `MAX_DECODE_ALLOC`. A decoder that panics on hostile bytes is caught and reads as
+/// at most `MAX_DECODE_ALLOC`. Peak memory is about one decoded buffer, its RGBA8 form when it
+/// differs, and the thumbnail. A decoder that panics on hostile bytes is caught and reads as
 /// `Unreadable` (no cheap hostile fixture triggers one, so this is not tested). A GIF gives
 /// its first frame. Transparency is composited over black before the picture is reduced.
 pub fn decode(bytes: &[u8], max_columns: usize) -> Result<(RgbaImage, usize), MosaicFailure> {
@@ -416,13 +420,27 @@ pub fn decode(bytes: &[u8], max_columns: usize) -> Result<(RgbaImage, usize), Mo
     let (cols, rows) = grid(width, height, columns);
     // About two image pixels per font pixel, like the Mac's thumbnail.
     let long_side = (2 * (cols * CELL_WIDTH).max(rows * CELL_HEIGHT)) as u32;
-    let paper = DynamicImage::ImageRgb8(over_black(&picture.to_rgba8()));
-    let paper = if paper.width().max(paper.height()) > long_side {
-        paper.thumbnail(long_side, long_side)
-    } else {
-        paper
-    };
-    Ok((paper.to_rgba8(), columns))
+    // One full-size buffer: the decoded picture as RGBA8 (no copy when it already is),
+    // composited over black in place, so no transparent pixel's colour bleeds into the
+    // reduction. Only then is it reduced; the thumbnail is the second, small buffer.
+    let mut paper = picture.into_rgba8();
+    black_paper(&mut paper);
+    if paper.width().max(paper.height()) > long_side {
+        let thumbnail = DynamicImage::ImageRgba8(paper).thumbnail(long_side, long_side);
+        return Ok((thumbnail.into_rgba8(), columns));
+    }
+    Ok((paper, columns))
+}
+
+/// Composites `image` over black in place: every pixel becomes opaque.
+fn black_paper(image: &mut RgbaImage) {
+    for pixel in image.pixels_mut() {
+        let alpha = u32::from(pixel.0[3]);
+        for k in 0..3 {
+            pixel.0[k] = (u32::from(pixel.0[k]) * alpha / 255) as u8;
+        }
+        pixel.0[3] = 255;
+    }
 }
 
 /// `image` over the black paper: transparency reads as black.
@@ -772,6 +790,27 @@ mod tests {
                 .iter()
                 .all(|c| *c == uniform(Color::Black))
         );
+    }
+
+    #[test]
+    fn a_transparent_pixels_colour_does_not_bleed_into_the_reduction() {
+        // Opaque blue on the left, fully transparent (but red underneath) on the right, big
+        // enough to be reduced: the transparent half is the black paper, never red or purple.
+        let edge = RgbaImage::from_fn(2400, 1200, |x, _| {
+            if x < 1200 {
+                Rgba([0, 0, 255, 255])
+            } else {
+                Rgba([255, 0, 0, 0])
+            }
+        });
+        let (thumbnail, columns) = decode(&encoded(&edge, ImageFormat::Png), 40).unwrap();
+        assert!(thumbnail.width() < 2400, "the picture was reduced");
+        assert!(thumbnail.pixels().all(|p| p.0[0] == 0 && p.0[3] == 255));
+        let mosaic = mosaic_from_rgba(&thumbnail, columns);
+        assert!(mosaic.cells.iter().all(|cell| {
+            [Color::Blue, Color::Black].contains(&cell.fg)
+                && [Color::Blue, Color::Black].contains(&cell.bg)
+        }));
     }
 
     #[test]
