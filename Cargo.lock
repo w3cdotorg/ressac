@@ -3495,6 +3495,7 @@ name = "ressac-ui"
 version = "0.2.0"
 dependencies = [
  "chrono",
+ "image",
  "ressac-core",
  "rusqlite",
  "scraper",
@@ -3504,6 +3505,7 @@ dependencies = [
  "unicode-normalization",
  "unicode-segmentation",
  "url",
+ "wiremock",
 ]
 
 [[package]]

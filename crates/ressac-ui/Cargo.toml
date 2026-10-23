@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 ressac-core = { path = "../ressac-core" }
 chrono.workspace = true
+image.workspace = true
 scraper.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -19,3 +20,4 @@ url.workspace = true
 [dev-dependencies]
 rusqlite.workspace = true
 tempfile.workspace = true
+wiremock.workspace = true
