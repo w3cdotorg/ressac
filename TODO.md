@@ -1,6 +1,6 @@
 # TODO
 
-Prochaines étapes de Ressac, au 20/10/2026. Le détail des décisions passées est dans `notes.md`.
+Prochaines étapes de Ressac, au 23/10/2026. Le détail des décisions passées est dans `notes.md`.
 
 ## Mise en service
 
@@ -12,6 +12,7 @@ Prochaines étapes de Ressac, au 20/10/2026. Le détail des décisions passées 
 
 ## Sous-projets suivants
 
+- [ ] **8 : Ressac sous Linux.** Partie A (terminal, chemins XDG, conteneur Fedora, CI et release Linux) faite le 23/10/2026 sur la branche `linux` (spec `docs/specs/2026-10-23-linux-design.md`) ; partie B (appli KDE) en cours ; trouvailles dans `notes.md`.
 - [x] **7 : ajouter un flux.** Code fait le 20/10/2026 sur la branche `add-feed` (spec `docs/specs/2026-10-20-add-feed-design.md`) ; recette en attente ; trouvailles dans `notes.md`.
 - [x] **6 : la carte marine.** Code fait le 19/10/2026 sur la branche `sea-chart` (spec `docs/specs/2026-10-19-sea-chart-design.md`) ; recette en attente (import de l'amorce dans la vraie base, remplacement de l'appli, essai des quatre encres) ; trouvailles dans `notes.md`.
 - [x] **5 : le bandeau tmux.** Fait le 19/10/2026 sur la branche `tmux-ticker` ; recette et trouvailles dans `notes.md`.
@@ -133,6 +134,13 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Petites dettes du cœur : la résolution d'un thème par clé ou par nom est maintenant unique (`resolve_theme_in`), mais la lecture d'une ligne de thème en `ThemeDef` reste écrite à trois endroits (`resolve_theme_in`, `themes`, relecture dans `insert_added_feed`) ; `COALESCE(html_url, xml_url)` prend un `html_url` vide pour présent (`NULLIF`) ; un territoire peut différer du thème hérité ; dérivations `Serialize` inutilisées ; ménage préalable (« Step 0 ») non fait sur `feeds.rs` ; `service.rs` à découper (`service/add.rs`) ; un déplacement sans effet calcule quand même la page.
 - [ ] CLI : pas de test qu'un refus en `--json` laisse stdout vide.
 - [ ] Appli : le presse-papiers est relu à chaque recréation de la fenêtre d'ajout ; un ajout qui se termine après Annuler sélectionne quand même le flux, affiche la note et peut fermer une fenêtre rouverte entre-temps ; deux notes identiques de suite ne relancent pas la minuterie.
+
+### Linux (sous-projet 8)
+
+- [ ] Konsole : vérifier à la main sur marghe quel protocole d'images le lecteur y trouve (aujourd'hui des demi-blocs quand aucun n'est reconnu) et décider si un correctif vaut la peine (spec §5.2).
+- [ ] Lecteur et jardin du terminal : un SIGTERM venu d'ailleurs les arrête sans restaurer le terminal (mode brut, écran alternatif). Il faudrait que les deux boucles surveillent le signal et quittent proprement (`commands/mod.rs`, `commands/garden.rs`, une boucle du jardin qui n'attend plus `event::read` sans fin).
+- [ ] Après le 02/11/2026 (crédits Actions) : vérifier le premier passage de `ci.yml` (job `fedora`, avertissement attendu de `--exclude ressac-kde` tant que l'appli n'existe pas) et, au premier tag, celui de `release.yml` (le runner `ubuntu-22.04-arm` est-il offert à ce dépôt ? il est public, donc normalement oui ; sinon le job attend sans fin dans la file).
+- [ ] Release : le build x86_64 n'a jamais été rejoué et le plafond glibc (2.35) est affiché, pas contrôlé ; ajouter un garde-fou qui échoue au-delà.
 
 ### Durcissement proposé, non fait
 

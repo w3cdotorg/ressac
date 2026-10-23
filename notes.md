@@ -324,6 +324,31 @@ Demandé par Clément le 19/10/2026 (jusque-là un flux n'entrait que par l'impo
 
 Voir TODO, section « Ajouter un flux (sous-projet 7) » : choix parmi plusieurs flux annoncés, dossier dans la fenêtre d'ajout, commandes Antiope, `ressac chart export`, et les mineurs de la relecture finale.
 
+## Ressac sous Linux (sous-projet 8)
+
+Demandé par Clément le 23/10/2026 : Ressac sur marghe (Fedora KDE Plasma 44, aarch64, dans Parallels), avec sa propre base. Spec `docs/specs/2026-10-23-linux-design.md`, plan `docs/plans/2026-10-23-linux.md`, une fiche par phase dans `docs/plans/linux/`. Partie A (le terminal) faite le 23/10/2026, sur la branche `linux`.
+
+### Décisions de la partie A (prises par Claude)
+
+- **Chemins** : un seul module, `ressac_core::paths`, écrit à la main (la crate `dirs` ne reproduirait pas les noms macOS). macOS ne bouge pas d'un octet. Linux suit XDG : base dans `~/.local/share/ressac/`, `terminal.json` dans `~/.config/ressac/`, bandeau et journaux dans `~/.local/state/ressac/`, `~/.cache/ressac/` réservé. Une variable `XDG_*` vide ou relative est ignorée ; sans `HOME` absolu, erreur `NoHome`, jamais un chemin relatif au dossier courant.
+- **Bandeau tmux, un état par base** : la base par défaut garde `ticker.json` ; toute autre base a `ticker-<16 hex>.json` dans le même dossier (FNV-1a 64 du chemin canonique, écrit à la main, stable entre `./r.sqlite`, le chemin absolu et un lien symbolique). Corrige au passage le défaut du Mac, où une seconde base partageait la rotation de la première. Le dossier d'état n'est créé que si la base existe.
+- **Ancienne base `~/Library` sous Linux** : nommée dans le journal une fois par lancement (`warn`, mais `debug` pour `ressac ticker`, que tmux lance toutes les 15 s), jamais déplacée.
+- **Petites corrections** : « The database is busy (is another Ressac writing?) » au lieu de nommer Ressac.app ; les liens s'ouvrent par `open::that_detached`, le terminal n'attend plus `xdg-open` ; SIGTERM vaut un premier Ctrl-C (arrêt propre, code 130) pour les commandes qui surveillent l'arrêt (`add`, `fetch`, `check`, `edition`), le lecteur et le jardin gardent le SIGTERM par défaut (voir TODO).
+- **Conteneur de développement** : Fedora 44 aarch64 sous OrbStack (`ressac-fedora`), utilisateur non root `ressac` avec l'uid du Mac, rust 1.99 de dnf, `lld` obligatoire, dossier de compilation dans un volume du conteneur et jamais `target/` du Mac. `apps/linux/dev/dev.sh check` est la porte Linux tant qu'Actions n'a pas de crédits (jusqu'au 02/11/2026). Une seule liste de paquets, `apps/linux/dev/packages.txt`, lue par le conteneur et par la CI.
+- **CI** : le job Ubuntu exclut `ressac-kde` dès maintenant (`--exclude` d'un paquet absent n'est qu'un avertissement de cargo, vérifié avec cargo 1.99.1) ; un job Fedora 44 lance le script de la porte locale en utilisateur non root.
+- **Release** : binaire `ressac` Linux pour x86_64 et aarch64, construit sur Ubuntu 22.04 (glibc 2.35), en `tar.gz` ; un seul `SHA256SUMS` pour le Mac et Linux ; un job de publication à part, seul à pouvoir écrire dans le dépôt.
+
+### Trouvailles de la construction
+
+- **Première porte Linux** : `dev.sh check` vert du premier coup, 1018 tests passés, 1 ignoré, 0 échec, graphique 28/28, clippy sans avertissement. Deuxième passage à chaud : 30 s. Le temps du premier passage à froid (téléchargement des crates compris) n'a pas été mesuré, quelques minutes ; l'image du conteneur met environ 4 min à se construire à froid.
+- **Aucun échec propre à Linux** : les tests XDG, du dossier de journaux, de `terminal.json`, de l'ancienne base `~/Library` et du SIGTERM ont tous passé en utilisateur `ressac`, sans correctif.
+- **Déviation du plan maître** : le routage de `terminal.json` est passé de A1 à A2 pour tenir le plafond de 5 fichiers par phase ; les interfaces du plan maître sont restées les mêmes.
+- **Piège du conteneur** : `dev.sh up` réutilisait un conteneur monté sur un autre dépôt (faux vert depuis un worktree) ; il compare maintenant la source du montage de `/work/ressac` et recrée `ressac-fedora` seulement. Changer de copie du dépôt recrée donc le conteneur et tue un `sh` ou un `check` en cours de l'autre.
+- **Test du SIGTERM** : écrit d'abord en rouge (statut 15 au lieu de 130), puis vert ; un test unitaire garde la liste des commandes qui écoutent le signal.
+- **Rejeu de la CI** : le job Fedora rejoué sur `fedora:44` arm64 : 4 min 56 s, porte verte. La construction de la release rejouée sur `ubuntu:22.04` arm64 : 2 min 29 s de compilation (3 min 36 s en tout), symbole glibc le plus haut vu `GLIBC_2.34`, `ressac 0.2.0`, migration en JSON « finished ». Le x86_64 n'a jamais été rejoué (pas de machine) et le plafond glibc est affiché, pas contrôlé.
+- **`ubuntu-22.04-arm`** : gratuit pour les dépôts publics, ce que `w3cdotorg/ressac` est ; pas un trou.
+- **README** : la ligne `dnf install` a été essayée sur un Fedora 44 nu (`cargo install --locked --path crates/ressac` puis `ressac --version` : 0.2.0, en 2 min 47 s, `tar` seulement pour la copie des sources) et le bloc tmux est sourcé tel quel par tmux 3.8 dans le conteneur.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
