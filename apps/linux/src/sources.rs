@@ -10,13 +10,15 @@ use cxx_qt_lib::{QString, QVariant};
 use ressac_core::clock::today_start;
 use ressac_core::store::Source;
 use ressac_ui::chrono;
+use ressac_ui::library::{FeedDrop, decide_drop, drop_target, feed_from_payload};
 use ressac_ui::live::plan_rows;
-use ressac_ui::runs::{DirectWrite, read_failure, write_failure};
+use ressac_ui::runs::{DirectWrite, RunRequest, read_failure, write_failure};
 use ressac_ui::sources::{RowKind, Selection, SidebarRow, SidebarTree, index_of};
 use ressac_ui::worker::JobResult;
 
 use crate::launcher::with_session;
 use crate::rows::{list_model_rows, to_i32, variant_string};
+use crate::runs::submit_short;
 
 /// The role names QML sees, in role order (`FIRST_ROLE + index`).
 const ROLES: [&str; 14] = [
@@ -63,11 +65,13 @@ pub mod qobject {
         #[qproperty(QString, selected_key, READ = selected_key, NOTIFY = selection_changed)]
         #[qproperty(i32, selected_row, READ = selected_row, NOTIFY = selection_changed)]
         #[qproperty(bool, is_garden, READ = is_garden, NOTIFY = selection_changed)]
+        #[qproperty(bool, empty_library, READ = empty_library, NOTIFY = library_changed)]
         type SourcesModel = super::SourcesModelRust;
 
         fn selected_key(self: &SourcesModel) -> QString;
         fn selected_row(self: &SourcesModel) -> i32;
         fn is_garden(self: &SourcesModel) -> bool;
+        fn empty_library(self: &SourcesModel) -> bool;
 
         #[cxx_override]
         fn data(self: &SourcesModel, index: &QModelIndex, role: i32) -> QVariant;
@@ -116,8 +120,19 @@ pub mod qobject {
         #[qinvokable]
         fn set_prefer_full_text(self: Pin<&mut SourcesModel>, feed_id: i64, on: bool);
 
+        /// Drops the feed named by `payload` (a feed id as text, the drag payload) on the
+        /// sidebar row `target_key`: a folder or the "Feeds" heading. True when a move was
+        /// queued; the reload comes from `Runs.databaseChanged`.
+        #[qinvokable]
+        fn drop_feed(self: Pin<&mut SourcesModel>, payload: &QString, target_key: &QString)
+        -> bool;
+
         #[qsignal]
         fn selection_changed(self: Pin<&mut SourcesModel>);
+
+        /// The library went from empty to not (or back): the first-run screen follows.
+        #[qsignal]
+        fn library_changed(self: Pin<&mut SourcesModel>);
 
         /// A failed read or write: for the window's banner.
         #[qsignal]
@@ -148,6 +163,8 @@ pub struct SourcesModelRust {
     tree: SidebarTree,
     rows: Vec<SidebarRow>,
     selection: Selection,
+    /// What `emptyLibrary` last told QML.
+    empty_library: bool,
 }
 
 fn variant_count(count: usize) -> QVariant {
@@ -203,6 +220,10 @@ impl qobject::SourcesModel {
         self.rust().selection.is_garden()
     }
 
+    fn empty_library(&self) -> bool {
+        self.rust().empty_library
+    }
+
     /// A row index from QML; `None` when out of range (a stale index).
     fn row_at(&self, row: i32) -> Option<&SidebarRow> {
         usize::try_from(row)
@@ -219,7 +240,12 @@ impl qobject::SourcesModel {
             self.as_mut().apply(op);
         }
         if (self.selected_row(), self.selected_key()) != before {
-            self.selection_changed();
+            self.as_mut().selection_changed();
+        }
+        let empty = self.rust().tree.is_empty_library();
+        if empty != self.rust().empty_library {
+            self.as_mut().rust_mut().get_mut().empty_library = empty;
+            self.library_changed();
         }
     }
 
@@ -287,6 +313,27 @@ impl qobject::SourcesModel {
         };
         self.as_mut().rust_mut().get_mut().tree.toggle(folder);
         self.replan();
+    }
+
+    fn drop_feed(self: Pin<&mut Self>, payload: &QString, target_key: &QString) -> bool {
+        let Some(feed) = feed_from_payload(&payload.to_string()) else {
+            return false;
+        };
+        let Some(target) = drop_target(&target_key.to_string()) else {
+            return false;
+        };
+        let Some(current) = self.rust().tree.folder_of(feed) else {
+            return false;
+        };
+        let FeedDrop::Move(target) = decide_drop(current, target) else {
+            return false;
+        };
+        submit_short(
+            RunRequest::MoveFeed(feed, target),
+            move |cx| cx.app.store().move_feed(feed, target).map(drop),
+            |_| {},
+        );
+        true
     }
 
     /// The optimistic switch, then the write on the worker's direct lane.

@@ -6,8 +6,14 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::QString;
-use ressac_ui::settings::{Appearance, Settings, SettingsStore, TextSizeCommand};
+use cxx_qt_lib::{QString, QStringList};
+use ressac_core::paths::Paths;
+use ressac_core::store::Store;
+use ressac_ui::launch::{DatabaseChoice, choose_database, database_location, database_note};
+use ressac_ui::library::local_path;
+use ressac_ui::settings::{
+    Appearance, LineWidth, ReaderFont, Settings, SettingsStore, TextSizeCommand,
+};
 
 use crate::shim;
 
@@ -62,6 +68,8 @@ pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qstringlist.h");
+        type QStringList = cxx_qt_lib::QStringList;
     }
 
     #[auto_cxx_name]
@@ -79,6 +87,16 @@ pub mod qobject {
         #[qproperty(QString, chart_view, READ = chart_view, WRITE = set_chart_view, NOTIFY)]
         #[qproperty(QString, chart_ink, READ = chart_ink, WRITE = set_chart_ink, NOTIFY)]
         #[qproperty(bool, chart_animate, READ = chart_animate, WRITE = set_chart_animate, NOTIFY)]
+        #[qproperty(QStringList, font_ids, READ, CONSTANT)]
+        #[qproperty(QStringList, font_titles, READ, CONSTANT)]
+        #[qproperty(QStringList, font_families, READ, CONSTANT)]
+        #[qproperty(QStringList, width_ids, READ, CONSTANT)]
+        #[qproperty(QStringList, width_titles, READ, CONSTANT)]
+        #[qproperty(QString, resolved_database_path, READ = resolved_database_path, NOTIFY = data_changed)]
+        #[qproperty(QString, database_note, READ = database_note, NOTIFY = data_changed)]
+        #[qproperty(bool, ressac_db_set, READ = ressac_db_set, CONSTANT)]
+        #[qproperty(QString, database_refusal, READ = database_refusal, NOTIFY = data_changed)]
+        #[qproperty(bool, needs_relaunch, READ = needs_relaunch, NOTIFY = data_changed)]
         type AppSettings = super::AppSettingsRust;
 
         fn appearance(self: &AppSettings) -> QString;
@@ -102,6 +120,29 @@ pub mod qobject {
         fn chart_animate(self: &AppSettings) -> bool;
         fn set_chart_animate(self: Pin<&mut AppSettings>, value: bool);
 
+        fn resolved_database_path(self: &AppSettings) -> QString;
+        fn database_note(self: &AppSettings) -> QString;
+        fn ressac_db_set(self: &AppSettings) -> bool;
+        fn database_refusal(self: &AppSettings) -> QString;
+        fn needs_relaunch(self: &AppSettings) -> bool;
+
+        /// Settings ▸ Data: a database chosen in a file dialog (a `file:` URL). A refusal
+        /// shows in `databaseRefusal`; a change is stored and `needsRelaunch` turns on.
+        #[qinvokable]
+        fn choose_database(self: Pin<&mut AppSettings>, url: &QString);
+
+        /// Back to the default location.
+        #[qinvokable]
+        fn use_default_location(self: Pin<&mut AppSettings>);
+
+        /// Starts a new `ressac-kde` process; true when it started (QML then quits).
+        #[qinvokable]
+        fn relaunch(self: &AppSettings) -> bool;
+
+        /// The Data page's texts changed (path, note, refusal, relaunch rule).
+        #[qsignal]
+        fn data_changed(self: Pin<&mut AppSettings>);
+
         /// View ▸ Bigger / Smaller / Actual Size on `look` (`native` or `antiope`): `command` is
         /// `bigger`, `smaller` or `actualSize`. Returns the size now shown; an unknown command
         /// writes nothing.
@@ -114,13 +155,33 @@ pub mod qobject {
 pub struct AppSettingsRust {
     store: QSettingsStore,
     settings: Settings,
+    /// `RESSAC_DB` set and not empty at start.
+    ressac_db_set: bool,
+    database_refusal: &'static str,
+    needs_relaunch: bool,
+    font_ids: QStringList,
+    font_titles: QStringList,
+    font_families: QStringList,
+    width_ids: QStringList,
+    width_titles: QStringList,
 }
 
 impl Default for AppSettingsRust {
     fn default() -> Self {
         let store = QSettingsStore::default_file();
         let settings = Settings::load(&store);
-        AppSettingsRust { store, settings }
+        AppSettingsRust {
+            store,
+            settings,
+            ressac_db_set: std::env::var_os("RESSAC_DB").is_some_and(|v| !v.is_empty()),
+            database_refusal: "",
+            needs_relaunch: false,
+            font_ids: string_list(ReaderFont::ALL.map(ReaderFont::as_str)),
+            font_titles: string_list(ReaderFont::ALL.map(ReaderFont::title)),
+            font_families: string_list(ReaderFont::ALL.map(ReaderFont::family)),
+            width_ids: string_list(LineWidth::ALL.map(LineWidth::as_str)),
+            width_titles: string_list(LineWidth::ALL.map(LineWidth::title)),
+        }
     }
 }
 
@@ -130,7 +191,9 @@ impl qobject::AppSettings {
         self: Pin<&mut Self>,
         set: impl FnOnce(&mut Settings, &mut QSettingsStore) -> bool,
     ) -> bool {
-        let AppSettingsRust { store, settings } = self.rust_mut().get_mut();
+        let AppSettingsRust {
+            store, settings, ..
+        } = self.rust_mut().get_mut();
         set(settings, store)
     }
 
@@ -233,6 +296,87 @@ impl qobject::AppSettings {
         }
     }
 
+    /// Where the database is (or will be created), as the launch resolves it; `""` when no
+    /// location can be worked out.
+    fn resolved_database_path(&self) -> QString {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute());
+        let default_db = Paths::from_env().ok().map(|paths| paths.database());
+        let path = database_location(
+            None,
+            self.rust().settings.database_path.as_deref(),
+            home.as_deref(),
+            default_db.as_deref(),
+        );
+        QString::from(
+            path.map(|path| path.display().to_string())
+                .unwrap_or_default()
+                .as_str(),
+        )
+    }
+
+    fn database_note(&self) -> QString {
+        QString::from(database_note(self.rust().settings.database_path.as_deref()))
+    }
+
+    fn ressac_db_set(&self) -> bool {
+        self.rust().ressac_db_set
+    }
+
+    fn database_refusal(&self) -> QString {
+        QString::from(self.rust().database_refusal)
+    }
+
+    fn needs_relaunch(&self) -> bool {
+        self.rust().needs_relaunch
+    }
+
+    /// Applies a chosen path (blank: the default location) and tells QML what changed.
+    fn apply_database_choice(mut self: Pin<&mut Self>, path: &str) {
+        let AppSettingsRust {
+            store,
+            settings,
+            database_refusal,
+            needs_relaunch,
+            ..
+        } = self.as_mut().rust_mut().get_mut();
+        match choose_database(settings, store, path, Store::probe) {
+            DatabaseChoice::Refused(sentence) => *database_refusal = sentence,
+            DatabaseChoice::Stored => {
+                *database_refusal = "";
+                *needs_relaunch = true;
+                self.as_mut().database_path_changed();
+            }
+            DatabaseChoice::Unchanged => *database_refusal = "",
+        }
+        self.data_changed();
+    }
+
+    fn choose_database(self: Pin<&mut Self>, url: &QString) {
+        // Anything but a file URL (a stale or empty dialog result) is ignored.
+        let Some(path) = local_path(&url.to_string()) else {
+            return;
+        };
+        self.apply_database_choice(&path.to_string_lossy());
+    }
+
+    fn use_default_location(self: Pin<&mut Self>) {
+        self.apply_database_choice("");
+    }
+
+    fn relaunch(&self) -> bool {
+        let started =
+            std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn());
+        match started {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!("cannot start a new Ressac: {error}");
+                false
+            }
+        }
+    }
+
     fn resize(mut self: Pin<&mut Self>, look: &QString, command: &QString) -> f64 {
         let look = Appearance::parse(&look.to_string()).unwrap_or_default();
         let command = match command.to_string().as_str() {
@@ -296,6 +440,14 @@ impl qobject::AppSettings {
             self.as_mut().chart_animate_changed();
         }
     }
+}
+
+fn string_list<const N: usize>(items: [&str; N]) -> QStringList {
+    let mut list = QStringList::default();
+    for item in items {
+        list.append(QString::from(item));
+    }
+    list
 }
 
 #[cfg(test)]
