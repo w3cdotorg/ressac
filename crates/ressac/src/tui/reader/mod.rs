@@ -60,21 +60,6 @@ fn tick_redraws(look: Look, before: DateTime<FixedOffset>, after: DateTime<Fixed
         || before.format("%Y%m%d%H%M").to_string() != after.format("%Y%m%d%H%M").to_string()
 }
 
-/// Local midnight of the day `now` belongs to, in UTC (the app's "Today").
-pub fn today_start<Tz: TimeZone>(now: DateTime<Tz>) -> DateTime<Utc> {
-    let midnight = now.date_naive().and_hms_opt(0, 0, 0).expect("00:00 exists");
-    let zone = now.timezone();
-    zone.from_local_datetime(&midnight)
-        .earliest()
-        // A zone that skips midnight (DST at 00:00): the day starts at the first valid hour.
-        .or_else(|| {
-            zone.from_local_datetime(&(midnight + chrono::Duration::hours(1)))
-                .earliest()
-        })
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|| now.with_timezone(&Utc))
-}
-
 /// The clock a command needs: `now` for writes and the zone for "Today" and the edition's day.
 /// Production passes `chrono::Local` itself, so that a day with a clock change keeps its true
 /// midnight and 04:00 (a `FixedOffset` captured at `now` would shift them by an hour); tests
@@ -101,7 +86,7 @@ impl<Tz: TimeZone> Clock<Tz> {
     }
 
     fn today(&self) -> DateTime<Utc> {
-        today_start(self.now.with_timezone(&self.zone))
+        ressac_core::clock::today_start(self.now.with_timezone(&self.zone))
     }
 
     fn tick(&self) -> Event {
@@ -712,24 +697,6 @@ mod tests {
             .with_ymd_and_hms(2026, 10, 16, 9, 1, 0)
             .unwrap();
         assert!(tick_redraws(Look::Native, at("59"), next_minute));
-    }
-
-    #[test]
-    fn today_starts_at_local_midnight() {
-        let now = paris_summer()
-            .with_ymd_and_hms(2026, 10, 16, 0, 30, 0)
-            .unwrap();
-        assert_eq!(
-            today_start(now),
-            Utc.with_ymd_and_hms(2026, 10, 15, 22, 0, 0).unwrap()
-        );
-        let evening = paris_summer()
-            .with_ymd_and_hms(2026, 10, 16, 23, 59, 0)
-            .unwrap();
-        assert_eq!(
-            today_start(evening),
-            Utc.with_ymd_and_hms(2026, 10, 15, 22, 0, 0).unwrap()
-        );
     }
 
     /// Europe/Paris for 2026 only (CEST from 2026-03-29 01:00 UTC to 2026-10-25 01:00 UTC): a

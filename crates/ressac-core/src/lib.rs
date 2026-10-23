@@ -1,5 +1,6 @@
 //! Ressac core: storage, fetching, diagnosis and OPML for the Ressac feed reader.
 
+pub mod clock;
 pub mod discover;
 pub mod edition;
 pub mod error;
