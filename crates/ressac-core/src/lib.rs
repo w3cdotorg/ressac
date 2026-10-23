@@ -9,6 +9,7 @@ pub mod health;
 pub mod model;
 pub mod opml;
 pub mod parse;
+pub mod paths;
 pub mod service;
 pub mod source;
 pub mod store;
