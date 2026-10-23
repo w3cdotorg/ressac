@@ -6,7 +6,12 @@ use std::time::Duration;
 
 use chrono::offset::MappedLocalTime;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
-use ressac_core::store::Store;
+use ressac_core::edition::Section;
+use ressac_core::model::FeedId;
+use ressac_core::store::{
+    EditionOverflowRow, EditionRecord, EntryRow, JournalItem, JournalView, SourceCounts,
+    SourceNode, SourceNodeKind, SourcesSnapshot, Store,
+};
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
@@ -322,5 +327,176 @@ impl TimeZone for Paris {
 
     fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> FixedOffset {
         Paris::offset_at_utc(utc)
+    }
+}
+
+pub fn folder(
+    id: i64,
+    name: &str,
+    page: Option<u16>,
+    unread: usize,
+    children: Vec<SourceNode>,
+) -> SourceNode {
+    SourceNode {
+        kind: SourceNodeKind::Folder {
+            id,
+            name: name.into(),
+        },
+        page,
+        unread,
+        children,
+    }
+}
+
+pub fn feed(id: i64, title: &str, page: Option<u16>, unread: usize) -> SourceNode {
+    SourceNode {
+        kind: SourceNodeKind::Feed {
+            id,
+            title: title.into(),
+        },
+        page,
+        unread,
+        children: Vec::new(),
+    }
+}
+
+/// A small library with page numbers: Blogs (200) with xkcd (201); Infos (400) with Daring
+/// Fireball (401) and the subfolder Science (402) holding one feed (403); a feed without a
+/// folder (110) and one the core has not numbered yet.
+pub fn paged_snapshot() -> SourcesSnapshot {
+    SourcesSnapshot {
+        counts: SourceCounts {
+            unread: 10,
+            today: 1,
+            starred: 4,
+            needs_triage: 7,
+            ..SourceCounts::default()
+        },
+        tree: vec![
+            folder(
+                1,
+                "Blogs",
+                Some(200),
+                3,
+                vec![feed(1, "xkcd.com", Some(201), 3)],
+            ),
+            folder(
+                4,
+                "Infos",
+                Some(400),
+                3,
+                vec![
+                    feed(8, "Daring Fireball", Some(401), 2),
+                    folder(
+                        5,
+                        "Science",
+                        Some(402),
+                        1,
+                        vec![feed(10, "Center for Humane Technology", Some(403), 1)],
+                    ),
+                ],
+            ),
+            feed(13, "Loose feed", Some(110), 0),
+            feed(12, "Brand new", None, 4),
+        ],
+    }
+}
+
+/// An edition item of the Mac's `item(...)` helper: unread, published at the edition's build.
+pub fn journal_item(
+    id: i64,
+    section: Section,
+    rank: u32,
+    feed: FeedId,
+    feed_title: &str,
+    title: Option<&str>,
+    starred: bool,
+) -> JournalItem {
+    JournalItem {
+        row: EntryRow {
+            entry_id: id,
+            feed_id: feed,
+            feed_title: feed_title.to_string(),
+            title: title.map(str::to_string),
+            author: None,
+            url: None,
+            published_at: at("2026-10-16T07:12:00Z"),
+            is_read: false,
+            is_starred: starred,
+            has_fulltext: false,
+        },
+        section,
+        rank,
+    }
+}
+
+/// The Mac's `sampleEdition()`: edition 12 built on Friday 16 October 2026 at 09:12 in Paris,
+/// with one front-page entry, two weekly entries of one feed, one wire entry and 12 more left
+/// in Actualitté (page 412). `read` marks entries read; `items` replaces the four.
+pub fn journal_view(
+    read: &[i64],
+    unreachable: u32,
+    items: Option<Vec<JournalItem>>,
+) -> JournalView {
+    let built_at = at("2026-10-16T07:12:00Z");
+    let mut items = items.unwrap_or_else(|| {
+        vec![
+            journal_item(
+                1,
+                Section::Front,
+                1,
+                30,
+                "Bibliobsession",
+                Some("A rare post"),
+                false,
+            ),
+            journal_item(
+                2,
+                Section::Week,
+                2,
+                20,
+                "Six Colors",
+                Some("Weekly one"),
+                true,
+            ),
+            journal_item(
+                3,
+                Section::Week,
+                3,
+                20,
+                "Six Colors",
+                Some("Weekly two"),
+                false,
+            ),
+            journal_item(
+                4,
+                Section::Wire,
+                4,
+                10,
+                "Actualitt\u{e9}",
+                Some("Latest news"),
+                false,
+            ),
+        ]
+    });
+    for item in &mut items {
+        item.row.is_read = item.row.is_read || read.contains(&item.row.entry_id);
+    }
+    JournalView {
+        edition: EditionRecord {
+            id: 12,
+            built_at,
+            window_start: built_at - chrono::TimeDelta::hours(24),
+            window_end: built_at,
+            unreachable,
+        },
+        items,
+        overflow: vec![EditionOverflowRow {
+            section: Section::Wire,
+            feed_id: 10,
+            feed_title: "Actualitt\u{e9}".to_string(),
+            page: Some(412),
+            hidden_count: 12,
+        }],
     }
 }

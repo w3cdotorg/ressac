@@ -14,6 +14,8 @@ use crate::keys::Command;
 use crate::sources::{GardenScope, Selection, rhythm_title};
 use crate::teletext::CellLine;
 
+pub mod frame;
+
 /// The index column's width, in cells.
 pub const INDEX_CELLS: usize = 22;
 /// The entries column's width, in cells.
@@ -842,83 +844,10 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use ressac_core::store::pages::RESERVED_PAGES;
-    use ressac_core::store::{SourceNode, SourceNodeKind};
-
     use crate::sources::{GardenScope, rhythm_title};
     use crate::teletext::{CellSpan, Color};
-
-    fn folder(
-        id: i64,
-        name: &str,
-        page: Option<u16>,
-        unread: usize,
-        children: Vec<SourceNode>,
-    ) -> SourceNode {
-        SourceNode {
-            kind: SourceNodeKind::Folder {
-                id,
-                name: name.into(),
-            },
-            page,
-            unread,
-            children,
-        }
-    }
-
-    fn feed(id: i64, title: &str, page: Option<u16>, unread: usize) -> SourceNode {
-        SourceNode {
-            kind: SourceNodeKind::Feed {
-                id,
-                title: title.into(),
-            },
-            page,
-            unread,
-            children: Vec::new(),
-        }
-    }
-
-    /// A small library with page numbers: Blogs (200) with xkcd (201); Infos (400) with Daring
-    /// Fireball (401) and the subfolder Science (402) holding one feed (403); a feed without a
-    /// folder (110) and one the core has not numbered yet.
-    fn paged_snapshot() -> SourcesSnapshot {
-        SourcesSnapshot {
-            counts: SourceCounts {
-                unread: 10,
-                today: 1,
-                starred: 4,
-                needs_triage: 7,
-                ..SourceCounts::default()
-            },
-            tree: vec![
-                folder(
-                    1,
-                    "Blogs",
-                    Some(200),
-                    3,
-                    vec![feed(1, "xkcd.com", Some(201), 3)],
-                ),
-                folder(
-                    4,
-                    "Infos",
-                    Some(400),
-                    3,
-                    vec![
-                        feed(8, "Daring Fireball", Some(401), 2),
-                        folder(
-                            5,
-                            "Science",
-                            Some(402),
-                            1,
-                            vec![feed(10, "Center for Humane Technology", Some(403), 1)],
-                        ),
-                    ],
-                ),
-                feed(13, "Loose feed", Some(110), 0),
-                feed(12, "Brand new", None, 4),
-            ],
-        }
-    }
+    use crate::test_db::{feed, paged_snapshot};
+    use ressac_core::store::pages::RESERVED_PAGES;
 
     fn src(source: Source) -> Selection {
         Selection::Source(source)

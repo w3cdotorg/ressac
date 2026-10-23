@@ -7,10 +7,12 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, TimeZone, Utc};
+use ressac_core::model::FeedId;
 use ressac_core::service::ExtractOutcome;
-use ressac_core::store::{EntryDetail, EntryRow, FulltextRow};
+use ressac_core::store::{EntryDetail, EntryRow, FulltextRow, JournalView};
 
 use crate::entries::display_title;
+use crate::pages::ReservedPage;
 use crate::sanitize::{Images, is_web_url, sanitize};
 use crate::settings::{Appearance, LineWidth, ReaderFont, Settings, effective_size};
 use crate::worker::JobFailure;
@@ -230,6 +232,38 @@ impl SubpageLabel {
             Some(page) => format!("{page} {}/{}", self.index, self.count),
             None => format!("{}/{}", self.index, self.count),
         }
+    }
+
+    /// Numbered from 1 in `listed` (entry id, feed id), out of `total`: the whole list's size
+    /// when only its first rows are loaded, `listed.len()` when `None`. `None` when the entry
+    /// is not in the list (filtered out).
+    pub fn of(
+        entry_id: i64,
+        listed: &[(i64, FeedId)],
+        total: Option<usize>,
+        page_of: impl Fn(FeedId) -> Option<u16>,
+    ) -> Option<SubpageLabel> {
+        let position = listed.iter().position(|(id, _)| *id == entry_id)?;
+        Some(SubpageLabel {
+            page: page_of(listed[position].1),
+            index: position + 1,
+            count: total.unwrap_or(listed.len()),
+        })
+    }
+
+    /// "104 3/43": on P104 an entry is a sub-page of the Journal by its rank in the edition,
+    /// out of the edition's size. `None` when the entry is not in it.
+    pub fn of_edition(entry_id: i64, view: Option<&JournalView>) -> Option<SubpageLabel> {
+        let view = view?;
+        let item = view
+            .items
+            .iter()
+            .find(|item| item.row.entry_id == entry_id)?;
+        Some(SubpageLabel {
+            page: Some(ReservedPage::Journal.number()),
+            index: item.rank as usize,
+            count: view.items.len(),
+        })
     }
 }
 
@@ -731,6 +765,15 @@ pub fn toggle_image_script(index: u32) -> String {
 /// Evaluates to how many boxes it swapped.
 pub fn toggle_all_images_script() -> String {
     r#"(() => { const boxes = Array.from(document.querySelectorAll(".mosaic")); const original = boxes.some((box) => !box.classList.contains("original")); for (const box of boxes) { box.classList.toggle("original", original); box.querySelector("img").src = original ? box.dataset.original : box.dataset.mosaic; } return boxes.length; })()"#.to_string()
+}
+
+/// Rewrites the Antiope sub-page line of the page on screen in place, keeping its scroll
+/// position. App JavaScript; the page's own stays off.
+pub fn subpage_script(text: &str) -> String {
+    format!(
+        r#"const line = document.getElementById("subpage"); if (line) {{ line.textContent = {}; }}"#,
+        js_string(text)
+    )
 }
 
 /// Flags every box showing the mosaic address `source` as failed (`data-failed`), so the
@@ -1331,6 +1374,46 @@ mod tests {
             .text(),
             "1/1"
         );
+    }
+
+    #[test]
+    fn an_entry_is_a_sub_page_of_its_feed_by_its_position() {
+        let listed = [(1, 8), (3, 8), (4, 1)];
+        let page = |f: FeedId| (f == 8).then_some(412);
+        assert_eq!(
+            SubpageLabel::of(3, &listed, Some(20), page).map(|l| l.text()),
+            Some("412 2/20".to_string())
+        );
+        // No total: the list's own size.
+        assert_eq!(
+            SubpageLabel::of(3, &listed, None, page).map(|l| l.text()),
+            Some("412 2/3".to_string())
+        );
+        // A feed without a page number yet.
+        assert_eq!(
+            SubpageLabel::of(4, &listed, Some(20), page).map(|l| l.text()),
+            Some("3/20".to_string())
+        );
+        assert_eq!(SubpageLabel::of(9, &listed, Some(20), page), None);
+    }
+
+    #[test]
+    fn an_edition_entry_is_a_sub_page_of_104_by_its_rank() {
+        let view = crate::test_db::journal_view(&[], 0, None);
+        let text = |id| SubpageLabel::of_edition(id, Some(&view)).map(|l| l.text());
+        assert_eq!(text(3), Some("104 3/4".to_string()));
+        assert_eq!(text(1), Some("104 1/4".to_string()));
+        assert_eq!(text(99), None);
+        assert_eq!(SubpageLabel::of_edition(1, None), None);
+    }
+
+    #[test]
+    fn the_subpage_script_rewrites_the_line_in_place() {
+        let script = subpage_script("412 3/20");
+        assert!(script.contains(r#"getElementById("subpage")"#));
+        assert!(script.contains(&js_string("412 3/20")));
+        assert!(script.contains("textContent"));
+        assert!(subpage_script(r#""</script>"#).contains(r#"\"\u003c/script>"#));
     }
 
     // AntiopePageTests
