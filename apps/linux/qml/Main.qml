@@ -2,6 +2,7 @@ import QtQuick
 import QtCore
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
+import QtQuick.Shapes
 import org.kde.kirigami as Kirigami
 import org.w3cdotorg.ressac
 
@@ -41,6 +42,48 @@ Kirigami.ApplicationWindow {
             root.show(); root.raise(); root.requestActivate()
         }
         function onOpenUrl(url) { root.openExternally(url) }
+    }
+
+    // Add Feed, OPML import and export (B6d): the menu actions' state and triggers come from here.
+    function addFeed() { Library.beginAdd() }
+    function importOpml() { opml.chooseImport() }
+    function exportOpml() { opml.chooseExport() }
+    Binding { target: mainMenu.addFeed; property: "enabled"; value: Launcher.phase === Launcher.Ready }
+    Binding { target: mainMenu.importOpml; property: "enabled"; value: Launcher.phase === Launcher.Ready && !Library.busy }
+    Binding { target: mainMenu.exportOpml; property: "enabled"; value: Launcher.phase === Launcher.Ready }
+    Connections { target: mainMenu.addFeed; function onTriggered() { root.addFeed() } }
+    Connections { target: mainMenu.importOpml; function onTriggered() { root.importOpml() } }
+    Connections { target: mainMenu.exportOpml; function onTriggered() { root.exportOpml() } }
+    Connections { target: Library; function onAdded(key) { SourcesModel.selectKey(key) } }
+    // `reloadAll` reaches the form's pop-ups: a database change under an open dialog.
+    Connections { target: Runs; function onDatabaseChanged() { Library.reloadChoices() } }
+    AddFeedDialog { id: addFeedDialog; onOpenUrl: (url) => root.openExternally(url) }
+    OpmlDialogs { id: opml }
+    TextEdit { id: clipboardProbe; visible: false }          // walk only: puts text on the clipboard
+
+    // The note under the window: what an add did, gone after Library.noteSeconds or on Dismiss.
+    footer: Rectangle {
+        visible: Library.note !== ""
+        implicitHeight: visible ? noteRow.implicitHeight + Kirigami.Units.smallSpacing * 2 : 0
+        color: Kirigami.Theme.backgroundColor
+        Kirigami.Theme.colorSet: Kirigami.Theme.Window
+        RowLayout {
+            id: noteRow
+            anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter
+                leftMargin: Kirigami.Units.largeSpacing; rightMargin: Kirigami.Units.smallSpacing }
+            spacing: Kirigami.Units.smallSpacing
+            Kirigami.Icon { source: "emblem-ok-symbolic"; color: Kirigami.Theme.positiveTextColor
+                implicitWidth: Kirigami.Units.iconSizes.small; implicitHeight: Kirigami.Units.iconSizes.small }
+            QQC2.Label { Layout.fillWidth: true; text: Library.note; maximumLineCount: 2; wrapMode: Text.Wrap; textFormat: Text.PlainText }
+            QQC2.ToolButton { icon.name: "window-close"; display: QQC2.AbstractButton.IconOnly; text: "Dismiss"; onClicked: Library.dismissNote() }
+        }
+        Timer {
+            id: noteTimer
+            interval: Library.noteSeconds * 1000
+            running: Library.note !== ""
+            onTriggered: Library.dismissNote()
+        }
+        Connections { target: Library; function onNoteChanged() { if (Library.note !== "") noteTimer.restart() } }
     }
 
     function useDefaultDatabase() {
@@ -231,7 +274,39 @@ Kirigami.ApplicationWindow {
         { name: "28-after", enter: function () { console.warn("walk: 28-after surveys=" + Chart.surveys + " open=" + Chart.open
             + " onScreen=" + Live.chartOnScreen + " polling=" + Live.polling) } },
     ]
-    readonly property var steps: Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
+    // The `library` walk (B6d): an empty library (the launch creates the file), a dropped OPML, the add dialog.
+    // Every address targets a closed loopback port or is refused before any connection.
+    readonly property var librarySteps: [
+        { name: "02-first-run", enter: function () { console.warn("walk: 02-first-run empty=" + SourcesModel.emptyLibrary
+            + " add=" + mainMenu.addFeed.enabled + " import=" + mainMenu.importOpml.enabled + " page=" + (mainMenu.page === null)) } },
+        { name: "03-drop", enter: function () { const home = String(StandardPaths.writableLocation(StandardPaths.HomeLocation))
+            console.warn("walk: 03-drop started=" + Library.openUrls([home + "/notes.txt", home + "/walk.opml"]) + " again="
+                + Library.openUrls([home + "/walk.opml"]) + " busy=" + Library.busy) } },
+        { name: "04-wait", enter: function () {} },
+        { name: "05-confirm", enter: function () { console.warn("walk: 05-confirm step=" + Library.opmlStep + " title=" + Library.importTitle
+            + " lines=" + Library.importLines.join("|") + " note=" + Library.importNote + " canImport=" + Library.canImport) } },
+        { name: "06-import", enter: function () { opml.confirmImport() } },
+        { name: "07-wait", enter: function () {} },
+        { name: "08-wait", enter: function () {} },
+        { name: "09-wait", enter: function () {} },
+        { name: "10-imported", enter: function () { console.warn("walk: 10-imported empty=" + SourcesModel.emptyLibrary + " step=" + Library.opmlStep
+            + " walk=" + (SourcesModel.rowOfKey("folder:1") >= 0) + " gamma=" + (SourcesModel.rowOfKey("feed:3") >= 0) + " longRun=" + Runs.longRunActive) } },
+        { name: "11-add-dialog", enter: function () { clipboardProbe.text = "  https://example.org/feed.xml\n"; clipboardProbe.selectAll(); clipboardProbe.copy()
+            root.addFeed(); console.warn("walk: 11-add-dialog open=" + Library.addOpen + " address=" + Library.address + " themes=" + Library.themeNames.join("|")
+                + " folders=" + Library.folderTitles.join("|") + " canAdd=" + Library.canAdd) } },
+        { name: "12-add-refused", enter: function () { Library.address = "http://127.0.0.1:9/feed"; addFeedDialog.accept() } },
+        { name: "13-wait", enter: function () {} },
+        { name: "14-add-refusal", enter: function () { console.warn("walk: 14-add-refusal error=" + Library.addError + " showLog=" + Library.addShowsLog
+            + " open=" + Library.addOpen + " adding=" + Library.adding) } },
+        { name: "15-add-known", enter: function () { Library.address = "http://127.0.0.21:9/alpha.xml"; Library.folderIndex = 1; addFeedDialog.accept() } },
+        { name: "16-wait", enter: function () {} },
+        { name: "17-add-known", enter: function () { console.warn("walk: 17-add-known error=" + Library.addError + " showLog=" + Library.addShowsLog)
+            Library.cancelAdd(); console.warn("walk: 17-closed open=" + Library.addOpen) } },
+        { name: "18-export", enter: function () { const home = String(StandardPaths.writableLocation(StandardPaths.HomeLocation))
+            console.warn("walk: 18-export started=" + Library.exportTo(home + "/" + Library.exportName) + " refused=" + Library.exportTo("https://example.org/x.opml")) } },
+        { name: "19-wait", enter: function () {} },
+    ]
+    readonly property var steps: Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }
@@ -259,17 +334,55 @@ Kirigami.ApplicationWindow {
 
     Component.onCompleted: { Launcher.launch(); root.startWalkIfSettled() }
 
-    menuBar: MainMenu { id: mainMenu; page: readingLoader.item }
+    menuBar: MainMenu { id: mainMenu; page: SourcesModel.emptyLibrary ? null : readingLoader.item }
 
     pageStack.initialPage: Kirigami.Page {
         globalToolBarStyle: Kirigami.ApplicationHeaderStyle.None
         padding: 0
 
+        // Files dropped on the window; under everything, so the folder drop targets above it win.
+        DropArea {
+            id: fileDrop
+            anchors.fill: parent
+            keys: ["text/uri-list"]
+            enabled: Launcher.phase === Launcher.Ready
+            onDropped: (drop) => { if (!Library.busy && Library.openUrls(drop.urls.map(String))) drop.accept(Qt.CopyAction) }
+        }
+
         Loader {
             id: readingLoader
             anchors.fill: parent
+            visible: !SourcesModel.emptyLibrary
             active: Launcher.phase === Launcher.Ready
             source: Qt.resolvedUrl("ReadingPage.qml")
+        }
+
+        FirstRun {
+            anchors.fill: parent
+            visible: Launcher.phase === Launcher.Ready && SourcesModel.emptyLibrary
+            onChooseRequested: root.importOpml()
+        }
+
+        // The drop target's dashed accent outline.
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 6
+            visible: fileDrop.containsDrag
+            enabled: false
+            radius: 10
+            color: Qt.alpha(Kirigami.Theme.highlightColor, 0.05)
+            Shape {
+                id: dashes
+                anchors.fill: parent
+                ShapePath {
+                    strokeColor: Kirigami.Theme.highlightColor
+                    strokeWidth: 3
+                    strokeStyle: ShapePath.DashLine
+                    dashPattern: [8 / 3, 6 / 3]
+                    fillColor: "transparent"
+                    PathRectangle { x: 1.5; y: 1.5; width: dashes.width - 3; height: dashes.height - 3; radius: 10 }
+                }
+            }
         }
 
         ColumnLayout {
