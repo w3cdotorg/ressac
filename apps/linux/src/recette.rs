@@ -30,6 +30,7 @@ pub mod qobject {
         #[qml_singleton]
         #[qproperty(bool, active, READ, CONSTANT)]
         #[qproperty(QString, press_default, READ, CONSTANT)]
+        #[qproperty(QString, walk, READ, CONSTANT)]
         type Recette = super::RecetteRust;
 
         /// Saves the first visible window to `<dir>/<name>.png`; false when inactive or failed.
@@ -54,21 +55,31 @@ pub struct RecetteRust {
     /// `RESSAC_RECETTE_PRESS_DEFAULT` (`keep-db` or `drop-db`): the walk presses "Use Default
     /// Database" once after the first screen. Empty: it does not.
     press_default: QString,
+    /// `RESSAC_RECETTE_WALK` (`journal`): the walk `Main.qml` runs, with that walk's own
+    /// automatic edition triggers. Empty: the usual walk, with every automatic trigger off.
+    walk: QString,
 }
 
 const PRESS_DEFAULT_ENV: &str = "RESSAC_RECETTE_PRESS_DEFAULT";
+const WALK_ENV: &str = "RESSAC_RECETTE_WALK";
+
+/// The variable's value, only when `--screenshot` was given.
+fn recette_env(name: &str) -> QString {
+    QString::from(
+        std::env::var(name)
+            .ok()
+            .filter(|_| DIR.get().is_some())
+            .unwrap_or_default()
+            .as_str(),
+    )
+}
 
 impl Default for RecetteRust {
     fn default() -> Self {
         RecetteRust {
             active: DIR.get().is_some(),
-            press_default: QString::from(
-                std::env::var(PRESS_DEFAULT_ENV)
-                    .ok()
-                    .filter(|_| DIR.get().is_some())
-                    .unwrap_or_default()
-                    .as_str(),
-            ),
+            press_default: recette_env(PRESS_DEFAULT_ENV),
+            walk: recette_env(WALK_ENV),
         }
     }
 }

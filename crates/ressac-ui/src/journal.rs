@@ -347,6 +347,20 @@ impl JournalModel {
             .as_ref()
             .is_none_or(|last| due_after(last, now, tz))
     }
+
+    /// The wait after an offline or failed build is over and nothing is running: the minute
+    /// check replays the automatic build (`begin` records the clock even when it declines, so
+    /// the day check alone would never fire again).
+    pub fn wait_is_over(&self, now: DateTime<Utc>) -> bool {
+        !self.busy
+            && matches!(self.phase, Phase::Offline | Phase::Failed(_))
+            && self.not_before.is_some_and(|not_before| now >= not_before)
+    }
+
+    /// What the once-a-minute tick asks: the day turned, or a build is due for a retry.
+    pub fn minute_check<Tz: TimeZone>(&self, now: DateTime<Utc>, tz: &Tz) -> bool {
+        self.clock_tick(now, tz) || self.wait_is_over(now)
+    }
 }
 
 #[cfg(test)]
@@ -782,6 +796,40 @@ mod tests {
             }
         }
         assert_eq!(turned, [at("2026-10-17T02:00:00Z")]);
+    }
+
+    #[test]
+    fn the_minute_check_replays_the_build_once_the_wait_after_a_failure_is_over() {
+        let mut m = JournalModel::default();
+        let start = at(T0);
+        assert!(m.begin(Trigger::Automatic, start, &Paris));
+        assert_eq!(m.checked(Ok(true)), Step::Build);
+        m.finished(RunEnd::Done(EditionOutcome::Offline), start);
+        // `begin` recorded the clock: the day has not turned, so only the wait can fire.
+        assert!(!m.minute_check(start + mins(1), &Paris));
+        assert!(!m.minute_check(start + mins(14), &Paris));
+        let ready = start + mins(15);
+        assert!(m.minute_check(ready, &Paris));
+        assert!(m.begin(Trigger::Automatic, ready, &Paris));
+        assert!(!m.minute_check(ready, &Paris), "busy: one check at a time");
+        assert_eq!(m.checked(Ok(true)), Step::Build);
+        m.finished(
+            RunEnd::Failed(RunFailure {
+                message: "boom".into(),
+                refusal: false,
+            }),
+            ready,
+        );
+        assert!(
+            !m.minute_check(ready + mins(14), &Paris),
+            "a new wait began"
+        );
+        assert!(m.minute_check(ready + mins(15), &Paris));
+        // Built: nothing more to replay.
+        assert!(m.begin(Trigger::Automatic, ready + mins(15), &Paris));
+        assert_eq!(m.checked(Ok(true)), Step::Build);
+        m.finished(RunEnd::Done(built()), ready + mins(15));
+        assert!(!m.minute_check(ready + mins(60), &Paris));
     }
 
     #[test]

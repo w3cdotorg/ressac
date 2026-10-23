@@ -3,6 +3,7 @@
 #![cfg(target_os = "linux")]
 
 mod entries;
+mod journal;
 mod launcher;
 mod reader;
 mod recette;
