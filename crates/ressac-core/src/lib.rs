@@ -6,6 +6,7 @@ pub mod error;
 pub mod extract;
 pub mod garden;
 pub mod health;
+pub mod logging;
 pub mod model;
 pub mod opml;
 pub mod parse;
