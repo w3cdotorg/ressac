@@ -2,6 +2,8 @@
 //! library is empty elsewhere so `cargo test --workspace` needs no Qt.
 #![cfg(target_os = "linux")]
 
+mod settings;
+
 use std::process::ExitCode;
 
 use cxx_qt_lib::{QQmlApplicationEngine, QUrl};
@@ -12,10 +14,15 @@ mod shim {
     unsafe extern "C++" {
         include!("shim.h");
 
-        fn ressac_init_webengine();
-        fn ressac_create_application();
-        fn ressac_has_window() -> bool;
-        fn ressac_exec() -> i32;
+        pub fn ressac_init_webengine();
+        pub fn ressac_create_application();
+        pub fn ressac_has_window() -> bool;
+        pub fn ressac_exec() -> i32;
+
+        pub fn ressac_settings_default_file() -> String;
+        pub fn ressac_settings_get(file: &str, key: &str, value: &mut String) -> bool;
+        pub fn ressac_settings_set(file: &str, key: &str, value: &str) -> bool;
+        pub fn ressac_settings_remove(file: &str, key: &str) -> bool;
     }
 }
 
