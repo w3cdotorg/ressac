@@ -44,33 +44,33 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[qml_singleton]
-        // Inputs, bound in QML (write-only in practice: no notify signal).
-        #[qproperty(QString, selection_key, READ, WRITE = set_selection_key)]
-        #[qproperty(QString, search_text, READ, WRITE = set_search_text)]
-        #[qproperty(QString, garden_message, READ, WRITE = set_garden_message)]
-        #[qproperty(QString, journal_phase, READ, WRITE = set_journal_phase)]
-        #[qproperty(QString, journal_failure, READ, WRITE = set_journal_failure)]
-        #[qproperty(bool, is_garden, READ, WRITE = set_is_garden)]
-        #[qproperty(bool, unread_only, READ, WRITE = set_unread_only)]
-        #[qproperty(bool, selected_read, READ, WRITE = set_selected_read)]
-        #[qproperty(bool, can_refresh, READ, WRITE = set_can_refresh)]
-        #[qproperty(bool, can_navigate, READ, WRITE = set_can_navigate)]
-        #[qproperty(bool, run_active, READ, WRITE = set_run_active)]
-        #[qproperty(bool, reduce_motion, READ, WRITE = set_reduce_motion)]
-        #[qproperty(bool, crt, READ, WRITE = set_crt)]
-        #[qproperty(i64, selected_entry_id, READ, WRITE = set_selected_entry_id)]
-        #[qproperty(i64, selected_feed_id, READ, WRITE = set_selected_feed_id)]
-        #[qproperty(i32, entry_position, READ, WRITE = set_entry_position)]
-        #[qproperty(i32, entry_total, READ, WRITE = set_entry_total)]
-        #[qproperty(i32, run_done, READ, WRITE = set_run_done)]
-        #[qproperty(i32, run_total, READ, WRITE = set_run_total)]
-        #[qproperty(i32, journal_done, READ, WRITE = set_journal_done)]
-        #[qproperty(i32, journal_total, READ, WRITE = set_journal_total)]
-        #[qproperty(i32, window_cells, READ, WRITE = set_window_cells)]
-        #[qproperty(i32, reader_cells, READ, WRITE = set_reader_cells)]
-        #[qproperty(f64, window_width, READ, WRITE = set_window_width)]
-        #[qproperty(f64, window_height, READ, WRITE = set_window_height)]
-        #[qproperty(f64, cell_width, READ, WRITE = set_cell_width)]
+        // Inputs, bound in QML; `inputsChanged` on a real change, so a binding may read them.
+        #[qproperty(QString, selection_key, READ, WRITE = set_selection_key, NOTIFY = inputs_changed)]
+        #[qproperty(QString, search_text, READ, WRITE = set_search_text, NOTIFY = inputs_changed)]
+        #[qproperty(QString, garden_message, READ, WRITE = set_garden_message, NOTIFY = inputs_changed)]
+        #[qproperty(QString, journal_phase, READ, WRITE = set_journal_phase, NOTIFY = inputs_changed)]
+        #[qproperty(QString, journal_failure, READ, WRITE = set_journal_failure, NOTIFY = inputs_changed)]
+        #[qproperty(bool, is_garden, READ, WRITE = set_is_garden, NOTIFY = inputs_changed)]
+        #[qproperty(bool, unread_only, READ, WRITE = set_unread_only, NOTIFY = inputs_changed)]
+        #[qproperty(bool, selected_read, READ, WRITE = set_selected_read, NOTIFY = inputs_changed)]
+        #[qproperty(bool, can_refresh, READ, WRITE = set_can_refresh, NOTIFY = inputs_changed)]
+        #[qproperty(bool, can_navigate, READ, WRITE = set_can_navigate, NOTIFY = inputs_changed)]
+        #[qproperty(bool, run_active, READ, WRITE = set_run_active, NOTIFY = inputs_changed)]
+        #[qproperty(bool, reduce_motion, READ, WRITE = set_reduce_motion, NOTIFY = inputs_changed)]
+        #[qproperty(bool, crt, READ, WRITE = set_crt, NOTIFY = inputs_changed)]
+        #[qproperty(i64, selected_entry_id, READ, WRITE = set_selected_entry_id, NOTIFY = inputs_changed)]
+        #[qproperty(i64, selected_feed_id, READ, WRITE = set_selected_feed_id, NOTIFY = inputs_changed)]
+        #[qproperty(i32, entry_position, READ, WRITE = set_entry_position, NOTIFY = inputs_changed)]
+        #[qproperty(i32, entry_total, READ, WRITE = set_entry_total, NOTIFY = inputs_changed)]
+        #[qproperty(i32, run_done, READ, WRITE = set_run_done, NOTIFY = inputs_changed)]
+        #[qproperty(i32, run_total, READ, WRITE = set_run_total, NOTIFY = inputs_changed)]
+        #[qproperty(i32, journal_done, READ, WRITE = set_journal_done, NOTIFY = inputs_changed)]
+        #[qproperty(i32, journal_total, READ, WRITE = set_journal_total, NOTIFY = inputs_changed)]
+        #[qproperty(i32, window_cells, READ, WRITE = set_window_cells, NOTIFY = inputs_changed)]
+        #[qproperty(i32, reader_cells, READ, WRITE = set_reader_cells, NOTIFY = inputs_changed)]
+        #[qproperty(f64, window_width, READ, WRITE = set_window_width, NOTIFY = inputs_changed)]
+        #[qproperty(f64, window_height, READ, WRITE = set_window_height, NOTIFY = inputs_changed)]
+        #[qproperty(f64, cell_width, READ, WRITE = set_cell_width, NOTIFY = inputs_changed)]
         // Outputs.
         #[qproperty(QString, column, READ = column, WRITE = set_column, NOTIFY = state_changed)]
         #[qproperty(QString, reader_page, READ = reader_page, NOTIFY = state_changed)]
@@ -181,6 +181,10 @@ pub mod qobject {
         /// An output changed.
         #[qsignal]
         fn state_changed(self: Pin<&mut Antiope>);
+
+        /// An input took a new value (never for a write of the same value).
+        #[qsignal]
+        fn inputs_changed(self: Pin<&mut Antiope>);
     }
 }
 
@@ -502,16 +506,27 @@ impl AntiopeRust {
     }
 }
 
-/// A setter per input: an unchanged value does nothing, a new one recomputes the outputs.
+/// Stores `value` in `slot`; true when it differs from what was there (the setters then emit
+/// `inputsChanged` and recompute the outputs).
+fn replace_input<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        return false;
+    }
+    *slot = value;
+    true
+}
+
+/// A setter per input: an unchanged value does nothing; a new one emits `inputsChanged`, then
+/// recomputes the outputs (`stateChanged` only when one of them moved).
 macro_rules! input_setters {
     ($($setter:ident => $field:ident: $ty:ty),* $(,)?) => {
         impl qobject::Antiope {
             $(
                 fn $setter(mut self: Pin<&mut Self>, value: $ty) {
-                    if self.rust().$field == value {
+                    if !replace_input(&mut self.as_mut().rust_mut().get_mut().$field, value) {
                         return;
                     }
-                    self.as_mut().rust_mut().get_mut().$field = value;
+                    self.as_mut().inputs_changed();
                     self.refresh();
                 }
             )*
@@ -828,6 +843,28 @@ mod tests {
         let later = now + NOT_FOUND_FOR + Duration::from_millis(1);
         assert!(rust.update(Utc::now(), later));
         assert!(!header(&rust).contains("NOT FOUND"), "{}", header(&rust));
+    }
+
+    #[test]
+    fn an_input_changes_only_for_a_new_value() {
+        let mut rust = AntiopeRust::default();
+        assert!(!replace_input(
+            &mut rust.reader_cells,
+            to_i32(MIN_READER_CELLS)
+        ));
+        assert!(replace_input(&mut rust.reader_cells, 40));
+        assert_eq!(rust.reader_cells, 40);
+        assert!(!replace_input(&mut rust.reader_cells, 40));
+        assert!(!replace_input(
+            &mut rust.selection_key,
+            QString::from("unread")
+        ));
+        assert!(replace_input(
+            &mut rust.selection_key,
+            QString::from("journal")
+        ));
+        assert!(replace_input(&mut rust.window_width, 800.5));
+        assert!(!replace_input(&mut rust.window_width, 800.5));
     }
 
     #[test]
