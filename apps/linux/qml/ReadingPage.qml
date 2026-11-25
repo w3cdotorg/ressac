@@ -208,7 +208,6 @@ Item {
                 }
 
                 QQC2.ProgressBar {
-                    id: pill
                     visible: Runs.progressVisible
                     implicitWidth: Runs.progressWidth
                     indeterminate: Runs.progressFraction < 0
@@ -242,7 +241,6 @@ Item {
                 }
 
                 QQC2.ToolButton {
-                    id: fullArticleButton
                     text: "Full Article"
                     icon.name: "view-readermode"
                     display: QQC2.AbstractButton.TextBesideIcon
@@ -340,7 +338,6 @@ Item {
 
                 ReaderPane { id: readerPane; anchors.fill: parent; visible: !SourcesModel.isGarden }
                 GardenInspector {
-                    id: gardenInspector
                     anchors.fill: parent
                     visible: SourcesModel.isGarden
                     onOpenUrl: (url) => readerPane.openExternally(url)
