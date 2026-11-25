@@ -3482,11 +3482,13 @@ dependencies = [
  "cxx-qt",
  "cxx-qt-build",
  "cxx-qt-lib",
+ "futures",
  "image",
  "ressac-core",
  "ressac-ui",
  "rusqlite",
  "tempfile",
+ "tokio",
  "tracing",
  "url",
 ]

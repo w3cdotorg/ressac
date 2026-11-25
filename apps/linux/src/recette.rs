@@ -17,6 +17,11 @@ pub(crate) fn set_dir(dir: PathBuf) {
     let _ = DIR.set(dir);
 }
 
+/// Whether this is the recette run (`--screenshot`): what `Recette.active` reads.
+pub(crate) fn active() -> bool {
+    DIR.get().is_some()
+}
+
 #[cxx_qt::bridge]
 pub mod qobject {
     unsafe extern "C++" {
@@ -169,7 +174,7 @@ fn recette_env(name: &str) -> QString {
 impl Default for RecetteRust {
     fn default() -> Self {
         RecetteRust {
-            active: DIR.get().is_some(),
+            active: active(),
             press_default: recette_env(PRESS_DEFAULT_ENV),
             walk: recette_env(WALK_ENV),
             grid_variant: recette_env(GRID_VARIANT_ENV),

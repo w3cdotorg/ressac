@@ -1,6 +1,8 @@
 #pragma once
 #include <rust/cxx.h>
 
+#include <cstdint>
+
 // What cxx-qt-lib does not wrap. Every function is declared to Rust in the `shim` bridge of
 // src/lib.rs.
 
@@ -48,3 +50,9 @@ rust::String ressac_bedstead_family();
 void ressac_frame_log_start();
 rust::String ressac_frame_log_stop();
 void ressac_frame_log_auto();
+
+// Answers the ressac-mosaic: request `token` (the MosaicHandler's, handed to Rust's
+// `ressac_mosaic_start`) with `body` of type `mime`, `Cache-Control: no-store`. GUI thread only.
+// A request the page cancelled (its job is gone) is dropped without an answer and logged at
+// debug level as "mosaic: dropped <token>" (category ressac.mosaic).
+void ressac_mosaic_reply(std::uint64_t token, rust::Str mime, rust::Slice<const std::uint8_t> body);

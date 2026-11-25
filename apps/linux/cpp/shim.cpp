@@ -6,7 +6,9 @@
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QElapsedTimer>
+#include <QtCore/QLoggingCategory>
 #include <QtCore/QMetaObject>
+#include <QtCore/QMultiMap>
 #include <QtCore/QPointer>
 #include <QtCore/QSettings>
 #include <QtCore/QString>
@@ -31,7 +33,10 @@
 
 #include <algorithm>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
+
+Q_LOGGING_CATEGORY(lcMosaic, "ressac.mosaic")
 
 namespace {
 
@@ -99,6 +104,55 @@ public:
         job->reply(QByteArray(mime.data(), static_cast<qsizetype>(mime.size())), buffer);
     }
 };
+
+// Serves ressac-mosaic:image?cols=<n>&src=<original>: each request gets a token and goes to Rust
+// (`ressac_mosaic_start`), which answers later, possibly at once, through `ressac_mosaic_reply`
+// with PNG bytes it produced. The pending jobs are held by QPointer: a request the page cancels
+// is deleted by WebEngine, its entry removed on `destroyed`, and its answer dropped.
+class MosaicHandler : public QWebEngineUrlSchemeHandler
+{
+public:
+    using QWebEngineUrlSchemeHandler::QWebEngineUrlSchemeHandler;
+
+    void requestStarted(QWebEngineUrlRequestJob *job) override
+    {
+        const std::uint64_t token = ++m_next;
+        m_jobs.emplace(token, QPointer<QWebEngineUrlRequestJob>(job));
+        QObject::connect(job, &QObject::destroyed, this, [this, token] { m_jobs.erase(token); });
+        const std::string url = job->requestUrl().toString(QUrl::FullyEncoded).toStdString();
+        ressac_mosaic_start(token, rust::Str(url.data(), url.size()));
+    }
+
+    void reply(std::uint64_t token, rust::Str mime, rust::Slice<const std::uint8_t> body)
+    {
+        QPointer<QWebEngineUrlRequestJob> job;
+        if (const auto found = m_jobs.find(token); found != m_jobs.end()) {
+            job = found->second;
+            m_jobs.erase(found);
+        }
+        if (job.isNull()) {
+            qCDebug(lcMosaic, "mosaic: dropped %llu", static_cast<unsigned long long>(token));
+            return;
+        }
+        QObject::disconnect(job, &QObject::destroyed, this, nullptr);
+        // Fixed headers only: nothing from the request is reflected into the answer.
+        QMultiMap<QByteArray, QByteArray> headers;
+        headers.insert(QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store"));
+        job->setAdditionalResponseHeaders(headers);
+        auto *buffer = new QBuffer(job);
+        buffer->setData(QByteArray(reinterpret_cast<const char *>(body.data()),
+                                   static_cast<qsizetype>(body.size())));
+        buffer->open(QIODevice::ReadOnly);
+        job->reply(QByteArray(mime.data(), static_cast<qsizetype>(mime.size())), buffer);
+    }
+
+private:
+    std::uint64_t m_next = 0;
+    std::unordered_map<std::uint64_t, QPointer<QWebEngineUrlRequestJob>> m_jobs;
+};
+
+// The installed handler (owned by the application object).
+QPointer<MosaicHandler> g_mosaic_handler;
 
 // Takes the reading keys before the focused item sees them, WebEngine's delegate included (QML
 // `Keys` on an ancestor only sees what Chromium declined, a round trip later). The ShortcutOverride
@@ -205,6 +259,9 @@ void ressac_init_webengine()
     QWebEngineUrlScheme scheme(QByteArrayLiteral("ressac"));
     scheme.setSyntax(QWebEngineUrlScheme::Syntax::Path);
     QWebEngineUrlScheme::registerScheme(scheme);
+    QWebEngineUrlScheme mosaic(QByteArrayLiteral("ressac-mosaic"));
+    mosaic.setSyntax(QWebEngineUrlScheme::Syntax::Path);
+    QWebEngineUrlScheme::registerScheme(mosaic);
 
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     QtWebEngineQuick::initialize();
@@ -229,6 +286,8 @@ void ressac_create_application()
         qWarning("ressac-kde: the default web profile is not off the record");
     }
     profile->installUrlSchemeHandler("ressac", new RessacSchemeHandler(qApp));
+    g_mosaic_handler = new MosaicHandler(qApp);
+    profile->installUrlSchemeHandler("ressac-mosaic", g_mosaic_handler);
 
     QGuiApplication::setDesktopFileName(QStringLiteral("org.w3cdotorg.ressac"));
     QGuiApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("org.w3cdotorg.ressac")));
@@ -264,6 +323,15 @@ void ressac_create_application()
     if (g_bedstead_family.isEmpty()) {
         qWarning("ressac-kde: cannot register bedstead.otf");
     }
+}
+
+void ressac_mosaic_reply(std::uint64_t token, rust::Str mime, rust::Slice<const std::uint8_t> body)
+{
+    if (g_mosaic_handler.isNull()) {
+        qCDebug(lcMosaic, "mosaic: dropped %llu", static_cast<unsigned long long>(token));
+        return;
+    }
+    g_mosaic_handler->reply(token, mime, body);
 }
 
 rust::String ressac_bedstead_family()

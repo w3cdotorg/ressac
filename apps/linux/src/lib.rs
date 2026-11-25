@@ -12,6 +12,7 @@ mod garden_inspector;
 mod journal;
 mod launcher;
 mod library;
+mod mosaic;
 mod reader;
 mod recette;
 mod rows;
@@ -28,7 +29,8 @@ use ressac_ui::keys;
 use ressac_ui::launch::parse_args;
 use ressac_ui::settings::Appearance;
 
-// Named by the `shim` bridge's `extern "Rust"` block (cxx looks it up in this scope).
+// Named by the `shim` bridge's `extern "Rust"` block (cxx looks them up in this scope).
+use mosaic::ressac_mosaic_start;
 use reader::ressac_scheme_serve;
 
 /// What cxx-qt-lib does not wrap (`cpp/shim.h`).
@@ -60,11 +62,19 @@ mod shim {
         pub fn ressac_settings_get(file: &str, key: &str, value: &mut String) -> bool;
         pub fn ressac_settings_set(file: &str, key: &str, value: &str) -> bool;
         pub fn ressac_settings_remove(file: &str, key: &str) -> bool;
+
+        /// Answers the `ressac-mosaic:` request `token` with `body` (GUI thread only); a
+        /// request the page cancelled is dropped without an answer.
+        pub fn ressac_mosaic_reply(token: u64, mime: &str, body: &[u8]);
     }
 
     extern "Rust" {
         /// The `ressac:` scheme handler's lookup (`reader.rs`).
         fn ressac_scheme_serve(url: &str, mime: &mut String, body: &mut Vec<u8>) -> bool;
+
+        /// The `ressac-mosaic:` handler's request `token` for `url` (`mosaic.rs`): answered
+        /// later through `ressac_mosaic_reply`, at once when cached or unparsable.
+        fn ressac_mosaic_start(token: u64, url: &str);
 
         /// The window key filter's question (`ressac_ui::keys::route`): fills `verb` (empty
         /// when the key maps to no command) and returns whether the key's `ShortcutOverride`
@@ -146,9 +156,11 @@ pub fn run() -> ExitCode {
         eprintln!("ressac-kde: the main window did not load (see the QML errors above)");
         1
     };
-    // Teardown in order, before `main` returns: the QML engine (and its singletons), the
-    // session (its worker threads joined), then the application and Chromium.
+    // Teardown in order, before `main` returns: the QML engine (and its singletons, so a
+    // late answer cannot queue onto them), the mosaic thread and the session's worker threads
+    // joined within a bounded wait, then the application and Chromium.
     drop(engine);
+    mosaic::shutdown();
     launcher::shutdown_session();
     shim::ressac_destroy_application();
     ExitCode::from(code)

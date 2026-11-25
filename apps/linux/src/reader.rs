@@ -13,7 +13,8 @@ use ressac_core::store::{EntryDetail, FulltextRow};
 use ressac_ui::article::{
     ASSET_PREFIX, ArticlePage, ColorScheme, FullText, FullTextStep, Navigation, PAGE_PREFIX,
     PROOF_PAGE, PROOF_SCRIPT, PROOF_URL, RECETTE_PROBE, ReaderStyle, ReaderTheme, SubpageLabel,
-    asset, decide, full_article_help, page_down_script, page_url, subpage_script,
+    asset, decide, full_article_help, mark_failed_script, page_down_script, page_url,
+    subpage_script, toggle_all_images_script, toggle_image_script,
 };
 use ressac_ui::chart;
 use ressac_ui::chrono;
@@ -114,6 +115,21 @@ pub mod qobject {
         /// The app-world script rewriting the page's sub-page line in place ("412 3/20").
         #[qinvokable]
         fn subpage_script(self: &Reader) -> QString;
+
+        /// The app-world script swapping mosaic `index` and its original (a click on the
+        /// mosaic); evaluates to whether the original now shows (`false` for no such box).
+        #[qinvokable]
+        fn toggle_image_script(self: &Reader, index: i32) -> QString;
+
+        /// The app-world script of `i`: every image of the article both ways; evaluates to
+        /// how many boxes it swapped.
+        #[qinvokable]
+        fn toggle_all_script(self: &Reader) -> QString;
+
+        /// The app-world script flagging every box showing the mosaic address `url` as failed
+        /// (`Mosaics.failed(url)`), so the IMAGE line shows.
+        #[qinvokable]
+        fn mark_failed_script(self: &Reader, url: &QString) -> QString;
 
         /// The entry, its flags or the page state changed.
         #[qsignal]
@@ -440,6 +456,21 @@ impl qobject::Reader {
             .map(|label| label.text())
             .unwrap_or_default();
         QString::from(subpage_script(&text).as_str())
+    }
+
+    fn toggle_image_script(&self, index: i32) -> QString {
+        match u32::try_from(index) {
+            Ok(index) => QString::from(toggle_image_script(index).as_str()),
+            Err(_) => QString::from("false"),
+        }
+    }
+
+    fn toggle_all_script(&self) -> QString {
+        QString::from(toggle_all_images_script().as_str())
+    }
+
+    fn mark_failed_script(&self, url: &QString) -> QString {
+        QString::from(mark_failed_script(&url.to_string()).as_str())
     }
 
     fn request_full_text(mut self: Pin<&mut Self>) {
