@@ -3,7 +3,8 @@
 //! rules are `ressac_ui::garden`'s (`GardenVisit`, `Inspector`, keys, labels); this object
 //! applies the rows by feed id (never a reset: the selection and the scroll position survive
 //! every reload) and sends decisions, undo, safe repairs, rhythm and theme through the
-//! short door of `Runs`. The inspector's getters are in `garden_inspector.rs`.
+//! short door of `Runs`. The inspector's getters are in `garden_inspector.rs`. In Antiope the
+//! same visit is drawn as teletext rows (`pages::garden`): `antiopeRows`, `antiopeInspector`.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -21,6 +22,8 @@ use ressac_ui::garden::{
     unread_label,
 };
 use ressac_ui::live::plan_rows;
+use ressac_ui::pages::garden::{garden_page, move_selection, ordered};
+use ressac_ui::pages::{ENTRY_CELLS, encode_rows};
 use ressac_ui::runs::{RunEnd, RunRequest};
 use ressac_ui::sources::{GardenScope, Selection};
 
@@ -75,6 +78,8 @@ pub mod qobject {
         #[qproperty(QString, message, READ = message, NOTIFY = state_changed)]
         #[qproperty(QString, empty_text, READ = empty_text, NOTIFY = state_changed)]
         #[qproperty(QStringList, section_titles, READ = section_titles, NOTIFY = state_changed)]
+        // The Antiope page (`pages::garden`): its rows follow the selection too.
+        #[qproperty(QStringList, antiope_rows, READ = antiope_rows, NOTIFY = state_changed)]
         // The selection.
         #[qproperty(i32, selected_row, READ = selected_row, NOTIFY = selection_changed)]
         #[qproperty(i64, selected_feed_id, READ = selected_feed_id, NOTIFY = selection_changed)]
@@ -104,6 +109,8 @@ pub mod qobject {
         #[qproperty(QStringList, redirects, READ = redirects, NOTIFY = inspector_changed)]
         #[qproperty(QStringList, log_dates, READ = log_dates, NOTIFY = inspector_changed)]
         #[qproperty(QStringList, log_outcomes, READ = log_outcomes, NOTIFY = inspector_changed)]
+        #[qproperty(i32, antiope_cells, READ = antiope_cells, WRITE = set_antiope_cells, NOTIFY = inspector_changed)]
+        #[qproperty(QStringList, antiope_inspector, READ = antiope_inspector, NOTIFY = inspector_changed)]
         // Fixed strings.
         #[qproperty(QStringList, grouping_titles, READ = grouping_titles, CONSTANT)]
         #[qproperty(QStringList, rhythm_choices, READ = rhythm_choices, CONSTANT)]
@@ -132,6 +139,7 @@ pub mod qobject {
         fn message(self: &Garden) -> QString;
         fn empty_text(self: &Garden) -> QString;
         fn section_titles(self: &Garden) -> QStringList;
+        fn antiope_rows(self: &Garden) -> QStringList;
         fn selected_row(self: &Garden) -> i32;
         fn selected_feed_id(self: &Garden) -> i64;
 
@@ -160,6 +168,9 @@ pub mod qobject {
         fn redirects(self: &Garden) -> QStringList;
         fn log_dates(self: &Garden) -> QStringList;
         fn log_outcomes(self: &Garden) -> QStringList;
+        fn antiope_cells(self: &Garden) -> i32;
+        fn set_antiope_cells(self: Pin<&mut Garden>, cells: i32);
+        fn antiope_inspector(self: &Garden) -> QStringList;
 
         fn grouping_titles(self: &Garden) -> QStringList;
         fn rhythm_choices(self: &Garden) -> QStringList;
@@ -202,6 +213,11 @@ pub mod qobject {
         /// Selects a listed feed; whether it is listed.
         #[qinvokable]
         fn select_feed(self: Pin<&mut Garden>, feed_id: i64) -> bool;
+
+        /// Antiope's arrows: the next (`delta` 1) or previous (−1) feed of the page, stopping
+        /// at the ends; whether the selection moved.
+        #[qinvokable]
+        fn antiope_move(self: Pin<&mut Garden>, delta: i32) -> bool;
 
         #[qinvokable]
         fn row_of_feed(self: &Garden, feed_id: i64) -> i32;
@@ -288,12 +304,42 @@ pub struct GardenRust {
     pub(crate) inspector: Option<Inspector>,
     /// The inspector's fetch log and the feed it was read for: read again only when the
     /// selected feed changes or a decision touched it.
-    log: Vec<AttemptRecord>,
+    pub(crate) log: Vec<AttemptRecord>,
     log_feed: Option<FeedId>,
     /// The visit's safe repairs, as of the last sync (five properties read them).
     repairs: Vec<(FeedId, Action)>,
     /// The Theme picker's items, as of the last sync.
     pub(crate) theme_names: Vec<String>,
+    /// The width of Antiope's reader column, in cells (bound in QML; 0 draws nothing).
+    pub(crate) antiope_cells: i32,
+}
+
+impl GardenRust {
+    /// The garden page of Antiope's entry column, 28 cells wide; empty outside a garden scope.
+    fn antiope_rows(&self) -> Vec<String> {
+        let Some(scope) = self.visit.scope() else {
+            return Vec::new();
+        };
+        let snapshot = self.visit.snapshot();
+        encode_rows(&garden_page(
+            &snapshot.rows,
+            &self.visit.visible(),
+            &snapshot.unread,
+            scope,
+            self.visit.selected(),
+            ENTRY_CELLS,
+        ))
+    }
+
+    /// The feed Antiope's arrows go to, in the page's order.
+    fn antiope_target(&self, delta: i32) -> Option<FeedId> {
+        let scope = self.visit.scope()?;
+        move_selection(
+            self.visit.selected(),
+            &ordered(&self.visit.visible(), scope),
+            delta,
+        )
+    }
 }
 
 /// The value of `role` (a name of [`ROLES`]) for a row.
@@ -398,6 +444,14 @@ impl qobject::Garden {
 
     fn empty_text(&self) -> QString {
         QString::from(self.rust().visit.empty_text().unwrap_or(""))
+    }
+
+    fn antiope_rows(&self) -> QStringList {
+        self.rust()
+            .antiope_rows()
+            .iter()
+            .map(|row| QString::from(row.as_str()))
+            .collect()
     }
 
     fn section_titles(&self) -> QStringList {
@@ -515,6 +569,8 @@ impl qobject::Garden {
         if names != self.rust().theme_names {
             self.as_mut().rust_mut().get_mut().theme_names = names;
             self.as_mut().themes_changed();
+            // Antiope's inspector lists the themes.
+            self.as_mut().inspector_changed();
         }
         self.as_mut().refresh_inspector();
         self.as_mut().state_changed();
@@ -596,9 +652,23 @@ impl qobject::Garden {
         let listed = self.row_of_feed(feed_id) >= 0;
         if self.as_mut().rust_mut().get_mut().visit.select(feed_id) {
             self.as_mut().selection_changed();
+            // Antiope's rows reverse the selected feed.
+            self.as_mut().state_changed();
             self.refresh_inspector();
         }
         listed
+    }
+
+    fn antiope_move(mut self: Pin<&mut Self>, delta: i32) -> bool {
+        let before = self.selected_feed();
+        let Some(target) = self.rust().antiope_target(delta) else {
+            return false;
+        };
+        if Some(target) == before {
+            return false;
+        }
+        self.as_mut().select_feed(target);
+        self.selected_feed() != before
     }
 
     fn key(mut self: Pin<&mut Self>, text: &QString, modifiers: i32) -> bool {
@@ -745,3 +815,89 @@ impl qobject::Garden {
 }
 
 list_model_rows!(qobject::Garden, rows: TableRow, ROLES, role_value);
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    use ressac_ui::garden::{GardenRow, Snapshot};
+    use ressac_ui::teletext::decode;
+
+    pub(crate) fn row(feed_id: FeedId, title: &str) -> GardenRow {
+        GardenRow {
+            feed_id,
+            title: title.to_string(),
+            folder_path: String::new(),
+            top_folder: String::new(),
+            xml_url: format!("https://example.org/{feed_id}.xml"),
+            html_url: None,
+            wayback_url: None,
+            buried: false,
+            diagnosis: None,
+            decision: None,
+            recent: Vec::new(),
+            attempts: Vec::new(),
+        }
+    }
+
+    /// A garden visit of All feeds over three unchecked feeds.
+    pub(crate) fn visiting() -> GardenRust {
+        let mut rust = GardenRust::default();
+        rust.visit.enter(GardenScope::All);
+        rust.visit.update(Snapshot {
+            rows: vec![row(1, "Alpha"), row(2, "Beta"), row(3, "Gamma")],
+            ..Snapshot::default()
+        });
+        rust
+    }
+
+    /// The text of each encoded `Line`.
+    pub(crate) fn texts(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .map(|row| {
+                decode(row.rsplit('\u{1d}').next().unwrap_or_default())
+                    .into_iter()
+                    .map(|run| run.text)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_antiope_rows_are_the_garden_page_of_the_visit() {
+        assert!(GardenRust::default().antiope_rows().is_empty());
+        let rust = visiting();
+        let rows = rust.antiope_rows();
+        let shown = texts(&rows);
+        assert!(shown[0].starts_with("ALL FEEDS"), "{shown:?}");
+        assert!(shown.iter().all(|row| row.chars().count() == ENTRY_CELLS));
+        for title in ["Alpha", "Beta", "Gamma"] {
+            assert!(shown.iter().any(|row| row.contains(title)), "{shown:?}");
+        }
+        // The selected feed's row is flagged selected.
+        let selected = rust.visit.selected().unwrap();
+        let flagged: Vec<&String> = rows
+            .iter()
+            .filter(|row| row.split('\u{1d}').nth(1).is_some_and(|f| f.contains('s')))
+            .collect();
+        assert_eq!(flagged.len(), 1, "{rows:?}");
+        assert!(
+            flagged[0].contains(&format!("feed:{selected}")),
+            "{flagged:?}"
+        );
+    }
+
+    #[test]
+    fn the_antiope_arrows_walk_the_page_and_stop_at_its_ends() {
+        assert_eq!(GardenRust::default().antiope_target(1), None);
+        let mut rust = visiting();
+        let order = ordered(&rust.visit.visible(), GardenScope::All);
+        assert_eq!(order.len(), 3);
+        assert_eq!(rust.visit.selected(), Some(order[0]));
+        assert_eq!(rust.antiope_target(-1), Some(order[0]));
+        assert_eq!(rust.antiope_target(1), Some(order[1]));
+        assert!(rust.visit.select(order[2]));
+        assert_eq!(rust.antiope_target(1), Some(order[2]));
+        assert_eq!(rust.antiope_target(-1), Some(order[1]));
+    }
+}

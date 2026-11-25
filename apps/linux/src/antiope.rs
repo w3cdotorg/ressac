@@ -1,7 +1,8 @@
 //! The `Antiope` QML singleton: the Antiope look's navigation (`pages::AntiopeNav`), its page
-//! directory, and the frame's rows (header, column titles, index, Minitel bar) encoded for
-//! `CellRow`. The rules are `ressac_ui::pages`'; this object holds the inputs QML binds, asks
-//! the nav, and tells QML (`stateChanged`) only when what it shows moved.
+//! directory, and the rows it draws (header, column titles, index, Minitel bar, P104's
+//! entries, the reader's own pages, the banner) encoded for `CellRow`. The rules are
+//! `ressac_ui::pages`'; this object holds the inputs QML binds, asks the nav, and tells QML
+//! (`stateChanged`) only when what it shows moved.
 
 use std::pin::Pin;
 use std::time::Instant;
@@ -18,9 +19,9 @@ use ressac_ui::pages::frame::{
     self, KEYS_CELLS, MinitelKey, column_title, header_label, header_line, hint, hint_line,
     index_rows, right_margin_cells, rolling_page, search_label_line, status,
 };
-use ressac_ui::pages::special::last_entry_id;
+use ressac_ui::pages::special::{journal_page, last_entry_id, reader_page_lines};
 use ressac_ui::pages::{
-    AntiopeColumn, AntiopeNav, DirectoryCache, ENTRY_CELLS, INDEX_CELLS, MIN_CELLS,
+    AntiopeColumn, AntiopeNav, DirectoryCache, ENTRY_CELLS, INDEX_CELLS, Line, LineRole, MIN_CELLS,
     MIN_READER_CELLS, NavContext, PageDirectory, ReaderPage, encode_rows, retries_journal,
 };
 use ressac_ui::runs::RunProgress;
@@ -81,6 +82,8 @@ pub mod qobject {
         #[qproperty(QString, reader_title, READ = reader_title, NOTIFY = state_changed)]
         #[qproperty(QString, minitel, READ = minitel, NOTIFY = state_changed)]
         #[qproperty(QStringList, index_rows, READ = index_rows, NOTIFY = state_changed)]
+        #[qproperty(QStringList, reader_rows, READ = reader_rows, NOTIFY = state_changed)]
+        #[qproperty(QStringList, journal_rows, READ = journal_rows, NOTIFY = state_changed)]
         #[qproperty(i32, subpage_page, READ = subpage_page, NOTIFY = state_changed)]
         #[qproperty(i32, subpage_index, READ = subpage_index, NOTIFY = state_changed)]
         #[qproperty(i32, subpage_count, READ = subpage_count, NOTIFY = state_changed)]
@@ -131,6 +134,8 @@ pub mod qobject {
         fn reader_title(self: &Antiope) -> QString;
         fn minitel(self: &Antiope) -> QString;
         fn index_rows(self: &Antiope) -> QStringList;
+        fn reader_rows(self: &Antiope) -> QStringList;
+        fn journal_rows(self: &Antiope) -> QStringList;
         fn subpage_page(self: &Antiope) -> i32;
         fn subpage_index(self: &Antiope) -> i32;
         fn subpage_count(self: &Antiope) -> i32;
@@ -178,6 +183,12 @@ pub mod qobject {
         #[qinvokable]
         fn search_label(self: &Antiope, width: i32) -> QString;
 
+        /// The run banner as three encoded rows, `width` cells in all: the message, ` LOG `
+        /// (`""` without a log to show) and ` X `.
+        #[qinvokable]
+        fn banner_row(self: &Antiope, message: &QString, show_log: bool, width: i32)
+        -> QStringList;
+
         /// An output changed.
         #[qsignal]
         fn state_changed(self: Pin<&mut Antiope>);
@@ -200,6 +211,10 @@ struct Outputs {
     reader_title: String,
     minitel: String,
     index_rows: Vec<String>,
+    /// P100, P899, the end page or `NO ENTRY SELECTED`; empty over an article.
+    reader_rows: Vec<String>,
+    /// P104's entry column; empty on any other page.
+    journal_rows: Vec<String>,
     /// Page (−1 none), index (0 no label) and count of the selected entry.
     subpage: (i32, i32, i32),
 }
@@ -237,10 +252,17 @@ pub struct AntiopeRust {
     /// The cache's directory, copied when it was rebuilt (the cache only lends it out for a
     /// snapshot).
     directory: PageDirectory,
-    /// The latest edition, read at `reload`: P104's sub-pages and its last entry.
+    /// The latest edition, read on P104 (at `reload` and on arriving there): its rows, its
+    /// sub-pages and its last entry.
     journal: Option<JournalView>,
+    /// Successful reads of `journal`, to tell a new edition from the one encoded.
+    journal_reads: usize,
     /// The (current page, directory build) `shown.index_rows` was encoded for.
     index_for: Option<(Option<u16>, usize)>,
+    /// What `shown.reader_rows` was encoded for.
+    reader_for: Option<ReaderKey>,
+    /// What `shown.journal_rows` was encoded for (`None` off P104).
+    journal_for: Option<JournalKey>,
     shown: Outputs,
 }
 
@@ -277,13 +299,32 @@ impl Default for AntiopeRust {
             cache: DirectoryCache::default(),
             directory: PageDirectory::default(),
             journal: None,
+            journal_reads: 0,
             index_for: None,
+            reader_for: None,
+            journal_for: None,
             shown: Outputs::default(),
         };
         // QML may read before the first reload: the frame of an empty directory.
         rust.update(Utc::now(), Instant::now());
         rust
     }
+}
+
+/// The reader rows' inputs: page, directory build, width, `NO ENTRY SELECTED`.
+type ReaderKey = (ReaderPage, usize, usize, bool);
+
+/// P104's rows' inputs: phase, selected entry, edition read.
+type JournalKey = (Phase, Option<i64>, usize);
+
+/// The banner's three rows: message, ` LOG ` or `""`, ` X `.
+fn banner_lines(message: &str, show_log: bool, width: usize) -> [String; 3] {
+    let row = frame::banner_row(message, show_log, width);
+    [
+        row.message.encode(),
+        row.log.map(|log| log.encode()).unwrap_or_default(),
+        row.dismiss.encode(),
+    ]
 }
 
 /// A cell count from QML, negative as 0.
@@ -336,6 +377,67 @@ fn phase_of(name: &str, done: i32, total: i32, failure: &str) -> Phase {
 impl AntiopeRust {
     fn selection(&self) -> Selection {
         Selection::parse_key(&self.selection_key.to_string()).unwrap_or_default()
+    }
+
+    fn on_journal(&self) -> bool {
+        self.selection() == Selection::Source(Source::Journal)
+    }
+
+    /// Reads the latest edition; a failed read keeps the last one.
+    fn read_edition(&mut self) {
+        match with_session(|session| session.store.journal()) {
+            Some(Ok(view)) => {
+                self.journal = view;
+                self.journal_reads += 1;
+            }
+            Some(Err(error)) => tracing::warn!("cannot read the edition for the pages: {error}"),
+            None => {}
+        }
+    }
+
+    /// The reader column's rows when it shows no article: P100, P899, FIN DE L'EDITION, or
+    /// `NO ENTRY SELECTED` over an article with no entry (outside the garden, whose reader is
+    /// the inspector).
+    fn reader_rows(&mut self, page: ReaderPage) -> Vec<String> {
+        let width = cells(self.reader_cells);
+        let no_entry = page == ReaderPage::Article && self.selected_entry_id < 0 && !self.is_garden;
+        let key = (page, self.cache.builds(), width, no_entry);
+        if self.reader_for == Some(key) {
+            return self.shown.reader_rows.clone();
+        }
+        self.reader_for = Some(key);
+        let mut lines = reader_page_lines(page, &self.directory, width);
+        if no_entry {
+            lines.push(Line::new(
+                "no-entry",
+                LineRole::Text,
+                frame::no_entry_line(width),
+            ));
+        }
+        encode_rows(&lines)
+    }
+
+    /// P104's entry column, 28 cells wide; empty elsewhere.
+    fn journal_rows(&mut self) -> Vec<String> {
+        if !self.on_journal() {
+            self.journal_for = None;
+            return Vec::new();
+        }
+        let phase = self.phase();
+        let selected = (self.selected_entry_id >= 0).then_some(self.selected_entry_id);
+        let key = (phase, selected, self.journal_reads);
+        if self.journal_for.as_ref() == Some(&key) {
+            return self.shown.journal_rows.clone();
+        }
+        let rows = encode_rows(&journal_page(
+            self.journal.as_ref(),
+            &key.0,
+            selected,
+            ENTRY_CELLS,
+            &Local,
+        ));
+        self.journal_for = Some(key);
+        rows
     }
 
     fn selected_entry(&self) -> Option<(i64, bool)> {
@@ -436,6 +538,8 @@ impl AntiopeRust {
             self.index_for = Some(index_for);
             encode_rows(&index_rows(&self.directory, current))
         };
+        let reader_rows = self.reader_rows(reader_page);
+        let journal_rows = self.journal_rows();
 
         let rolling = (self.run_active && !self.reduce_motion).then(|| rolling_page(now));
         let label = header_label(
@@ -491,6 +595,8 @@ impl AntiopeRust {
             ),
             minitel: minitel.encode(),
             index_rows: rows,
+            reader_rows,
+            journal_rows,
             subpage: self.subpage(),
         }
     }
@@ -535,7 +641,6 @@ macro_rules! input_setters {
 }
 
 input_setters! {
-    set_selection_key => selection_key: QString,
     set_search_text => search_text: QString,
     set_garden_message => garden_message: QString,
     set_journal_phase => journal_phase: QString,
@@ -581,6 +686,20 @@ impl qobject::Antiope {
         if changed {
             self.state_changed();
         }
+    }
+
+    /// An input like the others, except that arriving on P104 reads the edition (it is read
+    /// only there).
+    fn set_selection_key(mut self: Pin<&mut Self>, value: QString) {
+        let rust = self.as_mut().rust_mut().get_mut();
+        if !replace_input(&mut rust.selection_key, value) {
+            return;
+        }
+        if rust.on_journal() {
+            rust.read_edition();
+        }
+        self.as_mut().inputs_changed();
+        self.refresh();
     }
 
     fn set_column(mut self: Pin<&mut Self>, value: QString) {
@@ -630,6 +749,14 @@ impl qobject::Antiope {
         string_list(self.rust().shown.index_rows.iter().cloned())
     }
 
+    fn reader_rows(&self) -> QStringList {
+        string_list(self.rust().shown.reader_rows.iter().cloned())
+    }
+
+    fn journal_rows(&self) -> QStringList {
+        string_list(self.rust().shown.journal_rows.iter().cloned())
+    }
+
     fn subpage_page(&self) -> i32 {
         self.rust().shown.subpage.0
     }
@@ -672,23 +799,19 @@ impl qobject::Antiope {
 
     fn reload(mut self: Pin<&mut Self>) {
         let today = today_start(Local::now());
-        let read = with_session(|session| (session.store.sources(today), session.store.journal()));
-        if let Some((sources, journal)) = read {
-            let rust = self.as_mut().rust_mut().get_mut();
-            match sources {
-                Ok(snapshot) => rust.take_snapshot(&snapshot),
-                // The last directory stays: the pages keep their numbers until a read works.
-                Err(error) => tracing::warn!("cannot read the sources for the pages: {error}"),
-            }
-            match journal {
-                Ok(view) => rust.journal = view,
-                Err(error) => tracing::warn!("cannot read the edition for the pages: {error}"),
-            }
+        let rust = self.as_mut().rust_mut().get_mut();
+        match with_session(|session| session.store.sources(today)) {
+            Some(Ok(snapshot)) => rust.take_snapshot(&snapshot),
+            // The last directory stays: the pages keep their numbers until a read works.
+            Some(Err(error)) => tracing::warn!("cannot read the sources for the pages: {error}"),
+            None => {}
         }
-        self.as_mut()
-            .rust_mut()
-            .get_mut()
-            .update(Utc::now(), Instant::now());
+        // Only P104 shows the edition (its rows, sub-pages and last entry); arriving there
+        // reads it too (`set_selection_key`).
+        if rust.on_journal() {
+            rust.read_edition();
+        }
+        rust.update(Utc::now(), Instant::now());
         self.state_changed();
     }
 
@@ -751,6 +874,10 @@ impl qobject::Antiope {
     fn search_label(&self, width: i32) -> QString {
         QString::from(search_label_line(cells(width)).encode().as_str())
     }
+
+    fn banner_row(&self, message: &QString, show_log: bool, width: i32) -> QStringList {
+        string_list(banner_lines(&message.to_string(), show_log, cells(width)))
+    }
 }
 
 #[cfg(test)]
@@ -769,6 +896,109 @@ mod tests {
 
     fn header(rust: &AntiopeRust) -> String {
         text(&rust.shown.header)
+    }
+
+    /// The text of each encoded `Line` (id, flags, action, then its cells).
+    fn row_texts(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .map(|row| text(row.rsplit('\u{1d}').next().unwrap_or_default()))
+            .collect()
+    }
+
+    #[test]
+    fn the_reader_rows_say_no_entry_over_an_empty_article_and_draw_the_other_pages() {
+        let mut rust = AntiopeRust::default();
+        let (now, instant) = (Utc::now(), Instant::now());
+        rust.reader_cells = 30;
+        rust.update(now, instant);
+        let shown = row_texts(&rust.shown.reader_rows);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].trim(), "NO ENTRY SELECTED");
+        assert_eq!(shown[0].chars().count(), 30);
+        assert!(rust.shown.reader_rows[0].starts_with("no-entry\u{1d}"));
+        // An entry to read, or the garden (its reader is the inspector): no rows.
+        rust.selected_entry_id = 5;
+        assert!(rust.update(now, instant));
+        assert!(rust.shown.reader_rows.is_empty());
+        rust.selected_entry_id = -1;
+        rust.is_garden = true;
+        rust.update(now, instant);
+        assert!(rust.shown.reader_rows.is_empty());
+        rust.is_garden = false;
+
+        // The reserved pages, P100 and P899 among them.
+        rust.take_snapshot(&SourcesSnapshot {
+            counts: Default::default(),
+            tree: Vec::new(),
+        });
+        assert_eq!(rust.handle(Command::Guide, instant), "handled");
+        rust.update(now, instant);
+        let guide = row_texts(&rust.shown.reader_rows);
+        assert!(guide.len() > 5, "{guide:?}");
+        assert!(
+            guide.iter().all(|row| row.chars().count() == 30),
+            "{guide:?}"
+        );
+
+        assert_eq!(rust.handle(Command::Sommaire, instant), "handled");
+        rust.update(now, instant);
+        let sommaire = row_texts(&rust.shown.reader_rows);
+        assert_eq!(sommaire[0].trim(), "RESSAC");
+        assert!(
+            sommaire.iter().any(|row| row.contains("104")),
+            "{sommaire:?}"
+        );
+    }
+
+    #[test]
+    fn the_journal_rows_show_p104_only_and_follow_its_phase() {
+        let mut rust = AntiopeRust::default();
+        let (now, instant) = (Utc::now(), Instant::now());
+        rust.journal_phase = QString::from("building");
+        rust.journal_done = 34;
+        rust.journal_total = 156;
+        rust.update(now, instant);
+        assert!(rust.shown.journal_rows.is_empty());
+
+        rust.selection_key = QString::from("journal");
+        assert!(rust.update(now, instant));
+        let rows = row_texts(&rust.shown.journal_rows);
+        assert!(
+            rows.iter()
+                .any(|row| row.trim() == "EDITION IN PROGRESS 34/156"),
+            "{rows:?}"
+        );
+        assert!(rows.iter().all(|row| row.chars().count() == ENTRY_CELLS));
+
+        rust.journal_phase = QString::from("failed");
+        rust.journal_failure = QString::from("No network");
+        rust.update(now, instant);
+        let rows = row_texts(&rust.shown.journal_rows);
+        assert!(
+            rows.iter().any(|row| row.trim() == "NO NETWORK"),
+            "{rows:?}"
+        );
+
+        // Away and back: the rows come back (the cache does not keep the empty list).
+        rust.selection_key = QString::from("unread");
+        rust.update(now, instant);
+        assert!(rust.shown.journal_rows.is_empty());
+        rust.selection_key = QString::from("journal");
+        rust.update(now, instant);
+        assert_eq!(row_texts(&rust.shown.journal_rows), rows);
+    }
+
+    #[test]
+    fn the_banner_is_three_rows_the_width_of_the_window() {
+        let [message, log, dismiss] = banner_lines("Could not refresh", true, 40);
+        assert_eq!(text(&message).chars().count(), 40 - 5 - 3);
+        assert!(text(&message).starts_with(" Could not refresh"));
+        assert_eq!(text(&log), " LOG ");
+        assert_eq!(text(&dismiss), " X ");
+        let [message, log, dismiss] = banner_lines("Could not refresh", false, 40);
+        assert_eq!(text(&message).chars().count(), 40 - 3);
+        assert_eq!(log, "");
+        assert_eq!(text(&dismiss), " X ");
     }
 
     #[test]

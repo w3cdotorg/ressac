@@ -17,6 +17,7 @@ use ressac_ui::journal::{
 use ressac_ui::runs::{RunEnd, RunRequest, read_failure};
 
 use crate::launcher::with_session;
+use crate::rows::to_i32;
 use crate::runs::submit_long;
 
 #[cxx_qt::bridge]
@@ -37,6 +38,9 @@ pub mod qobject {
         #[qproperty(bool, offers_retry, READ = offers_retry, NOTIFY = state_changed)]
         #[qproperty(QString, header, READ = header, NOTIFY = state_changed)]
         #[qproperty(bool, finished, READ = finished, NOTIFY = state_changed)]
+        #[qproperty(i32, progress_done, READ = progress_done, NOTIFY = state_changed)]
+        #[qproperty(i32, progress_total, READ = progress_total, NOTIFY = state_changed)]
+        #[qproperty(QString, failure, READ = failure, NOTIFY = state_changed)]
         #[qproperty(QString, end_line, READ = end_line, CONSTANT)]
         #[qproperty(QString, retry_title, READ = retry_title, CONSTANT)]
         type Journal = super::JournalRust;
@@ -47,6 +51,9 @@ pub mod qobject {
         fn offers_retry(self: &Journal) -> bool;
         fn header(self: &Journal) -> QString;
         fn finished(self: &Journal) -> bool;
+        fn progress_done(self: &Journal) -> i32;
+        fn progress_total(self: &Journal) -> i32;
+        fn failure(self: &Journal) -> QString;
         fn end_line(self: &Journal) -> QString;
         fn retry_title(self: &Journal) -> QString;
 
@@ -77,6 +84,22 @@ pub mod qobject {
     }
 
     impl cxx_qt::Threading for Journal {}
+}
+
+/// The build's counts while it runs (`EDITION IN PROGRESS 34/156`), else `(0, 0)`.
+fn progress(phase: &Phase) -> (i32, i32) {
+    match phase {
+        Phase::Building { done, total } => (to_i32(*done), to_i32(*total)),
+        _ => (0, 0),
+    }
+}
+
+/// Why the last build failed, `""` unless it did.
+fn failure(phase: &Phase) -> &str {
+    match phase {
+        Phase::Failed(reason) => reason,
+        _ => "",
+    }
 }
 
 #[derive(Default)]
@@ -112,6 +135,18 @@ impl qobject::Journal {
 
     fn finished(&self) -> bool {
         self.rust().view.as_ref().is_some_and(is_finished)
+    }
+
+    fn progress_done(&self) -> i32 {
+        progress(self.rust().model.phase()).0
+    }
+
+    fn progress_total(&self) -> i32 {
+        progress(self.rust().model.phase()).1
+    }
+
+    fn failure(&self) -> QString {
+        QString::from(failure(self.rust().model.phase()))
     }
 
     fn end_line(&self) -> QString {
@@ -215,5 +250,27 @@ impl qobject::Journal {
             .finished(end, Utc::now());
         // Emits `state_changed` with the new edition.
         self.reload();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_and_failure_come_from_the_phase_alone() {
+        let building = Phase::Building {
+            done: 34,
+            total: 156,
+        };
+        assert_eq!(progress(&building), (34, 156));
+        assert_eq!(failure(&building), "");
+        let failed = Phase::Failed("No network".into());
+        assert_eq!(progress(&failed), (0, 0));
+        assert_eq!(failure(&failed), "No network");
+        for phase in [Phase::Idle, Phase::Due, Phase::Offline] {
+            assert_eq!(progress(&phase), (0, 0), "{phase:?}");
+            assert_eq!(failure(&phase), "", "{phase:?}");
+        }
     }
 }
