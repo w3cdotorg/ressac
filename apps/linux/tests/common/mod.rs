@@ -16,6 +16,23 @@ pub struct Run {
     pub shots: PathBuf,
 }
 
+/// The fixture's path, for a test that compares a run's copy with it.
+pub fn fixture_path() -> &'static Path {
+    Path::new(FIXTURE)
+}
+
+/// Every feed address on a closed loopback port (`127.0.0.<id>:9`): no traffic leaves the box,
+/// and the core's address guard refuses nothing it should fetch.
+pub fn unreachable_feeds(db: &Path) {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute_batch(
+            "UPDATE feed SET xml_url = 'http://127.0.0.' || id || ':9/feed', html_url = 'http://127.0.0.' || id || ':9/'; \
+             UPDATE entry SET url = 'http://127.0.0.1:9/entry/' || id;",
+        )
+        .unwrap();
+}
+
 impl Run {
     pub fn new() -> Run {
         let dir = tempfile::tempdir().unwrap();
@@ -28,6 +45,16 @@ impl Run {
         }
     }
 
+    /// The run's `XDG_DATA_HOME`: where a launch with no `RESSAC_DB` puts `ressac/ressac.sqlite`.
+    pub fn data_home(&self) -> PathBuf {
+        self.home.join("data")
+    }
+
+    /// The working directory of every launch: a folder of its own, empty unless the app writes there.
+    pub fn cwd(&self) -> PathBuf {
+        self.home.join("cwd")
+    }
+
     /// `ressac-kde --screenshot <shots>` with RESSAC_DB = `db` (None: unset), offscreen, HOME and
     /// XDG_{CONFIG,DATA,STATE,CACHE}_HOME under the temp dir, RUST_LOG unset.
     pub fn launch(&self, db: Option<&Path>) -> Output {
@@ -35,7 +62,9 @@ impl Run {
     }
 
     pub fn launch_with(&self, db: Option<&Path>, extra_env: &[(&str, &str)]) -> Output {
+        std::fs::create_dir_all(self.cwd()).unwrap();
         let mut cmd = Command::new("timeout");
+        cmd.current_dir(self.cwd());
         cmd.arg("90")
             .arg(env!("CARGO_BIN_EXE_ressac-kde"))
             .arg("--screenshot")

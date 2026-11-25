@@ -36,8 +36,15 @@ QQC2.ApplicationWindow {
         Qt.callLater(chrome.chartClosed)
     }
 
-    function probe(tag) {
-        web.runJavaScript(Chart.probeScript, function (result) { console.warn("walk: " + tag + " " + result) })
+    // A walk's draw probe: logs its facts (unless `tag` is empty) and hands them to `done`, when given. A
+    // silent probe is a poll that may land before the page has a document: it answers "pending" then,
+    // instead of letting the page log an error.
+    function probe(tag, done) {
+        const script = tag === "" ? "(function () { try { return " + Chart.probeScript + " } catch (e) { return 'colours=0 pending' } })()" : Chart.probeScript
+        web.runJavaScript(script, function (result) {
+            if (tag !== "") console.warn("walk: " + tag + " " + result)
+            if (done) done(result)
+        })
     }
 
     function runPage(script) { web.runJavaScript(script) }

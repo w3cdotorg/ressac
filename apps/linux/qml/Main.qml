@@ -174,8 +174,103 @@ Kirigami.ApplicationWindow {
         // (Daring Fireball), The Wire entry 1 (xkcd.com) then "+2 more in xkcd.com".
         { name: "23-journal", enter: function () { SourcesModel.selectKey("journal")
             console.warn("walk: 23-journal rows=" + EntriesModel.rowCount() + " phase=" + Journal.phase + " placeholder=" + Journal.placeholder
-                + " header=" + Journal.header + " focus=" + readingLoader.item.focusName()) } }
+                + " header=" + Journal.header + " focus=" + readingLoader.item.focusName()) } },
+        // The closing states (spec §8.2), so that `--screenshot <dir>` alone shows every page and window. Needs Triage
+        // with its inspector is `06-garden` above, and is not shown twice.
+        { name: "91-antiope-101", enter: function () { root.showAntiope("91-antiope-101") } },
+        { name: "92-antiope-100", enter: function () { root.antiopeIndex("92-antiope-100") } },
+        { name: "93-antiope-899", enter: function () { root.antiopeGuide("93-antiope-899") } },
+        { name: "94-antiope-104", enter: function () { root.antiopeDial("94-antiope-104", 104, "selected") } },
+        { name: "95-antiope-800", enter: function () { root.antiopeDial("95-antiope-800", 800, "selected") } },
+        { name: "96-chart", enter: function () { root.showChart("96-chart") } },
+        { name: "97-settings", enter: function () { root.showSettings("97-settings") } },
+        { name: "98-native", enter: function () { root.showNative("98-native") } }
     ]
+    // The states the closing steps of the default walk and the `smoke` walk share; each logs `walk: <tag> …`.
+    function showGarden(tag) {
+        SourcesModel.selectKey("garden:needs-triage")
+        root.waitFor(() => Garden.title !== "", 5000, function () {
+            console.warn("walk: " + tag + " garden=" + SourcesModel.isGarden + " inspector=" + Garden.title) })
+    }
+    function showAntiope(tag) {
+        SourcesModel.selectKey("unread"); AppSettings.appearance = "antiope"
+        root.waitFor(() => readingLoader.item.look === "antiope" && readingLoader.item.antiopeView !== null, 5000, function () {
+            console.warn("walk: " + tag + " look=" + readingLoader.item.look + " page=" + Antiope.currentPage) })
+    }
+    function antiopeIndex(tag) {
+        Recette.key(Qt.Key_S, "s", Qt.AltModifier)
+        console.warn("walk: " + tag + " reader=" + Antiope.readerPage + " page=" + Antiope.currentPage)
+    }
+    function antiopeGuide(tag) {
+        Recette.key(Qt.Key_Question, "?", Qt.ShiftModifier)
+        console.warn("walk: " + tag + " reader=" + Antiope.readerPage + " page=" + Antiope.currentPage)
+    }
+    function antiopeDial(tag, page, lead) {
+        root.dial(page)
+        const key = "selected=" + SourcesModel.selectedKey; const number = "page=" + Antiope.currentPage
+        console.warn("walk: " + tag + " " + (lead === "selected" ? key + " " + number : number + " " + key))
+    }
+    // The Sea Chart drawn: the page's own probe sees more than eight colours on its canvas (asked at most every 250 ms).
+    property var chartProbe: ({ asking: false, asked: 0, colours: 0 })
+    function chartDrawn() {
+        const p = root.chartProbe
+        if (p.colours <= 8 && !p.asking && Date.now() - p.asked >= 250 && chartLoader.item !== null) {
+            p.asking = true; p.asked = Date.now()
+            chartLoader.item.probe("", function (result) { p.asking = false; p.colours = Number(/colours=(\d+)/.exec(result)[1]) })
+        }
+        return p.colours > 8
+    }
+    function showChart(tag) {
+        root.chartProbe = { asking: false, asked: 0, colours: 0 }
+        root.openChart()
+        root.waitFor(root.chartDrawn, 15000, function () {
+            console.warn("walk: " + tag + " chart=" + (root.chartProbe.colours > 8 ? "drawn" : "blank") + " colours=" + root.chartProbe.colours) })
+    }
+    function showSettings(tag) {
+        if (chartLoader.item !== null) chartLoader.item.close()
+        root.openSettings(); settingsWindow.showPage("reading")
+        console.warn("walk: " + tag + " appearance=" + AppSettings.appearance)
+    }
+    function showNative(tag) {
+        settingsWindow.close(); root.requestActivate(); AppSettings.appearance = "native"
+        root.waitFor(() => readingLoader.item.look === "native", 5000, function () {
+            console.warn("walk: " + tag + " look=" + readingLoader.item.look) })
+    }
+    // The `smoke` walk (B10a, spec §8.3): every page and window once, keys reaching the database. Run on a copy of
+    // the fixture whose feeds sit at 127.0.0.<id>:9; the log lines carry the ids the test checks.
+    readonly property var smokeSteps: [
+        { name: "s01-native", enter: function () { AppSettings.appearance = "native"; SourcesModel.selectKey("unread"); EntriesModel.select(0)
+            console.warn("walk: smoke-s01-native entries=" + EntriesModel.rowCount() + " page=" + Reader.pageUrl) } },
+        // j leaves the first entry (read), m reads the second, s stars it; the line names the rows' own flags.
+        { name: "s02-keys", enter: function () {
+            const first = EntriesModel.selectedEntryId
+            Recette.key(Qt.Key_J, "j", 0); const second = EntriesModel.selectedEntryId
+            Recette.key(Qt.Key_M, "m", 0); Recette.key(Qt.Key_S, "s", 0)
+            root.waitFor(() => EntriesModel.selectedRead && EntriesModel.selectedStarred, 5000, function () {
+                const read = [first, second].filter(id => root.rowFlag(id, 5)).join(",")
+                console.warn("walk: smoke-s02-keys selected=" + EntriesModel.selectedEntryId + " read=" + read
+                    + " starred=" + [second].filter(id => root.rowFlag(id, 6)).join(",")) }) } },
+        { name: "s03-journal", enter: function () { SourcesModel.selectKey("journal")
+            console.warn("walk: smoke-s03-journal journal=" + (SourcesModel.selectedKey === "journal")) } },
+        { name: "s04-garden", enter: function () { root.showGarden("smoke-s04-garden") } },
+        { name: "s05-antiope", enter: function () { root.showAntiope("smoke-s05-antiope") } },
+        { name: "s06-p201", enter: function () { root.antiopeDial("smoke-s06-p201", 201, "page") } },
+        { name: "s07-p100", enter: function () { root.antiopeIndex("smoke-s07-p100") } },
+        { name: "s08-p899", enter: function () { root.antiopeGuide("smoke-s08-p899") } },
+        { name: "s09-p104", enter: function () { root.antiopeDial("smoke-s09-p104", 104, "selected") } },
+        { name: "s10-p800", enter: function () { root.antiopeDial("smoke-s10-p800", 800, "selected") } },
+        { name: "s11-chart", enter: function () { root.showChart("smoke-s11-chart") } },
+        { name: "s12-settings", enter: function () { root.showSettings("smoke-s12-settings") } },
+        { name: "s13-native-again", enter: function () { root.showNative("smoke-s13-native-again") } }
+    ]
+    // One flag of an entry's row (role 5 read, 6 starred), false when the row is not in the list.
+    function rowFlag(id, role) {
+        for (let row = 0; row < EntriesModel.rowCount(); row++) {
+            const index = EntriesModel.index(row, 0)
+            if (EntriesModel.data(index, 256) === id) return EntriesModel.data(index, 256 + role) === true
+        }
+        return false
+    }
     // The `journal` walk: the test points every active feed at a closed loopback port, and the launch trigger builds at once.
     readonly property var journalSteps: [
         { name: "02-journal", enter: function () { SourcesModel.selectKey("journal"); console.warn("walk: 02-journal phase=" + Journal.phase) } },
@@ -424,7 +519,13 @@ Kirigami.ApplicationWindow {
         property var test: null
         property var done: null
         property real until: 0
-        onTriggered: if (test() || Date.now() > until) { stop(); root.walkPaused = false; const d = done; done = null; if (d) d() }
+        onTriggered: {
+            const ok = test()
+            if (!ok && Date.now() <= until) return
+            stop(); root.walkPaused = false
+            if (!ok) console.warn("walk: wait timed out")      // the step that needed it fails at its own check, with this line above
+            const d = done; done = null; if (d) d()
+        }
     }
     // Holds the walk while the reader's page answers `script` (app world, every 50 ms) with a result
     // that is not `ready` yet, at most `ms`; then `done(result)` (the last answer, undefined if none).
@@ -519,7 +620,8 @@ Kirigami.ApplicationWindow {
                 + " after=" + root.headerPage()) } },
         { name: "c08-switch-with-prompt", enter: function () { mainMenu.search.trigger(); Recette.key(Qt.Key_X, "x", 0)
             AppSettings.appearance = "native"
-            // The prompt went with the view, its text kept; a letter is a command at once in Native.
+            // The prompt went with the view, its text kept; a letter is routed as a command at once in Native
+            // (this line shows the routing, not an effect: `lastHandled` says whether a list took the key).
             const p = readingLoader.item; const switched = "look=" + p.look + " search=" + EntriesModel.searchText + " focus=" + p.focusName()
             p.lastVerb = ""; p.lastHandled = false
             Recette.key(Qt.Key_J, "j", 0)
@@ -658,7 +760,7 @@ Kirigami.ApplicationWindow {
         width: 2; height: 2; color: "black"
         Connections { target: root; enabled: frameDriver.visible; function onFrameSwapped() { frameDriver.x = frameDriver.x > 0 ? 0 : 2 } }
     }
-    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
+    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : Recette.walk === "smoke" ? smokeSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }

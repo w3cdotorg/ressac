@@ -25,7 +25,12 @@ fn the_reading_page_walks_sources_entries_search_banner_and_garden() {
         ]
     );
     for shot in shots(&run) {
-        assert_drawn(&run.shots.join(&shot));
+        // The closing states of the walk include the Sea Chart and Settings windows, smaller than the main one.
+        if shot == "97-settings.png" || shot == "96-chart.png" {
+            assert_drawn_min(&run.shots.join(&shot), 500, 300);
+        } else {
+            assert_drawn(&run.shots.join(&shot));
+        }
     }
     assert_ne!(
         std::fs::read(run.shots.join("02-folder-blogs.png")).unwrap(),

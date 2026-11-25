@@ -82,6 +82,8 @@ fn the_antiope_pages_walk_reads_every_page() {
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert_clean(&out);
+    // c05c's write wait and c06b/c06c's waits log when they run out, rather than failing a step later.
+    assert!(!err.contains("walk: wait timed out"), "{err}");
     // Each step's whole line, as logged.
     for line in [
         // P100: RESSAC in double height, the logo's two rows, a blank, then the 31 pages of

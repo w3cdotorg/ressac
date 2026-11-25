@@ -25,8 +25,12 @@ fn a_current_database_opens_ready() {
     assert_drawn(&run.shots.join("01-ready.png"));
     assert_eq!(Store::probe(&db).unwrap(), SchemaState::Current);
     assert!(run.home.join("state/ressac/logs").is_dir()); // logging::init under XDG_STATE_HOME
-    // The launch only reads settings; the walk's text-size step (View menu) writes the one key and restores it.
-    assert_eq!(conf_text(&run).trim(), "[General]\nreader.size=17");
+    // The launch only reads settings; the walk's text-size step (View menu) writes its key and restores it, and
+    // the closing steps (B10a) switch to Antiope and back, so the look is stored as `native`.
+    assert_eq!(
+        conf_text(&run).trim(),
+        "[General]\nappearance=native\nreader.size=17"
+    );
 }
 
 #[test]
