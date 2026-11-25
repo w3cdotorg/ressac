@@ -40,8 +40,6 @@ pub const PROOF_PAGE: &str = r#"<!doctype html>
 pub const PROOF_SCRIPT: &str = r#"document.documentElement.setAttribute("data-external", "ran");"#;
 /// The recette's app-world probe of the proof page: the app's script runs, no article script did.
 pub const RECETTE_PROBE: &str = r#"(() => { const d = document.documentElement; d.setAttribute("data-app", "ran"); const j = document.getElementById("jslink"); if (j) { j.click(); } return JSON.stringify({ app: d.getAttribute("data-app"), inline: d.getAttribute("data-inline"), external: d.getAttribute("data-external"), onload: d.getAttribute("data-onload"), onerror: d.getAttribute("data-onerror"), jslink: d.getAttribute("data-jslink"), scripts: document.querySelectorAll("script").length, paragraphs: document.querySelectorAll(".content p").length }); })()"#;
-pub const NO_ENTRY_TITLE: &str = "No Entry Selected";
-pub const NO_ENTRY_TEXT: &str = "Choose an entry in the list to read it here.";
 pub const FULL_ARTICLE_UNAVAILABLE: &str = "Full article unavailable: ";
 
 /// A file the `ressac:asset/` scheme serves.
@@ -122,6 +120,7 @@ pub struct ReaderTheme {
 }
 
 impl ReaderTheme {
+    #[cfg(test)]
     pub const NATIVE: ReaderTheme = ReaderTheme {
         appearance: Appearance::Native,
         crt: false,

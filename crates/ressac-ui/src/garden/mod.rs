@@ -492,7 +492,7 @@ pub fn rhythm_choice(index: usize) -> Option<Option<CadenceGroup>> {
 
 /// "None", then the themes by position (the order `Store::themes` returns).
 pub fn theme_names(themes: &[ThemeDef]) -> Vec<String> {
-    std::iter::once("None".to_string())
+    std::iter::once(crate::library::NO_THEME.to_string())
         .chain(themes.iter().map(|t| t.name.clone()))
         .collect()
 }

@@ -481,7 +481,7 @@ pub async fn fetch(app: &Ressac, url: &str) -> Result<Vec<u8>, MosaicFailure> {
 }
 
 /// Finished mosaics by `MosaicRequest::cache_key`, least recently used out first once past
-/// `CACHE_BYTES`. Transient failures are never remembered.
+/// `CACHE_BYTES` (keys included). Transient failures are never remembered.
 #[derive(Debug, Default)]
 pub struct MosaicCache {
     entries: HashMap<String, CacheEntry>,
@@ -495,8 +495,10 @@ struct CacheEntry {
     used: u64,
 }
 
-fn cost_of(result: &Result<Vec<u8>, MosaicFailure>) -> usize {
-    result.as_ref().map_or(FAILURE_COST, Vec::len)
+/// An entry's memory: its key (a full address, as long as the article allows) and its PNG,
+/// or `FAILURE_COST` for a failure.
+fn cost_of(key: &str, result: &Result<Vec<u8>, MosaicFailure>) -> usize {
+    key.len() + result.as_ref().map_or(FAILURE_COST, Vec::len)
 }
 
 impl MosaicCache {
@@ -512,13 +514,13 @@ impl MosaicCache {
             return;
         }
         self.clock += 1;
-        self.cost += cost_of(&result);
+        self.cost += cost_of(key, &result);
         let entry = CacheEntry {
             result,
             used: self.clock,
         };
         if let Some(old) = self.entries.insert(key.to_owned(), entry) {
-            self.cost -= cost_of(&old.result);
+            self.cost -= cost_of(key, &old.result);
         }
         while self.cost > CACHE_BYTES {
             let Some(oldest) = self
@@ -530,7 +532,7 @@ impl MosaicCache {
                 break;
             };
             if let Some(gone) = self.entries.remove(&oldest) {
-                self.cost -= cost_of(&gone.result);
+                self.cost -= cost_of(&oldest, &gone.result);
             }
         }
     }
@@ -998,7 +1000,7 @@ mod tests {
         assert_eq!(cache.get("a"), None);
         cache.put("b", Err(MosaicFailure::Unreadable));
         assert_eq!(cache.get("b"), Some(Err(MosaicFailure::Unreadable)));
-        assert_eq!(cache.cost(), 64);
+        assert_eq!(cache.cost(), FAILURE_COST + "b".len());
 
         let mut cache = MosaicCache::default();
         for key in ["one", "two", "three"] {
@@ -1012,6 +1014,23 @@ mod tests {
         cache.put("four", Ok(vec![0; 6 << 20]));
         assert_eq!(cache.get("two"), None);
         assert!(cache.get("three").is_some());
+    }
+
+    /// A hostile feed's unique, long, failing image addresses: the keys are the memory, so
+    /// they count toward the cap (each failure alone costs `FAILURE_COST`).
+    #[test]
+    fn long_keys_count_toward_the_cap() {
+        let mut cache = MosaicCache::default();
+        let key = |i: usize| format!("ressac-mosaic:image?cols=40&src={i:0>4096}");
+        for i in 0..5_000 {
+            cache.put(&key(i), Err(MosaicFailure::Status(404)));
+        }
+        let held: usize = cache.entries.keys().map(String::len).sum();
+        assert!(held <= CACHE_BYTES, "{held} bytes of keys held");
+        assert!(cache.cost() >= held, "{} < {held}", cache.cost());
+        assert!(cache.cost() <= CACHE_BYTES);
+        assert!(cache.get(&key(4_999)).is_some(), "the newest stays");
+        assert_eq!(cache.get(&key(0)), None, "the oldest went first");
     }
 
     #[test]

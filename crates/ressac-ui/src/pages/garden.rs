@@ -12,7 +12,7 @@ use ressac_core::model::FeedId;
 use ressac_core::store::{AttemptRecord, CadenceDetail};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{AntiopeColumn, Line, LineRole, blank_line, len, wide};
+use super::{Line, LineRole, blank_line, len, wide};
 use crate::garden::{
     GardenRow, Inspector, Progress, RHYTHM_CHOICES, chip, empty_message, outcome, progress,
     rhythm_index, rhythm_text, sections, unread_label,
@@ -496,11 +496,6 @@ pub fn move_selection(selected: Option<FeedId>, ordered: &[FeedId], delta: i32) 
     Some(ordered[target as usize])
 }
 
-/// The arrows walk the garden list unless the index column is active: its arrows pick pages.
-pub fn takes_arrows(column: AntiopeColumn) -> bool {
-    column != AntiopeColumn::Index
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,9 +840,6 @@ mod tests {
         assert_eq!(move_selection(Some(3), &ordered, 1), Some(3));
         assert_eq!(move_selection(Some(9), &ordered, 1), Some(1));
         assert_eq!(move_selection(Some(9), &[], 1), Some(9));
-        assert!(!takes_arrows(AntiopeColumn::Index));
-        assert!(takes_arrows(AntiopeColumn::Entries));
-        assert!(takes_arrows(AntiopeColumn::Reader));
     }
 
     #[test]

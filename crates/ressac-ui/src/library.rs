@@ -416,10 +416,6 @@ impl OpmlFlow {
 
 // Drag and drop
 
-pub fn feed_payload(feed: FeedId) -> String {
-    feed.to_string()
-}
-
 /// ASCII digits only, no sign, fits in an id.
 pub fn feed_from_payload(text: &str) -> Option<FeedId> {
     (!text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
@@ -1085,7 +1081,6 @@ mod tests {
     #[test]
     fn payload_round_trips_and_foreign_strings_are_ignored() {
         assert_eq!(FEED_MIME, "application/x-ressac-feed");
-        assert_eq!(feed_payload(42), "42");
         assert_eq!(feed_from_payload("42"), Some(42));
         for foreign in [
             "",
