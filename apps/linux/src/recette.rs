@@ -76,7 +76,7 @@ pub struct RecetteRust {
     /// `RESSAC_RECETTE_WALK` (`journal`): the walk `Main.qml` runs, with that walk's own
     /// automatic edition triggers. Empty: the usual walk, with every automatic trigger off.
     walk: QString,
-    /// `RESSAC_RECETTE_GRID_VARIANT`: which grid the measurement builds. Empty: none.
+    /// `RESSAC_RECETTE_GRID` (`painted` or `text`): which grid the measurement builds. Empty: none.
     grid_variant: QString,
     /// `RESSAC_RECETTE_GRID_SIZE`: the pixel size of the measured rows (20 when unset).
     grid_size: f64,
@@ -84,7 +84,7 @@ pub struct RecetteRust {
 
 const PRESS_DEFAULT_ENV: &str = "RESSAC_RECETTE_PRESS_DEFAULT";
 const WALK_ENV: &str = "RESSAC_RECETTE_WALK";
-const GRID_VARIANT_ENV: &str = "RESSAC_RECETTE_GRID_VARIANT";
+const GRID_VARIANT_ENV: &str = "RESSAC_RECETTE_GRID";
 const GRID_SIZE_ENV: &str = "RESSAC_RECETTE_GRID_SIZE";
 const DEFAULT_GRID_SIZE: f64 = 20.0;
 

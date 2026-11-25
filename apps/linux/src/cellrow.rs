@@ -233,7 +233,9 @@ impl qobject::CellRow {
         let pixel = size as i32;
         let (cell_width, _) = teletext::cell_size(size);
 
-        // Double height: a row is `size` tall in logical units and drawn twice as tall.
+        // Double height: the 1:2 window/viewport mapping already doubles every logical y, so
+        // a row's logical top stays r * size (and its clip is `size` tall) while it covers
+        // 2 * size on screen; doubling the top here too would double-scale.
         if rust.double_height {
             painter.as_mut().set_window(&QRect::new(0, 0, width, pixel));
             painter
