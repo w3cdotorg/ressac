@@ -12,7 +12,7 @@ Prochaines étapes de Ressac, au 23/10/2026. Le détail des décisions passées 
 
 ## Sous-projets suivants
 
-- [ ] **8 : Ressac sous Linux.** Partie A (terminal, chemins XDG, conteneur Fedora, CI et release Linux) faite le 23/10/2026 sur la branche `linux` (spec `docs/specs/2026-10-23-linux-design.md`) ; partie B (appli KDE) en cours ; trouvailles dans `notes.md`.
+- [ ] **8 : Ressac sous Linux.** Partie A (terminal, chemins XDG, conteneur Fedora, CI et release Linux) faite le 23/10/2026 sur la branche `linux` (spec `docs/specs/2026-10-23-linux-design.md`) ; partie B (appli KDE) faite le 25/11/2026, en recette sur marghe, PR à ouvrir ; bilan et trouvailles dans `notes.md`.
 - [x] **7 : ajouter un flux.** Code fait le 20/10/2026 sur la branche `add-feed` (spec `docs/specs/2026-10-20-add-feed-design.md`) ; recette en attente ; trouvailles dans `notes.md`.
 - [x] **6 : la carte marine.** Code fait le 19/10/2026 sur la branche `sea-chart` (spec `docs/specs/2026-10-19-sea-chart-design.md`) ; recette en attente (import de l'amorce dans la vraie base, remplacement de l'appli, essai des quatre encres) ; trouvailles dans `notes.md`.
 - [x] **5 : le bandeau tmux.** Fait le 19/10/2026 sur la branche `tmux-ticker` ; recette et trouvailles dans `notes.md`.

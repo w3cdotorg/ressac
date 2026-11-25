@@ -80,7 +80,7 @@ On a garden page (800 to 802) the garden's keys apply: `k` keep, `r` repair, `b`
 
 **Antiope keys.** The teletext look, as in the app: type a page number (`104` the Journal, `105` to `109` the rhythm groups, `800` to `802` the garden, `100` SOMMAIRE, `899` GUIDE), `⌫` corrects, `Esc` cancels; SUITE `Space` or `j`, RETOUR `k`, SOMMAIRE `S`, GUIDE `?`, RÉPÉTITION `r`. Images become teletext mosaics; `i` shows the original.
 
-**Images.** Shown inline when the terminal speaks a graphics protocol (Kitty, as Ghostty does, iTerm2 or Sixel; under tmux, `set -g allow-passthrough on`), as half-blocks otherwise, or as `[image: …]` when they cannot load or are turned off. Under tmux the outer terminal is read from the client's terminal name when the library finds no protocol. `RESSAC_IMAGES=kitty|iterm2|sixel|halfblocks|off` forces the choice (`off` shows alt text and never queries the terminal). The decision is logged as "image protocol".
+**Images.** Shown inline when the terminal speaks a graphics protocol (Kitty, as Ghostty does, iTerm2 or Sixel; under tmux, `set -g allow-passthrough on`), as half-blocks otherwise, or as `[image: …]` when they cannot load or are turned off. Under tmux the outer terminal is read from the client's terminal name when the library finds no protocol. `RESSAC_IMAGES=kitty|iterm2|sixel|halfblocks|off` forces the choice (`off` shows alt text and never queries the terminal). Outside tmux, Konsole gets iTerm2 images automatically when the terminal query finds no usable protocol. The decision is logged as "image protocol".
 
 **Settings.** The look and the images switch are kept in `~/Library/Application Support/Ressac/terminal.json` (on Linux, `~/.config/ressac/terminal.json`).
 
@@ -107,7 +107,7 @@ The ticker runs the `ressac` named in `~/.tmux.conf`. When that copy is older th
 
 ## Linux
 
-The terminal side runs on Linux: the reader, the garden, the tmux ticker and every subcommand. It keeps its own database; nothing is shared with a Mac. (A KDE app is on its way, see `docs/specs/2026-10-23-linux-design.md`.)
+The terminal side and [the KDE app](#the-linux-app-kde) run on Linux: the reader, the garden, the tmux ticker, every subcommand and a Kirigami window. They keep their own database; nothing is shared with a Mac. Design: `docs/specs/2026-10-23-linux-design.md`.
 
 **Where the files live.** Ressac follows the XDG base directories. An `XDG_*` variable that is empty or not an absolute path is ignored, and Ressac refuses to run without an absolute `HOME` rather than write anywhere relative.
 
@@ -115,7 +115,7 @@ The terminal side runs on Linux: the reader, the garden, the tmux ticker and eve
 |---|---|---|
 | Database `ressac.sqlite` (and `-wal`, `-shm`, the `.bak-vN` backups) | `$XDG_DATA_HOME/ressac/`, by default `~/.local/share/ressac/` | `~/Library/Application Support/Ressac/` |
 | `terminal.json` (the reader's look and images switch) | `$XDG_CONFIG_HOME/ressac/`, by default `~/.config/ressac/` | next to the database |
-| Ticker rotation (`ticker.json`, `ticker-<hash>.json`, their locks) | `$XDG_STATE_HOME/ressac/`, by default `~/.local/state/ressac/` | next to the database |
+| Ticker rotation (`ticker.json`, `ticker-<hash>.json`, their locks) | `$XDG_STATE_HOME/ressac/`, by default `~/.local/state/ressac/` | next to the default database, in `~/Library/Application Support/Ressac/` (another `--db` keeps `ticker-<hash>.json` there too, not beside itself) |
 | Logs | `$XDG_STATE_HOME/ressac/logs/` | `~/Library/Logs/Ressac/` |
 
 `--db` and `RESSAC_DB` still win over the default database. If a database exists at the macOS path under your Linux home (`~/Library/Application Support/Ressac/ressac.sqlite`, left by a `ressac` built before Linux support), each run names it in the log (at debug level for `ressac ticker`, which tmux runs every 15 s); Ressac never moves it. Move it to `~/.local/share/ressac/` yourself, or pass it with `--db`.
@@ -148,6 +148,57 @@ bind -n MouseDown1Status if -F '#{m/r:^rs[0-9]+$,#{mouse_status_range}}' \
 - Check the VM's time zone (`timedatectl`; set it with `sudo timedatectl set-timezone Europe/Paris`). A VM is often left on UTC, and the Journal's day starts at 04:00 local time, so a wrong zone builds the morning edition at the wrong hour and moves "Today".
 
 **Developing on Linux.** `apps/linux/dev/dev.sh check` runs the whole check (format, clippy, tests, the chart's tests and a smoke test of the paths above) in a Fedora 44 container under OrbStack, as a non-root user; `dev.sh sh` opens a shell there. The script only ever touches its own container, `ressac-fedora`.
+
+## The Linux app (KDE)
+
+A Kirigami and Qt Quick app for Fedora KDE Plasma, built from `apps/linux/` (Rust with cxx-qt, QML, WebEngine) on the same core as the Mac app and the terminal. It reads, tidies and charts a database of its own; nothing is shared with a Mac. Fedora 44 (dev container) and Fedora 45 (aarch64 VM) were tried; x86_64 should build.
+
+**Install.** From a clone, as your user (not root):
+
+```sh
+apps/linux/install.sh
+```
+
+It checks the Fedora packages listed in `apps/linux/dev/packages.txt`; when some are missing it prints the `sudo dnf install ...` line and stops, and it never runs dnf itself. Then it builds `ressac` and `ressac-kde` in release mode and installs `~/.local/bin/ressac`, `~/.local/bin/ressac-kde`, `~/.local/share/applications/org.w3cdotorg.ressac.desktop` and the icon `~/.local/share/icons/hicolor/scalable/apps/org.w3cdotorg.ressac.svg` (under `$XDG_DATA_HOME` when it is set). Run it again to update.
+
+- `apps/linux/install.sh --software-rendering` writes the desktop entry with `QT_QUICK_BACKEND=software` and `QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu`, for a virtual machine whose GPU draws blank or flickering views.
+- `apps/linux/install.sh --uninstall` removes exactly those four files. The database, the settings and the logs are never touched.
+
+**First launch.** Start Ressac from the Plasma launcher. With no feed yet, the window says "No Feeds Yet — Drop an OPML file here, or choose one…"; `ressac export > ressac.opml` on another machine gives one. The app and `ressac` in Konsole share `~/.local/share/ressac/ressac.sqlite`.
+
+**Files.** Settings are in `~/.config/ressac/ressac-kde.conf` (the Mac app's keys). Logs are in `~/.local/state/ressac/logs/` (Settings ▸ Data ▸ Show Logs). The database is described in [Linux](#linux).
+
+**Keys.** The Mac's shortcuts, with Command as Ctrl and Option as Alt:
+
+| Mac | KDE |
+|---|---|
+| ⌘N Add Feed… | Ctrl+N |
+| ⌘O Import OPML… / ⇧⌘E Export OPML… | Ctrl+O / Ctrl+Shift+E |
+| ⌘R Refresh / ⇧⌘R Refresh All | F5 and Ctrl+R / Ctrl+Shift+R |
+| ⌘F Search | Ctrl+F |
+| ⌥⌘U Show Unread Only | Ctrl+Alt+U |
+| ⌘+ / ⌘− / ⌘0 text size | Ctrl++ / Ctrl+− / Ctrl+0 |
+| ⇧⌘M Sea Chart | Ctrl+Shift+M |
+| ⇧⌘A Mark All as Read | Ctrl+Shift+A |
+| ⌘↩ Open in Browser | Ctrl+Return |
+| ⌘Z garden Undo | Ctrl+Z |
+| ⌘, Settings | Ctrl+Shift+, (KDE's Configure) |
+| ⌥S / ⌥G / ⌥R (Antiope) | Alt+S / Alt+G / Alt+R |
+| ⌘Q | Ctrl+Q |
+| Letters `j k m s Space ? i`, digits, arrows | unchanged |
+
+Letters act when the reading window has focus and no text field does.
+
+**Antiope.** Settings ▸ Reading ▸ Appearance switches to it, as on the Mac (see [Antiope](#antiope)). Text sizes are 15, 20, 25 and 30 (Ctrl++ and Ctrl+−); digits jump to pages, Backspace and Esc correct them; Alt+S is SOMMAIRE, Alt+G (or `?`) the GUIDE, Alt+R the refresh; ← and → move between the columns; `i` shows the mosaics' originals. The CRT screen is not ported (it cost more than the 2 ms a frame budget).
+
+**Sea Chart.** Ctrl+Shift+M opens it in its own window, whose size is remembered. When Plasma's animation speed is at Instant, its animation stops.
+
+**For developers.**
+
+- `apps/linux/dev/dev.sh check` runs the whole Linux gate in the Fedora 44 container (fmt, clippy, tests, chart tests, layout smoke).
+- `ressac-kde --screenshot <dir>` walks every state, writes a picture of each and quits (it needs `RESSAC_DB`, and never touches the network). `RESSAC_RECETTE_WALK=<name>` runs one walk: `garden`, `journal`, `antiope`, `antiope-pages`, `mosaic`, `grid`, `smoke`, and others (see `apps/linux/qml/Main.qml`).
+- `RESSAC_FRAME_LOG=1` logs the frame times every 10 seconds.
+- `apps/linux/dev/marghe.sh` drives a Parallels VM: push the sources, install, take screenshots in the user's own session.
 
 ## The Mac app
 
