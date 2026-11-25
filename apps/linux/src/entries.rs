@@ -15,15 +15,18 @@ use ressac_ui::chrono::{self, DateTime, Utc};
 use ressac_ui::entries::{AUTO_READ_DELAY, EntryList, ListRow, LocalEdit, relative_date};
 use ressac_ui::journal::{JournalRow, overflow_label, section_title, sections};
 use ressac_ui::live::plan_rows;
+use ressac_ui::pages::ENTRY_CELLS;
+use ressac_ui::pages::frame::entry_lines;
 use ressac_ui::runs::{DirectWrite, read_failure, write_failure};
 use ressac_ui::sources::Selection;
+use ressac_ui::teletext::encode_lines;
 use ressac_ui::worker::JobResult;
 
 use crate::launcher::with_session;
 use crate::rows::{list_model_rows, to_i32, variant_string};
 
 /// The role names QML sees, in role order (`FIRST_ROLE + index`).
-const ROLES: [&str; 11] = [
+const ROLES: [&str; 12] = [
     "entryId",
     "feedTitle",
     "title",
@@ -35,6 +38,7 @@ const ROLES: [&str; 11] = [
     "kind",
     "section",
     "overflowFeed",
+    "antiopeLines",
 ];
 
 #[cxx_qt::bridge]
@@ -65,11 +69,13 @@ pub mod qobject {
         #[qproperty(QString, search_text, READ = search_text, WRITE = set_search_text, NOTIFY)]
         #[qproperty(i32, selected_row, READ = selected_row, NOTIFY = selection_changed)]
         #[qproperty(i64, selected_entry_id, READ = selected_entry_id, NOTIFY = selection_changed)]
+        #[qproperty(i64, selected_feed_id, READ = selected_feed_id, NOTIFY = selection_changed)]
         #[qproperty(bool, active, READ = active, NOTIFY = list_changed)]
         #[qproperty(bool, journal, READ = journal, NOTIFY = list_changed)]
         #[qproperty(QString, empty_text, READ = empty_text, NOTIFY = list_changed)]
         #[qproperty(bool, can_mark_all_read, READ = can_mark_all_read, NOTIFY = list_changed)]
         #[qproperty(bool, can_navigate, READ = can_navigate, NOTIFY = list_changed)]
+        #[qproperty(i32, total, READ = total, NOTIFY = list_changed)]
         #[qproperty(bool, can_toggle, READ = can_toggle, NOTIFY = selected_state_changed)]
         #[qproperty(bool, selected_read, READ = selected_read, NOTIFY = selected_state_changed)]
         #[qproperty(bool, selected_starred, READ = selected_starred, NOTIFY = selected_state_changed)]
@@ -79,11 +85,13 @@ pub mod qobject {
         fn search_text(self: &EntriesModel) -> QString;
         fn selected_row(self: &EntriesModel) -> i32;
         fn selected_entry_id(self: &EntriesModel) -> i64;
+        fn selected_feed_id(self: &EntriesModel) -> i64;
         fn active(self: &EntriesModel) -> bool;
         fn journal(self: &EntriesModel) -> bool;
         fn empty_text(self: &EntriesModel) -> QString;
         fn can_mark_all_read(self: &EntriesModel) -> bool;
         fn can_navigate(self: &EntriesModel) -> bool;
+        fn total(self: &EntriesModel) -> i32;
         fn can_toggle(self: &EntriesModel) -> bool;
         fn selected_read(self: &EntriesModel) -> bool;
         fn selected_starred(self: &EntriesModel) -> bool;
@@ -270,6 +278,7 @@ struct View {
     empty_text: &'static str,
     can_mark_all_read: bool,
     can_navigate: bool,
+    total: i32,
     selected_row: i32,
     selected_entry_id: i64,
     can_toggle: bool,
@@ -287,6 +296,11 @@ fn role_value(slot: &Slot, role: &str) -> QVariant {
         (Slot::Overflow { feed_id, .. }, "overflowFeed") => QVariant::from(feed_id),
         (Slot::Entry { .. }, "overflowFeed") => QVariant::from(&0_i64),
         (Slot::Overflow { label, .. }, "title") => variant_string(label),
+        // P104's list is `Antiope.journalRows`; should the plain list show it, the row reads
+        // as a read entry titled "+N more in Feed".
+        (Slot::Overflow { label, .. }, "antiopeLines") => {
+            variant_string(&antiope_lines(Some(label), true, false))
+        }
         (Slot::Overflow { .. }, "entryId") => QVariant::from(&-1_i64),
         (Slot::Overflow { .. }, "read" | "starred") => QVariant::from(&false),
         (Slot::Overflow { .. }, "feedTitle" | "excerpt" | "date" | "link") => variant_string(""),
@@ -306,8 +320,19 @@ fn entry_value(shown: &Shown, role: &str) -> QVariant {
         "read" => QVariant::from(&row.is_read),
         "starred" => QVariant::from(&row.is_starred),
         "link" => variant_string(row.link.as_deref().unwrap_or("")),
+        "antiopeLines" => variant_string(&antiope_lines(
+            Some(&row.title),
+            row.is_read,
+            row.is_starred,
+        )),
         _ => QVariant::default(),
     }
+}
+
+/// The Antiope entries column's row(s) of an entry, never reversed: the delegate's `CellRow`
+/// reverses the selected one.
+fn antiope_lines(title: Option<&str>, read: bool, starred: bool) -> String {
+    encode_lines(&entry_lines(title, read, starred, ENTRY_CELLS, false))
 }
 
 /// The list's query for `source` under the pane's filter and search box.
@@ -343,6 +368,19 @@ impl qobject::EntriesModel {
 
     fn selected_entry_id(&self) -> i64 {
         self.rust().selected.unwrap_or(-1)
+    }
+
+    /// The selected entry's feed, −1 when none.
+    fn selected_feed_id(&self) -> i64 {
+        self.selected_shown().map_or(-1, |shown| shown.row.feed_id)
+    }
+
+    /// The list's size under its filter and search, beyond the loaded rows (0 without a list).
+    fn total(&self) -> i32 {
+        self.rust()
+            .list
+            .as_ref()
+            .map_or(0, |list| to_i32(list.total()))
     }
 
     fn active(&self) -> bool {
@@ -415,6 +453,7 @@ impl qobject::EntriesModel {
                 .unwrap_or(""),
             can_mark_all_read: self.can_mark_all_read(),
             can_navigate: self.can_navigate(),
+            total: self.total(),
             selected_row: self.selected_row(),
             selected_entry_id: self.selected_entry_id(),
             can_toggle: self.can_toggle(),
@@ -520,12 +559,14 @@ impl qobject::EntriesModel {
             after.empty_text,
             after.can_mark_all_read,
             after.can_navigate,
+            after.total,
         ) != (
             before.active,
             before.journal,
             before.empty_text,
             before.can_mark_all_read,
             before.can_navigate,
+            before.total,
         ) {
             self.as_mut().list_changed();
         }

@@ -25,6 +25,7 @@ use ressac_ui::sources::Selection;
 use ressac_ui::worker::{JobContext, JobResult};
 
 use crate::launcher::with_session;
+use crate::rows::to_i32;
 
 /// Width of the pill without progress (`runs::progress_width` of a fetch).
 const IDLE_PROGRESS_WIDTH: i32 = 140;
@@ -48,6 +49,8 @@ pub mod qobject {
         #[qproperty(QString, progress_compact_text, READ = progress_compact_text, NOTIFY = state_changed)]
         #[qproperty(f64, progress_fraction, READ = progress_fraction, NOTIFY = state_changed)]
         #[qproperty(i32, progress_width, READ = progress_width, NOTIFY = state_changed)]
+        #[qproperty(i32, progress_done, READ = progress_done, NOTIFY = state_changed)]
+        #[qproperty(i32, progress_total, READ = progress_total, NOTIFY = state_changed)]
         #[qproperty(bool, banner_visible, READ = banner_visible, NOTIFY = state_changed)]
         #[qproperty(QString, banner_message, READ = banner_message, NOTIFY = state_changed)]
         #[qproperty(bool, banner_show_log, READ = banner_show_log, NOTIFY = state_changed)]
@@ -61,6 +64,8 @@ pub mod qobject {
         fn progress_compact_text(self: &Runs) -> QString;
         fn progress_fraction(self: &Runs) -> f64;
         fn progress_width(self: &Runs) -> i32;
+        fn progress_done(self: &Runs) -> i32;
+        fn progress_total(self: &Runs) -> i32;
         fn banner_visible(self: &Runs) -> bool;
         fn banner_message(self: &Runs) -> QString;
         fn banner_show_log(self: &Runs) -> bool;
@@ -194,6 +199,22 @@ impl qobject::Runs {
             .map_or(IDLE_PROGRESS_WIDTH, |progress| {
                 i32::try_from(progress_width(progress)).unwrap_or(IDLE_PROGRESS_WIDTH)
             })
+    }
+
+    /// The run's count of done items, 0 without progress (Antiope's `REFRESHING 42/155`).
+    fn progress_done(&self) -> i32 {
+        self.rust()
+            .coordinator
+            .progress()
+            .map_or(0, |progress| to_i32(progress.done))
+    }
+
+    /// The run's count of items, 0 without progress or while it is unknown.
+    fn progress_total(&self) -> i32 {
+        self.rust()
+            .coordinator
+            .progress()
+            .map_or(0, |progress| to_i32(progress.total))
     }
 
     fn banner_visible(&self) -> bool {

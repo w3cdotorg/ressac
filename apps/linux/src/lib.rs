@@ -2,7 +2,9 @@
 //! library is empty elsewhere so `cargo test --workspace` needs no Qt.
 #![cfg(target_os = "linux")]
 
+mod antiope;
 mod cellrow;
+mod cellrows;
 mod chart;
 mod entries;
 mod garden;
