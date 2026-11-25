@@ -41,7 +41,6 @@ pub mod qobject {
         #[qproperty(QString, color_scheme, READ = color_scheme, WRITE = set_color_scheme, NOTIFY)]
         #[qproperty(QString, look, READ = look, WRITE = set_look, NOTIFY)]
         #[qproperty(QString, reader_font, READ = reader_font, WRITE = set_reader_font, NOTIFY)]
-        #[qproperty(bool, crt, READ = crt, WRITE = set_crt, NOTIFY)]
         #[qproperty(f64, text_size, READ = text_size, WRITE = set_text_size, NOTIFY)]
         #[qproperty(QString, reader_width, READ = reader_width, WRITE = set_reader_width, NOTIFY)]
         #[qproperty(bool, has_entry, READ = has_entry, NOTIFY = state_changed)]
@@ -70,8 +69,6 @@ pub mod qobject {
         fn set_reader_font(self: Pin<&mut Reader>, value: &QString);
         fn text_size(self: &Reader) -> f64;
         fn set_text_size(self: Pin<&mut Reader>, value: f64);
-        fn crt(self: &Reader) -> bool;
-        fn set_crt(self: Pin<&mut Reader>, value: bool);
         fn reader_width(self: &Reader) -> QString;
         fn set_reader_width(self: Pin<&mut Reader>, value: &QString);
         fn has_entry(self: &Reader) -> bool;
@@ -164,8 +161,6 @@ pub struct ReaderRust {
     look: QString,
     reader_font: QString,
     text_size: f64,
-    /// The CRT's reader bleed (`data-crt`), only in Antiope (`ReaderTheme::shows_crt`).
-    crt: bool,
     reader_width: QString,
     detail: Option<EntryDetail>,
     fulltext: Option<FulltextRow>,
@@ -188,7 +183,6 @@ impl Default for ReaderRust {
             look: QString::default(),
             reader_font: QString::default(),
             text_size: ReaderStyle::default().size,
-            crt: false,
             reader_width: QString::default(),
             detail: None,
             fulltext: None,
@@ -228,8 +222,7 @@ impl ReaderRust {
                 .unwrap_or(ColorScheme::Light),
             theme: ReaderTheme {
                 appearance: look,
-                // Native never shows the screen, so its toggle never makes a new page.
-                crt: self.crt && look == Appearance::Antiope,
+                crt: false,
             },
             subpage: self.subpage_label(),
         })
@@ -315,20 +308,6 @@ impl qobject::Reader {
         }
         self.as_mut().rust_mut().get_mut().text_size = value;
         self.as_mut().text_size_changed();
-        self.rebuild();
-    }
-
-    fn crt(&self) -> bool {
-        self.rust().crt
-    }
-
-    /// A change that alters the page (`ArticlePage::same_page`: only in Antiope) reloads it once.
-    fn set_crt(mut self: Pin<&mut Self>, value: bool) {
-        if self.rust().crt == value {
-            return;
-        }
-        self.as_mut().rust_mut().get_mut().crt = value;
-        self.as_mut().crt_changed();
         self.rebuild();
     }
 
@@ -718,54 +697,6 @@ mod tests {
         assert_eq!(text(412, 0, 20), None);
         assert_eq!(text(412, -2, 20), None);
         assert_eq!(text(412, 1, -5).as_deref(), Some("412 1/0"));
-    }
-
-    fn state(look: &str) -> ReaderRust {
-        use ressac_core::store::EntryRow;
-        use ressac_ui::chrono::{TimeZone, Utc};
-        ReaderRust {
-            look: QString::from(look),
-            detail: Some(EntryDetail {
-                row: EntryRow {
-                    entry_id: 1,
-                    feed_id: 7,
-                    feed_title: "Example Blog".into(),
-                    title: Some("A title".into()),
-                    author: None,
-                    url: None,
-                    published_at: Utc.with_ymd_and_hms(2026, 10, 9, 8, 0, 0).unwrap(),
-                    is_read: false,
-                    is_starred: false,
-                    has_fulltext: false,
-                },
-                summary_html: Some("<p>Summary</p>".into()),
-                content_html: None,
-                fulltext_html: None,
-                fulltext_error: None,
-                prefer_full_text: false,
-            }),
-            ..ReaderRust::default()
-        }
-    }
-
-    #[test]
-    fn the_crt_reloads_the_page_in_antiope_only_and_reading_never_does() {
-        let mut antiope = state("antiope");
-        let before = antiope.wanted_page().unwrap();
-        antiope.crt = true;
-        let on = antiope.wanted_page().unwrap();
-        assert!(on.theme.shows_crt() && !before.same_page(&on), "one reload");
-        // Marking read changes neither the identity nor a second reload.
-        if let Some(detail) = antiope.detail.as_mut() {
-            detail.row.is_read = true;
-        }
-        assert!(on.same_page(&antiope.wanted_page().unwrap()));
-
-        let mut native = state("native");
-        let before = native.wanted_page().unwrap();
-        native.crt = true;
-        let after = native.wanted_page().unwrap();
-        assert!(!after.theme.shows_crt() && before.same_page(&after));
     }
 
     #[test]

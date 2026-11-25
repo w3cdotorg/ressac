@@ -3,13 +3,8 @@
 
 #include <cstdint>
 
-class QColor;
-class QFont;
-class QPainter;
-class QString;
-
 // What cxx-qt-lib does not wrap. Every function is declared to Rust in the `shim` bridge of
-// src/lib.rs, except the two QPainter helpers at the end (declared in src/cellrow.rs).
+// src/lib.rs.
 
 // Must run before the application object is constructed (WebEngine needs it there).
 void ressac_init_webengine();
@@ -61,16 +56,3 @@ void ressac_frame_log_auto();
 // A request the page cancelled (its job is gone) is dropped without an answer and logged at
 // debug level as "mosaic: dropped <token>" (category ressac.mosaic).
 void ressac_mosaic_reply(std::uint64_t token, rust::Str mime, rust::Slice<const std::uint8_t> body);
-
-// The CRT bleed under one run of a CellRow (B9): `glow` four times, a device pixel (gx, gy) left,
-// right, up and down, then `red` at +offset and `blue` at -offset, all from the baseline point
-// (x, y). The glyphs are looked up once in `font` (one cell per character, the font's own advances,
-// no shaping) and drawn as glyph runs: grey antialiased, so the copies blend over the cell's ground
-// (a monochrome glyph blit writes a translucent pen as it is, punching the ground out).
-void ressac_draw_bleed(QPainter &painter, double x, double y, const QString &text, const QFont &font,
-                       const QColor &glow, const QColor &red, const QColor &blue, double gx, double gy,
-                       double offset);
-// Device pixels per painter unit, horizontally and vertically (the painter's device transform:
-// the item's content scale, the window's device pixel ratio, a window/viewport mapping).
-double ressac_painter_scale_x(const QPainter &painter);
-double ressac_painter_scale_y(const QPainter &painter);

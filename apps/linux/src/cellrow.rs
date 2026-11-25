@@ -10,7 +10,6 @@ use cxx_qt_lib::{
     ClipOperation, QColor, QFont, QFontHintingPreference, QFontStyleStrategy, QPen, QPoint, QRect,
     QRectF, QString,
 };
-use ressac_ui::teletext::crt::{BLEED_OFFSET, BLEED_OPACITY};
 use ressac_ui::teletext::{self, Color, PaintRun};
 
 use crate::shim;
@@ -26,28 +25,6 @@ pub mod qobject {
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qcolor.h");
         type QColor = cxx_qt_lib::QColor;
-        include!("cxx-qt-lib/qfont.h");
-        type QFont = cxx_qt_lib::QFont;
-
-        include!("shim.h");
-        /// The bleed's six copies of one run (glow, red, blue), blended over the ground.
-        #[allow(clippy::too_many_arguments)]
-        fn ressac_draw_bleed(
-            painter: Pin<&mut QPainter>,
-            x: f64,
-            y: f64,
-            text: &QString,
-            font: &QFont,
-            glow: &QColor,
-            red: &QColor,
-            blue: &QColor,
-            gx: f64,
-            gy: f64,
-            offset: f64,
-        );
-        /// Device pixels per painter unit, across and down.
-        fn ressac_painter_scale_x(painter: &QPainter) -> f64;
-        fn ressac_painter_scale_y(painter: &QPainter) -> f64;
     }
 
     #[auto_cxx_name]
@@ -59,7 +36,6 @@ pub mod qobject {
         #[qproperty(f64, size, READ, WRITE = set_size, NOTIFY)]
         #[qproperty(bool, double_height, READ, WRITE = set_double_height, NOTIFY)]
         #[qproperty(bool, reversed, READ, WRITE = set_reversed, NOTIFY)]
-        #[qproperty(bool, bleed, READ, WRITE = set_bleed, NOTIFY)]
         #[qproperty(i32, reverse_foreground, READ, WRITE = set_reverse_foreground, NOTIFY)]
         #[qproperty(i32, reverse_background, READ, WRITE = set_reverse_background, NOTIFY)]
         type CellRow = super::CellRowRust;
@@ -68,7 +44,6 @@ pub mod qobject {
         fn set_size(self: Pin<&mut CellRow>, size: f64);
         fn set_double_height(self: Pin<&mut CellRow>, on: bool);
         fn set_reversed(self: Pin<&mut CellRow>, on: bool);
-        fn set_bleed(self: Pin<&mut CellRow>, on: bool);
         fn set_reverse_foreground(self: Pin<&mut CellRow>, index: i32);
         fn set_reverse_background(self: Pin<&mut CellRow>, index: i32);
 
@@ -109,8 +84,6 @@ pub struct CellRowRust {
     size: f64,
     double_height: bool,
     reversed: bool,
-    /// The CRT's colour bleed (spec §7.9): a glow and a red and a blue copy under the text.
-    bleed: bool,
     reverse_foreground: i32,
     reverse_background: i32,
     /// `line` decoded on `set_line`.
@@ -124,7 +97,6 @@ impl Default for CellRowRust {
             size: 20.0,
             double_height: false,
             reversed: false,
-            bleed: false,
             reverse_foreground: i32::from(Color::Black.index()),
             reverse_background: i32::from(Color::White.index()),
             rows: Vec::new(),
@@ -156,9 +128,6 @@ fn color(color: Color) -> QColor {
     let [r, g, b] = color.rgb();
     QColor::from_rgb(i32::from(r), i32::from(g), i32::from(b))
 }
-
-/// The glow's opacity (the Mac's 2-point shadow at a quarter of the text's strength).
-const GLOW_OPACITY: f64 = 0.25;
 
 fn indexed(index: i32) -> Color {
     u8::try_from(index)
@@ -228,15 +197,6 @@ impl qobject::CellRow {
         self.resize();
     }
 
-    pub fn set_bleed(mut self: Pin<&mut Self>, on: bool) {
-        if self.rust().bleed == on {
-            return;
-        }
-        self.as_mut().rust_mut().get_mut().bleed = on;
-        self.as_mut().bleed_changed();
-        self.update();
-    }
-
     pub fn set_reverse_foreground(mut self: Pin<&mut Self>, index: i32) {
         if self.rust().reverse_foreground == index {
             return;
@@ -295,9 +255,6 @@ impl qobject::CellRow {
         font.set_hinting_preference(QFontHintingPreference::PreferFullHinting);
         font.set_kerning(false);
         painter.as_mut().set_font(&font);
-        // The bleed's copies: the same glyphs, grey antialiased (they blend over the ground).
-        let mut bleed_font = font.clone();
-        bleed_font.set_style_strategy(QFontStyleStrategy::NoSubpixelAntialias);
 
         let reverse_background = color(indexed(rust.reverse_background));
         let reverse_foreground = color(indexed(rust.reverse_foreground));
@@ -321,16 +278,7 @@ impl qobject::CellRow {
             }
         }
 
-        // Pass 2: the text, clipped to its row. With the bleed on, each run first gets its glow
-        // (four copies in its own colour, a device pixel up, down, left and right), a red copy
-        // right and a blue copy left; backgrounds never bleed.
-        let bleed = rust.bleed;
-        // One device pixel in painter units, across and down (the device pixel ratio, and
-        // the double-height mapping's doubled y).
-        let glow_x = 1.0 / qobject::ressac_painter_scale_x(&painter).max(1.0);
-        let glow_y = 1.0 / qobject::ressac_painter_scale_y(&painter).max(1.0);
-        let red = QColor::from_rgba(255, 0, 0, (BLEED_OPACITY * 255.0).round() as i32);
-        let blue = QColor::from_rgba(0, 0, 255, (BLEED_OPACITY * 255.0).round() as i32);
+        // Pass 2: the text, clipped to its row.
         for (r, row) in rust.rows.iter().enumerate() {
             let top = (r as f64 * size) as i32;
             painter.as_mut().set_clip_rect(
@@ -344,33 +292,11 @@ impl qobject::CellRow {
                     Some(_) if rust.reversed => reverse_foreground.clone(),
                     Some(fg) => color(fg),
                 };
-                let text = QString::from(run.text.as_str());
-                let baseline = top + pixel * 8 / 10;
-                if bleed {
-                    let glow = QColor::from_rgba(
-                        foreground.red(),
-                        foreground.green(),
-                        foreground.blue(),
-                        (GLOW_OPACITY * 255.0).round() as i32,
-                    );
-                    qobject::ressac_draw_bleed(
-                        painter.as_mut(),
-                        x.round(),
-                        f64::from(baseline),
-                        &text,
-                        &bleed_font,
-                        &glow,
-                        &red,
-                        &blue,
-                        glow_x,
-                        glow_y,
-                        BLEED_OFFSET,
-                    );
-                }
                 painter.as_mut().set_pen(&QPen::from(&foreground));
-                painter
-                    .as_mut()
-                    .draw_text(&QPoint::new(x.round() as i32, baseline), &text);
+                painter.as_mut().draw_text(
+                    &QPoint::new(x.round() as i32, top + pixel * 8 / 10),
+                    &QString::from(run.text.as_str()),
+                );
                 x += run.text.chars().count() as f64 * cell_width;
             }
         }

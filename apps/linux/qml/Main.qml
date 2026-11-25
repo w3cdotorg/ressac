@@ -544,88 +544,6 @@ Kirigami.ApplicationWindow {
             view.scrollProbe(10, 600, function (s10) { console.warn("frames: antiope step=10 " + s10); root.walkPaused = false }) }) } },
         { name: "s05-hold-j", enter: function () { root.walkPaused = true; holdJ.begin("antiope hold-j", 140, 60) } },
     ]
-    // The `crt` walk (B9b): the CRT screen off and on over Antiope, a page dialled through it, a
-    // resize, the toggle while reading, then Native with the box still checked.
-    // The view's overlay (the child that counts its paints) and an item by objectName, or null.
-    function crtOverlay() {
-        const view = readingLoader.item ? readingLoader.item.antiopeView : null
-        if (!view)
-            return null
-        for (let i = 0; i < view.children.length; ++i)
-            if (view.children[i].paints !== undefined)
-                return view.children[i]
-        return null
-    }
-    function findNamed(item, name) {
-        if (!item)
-            return null
-        if (item.objectName === name)
-            return item
-        for (let i = 0; i < item.children.length; ++i) {
-            const found = root.findNamed(item.children[i], name)
-            if (found)
-                return found
-        }
-        return null
-    }
-    function crtOrigin() {
-        const view = readingLoader.item.antiopeView; const o = view.mapToItem(null, 0, 0)
-        console.warn("walk: crt-origin x=" + o.x + " y=" + o.y + " width=" + view.width + " height=" + view.height + " size=" + view.size)
-    }
-    function hasDataCrt(done) {
-        root.waitForPage(readingLoader.item.antiopeView.reader, "document.documentElement.hasAttribute('data-crt')", r => r === true, 10000, done)
-    }
-    function lacksDataCrt(done) {
-        root.waitForPage(readingLoader.item.antiopeView.reader, "document.documentElement.hasAttribute('data-crt')", r => r === false, 10000, done)
-    }
-    // The distinct reader pages (`Reader.pageUrl`) seen while `crtPagesCounting`.
-    property bool crtPagesCounting: false
-    property var crtPages: []
-    Connections {
-        target: Reader; enabled: root.crtPagesCounting
-        function onPageChanged() { if (root.crtPages.indexOf(Reader.pageUrl) < 0) root.crtPages = root.crtPages.concat([Reader.pageUrl]) }
-    }
-    readonly property var crtSteps: [
-        { name: "e01-off", enter: function () { AppSettings.crt = false; AppSettings.appearance = "antiope"
-            root.crtOrigin(); const overlay = root.crtOverlay()
-            console.warn("walk: e01-off crt=" + AppSettings.crt + " paints=" + overlay.paints + " page=" + Antiope.currentPage) } },
-        { name: "e02-on", enter: function () { AppSettings.crt = true
-            root.waitFor(() => root.crtOverlay().paints > 0, 3000, function () {
-                console.warn("walk: e02-on crt=" + AppSettings.crt + " paints=" + root.crtOverlay().paints + " page=" + Reader.pageUrl) }) } },
-        { name: "e03-bleed", enter: function () { SourcesModel.selectKey("feed:1"); readingLoader.item.antiopeView.clickEntry(0)
-            const header = root.findNamed(readingLoader.item.antiopeView, "antiopeHeader")
-            root.hasDataCrt(function (r) { console.warn("walk: e03-bleed bleed=" + header.bleed + " entry=" + EntriesModel.selectedEntryId + " dataCrt=" + r) }) } },
-        { name: "e04-click-through", enter: function () { root.dial(101); const away = Antiope.currentPage; root.dial(201)
-            console.warn("walk: e04-click-through page=" + Antiope.currentPage + " overlayEnabled=" + root.crtOverlay().enabled + " from=" + away) } },
-        { name: "e05-resized", enter: function () { const overlay = root.crtOverlay(); const before = overlay.paints
-            readingLoader.item.antiopeView.clickEntry(0)
-            root.width = root.width - 100; root.height = root.height - 50
-            root.waitFor(() => overlay.paints > before && overlay.width === readingLoader.item.antiopeView.width, 3000, function () {
-                const bands = Antiope.scanlineBands(overlay.height, readingLoader.item.antiopeView.size / 10, Screen.devicePixelRatio)
-                root.crtOrigin()
-                console.warn("walk: e05-resized paints=" + overlay.paints + " before=" + before + " bands=" + bands.length / 2
-                    + " lastBottom=" + bands[bands.length - 1] + " height=" + overlay.height) }) } },
-        { name: "e06-toggle", enter: function () { root.crtPages = []; root.crtPagesCounting = true
-            AppSettings.crt = false
-            root.lacksDataCrt(function (off) { AppSettings.crt = true
-                root.hasDataCrt(function (on) { root.crtPagesCounting = false
-                    console.warn("walk: e06-toggle pages=" + root.crtPages.length + " dataCrt=" + on + " offDataCrt=" + off) }) }) } },
-        { name: "e07-native", enter: function () { AppSettings.appearance = "native"
-            console.warn("walk: e07-native overlay=" + (root.crtOverlay() !== null) + " readerCrt=" + Reader.crt + " crt=" + AppSettings.crt) } },
-    ]
-    // `crt-scroll`: `antiope-scroll`'s probe, CRT off then on; the overlay never repaints while scrolling.
-    readonly property var crtScrollSteps: [
-        { name: "x01-off", enter: function () { AppSettings.crt = false; AppSettings.appearance = "antiope"; SourcesModel.selectKey("feed:1") } },
-        { name: "x02-scroll-off", enter: function () { root.walkPaused = true; const view = readingLoader.item.antiopeView
-            view.scrollProbe(1, 600, function (s1) { console.warn("frames: crt=off step=1 " + s1)
-            view.scrollProbe(10, 600, function (s10) { console.warn("frames: crt=off step=10 " + s10); root.walkPaused = false }) }) } },
-        { name: "x03-on", enter: function () { AppSettings.crt = true } },
-        { name: "x04-scroll-on", enter: function () { root.walkPaused = true; const view = readingLoader.item.antiopeView
-            const overlay = root.crtOverlay(); const before = overlay.paints
-            view.scrollProbe(1, 600, function (s1) { console.warn("frames: crt=on step=1 " + s1)
-            view.scrollProbe(10, 600, function (s10) { console.warn("frames: crt=on step=10 " + s10)
-                console.warn("walk: crt-scroll paints before=" + before + " after=" + overlay.paints); root.walkPaused = false }) }) } },
-    ]
     // `antiope-bridges`: Task 7's wiring alone (the directory, digits to Antiope, the header).
     readonly property var bridgeSteps: [
         { name: "b00", enter: function () { AppSettings.appearance = "antiope" } },
@@ -740,7 +658,7 @@ Kirigami.ApplicationWindow {
         width: 2; height: 2; color: "black"
         Connections { target: root; enabled: frameDriver.visible; function onFrameSwapped() { frameDriver.x = frameDriver.x > 0 ? 0 : 2 } }
     }
-    readonly property var steps: Recette.walk === "crt" ? crtSteps : Recette.walk === "crt-scroll" ? crtScrollSteps : Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
+    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }
