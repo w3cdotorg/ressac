@@ -35,7 +35,6 @@ pub const OPML_FILTER: &str = "OPML files (*.opml)";
 pub const SQLITE_FILTER: &str = "SQLite databases (*.sqlite)";
 
 const UNCHARTED: &str = "Added to Uncharted waters.";
-const EM_SPACE: char = '\u{2003}';
 
 // Add Feed
 
@@ -59,37 +58,34 @@ pub fn added_note(added: &AddedFeed) -> String {
 pub struct FolderChoice {
     pub folder: Option<FolderId>,
     pub name: String,
-    pub depth: usize,
 }
 
 impl FolderChoice {
-    /// The name after one em space per level of depth.
+    /// The bare name: every folder sits at the same level, with no indent (two folders with
+    /// one name look the same; Clément chose that over a nested look).
     pub fn title(&self) -> String {
-        let indent = EM_SPACE.to_string().repeat(self.depth);
-        format!("{indent}{}", self.name)
+        self.name.clone()
     }
 }
 
-/// "Feeds" (the top level), then every folder of `tree` in sidebar order, root folders at depth 1.
+/// "Feeds" (the top level), then every folder of `tree` in sidebar order.
 pub fn folder_choices(tree: &[SourceNode]) -> Vec<FolderChoice> {
-    fn walk(nodes: &[SourceNode], depth: usize, out: &mut Vec<FolderChoice>) {
+    fn walk(nodes: &[SourceNode], out: &mut Vec<FolderChoice>) {
         for node in nodes {
             if let SourceNodeKind::Folder { id, name } = &node.kind {
                 out.push(FolderChoice {
                     folder: Some(*id),
                     name: name.clone(),
-                    depth,
                 });
-                walk(&node.children, depth + 1, out);
+                walk(&node.children, out);
             }
         }
     }
     let mut choices = vec![FolderChoice {
         folder: None,
         name: TOP_LEVEL.into(),
-        depth: 0,
     }];
-    walk(tree, 1, &mut choices);
+    walk(tree, &mut choices);
     choices
 }
 
@@ -603,19 +599,10 @@ mod tests {
             choices.iter().map(|c| c.folder).collect::<Vec<_>>(),
             [None, Some(4), Some(1), Some(2), Some(3)]
         );
-        assert_eq!(
-            choices.iter().map(|c| c.depth).collect::<Vec<_>>(),
-            [0, 1, 1, 2, 3]
-        );
+        // Every folder at the same level: no indent, whatever its depth in the tree.
         assert_eq!(
             choices.iter().map(FolderChoice::title).collect::<Vec<_>>(),
-            [
-                "Feeds",
-                "\u{2003}Blogs",
-                "\u{2003}News",
-                "\u{2003}\u{2003}Sub",
-                "\u{2003}\u{2003}\u{2003}Deep"
-            ]
+            ["Feeds", "Blogs", "News", "Sub", "Deep"]
         );
         assert_eq!(
             AddFeedForm::new(None).folder,

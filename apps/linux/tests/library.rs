@@ -42,7 +42,7 @@ fn first_run_imports_an_opml_then_adds_moves_exports_and_sets_the_database() {
         "walk: 03-drop started=true again=false busy=true",
         "walk: 05-confirm step=confirming title=Import “walk.opml”? lines=3 feeds in 1 new folder.|1 duplicate inside the file will be merged:|“Alpha again” into “Alpha” note=Ressac fetches every feed right after the import. canImport=true",
         "walk: 10-imported empty=false step=idle walk=true gamma=true longRun=false",
-        "walk: 11-add-dialog open=true address=https://example.org/feed.xml themes=None folders=Feeds|\u{2003}Walk canAdd=true",
+        "walk: 11-add-dialog open=true address=https://example.org/feed.xml themes=None folders=Feeds|Walk canAdd=true",
         "walk: 14-add-refusal error=Ressac only follows public web addresses. showLog=false open=true adding=false",
         "walk: 17-add-known error=Already followed: Alpha. showLog=false",
         "walk: 17-closed open=false",

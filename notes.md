@@ -434,6 +434,7 @@ Demandé par Clément le 23/10/2026 : Ressac sur marghe (Fedora KDE Plasma 44, a
 - **Échelle 1 à 15 px** (hors de la matrice du test) : un pixel de police fait 1,5 pixel physique, les bandes d'un pixel tombent sur des demi-pixels et aucune ligne n'est épargnée (0,86, 0,86, 0,72 de la valeur sans bande) ; même chose à 25 px. Limite de la géométrie, pas du dessin.
 - **Coin du tube** : le « P » de « P201 » est rogné par le coin haut gauche (la marge de droite de l'en-tête est réservée, celle de gauche non).
 - **Deux pistes mesurées pour une reprise** : retirer les copies horizontales de la lueur, toujours sous les copies rouge et bleue (+1,2 à +1,9 ms au pas de 10) ; repeindre la surcouche à son apparition (`onVisibleChanged` puis `requestPaint`), ce qui devrait corriger la VM. Le test de coût est alors à lancer seul (`--test-threads=1`) ou contre un témoin du même passage.
+- **Mesure en release** (après la coupe, conteneur Fedora 44, commit `51c8eb5` dans un worktree jetable, échelle 2, test lancé seul) : au pas de 10 articles par image, le CRT complet passe de 1,1 à 1,5 ms à 3,5 à 3,9 ms de p95 (+2,3 à +2,7 ms) ; au pas de 1, +0,3 à +1,1 ms ; aucune image au-delà de 33 ms, maximum 5,8 ms. Sans les deux copies horizontales de la lueur : +2,10, +1,69 et +1,99 ms (la ligne du budget, bruit d'environ ±0,3 ms). La ligne de repeinte à l'apparition fait journaliser `paints=2` à e02 dans le conteneur ; son effet sur la VM n'est pas vérifié. La coupe tient donc sur le budget de 2 ms du plan en release aussi.
 
 ## Paysage existant (10/10/2026)
 

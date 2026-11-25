@@ -46,7 +46,8 @@ session_env() {
     exit 3
   fi
   for name in WAYLAND_DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE \
-    XDG_CURRENT_DESKTOP QT_QPA_PLATFORMTHEME KDE_FULL_SESSION DISPLAY; do
+    XDG_CURRENT_DESKTOP QT_QPA_PLATFORMTHEME KDE_FULL_SESSION KDE_SESSION_VERSION \
+    XDG_SESSION_DESKTOP DESKTOP_SESSION DISPLAY; do
     value=$(tr '\0' '\n' <"/proc/$pid/environ" | sed -n "s/^$name=//p" | head -1 || true)
     if [ -n "$value" ]; then
       export "$name=$value"
