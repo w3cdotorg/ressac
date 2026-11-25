@@ -27,19 +27,21 @@ fn reading_keys_reach_the_router_before_the_lists_the_reader_and_the_menus() {
         "walk: 17-garden-keys verb=previousEntry handled=false",
         "walk: 18-auto-read selected=4 read=false page=ressac:page/4-",
         "walk: 21-auto-read-done read=true page=ressac:page/4-",
-        "walk: 23-menu read=Mark as Unread enabled=true star=Unstar",
+        // The toolbar's Star button agrees with the menu once the write has settled.
+        "walk: 23-menu read=Mark as Unread enabled=true star=Unstar toolbar=Unstar",
         "walk: 24-text-size bigger=18 actual=17",
     ] {
         assert!(err.contains(line), "{line} missing in {err}");
     }
-    // The reader's own item has the focus (not a list), and k, j, m, m, s, s still act.
+    // The reader's own item has the focus (not a list), and k, j, m, m, s, s still act; the
+    // toolbar's Star button shows the toggle at once (the list's optimistic row).
     let line = err
         .lines()
         .find(|l| l.contains("walk: 22-reader-keys"))
         .unwrap_or_else(|| panic!("walk 22 in {err}"));
     assert!(
         line.contains("focus=reader item=QtWebEngineCore::RenderWidgetHostViewQtDelegateItem")
-            && line.ends_with(" k=1 j=4 m=false m2=true s=false s2=true"),
+            && line.ends_with(" k=1 j=4 m=false m2=true s=false s2=true toolbar=Star,Unstar"),
         "{line}"
     );
     assert_eq!(

@@ -14,6 +14,7 @@ Item {
     property alias allButton: allButton
     property alias unreadButton: unreadButton
     property alias sourcesPane: sourcesPane
+    property alias starButton: starButton
     // The look on screen: Antiope's view over the hidden native panes, or the native panes alone.
     property string look: AppSettings.effectiveAppearance
     readonly property bool antiope: look === "antiope"
@@ -294,8 +295,11 @@ Item {
                 }
 
                 QQC2.ToolButton {
-                    text: Reader.isStarred ? "Unstar" : "Star"
-                    icon.name: Reader.isStarred ? "starred-symbolic" : "non-starred-symbolic"
+                    id: starButton
+                    // The list's row, as the menu: an own star toggle shows at once (its optimistic row);
+                    // the Reader's detail only refreshes on a full reload.
+                    text: EntriesModel.selectedStarred ? "Unstar" : "Star"
+                    icon.name: EntriesModel.selectedStarred ? "starred-symbolic" : "non-starred-symbolic"
                     display: QQC2.AbstractButton.IconOnly
                     enabled: Reader.hasEntry && EntriesModel.selectedRow >= 0
                     onClicked: EntriesModel.toggleStarred(EntriesModel.selectedRow)

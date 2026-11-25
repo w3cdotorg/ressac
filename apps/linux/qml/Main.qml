@@ -154,11 +154,13 @@ Kirigami.ApplicationWindow {
             Recette.key(Qt.Key_J, "j", 0); const j = EntriesModel.selectedEntryId
             Recette.key(Qt.Key_M, "m", 0); const m = EntriesModel.selectedRead
             Recette.key(Qt.Key_M, "m", 0); const m2 = EntriesModel.selectedRead
-            Recette.key(Qt.Key_S, "s", 0); const s = EntriesModel.selectedStarred
+            Recette.key(Qt.Key_S, "s", 0); const s = EntriesModel.selectedStarred; const toolbar1 = page.starButton.text
             Recette.key(Qt.Key_S, "s", 0); const s2 = EntriesModel.selectedStarred
-            console.warn("walk: 22-reader-keys focus=" + focus + " k=" + k + " j=" + j + " m=" + m + " m2=" + m2 + " s=" + s + " s2=" + s2) } },
+            console.warn("walk: 22-reader-keys focus=" + focus + " k=" + k + " j=" + j + " m=" + m + " m2=" + m2 + " s=" + s + " s2=" + s2
+                + " toolbar=" + toolbar1 + "," + page.starButton.text) } },
         { name: "23-menu", enter: function () { mainMenu.openMenu("article")
-            console.warn("walk: 23-menu read=" + mainMenu.toggleRead.text + " enabled=" + mainMenu.toggleRead.enabled + " star=" + mainMenu.toggleStar.text) } },
+            console.warn("walk: 23-menu read=" + mainMenu.toggleRead.text + " enabled=" + mainMenu.toggleRead.enabled + " star=" + mainMenu.toggleStar.text
+                + " toolbar=" + readingLoader.item.starButton.text) } },
         { name: "24-text-size", enter: function () { mainMenu.closeMenus(); const before = AppSettings.readerSize
             mainMenu.biggerText.trigger(); const bigger = AppSettings.readerSize
             mainMenu.actualSize.trigger(); console.warn("walk: 24-text-size bigger=" + bigger + " actual=" + AppSettings.readerSize)
