@@ -137,11 +137,14 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 
 ### Linux (sous-projet 8)
 
-- [ ] Konsole : vérifier à la main sur marghe quel protocole d'images le lecteur y trouve (aujourd'hui des demi-blocs quand aucun n'est reconnu) et décider si un correctif vaut la peine (spec §5.2).
+- [ ] Konsole : le lecteur du terminal y montre des demi-blocs (vérifié sur marghe le 25/11, journal `detected=Halfblocks reason="nothing detected"`) : `ratatui-image` 11.1 écarte Kitty et Sixel sous `KONSOLE_VERSION` et ne propose pas iTerm2. Faire essayer à Clément `RESSAC_IMAGES=iterm2`, puis `kitty` et `sixel`, dans Konsole (dessin et effacement au défilement) ; si l'un tient, le choisir dans `decide_protocol` quand `KONSOLE_VERSION` est posé et que rien n'est détecté (spec §5.2).
+- [ ] Réglages › Données : Clément n'a pas vu « Relaunch Now » à la VM 2. Comme sur le Mac, le bouton n'apparaît qu'après un chemin de base changé ; lui demander s'il a choisi un autre fichier (si oui, c'est un bogue à reproduire).
+- [ ] Listes déroulantes de dossiers (Add Feed) : Clément veut tous les dossiers au même niveau, sans retrait (aujourd'hui une espace cadratin par niveau, `FolderChoice::title`, comme le Mac) ; attention aux dossiers homonymes une fois le retrait ôté.
+- [ ] `marghe.sh` : recopier aussi `KDE_SESSION_VERSION` (et `XDG_SESSION_DESKTOP`, `DESKTOP_SESSION`) de la session ; sans elle, `xdg-open` appelle `kfmclient` et « Open Site » ne fait rien dans `manual` (VM 2), puis faire revérifier « Open Site » du jardin.
 - [ ] Lecteur et jardin du terminal : un SIGTERM venu d'ailleurs les arrête sans restaurer le terminal (mode brut, écran alternatif). Il faudrait que les deux boucles surveillent le signal et quittent proprement (`commands/mod.rs`, `commands/garden.rs`, une boucle du jardin qui n'attend plus `event::read` sans fin).
 - [ ] Après le 02/11/2026 (crédits Actions) : vérifier le premier passage de `ci.yml` (job `fedora`, avertissement attendu de `--exclude ressac-kde` tant que l'appli n'existe pas) et, au premier tag, celui de `release.yml` (le runner `ubuntu-22.04-arm` est-il offert à ce dépôt ? il est public, donc normalement oui ; sinon le job attend sans fin dans la file).
 - [ ] Release : le build x86_64 n'a jamais été rejoué et le plafond glibc (2.35) est affiché, pas contrôlé ; ajouter un garde-fou qui échoue au-delà.
-- [ ] Recette `--screenshot` : attendre le `loadingChanged` (ou la première peinture) de la page WebEngine avant chaque capture ; sur la VM, le panneau du lecteur sort gris, vide ou périmé sur plusieurs captures (artefact de minutage, Clément ne le voit pas à la main). Vérifier aussi le menu global de Plasma (non vérifié au point d'étape VM 1).
+- [ ] Recette `--screenshot` : attendre le `loadingChanged` (ou la première peinture) de la page WebEngine avant chaque capture ; sur la VM, le panneau du lecteur sort gris, vide ou périmé sur plusieurs captures (artefact de minutage, Clément ne le voit pas à la main). Le menu global de Plasma est vérifié (VM 2, 25/11) ; à la main, Clément n'a pas vu de lecteur gris au premier affichage.
 
 ### Durcissement proposé, non fait
 

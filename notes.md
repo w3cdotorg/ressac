@@ -394,6 +394,35 @@ Demandé par Clément le 23/10/2026 : Ressac sur marghe (Fedora KDE Plasma 44, a
 - **Écran CRT (B9)** : avec le moteur logiciel, `ShaderEffect` et `MultiEffect` ne dessinent rien ; un `Canvas` fonctionne et coûte +0,15 ms (échelle 1) et +0,4 ms (échelle 2) par image de défilement. B9 prend `Canvas` partout.
 - **Piège du parcours** : la sonde est parentée à la surcouche de la fenêtre (`QQC2.Overlay.overlay`) et non à la page, sinon la barre de menus décale tout de 26 px et le test de pixels, qui compte depuis le coin de la fenêtre, tombe à côté.
 
+### Point d'étape VM 2 (B8, 25/11/2026)
+
+- **Commit testé** : `5bed1d0`, transféré par l'entrée standard, compilé en release sur la VM (2 min 47 s, 171 s en tout), aucun paquet Fedora en plus. `marghe.sh` gagne `shots … --look --walk --big N [--long] --env K=V`, `manual --look --big N [--long] --frame-log` et note le commit installé (`check` affiche `installed: <sha>`). `shots` et `manual` lancent le binaire installé : leurs mesures sont des mesures release.
+- **Piège** : une session Plasma ouverte mais verrouillée (`kscreenlocker_greet`, `LockedHint=yes`) ne présente aucune image ; tout ce qui compte les images (grille, défilement, maintien de `j`) se bloque jusqu'au délai de 60 s du parcours. Il faut que Clément déverrouille avant les mesures (`loginctl show-session <n> -p LockedHint`).
+- **Rendu** : virgl gardé. Le rendu logiciel ne fait pas mieux (mêmes intervalles, même p95). Un panneau de lecteur blanc à `a07-suite` sur le premier passage, avec une perte de contexte GPU de Chromium dans le journal (`Context lost during MakeCurrent`), est venu avec l'écran verrouillé : écran déverrouillé, aucune perte de contexte et le lecteur dessiné.
+- **Grille à l'échelle 2** (captures `a01`, `a05`, `c03`, `c06`, `g01`, 2200 x 1440) : les 8 couleurs seulement sous la barre de menus, aucun pixel hors palette, Bedstead net ; cellules de 24 pixels de large et lignes de 40 pixels à 20 px, filets bleus droits (même étendue sur toutes les lignes). Dans le lecteur, le texte de l'article est en Bedstead mais Chromium lisse la police web (bords gris, 44 couleurs dans la colonne).
+- **Images par seconde sur la VM** (release, virgl sauf mention ; moyenne / p50 / p95 / max en ms). Dans une vraie session Wayland, KWin cale chaque image sur la synchro verticale à 60 Hz : la moyenne et la médiane restent à 16,6 ou 16,7 ms, et `over16` (près de la moitié des images) ne compte que la gigue autour de 16,67 ms. Ces chiffres ne se comparent donc pas aux temps de rendu hors écran du conteneur (tableau ci-dessus).
+
+| Mesure | virgl | logiciel |
+|---|---|---|
+| `grid: painted` pas 1 | 17,33 / 16,70 / 18,05 / 176,09 | 16,72 / 16,69 / 18,19 / 34,47 |
+| `grid: painted` pas 10 | 16,70 / 16,65 / 18,29 / 23,73 | 16,76 / 16,65 / 18,43 / 33,90 |
+| `grid: text` pas 1 | 16,69 / 16,66 / 18,92 / 32,44 | 16,71 / 16,68 / 18,32 / 33,39 |
+| `grid: text` pas 10 | 16,73 / 16,67 / 18,52 / 32,00 | 16,74 / 16,70 / 18,73 / 32,90 |
+| `frames: antiope` pas 1 (2004 lignes) | 16,74 / 16,70 / 18,27 / 51,67 | 16,65 / 16,66 / 18,87 / 21,71 |
+| `frames: antiope` pas 10 | 16,68 / 16,69 / 17,89 / 19,76 | 16,67 / 16,65 / 18,42 / 21,69 |
+
+- **Maintien de `j`** (60 appuis, release ; temps de l'appui seul, moyenne / max en ms) : Native sur une page (500 lignes) 2,85 / 5 ; Antiope sur une page 3,27 / 9 ; **Antiope à 2004 lignes 5,40 / 8** (virgl), 5,25 / 9 (logiciel), 5,75 / 8 avec 200 articles longs de 29 ko (`--long`, les données du test du conteneur). Aucun appui lent (`slow=0`), `wrote=0 settled=60` partout, la pastille rattrape 21 à 87 ms après le relâchement. Le conteneur en debug donnait environ 24 ms par appui : sous le seuil de 12 ms, pas d'optimisation de plus. Native à 2000 lignes n'est pas mesuré (le parcours ne tient Native que sur une page).
+- **Session de Clément** (`manual --look antiope --big 2000 --frame-log`, 48 lignes `ressac-kde: frames` toutes les 10 s) : dans les fenêtres actives, médiane de 16,7 à 17,5 ms (par exemple `n=313 mean=28.43 p50=16.72 p95=35.39`, `n=293 mean=29.61 p50=16.80 p95=27.37`) ; les moyennes hautes et les maxima autour de 1000 ms sont les secondes d'inactivité (l'horloge de l'en-tête ne redessine qu'une fois par seconde). Clément juge le défilement fluide, à la molette comme au clavier.
+- **Touches** : parcours `antiope` vert (lignes a01 à a10 identiques à `tests/antiope.rs`), parcours `antiope-pages` vert (les écarts de comptes avec `tests/antiope_pages.rs` viennent des données : le test prépare la base et fixe `TZ=UTC`). À la main, Clément : 201 puis 437 (NOT FOUND), Alt+S, Alt+G, ?, flèches entre colonnes et dans l'index, Espace, j, k, `i` et clic sur une image, Ctrl+F puis Entrée : « tout OK ».
+- **Mosaïques sur de vrais flux** : non vérifiées en tant que telles (la base de test n'a pas de vrais flux) ; `i` et le clic sur une image vont bien.
+- **Gestes de B6 et B7, un par un** (Clément, 25/11) : menu global de Plasma OK ; glisser un flux sur un dossier et un article hors de la fenêtre OK ; dialogues de fichiers par le portail (OPML, chemin des données) OK ; Entrée dans les listes déroulantes OK ; touches du libellé du jardin et Entrée du dialogue OK ; Ctrl+Z et dialogue des réparations sûres dans le jardin d'Antiope OK ; carte marine mise au premier plan et rafraîchissement arrêté une fois réduite OK ; pas de lecteur gris au premier affichage ; page à image lente OK ; Ctrl+N OK.
+- **Anomalies** :
+  - « Relaunch Now » absent dans Réglages › Données. Comme sur le Mac (`SettingsView.swift`, `update`), le bouton n'apparaît qu'après un chemin de base changé (`choose_database` renvoie `Stored`, `apps/linux/src/settings.rs`) ; un chemin inchangé, une annulation ou « Use Default » sans chemin enregistré n'en montrent pas. Probablement le comportement attendu : reste à savoir si Clément a choisi un autre fichier.
+  - Listes déroulantes de dossiers en retrait : le dossier est précédé d'une espace cadratin par niveau (`FolderChoice::title`, `crates/ressac-ui/src/library.rs`), comme le menu du Mac (`AddFeedSheet.swift`). Clément voudrait tous les dossiers au même niveau.
+  - « Open Site » du jardin ne fait rien : `Qt.openUrlExternally` passe par `xdg-open`, qui, sans `KDE_SESSION_VERSION`, croit à un vieux KDE et appelle `kfmclient` (« command not found », trois fois dans le journal). La variable vaut 6 dans la session, mais `marghe.sh` ne la recopie pas : artefact de l'outillage, pas de l'appli lancée depuis le menu.
+  - Lecteur du terminal dans Konsole : images en demi-blocs. `ratatui-image` 11.1 écarte exprès Kitty et Sixel quand `KONSOLE_VERSION` est posé (Sixel bogué, bug KDE 456354) et ne connaît pas l'iTerm2 de Konsole ; le journal dit `detected=Halfblocks … reason="nothing detected"`.
+  - Le premier passage, écran verrouillé : perte de contexte GPU de Chromium et lecteur blanc (voir Rendu).
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
