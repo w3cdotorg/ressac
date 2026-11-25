@@ -99,7 +99,7 @@ fn the_antiope_pages_walk_reads_every_page() {
         // The edition marked read away from P104 (on P201): arriving on P104 reads it again.
         "walk: c05c-change-away page=201",
         "walk: c05d-journal-again selected=journal read=2/2 end=true",
-        // P800 lists Hijacked 6, Moved 5 and Fossil 2; the inspector shows the first, 6.
+        // P800 lists Hijacked 6, Moved 5 and Ailing 2; the inspector shows the first, 6.
         "walk: c06-garden selected=garden:needs-triage column=entries inspector=25 entries-focus=true",
         // `k` keeps 6 through the entries column's rows (B5's keep path): no refusal message.
         "walk: c06b-garden-key message=",
@@ -108,10 +108,13 @@ fn the_antiope_pages_walk_reads_every_page() {
         "walk: c06c-repairs confirming=true count=2 of 4 left",
         "walk: c06d-repairs-switch focus=Apply look=native confirming=false",
         "walk: c06e-back look=antiope page=800 confirming=false",
-        // Digits in the prompt are text, one per press; the page stays.
-        "walk: c07-prompt-digits search=412 page=800 prompt=false typed=4|41|412",
-        // The prompt goes with the view, its text kept; `j` is a command at once in Native.
-        "walk: c08-switch-with-prompt look=native search=412x focus=sidebar letter=nextEntry search-after=412x",
+        // Digits in the prompt are text, one per press: the header never shows a page being
+        // typed (`P4`, `P41`) nor NOT FOUND, and the page stays.
+        "walk: c07-prompt-digits search=412 page=800 prompt=false typed=4|41|412 headers=P800|P800|P800 after=P800",
+        // The prompt goes with the view, its text kept; `j` reaches the window filter at once as
+        // Native's command (not typed into a field). It acts on nothing here: a garden has no
+        // entry list to move in.
+        "walk: c08-switch-with-prompt look=native search=412x focus=sidebar letter=nextEntry handled=false search-after=412x",
         "walk: c09-banner banner=true",
         "walk: c10-settings appearance=antiope bedstead=true",
     ] {

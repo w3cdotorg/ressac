@@ -402,8 +402,12 @@ Kirigami.ApplicationWindow {
     function lineText(encoded) { return lineField(encoded, 3).split("\u001f").map(run => run.slice(2)).join("") }
     function dial(page) { for (const d of String(page)) Recette.key(Qt.Key_0 + Number(d), d, 0) }
     function journalEnd() { return Antiope.journalRows.some(row => root.lineField(row, 0) === "end") }
-    property bool waitWrote: false               // a step waiting for an own write to land
-    Connections { target: EntriesModel; enabled: root.waitWrote; function onWrote() { root.waitWrote = false; root.walkPaused = false } }
+    // The header's page label (its first run): `P800`, `P41` while digits are typed, `P437 NOT FOUND`.
+    function headerPage() { return Antiope.header.split("\u001f")[0].slice(2).trim() }
+    // An own write to land (`EntriesModel.wrote`), at most `ms`: the walk waits through `waitFor`.
+    property bool waitWrote: false
+    Connections { target: EntriesModel; enabled: root.waitWrote; function onWrote() { root.waitWrote = false } }
+    function waitForWrote(ms) { root.waitWrote = true; root.waitFor(() => !root.waitWrote, ms) }
     // Holds the walk until `test()` holds (polled every 20 ms) or `ms` passed: a write or a
     // popup's transition lands in its own time on a loaded machine.
     function waitFor(test, ms) { walkWait.test = test; walkWait.until = Date.now() + ms; root.walkPaused = true; walkWait.start() }
@@ -429,6 +433,10 @@ Kirigami.ApplicationWindow {
         { name: "c04-suite-end", enter: function () {
             // The edition's last entry clicked (its row's action), then SUITE past it.
             const entries = Antiope.journalRows.map(row => root.lineField(row, 2)).filter(action => action.startsWith("entry:"))
+            if (entries.length === 0) {                     // an empty edition (another copy): nothing to read
+                console.warn("walk: c04-suite-end reader=" + Antiope.readerPage + " edition=empty")
+                return
+            }
             readingLoader.item.antiopeView.activate(entries[entries.length - 1], 0)
             Recette.key(Qt.Key_J, "j", 0)
             console.warn("walk: c04-suite-end reader=" + Antiope.readerPage + " read=" + EntriesModel.selectedRead) } },
@@ -439,7 +447,7 @@ Kirigami.ApplicationWindow {
             console.warn("walk: c05b-end-jump before=" + before + " reader=" + Antiope.readerPage + " page=" + Antiope.currentPage) } },
         { name: "c05c-change-away", enter: function () {
             // A database change away from P104: the edition's entries marked read from here.
-            root.walkPaused = true; root.waitWrote = true
+            root.waitForWrote(5000)
             EntriesModel.markAllReadIn("journal")
             console.warn("walk: c05c-change-away page=" + Antiope.currentPage) } },
         { name: "c05d-journal-again", enter: function () { root.dial(104)
@@ -464,17 +472,22 @@ Kirigami.ApplicationWindow {
         { name: "c06e-back", enter: function () { AppSettings.appearance = "antiope"
             console.warn("walk: c06e-back look=" + readingLoader.item.look + " page=" + Antiope.currentPage + " confirming=" + Garden.confirming) } },
         { name: "c07-prompt-digits", enter: function () { mainMenu.search.trigger()
-            const typed = []
-            for (const d of "412") { Recette.key(Qt.Key_0 + Number(d), d, 0); typed.push(EntriesModel.searchText) }
+            // After each press: the search text, and the header's page label (never `P4`, `P41`, `P412`:
+            // no page number is being typed, nor NOT FOUND).
+            const typed = []; const headers = []
+            for (const d of "412") { Recette.key(Qt.Key_0 + Number(d), d, 0); typed.push(EntriesModel.searchText); headers.push(root.headerPage()) }
             Recette.key(Qt.Key_Return, "\r", 0)
             console.warn("walk: c07-prompt-digits search=" + EntriesModel.searchText + " page=" + Antiope.currentPage
-                + " prompt=" + readingLoader.item.antiopeView.promptOpen + " typed=" + typed.join("|")) } },
+                + " prompt=" + readingLoader.item.antiopeView.promptOpen + " typed=" + typed.join("|") + " headers=" + headers.join("|")
+                + " after=" + root.headerPage()) } },
         { name: "c08-switch-with-prompt", enter: function () { mainMenu.search.trigger(); Recette.key(Qt.Key_X, "x", 0)
             AppSettings.appearance = "native"
             // The prompt went with the view, its text kept; a letter is a command at once in Native.
             const p = readingLoader.item; const switched = "look=" + p.look + " search=" + EntriesModel.searchText + " focus=" + p.focusName()
+            p.lastVerb = ""; p.lastHandled = false
             Recette.key(Qt.Key_J, "j", 0)
-            console.warn("walk: c08-switch-with-prompt " + switched + " letter=" + p.lastVerb + " search-after=" + EntriesModel.searchText) } },
+            console.warn("walk: c08-switch-with-prompt " + switched + " letter=" + p.lastVerb + " handled=" + p.lastHandled
+                + " search-after=" + EntriesModel.searchText) } },
         { name: "c09-banner", enter: function () { Runs.showBanner("The database is busy (is `ressac` running in a terminal?)", true)
             AppSettings.appearance = "antiope"
             console.warn("walk: c09-banner banner=" + Runs.bannerVisible) } },
