@@ -395,6 +395,92 @@ Kirigami.ApplicationWindow {
         { name: "a10-awkward", enter: function () { AppSettings.appearance = "antiope"; SourcesModel.selectKey("feed:1")
             console.warn("walk: a10-awkward focus=" + readingLoader.item.focusName()) } },
     ]
+    // The `antiope-pages` walk (B8c4): every Antiope page on screen. The test's copy: an edition of
+    // entries 1 and 3 with an overflow row, feed 2 waiting for triage (P800), no network.
+    // An encoded `Line` (pages::Line::encode): id, flags, action, cells; a run is fg, bg, text.
+    function lineField(encoded, field) { return String(encoded).split("\u001d")[field] || "" }
+    function lineText(encoded) { return lineField(encoded, 3).split("\u001f").map(run => run.slice(2)).join("") }
+    function dial(page) { for (const d of String(page)) Recette.key(Qt.Key_0 + Number(d), d, 0) }
+    function journalEnd() { return Antiope.journalRows.some(row => root.lineField(row, 0) === "end") }
+    property bool waitWrote: false               // a step waiting for an own write to land
+    Connections { target: EntriesModel; enabled: root.waitWrote; function onWrote() { root.waitWrote = false; root.walkPaused = false } }
+    // Holds the walk until `test()` holds (polled every 20 ms) or `ms` passed: a write or a
+    // popup's transition lands in its own time on a loaded machine.
+    function waitFor(test, ms) { walkWait.test = test; walkWait.until = Date.now() + ms; root.walkPaused = true; walkWait.start() }
+    Timer {
+        id: walkWait
+        interval: 20
+        repeat: true
+        property var test: null
+        property real until: 0
+        onTriggered: if (test() || Date.now() > until) { stop(); root.walkPaused = false }
+    }
+    readonly property var antiopePagesSteps: [
+        { name: "c01-sommaire", enter: function () { AppSettings.appearance = "antiope"
+            const o = readingLoader.item.antiopeView.mapToItem(null, 0, 0)
+            console.warn("walk: c01-origin x=" + o.x + " y=" + o.y)
+            Recette.key(Qt.Key_S, "s", Qt.AltModifier)
+            console.warn("walk: c01-sommaire reader=" + Antiope.readerPage + " rows=" + Antiope.readerRows.length
+                + " first=" + root.lineText(Antiope.readerRows[0]).trim()) } },
+        { name: "c02-guide", enter: function () { Recette.key(Qt.Key_Question, "?", Qt.ShiftModifier)
+            console.warn("walk: c02-guide reader=" + Antiope.readerPage) } },
+        { name: "c03-journal", enter: function () { root.dial(104)
+            console.warn("walk: c03-journal selected=" + SourcesModel.selectedKey + " rows=" + Antiope.journalRows.length + " end=" + root.journalEnd()) } },
+        { name: "c04-suite-end", enter: function () {
+            // The edition's last entry clicked (its row's action), then SUITE past it.
+            const entries = Antiope.journalRows.map(row => root.lineField(row, 2)).filter(action => action.startsWith("entry:"))
+            readingLoader.item.antiopeView.activate(entries[entries.length - 1], 0)
+            Recette.key(Qt.Key_J, "j", 0)
+            console.warn("walk: c04-suite-end reader=" + Antiope.readerPage + " read=" + EntriesModel.selectedRead) } },
+        { name: "c05-retour", enter: function () { Recette.key(Qt.Key_K, "k", 0)
+            console.warn("walk: c05-retour reader=" + Antiope.readerPage) } },
+        { name: "c05b-end-jump", enter: function () { Recette.key(Qt.Key_J, "j", 0); const before = Antiope.readerPage
+            root.dial(201)
+            console.warn("walk: c05b-end-jump before=" + before + " reader=" + Antiope.readerPage + " page=" + Antiope.currentPage) } },
+        { name: "c05c-change-away", enter: function () {
+            // A database change away from P104: the edition's entries marked read from here.
+            root.walkPaused = true; root.waitWrote = true
+            EntriesModel.markAllReadIn("journal")
+            console.warn("walk: c05c-change-away page=" + Antiope.currentPage) } },
+        { name: "c05d-journal-again", enter: function () { root.dial(104)
+            const read = (root.lineText(Antiope.journalRows[0]).match(/(\d+\/\d+) READ/) || ["", "?"])[1]
+            console.warn("walk: c05d-journal-again selected=" + SourcesModel.selectedKey + " read=" + read + " end=" + root.journalEnd()) } },
+        { name: "c06-garden", enter: function () { root.dial(800); Recette.key(Qt.Key_Right, "", 0)
+            const view = readingLoader.item.antiopeView
+            console.warn("walk: c06-garden selected=" + SourcesModel.selectedKey + " column=" + Antiope.column + " inspector=" + Garden.antiopeInspector.length
+                + " entries-focus=" + view.entriesItem.activeFocus) } },
+        { name: "c06b-garden-key", enter: function () { const before = Garden.countLabel; Recette.key(Qt.Key_K, "k", 0)
+            console.warn("walk: c06b-garden-key message=" + Garden.message)
+            root.waitFor(() => Garden.countLabel !== before, 5000) } },        // the keep's write
+        { name: "c06c-repairs", enter: function () { const count = Garden.countLabel
+            Recette.key(Qt.Key_R, "R", Qt.ShiftModifier)
+            console.warn("walk: c06c-repairs confirming=" + Garden.confirming + " count=" + count)
+            root.waitFor(() => root.activeFocusItem !== null && root.activeFocusItem.text === Garden.applyConfirmLabel, 3000) } },
+        { name: "c06d-repairs-switch", enter: function () {
+            // The question's confirm button has the keyboard; a look switch drops the question.
+            const focused = root.activeFocusItem; const focus = focused && focused.text !== undefined ? focused.text : String(focused)
+            AppSettings.appearance = "native"
+            console.warn("walk: c06d-repairs-switch focus=" + focus + " look=" + readingLoader.item.look + " confirming=" + Garden.confirming) } },
+        { name: "c06e-back", enter: function () { AppSettings.appearance = "antiope"
+            console.warn("walk: c06e-back look=" + readingLoader.item.look + " page=" + Antiope.currentPage + " confirming=" + Garden.confirming) } },
+        { name: "c07-prompt-digits", enter: function () { mainMenu.search.trigger()
+            const typed = []
+            for (const d of "412") { Recette.key(Qt.Key_0 + Number(d), d, 0); typed.push(EntriesModel.searchText) }
+            Recette.key(Qt.Key_Return, "\r", 0)
+            console.warn("walk: c07-prompt-digits search=" + EntriesModel.searchText + " page=" + Antiope.currentPage
+                + " prompt=" + readingLoader.item.antiopeView.promptOpen + " typed=" + typed.join("|")) } },
+        { name: "c08-switch-with-prompt", enter: function () { mainMenu.search.trigger(); Recette.key(Qt.Key_X, "x", 0)
+            AppSettings.appearance = "native"
+            // The prompt went with the view, its text kept; a letter is a command at once in Native.
+            const p = readingLoader.item; const switched = "look=" + p.look + " search=" + EntriesModel.searchText + " focus=" + p.focusName()
+            Recette.key(Qt.Key_J, "j", 0)
+            console.warn("walk: c08-switch-with-prompt " + switched + " letter=" + p.lastVerb + " search-after=" + EntriesModel.searchText) } },
+        { name: "c09-banner", enter: function () { Runs.showBanner("The database is busy (is `ressac` running in a terminal?)", true)
+            AppSettings.appearance = "antiope"
+            console.warn("walk: c09-banner banner=" + Runs.bannerVisible) } },
+        { name: "c10-settings", enter: function () { root.openSettings()
+            console.warn("walk: c10-settings appearance=" + AppSettings.effectiveAppearance + " bedstead=" + AppSettings.bedsteadAvailable) } },
+    ]
     // The `antiope-scroll` walk: `j` held on long unread articles with one page loaded (Native, then
     // Antiope), the entries column scrolled (frame times), then `j` held again with 2000 rows loaded.
     // Each hold starts on rows the last one left unread.
@@ -483,7 +569,7 @@ Kirigami.ApplicationWindow {
         width: 2; height: 2; color: "black"
         Connections { target: root; enabled: frameDriver.visible; function onFrameSwapped() { frameDriver.x = frameDriver.x > 0 ? 0 : 2 } }
     }
-    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
+    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }
