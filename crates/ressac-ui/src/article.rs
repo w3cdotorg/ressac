@@ -534,7 +534,8 @@ impl LinkDecision {
 pub use crate::sanitize::TOGGLE_SCHEME;
 
 /// Only the page the pane set loads (typed, main frame, under `PAGE_PREFIX`); a clicked link
-/// swaps a mosaic or, when it is a web address, opens in the browser; everything else (other
+/// swaps a mosaic (in the main frame only) or, when it is a web address, opens in the browser;
+/// everything else (other
 /// pages, forms, reloads, redirects, history, other schemes) is cancelled.
 pub fn decide(kind: Navigation, url: &str, main_frame: bool, expected_page: &str) -> LinkDecision {
     match kind {
@@ -542,7 +543,9 @@ pub fn decide(kind: Navigation, url: &str, main_frame: bool, expected_page: &str
             LinkDecision::Allow
         }
         Navigation::LinkClicked => match toggle_index(url) {
-            Some(index) => LinkDecision::ToggleImage(index),
+            // Only the page itself swaps its images (it has no frames).
+            Some(index) if main_frame => LinkDecision::ToggleImage(index),
+            Some(_) => LinkDecision::Cancel,
             None if is_web_url(url) => LinkDecision::OpenExternally(url.to_string()),
             None => LinkDecision::Cancel,
         },
@@ -1239,6 +1242,23 @@ mod tests {
             ),
             LinkDecision::ToggleImage(3)
         );
+        // Never from a frame (the page has none), nor from anything but a click.
+        assert_eq!(
+            decide(
+                Navigation::LinkClicked,
+                "ressac-toggle:3",
+                false,
+                "ressac:page/1-1"
+            ),
+            LinkDecision::Cancel
+        );
+        for kind in [Navigation::Typed, Navigation::Redirect, Navigation::Other] {
+            assert_eq!(
+                decide(kind, "ressac-toggle:3", true, "ressac:page/1-1"),
+                LinkDecision::Cancel,
+                "{kind:?}"
+            );
+        }
         assert_eq!(toggle_index("RESSAC-TOGGLE:0"), Some(0));
         for bad in [
             "ressac-toggle:-1",

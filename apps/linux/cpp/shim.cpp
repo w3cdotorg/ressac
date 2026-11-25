@@ -161,6 +161,20 @@ private:
 // The installed handler (owned by the application object).
 QPointer<MosaicHandler> g_mosaic_handler;
 
+// ressac-toggle:<n> is a mosaic box's link: registered so a click on it is an ordinary navigation
+// that reaches the reader's onNavigationRequested, which always rejects it (and swaps the image).
+// No request is ever expected here; one that comes is refused.
+class ToggleHandler : public QWebEngineUrlSchemeHandler
+{
+public:
+    using QWebEngineUrlSchemeHandler::QWebEngineUrlSchemeHandler;
+
+    void requestStarted(QWebEngineUrlRequestJob *job) override
+    {
+        job->fail(QWebEngineUrlRequestJob::RequestDenied);
+    }
+};
+
 // Takes the reading keys before the focused item sees them, WebEngine's delegate included (QML
 // `Keys` on an ancestor only sees what Chromium declined, a round trip later). The ShortcutOverride
 // is accepted for a key the router claims, so no single-letter Action or Shortcut fires; the
@@ -269,6 +283,9 @@ void ressac_init_webengine()
     QWebEngineUrlScheme mosaic(QByteArrayLiteral("ressac-mosaic"));
     mosaic.setSyntax(QWebEngineUrlScheme::Syntax::Path);
     QWebEngineUrlScheme::registerScheme(mosaic);
+    QWebEngineUrlScheme toggle(QByteArrayLiteral("ressac-toggle"));
+    toggle.setSyntax(QWebEngineUrlScheme::Syntax::Path);
+    QWebEngineUrlScheme::registerScheme(toggle);
 
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     QtWebEngineQuick::initialize();
@@ -295,6 +312,7 @@ void ressac_create_application()
     profile->installUrlSchemeHandler("ressac", new RessacSchemeHandler(qApp));
     g_mosaic_handler = new MosaicHandler(qApp);
     profile->installUrlSchemeHandler("ressac-mosaic", g_mosaic_handler);
+    profile->installUrlSchemeHandler("ressac-toggle", new ToggleHandler(qApp));
 
     QGuiApplication::setDesktopFileName(QStringLiteral("org.w3cdotorg.ressac"));
     QGuiApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("org.w3cdotorg.ressac")));

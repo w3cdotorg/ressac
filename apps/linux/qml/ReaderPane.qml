@@ -129,21 +129,18 @@ Item {
         settings.playbackRequiresUserGesture: true
         settings.pluginsEnabled: false
         settings.localContentCanAccessFileUrls: false
-        // Every link to a scheme WebEngine does not know (a mosaic box's ressac-toggle:) reaches
-        // onNavigationRequested, the one gate, which never accepts one (accepted, it would go to the
-        // desktop's URL handler). The default policy drops it silently unless a user gesture started
-        // it, so the walk's app-world click would never arrive. Article scripts never run: no page
-        // navigates by itself.
-        settings.unknownUrlSchemePolicy: WebEngineSettings.AllowAllUnknownUrlSchemes
 
         // Our own load is allowed; a clicked web link opens in the browser; everything else is refused.
+        // Refused first, so a decision that never comes (an error) leaves the navigation refused.
+        // ressac-toggle: is a registered scheme (shim.cpp), so a mosaic box's click arrives here
+        // like any link, with or without a user gesture.
         onNavigationRequested: (request) => {
+            request.reject()
             const d = Reader.decide(String(request.url), request.navigationType, request.isMainFrame, String(web.url))
             if (d === "allow") {
                 request.accept()
                 return
             }
-            request.reject()
             if (d.startsWith("open:"))
                 pane.openExternally(d.slice(5))
             else if (d.startsWith("toggle:"))         // a mosaic box clicked: it swaps with its original
