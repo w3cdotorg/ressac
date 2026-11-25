@@ -3,6 +3,9 @@
 
 #include <cstdint>
 
+class QPainter;
+class QString;
+
 // What cxx-qt-lib does not wrap. Every function is declared to Rust in the `shim` bridge of
 // src/lib.rs.
 
@@ -56,3 +59,7 @@ void ressac_frame_log_auto();
 // A request the page cancelled (its job is gone) is dropped without an answer and logged at
 // debug level as "mosaic: dropped <token>" (category ressac.mosaic).
 void ressac_mosaic_reply(std::uint64_t token, rust::Str mime, rust::Slice<const std::uint8_t> body);
+
+// QPainter::drawText(QPointF, text): cxx-qt-lib wraps only the integer-point overload, and the CRT's
+// glow and colour bleed sit a device pixel (half a logical one at scale 2) from the glyphs.
+void ressac_draw_text_f(QPainter &painter, double x, double y, const QString &text);

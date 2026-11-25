@@ -21,6 +21,7 @@
 #include <QtGui/QIcon>
 #include <QtGui/QImage>
 #include <QtGui/QKeyEvent>
+#include <QtGui/QPainter>
 #include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickWindow>
 #include <QtQuickControls2/QQuickStyle>
@@ -529,4 +530,9 @@ bool ressac_settings_remove(rust::Str file, rust::Str key)
     settings.remove(from_rust(key));
     settings.sync();
     return settings.status() == QSettings::NoError;
+}
+
+void ressac_draw_text_f(QPainter &painter, double x, double y, const QString &text)
+{
+    painter.drawText(QPointF(x, y), text);
 }

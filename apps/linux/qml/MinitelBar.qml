@@ -11,6 +11,8 @@ Row {
     id: bar
 
     property real size: 20
+    // The CRT's colour bleed on the keys and the hint.
+    property bool bleed: false
     readonly property real cellWidth: 0.6 * size
     // The cells right of the keys: the hint, or the prompt.
     property int cells: 0
@@ -49,6 +51,7 @@ Row {
             CellRow {
                 line: Antiope.keyLines[key.index]
                 size: bar.size
+                bleed: bar.bleed
 
                 MouseArea {
                     anchors.fill: parent
@@ -69,6 +72,7 @@ Row {
         visible: !bar.promptOpen
         line: Antiope.minitel
         size: bar.size
+        bleed: bar.bleed
     }
 
     CellRow {
@@ -76,6 +80,7 @@ Row {
         visible: bar.promptOpen
         line: Antiope.searchLabel(bar.cells)
         size: bar.size
+        bleed: bar.bleed
     }
 
     // Typing goes to the field: the window's key filter leaves every key to a text field, so digits

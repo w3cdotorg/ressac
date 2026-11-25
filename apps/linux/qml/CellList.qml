@@ -9,6 +9,8 @@ ListView {
 
     property alias rows: rowsModel.rows
     property real size: 20
+    // The CRT's colour bleed on every row.
+    property bool bleed: false
 
     // A row with an action was clicked, `x` in the row's own pixels (a pair row's half).
     signal activated(string action, real x)
@@ -37,6 +39,7 @@ ListView {
 
         line: model.line
         size: list.size
+        bleed: list.bleed
         doubleHeight: model.doubleHeight
         width: list.width
         height: (row.doubleHeight ? 2 : 1) * list.size

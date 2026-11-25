@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::time::Instant;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QString, QStringList};
+use cxx_qt_lib::{QList, QString, QStringList};
 use ressac_core::clock::today_start;
 use ressac_core::store::{JournalView, Source, SourcesSnapshot};
 use ressac_ui::article::SubpageLabel;
@@ -26,7 +26,7 @@ use ressac_ui::pages::{
 };
 use ressac_ui::runs::RunProgress;
 use ressac_ui::sources::Selection;
-use ressac_ui::teletext::Color;
+use ressac_ui::teletext::{Color, crt};
 
 use crate::launcher::with_session;
 use crate::rows::to_i32;
@@ -38,6 +38,8 @@ pub mod qobject {
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qstringlist.h");
         type QStringList = cxx_qt_lib::QStringList;
+        include!("cxx-qt-lib/qlist.h");
+        type QList_f64 = cxx_qt_lib::QList<f64>;
     }
 
     #[auto_cxx_name]
@@ -192,6 +194,11 @@ pub mod qobject {
         #[qinvokable]
         fn banner_row(self: &Antiope, message: &QString, show_log: bool, width: i32)
         -> QStringList;
+
+        /// The CRT's scanline bands for a screen `height` tall at `scale` device pixels per
+        /// logical one: flattened `top, bottom` pairs, one per font-pixel row of `pixel`.
+        #[qinvokable]
+        fn scanline_bands(self: &Antiope, height: f64, pixel: f64, scale: f64) -> QList_f64;
 
         /// An output changed.
         #[qsignal]
@@ -672,6 +679,14 @@ input_setters! {
     set_cell_width => cell_width: f64,
 }
 
+/// `(top, bottom)` pairs as `top, bottom, top, bottom, ...`.
+fn flatten_bands(bands: &[(f64, f64)]) -> QList<f64> {
+    bands
+        .iter()
+        .flat_map(|&(top, bottom)| [top, bottom])
+        .collect()
+}
+
 fn string_list(items: impl IntoIterator<Item = String>) -> QStringList {
     items
         .into_iter()
@@ -890,6 +905,10 @@ impl qobject::Antiope {
     fn banner_row(&self, message: &QString, show_log: bool, width: i32) -> QStringList {
         string_list(banner_lines(&message.to_string(), show_log, cells(width)))
     }
+
+    fn scanline_bands(&self, height: f64, pixel: f64, scale: f64) -> QList<f64> {
+        flatten_bands(&crt::scanline_bands(height, pixel, scale))
+    }
 }
 
 #[cfg(test)]
@@ -998,6 +1017,15 @@ mod tests {
         rust.selection_key = QString::from("journal");
         rust.update(now, instant);
         assert_eq!(row_texts(&rust.shown.journal_rows), rows);
+    }
+
+    #[test]
+    fn scanline_bands_flatten_to_top_bottom_pairs() {
+        let bands = crt::scanline_bands(10.0, 2.0, 1.0);
+        let flat: Vec<f64> = flatten_bands(&bands).into_iter().copied().collect();
+        assert_eq!(flat.len(), 2 * bands.len());
+        assert_eq!(flat[..2], [bands[0].0, bands[0].1]);
+        assert_eq!(flat[flat.len() - 2..], [bands[4].0, bands[4].1]);
     }
 
     #[test]

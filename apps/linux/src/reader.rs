@@ -41,6 +41,7 @@ pub mod qobject {
         #[qproperty(QString, color_scheme, READ = color_scheme, WRITE = set_color_scheme, NOTIFY)]
         #[qproperty(QString, look, READ = look, WRITE = set_look, NOTIFY)]
         #[qproperty(QString, reader_font, READ = reader_font, WRITE = set_reader_font, NOTIFY)]
+        #[qproperty(bool, crt, READ = crt, WRITE = set_crt, NOTIFY)]
         #[qproperty(f64, text_size, READ = text_size, WRITE = set_text_size, NOTIFY)]
         #[qproperty(QString, reader_width, READ = reader_width, WRITE = set_reader_width, NOTIFY)]
         #[qproperty(bool, has_entry, READ = has_entry, NOTIFY = state_changed)]
@@ -69,6 +70,8 @@ pub mod qobject {
         fn set_reader_font(self: Pin<&mut Reader>, value: &QString);
         fn text_size(self: &Reader) -> f64;
         fn set_text_size(self: Pin<&mut Reader>, value: f64);
+        fn crt(self: &Reader) -> bool;
+        fn set_crt(self: Pin<&mut Reader>, value: bool);
         fn reader_width(self: &Reader) -> QString;
         fn set_reader_width(self: Pin<&mut Reader>, value: &QString);
         fn has_entry(self: &Reader) -> bool;
@@ -161,6 +164,8 @@ pub struct ReaderRust {
     look: QString,
     reader_font: QString,
     text_size: f64,
+    /// The CRT's reader bleed (`data-crt`), only in Antiope (`ReaderTheme::shows_crt`).
+    crt: bool,
     reader_width: QString,
     detail: Option<EntryDetail>,
     fulltext: Option<FulltextRow>,
@@ -183,6 +188,7 @@ impl Default for ReaderRust {
             look: QString::default(),
             reader_font: QString::default(),
             text_size: ReaderStyle::default().size,
+            crt: false,
             reader_width: QString::default(),
             detail: None,
             fulltext: None,
@@ -222,7 +228,7 @@ impl ReaderRust {
                 .unwrap_or(ColorScheme::Light),
             theme: ReaderTheme {
                 appearance: look,
-                crt: false,
+                crt: self.crt,
             },
             subpage: self.subpage_label(),
         })
@@ -308,6 +314,20 @@ impl qobject::Reader {
         }
         self.as_mut().rust_mut().get_mut().text_size = value;
         self.as_mut().text_size_changed();
+        self.rebuild();
+    }
+
+    fn crt(&self) -> bool {
+        self.rust().crt
+    }
+
+    /// A change that alters the page (`ArticlePage::same_page`: only in Antiope) reloads it once.
+    fn set_crt(mut self: Pin<&mut Self>, value: bool) {
+        if self.rust().crt == value {
+            return;
+        }
+        self.as_mut().rust_mut().get_mut().crt = value;
+        self.as_mut().crt_changed();
         self.rebuild();
     }
 

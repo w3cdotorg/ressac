@@ -15,6 +15,8 @@ FocusScope {
     objectName: "antiopeView"
 
     readonly property real size: AppSettings.readerSizeAntiope
+    // The CRT screen (the view exists only in Antiope): scanlines, vignette, corners, colour bleed.
+    readonly property bool crtOn: AppSettings.crt
     readonly property real cellWidth: 0.6 * size
     readonly property bool reduceMotion: Kirigami.Units.longDuration <= 1
     readonly property int windowCells: Math.floor(width / cellWidth)
@@ -269,7 +271,9 @@ FocusScope {
     Binding { target: Antiope; property: "windowWidth"; value: view.Window.window ? view.Window.window.width : 0 }
     Binding { target: Antiope; property: "windowHeight"; value: view.Window.window ? view.Window.window.height : 0 }
     Binding { target: Antiope; property: "cellWidth"; value: view.cellWidth }
-    Binding { target: Antiope; property: "crt"; value: false }      // B9 binds the CRT screen
+    Binding { target: Antiope; property: "crt"; value: view.crtOn }
+    // The reader page's bleed (`data-crt`); the binding goes with the view, so Native never shows it.
+    Binding { target: Reader; property: "crt"; value: view.crtOn }
     // The garden inspector's page, as wide as the reader column.
     Binding { target: Garden; property: "antiopeCells"; value: view.readerCells }
 
@@ -290,6 +294,7 @@ FocusScope {
             objectName: "antiopeHeader"
             line: Antiope.header
             size: view.size
+            bleed: view.crtOn
         }
 
         // The run banner: the message, ` LOG ` when the log explains it, ` X ` to dismiss.
@@ -306,12 +311,14 @@ FocusScope {
             CellRow {
                 line: banner.lines[0]
                 size: view.size
+                bleed: view.crtOn
             }
 
             CellRow {
                 visible: banner.lines[1] !== ""
                 line: banner.lines[1]
                 size: view.size
+                bleed: view.crtOn
 
                 MouseArea {
                     anchors.fill: parent
@@ -323,6 +330,7 @@ FocusScope {
             CellRow {
                 line: banner.lines[2]
                 size: view.size
+                bleed: view.crtOn
 
                 MouseArea {
                     anchors.fill: parent
@@ -349,6 +357,7 @@ FocusScope {
                     id: indexTitle
                     line: Antiope.indexTitle
                     size: view.size
+                    bleed: view.crtOn
                 }
 
                 CellList {
@@ -358,6 +367,7 @@ FocusScope {
                     anchors.bottom: parent.bottom
                     width: parent.width
                     size: view.size
+                    bleed: view.crtOn
                     rows: Antiope.indexRows
                     onActivated: (action, x) => view.activate(action, x)
                 }
@@ -377,6 +387,7 @@ FocusScope {
                     id: entriesTitle
                     line: Antiope.entriesTitle
                     size: view.size
+                    bleed: view.crtOn
 
                     MouseArea {
                         anchors.fill: parent
@@ -410,6 +421,7 @@ FocusScope {
 
                         line: model.antiopeLines
                         size: view.size
+                        bleed: view.crtOn
                         width: entriesList.width
                         reversed: index === EntriesModel.selectedRow
                         reverseForeground: 0
@@ -438,6 +450,7 @@ FocusScope {
                     visible: view.entriesPage === "list" && entriesList.count === 0
                     line: Antiope.emptyLine(EntriesModel.emptyText)
                     size: view.size
+                    bleed: view.crtOn
                 }
 
                 // P800–P802 (the garden's feeds; its keys, ↑ and ↓ move between them) or P104's edition.
@@ -448,6 +461,7 @@ FocusScope {
                     anchors.bottom: parent.bottom
                     width: parent.width
                     size: view.size
+                    bleed: view.crtOn
                     visible: view.entriesPage !== "list"
                     rows: view.entriesPage === "garden" ? Garden.antiopeRows
                         : view.entriesPage === "journal" ? Antiope.journalRows : []
@@ -479,6 +493,7 @@ FocusScope {
                     id: readerTitle
                     line: Antiope.readerTitle
                     size: view.size
+                    bleed: view.crtOn
                 }
 
                 // A fetch that failed without a stored error, black on red over the article.
@@ -490,6 +505,7 @@ FocusScope {
                     height: visible ? view.size : 0
                     line: visible ? Antiope.failureNotice(Reader.runFailureNotice, view.readerCells) : ""
                     size: view.size
+                    bleed: view.crtOn
                 }
 
                 ReaderPane {
@@ -512,6 +528,7 @@ FocusScope {
                     anchors.bottom: parent.bottom
                     width: parent.width
                     size: view.size
+                    bleed: view.crtOn
                     visible: view.readerShows !== "article"
                     rows: view.readerShows === "inspector" ? Garden.antiopeInspector
                         : view.readerShows === "rows" ? Antiope.readerRows : []
@@ -523,10 +540,19 @@ FocusScope {
         MinitelBar {
             id: minitelBar
             size: view.size
+            bleed: view.crtOn
             cells: view.windowCells - Antiope.keysCells
             promptOpen: view.promptOpen
             onCloseRequested: (clearing) => view.closePrompt(clearing)
         }
+    }
+
+    // The CRT screen over everything, last in the view; it takes no input.
+    CrtOverlay {
+        anchors.fill: parent
+        z: 1000
+        visible: view.crtOn
+        textSize: view.size
     }
 
     // The garden's Undo (Ctrl+Z), Native's being hidden with its pane.
