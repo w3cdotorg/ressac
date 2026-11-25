@@ -2,6 +2,7 @@
 //! library is empty elsewhere so `cargo test --workspace` needs no Qt.
 #![cfg(target_os = "linux")]
 
+mod cellrow;
 mod chart;
 mod entries;
 mod garden;
@@ -43,6 +44,15 @@ mod shim {
         pub fn ressac_install_key_filter();
         pub fn ressac_clipboard_text() -> String;
         pub fn ressac_send_key(key: i32, modifiers: u32, text: &str) -> bool;
+
+        /// The family Qt gave the registered `bedstead.otf` (empty when registration failed).
+        pub fn ressac_bedstead_family() -> String;
+        /// Starts recording the frame intervals of the first visible window.
+        pub fn ressac_frame_log_start();
+        /// Stops recording; the one-line summary (`n=0` when no frame came).
+        pub fn ressac_frame_log_stop() -> String;
+        /// With `RESSAC_FRAME_LOG=1`: records, and logs a summary every ten seconds.
+        pub fn ressac_frame_log_auto();
 
         pub fn ressac_settings_default_file() -> String;
         pub fn ressac_settings_get(file: &str, key: &str, value: &mut String) -> bool;
@@ -128,6 +138,7 @@ pub fn run() -> ExitCode {
     }
     let code = if shim::ressac_has_window() {
         shim::ressac_install_key_filter();
+        shim::ressac_frame_log_auto();
         u8::try_from(shim::ressac_exec()).unwrap_or(1)
     } else {
         eprintln!("ressac-kde: the main window did not load (see the QML errors above)");

@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
+use ressac_ui::teletext::{self, CellLine, CellSpan, Color};
 
 use crate::shim;
 
@@ -31,6 +32,8 @@ pub mod qobject {
         #[qproperty(bool, active, READ, CONSTANT)]
         #[qproperty(QString, press_default, READ, CONSTANT)]
         #[qproperty(QString, walk, READ, CONSTANT)]
+        #[qproperty(QString, grid_variant, READ, CONSTANT)]
+        #[qproperty(f64, grid_size, READ, CONSTANT)]
         type Recette = super::RecetteRust;
 
         /// Saves the first visible window to `<dir>/<name>.png`; false when inactive or failed.
@@ -46,6 +49,21 @@ pub mod qobject {
         /// relaunch after "Use Default Database" reaches the default location.
         #[qinvokable]
         fn prepare_default(self: &Recette);
+
+        /// Test hook of the grid measurement: starts the frame-time log of the window; no-op
+        /// when inactive.
+        #[qinvokable]
+        fn frame_log_start(self: &Recette);
+
+        /// Stops the frame-time log: `n=… mean=… p50=… p95=… max=… over16=…` in ms; empty when
+        /// inactive.
+        #[qinvokable]
+        fn frame_log_stop(self: &Recette) -> QString;
+
+        /// The synthetic teletext entry `index` of the grid measurement, encoded for `CellRow`
+        /// (two rows); empty when inactive.
+        #[qinvokable]
+        fn grid_line(self: &Recette, index: i32) -> QString;
     }
 }
 
@@ -58,10 +76,84 @@ pub struct RecetteRust {
     /// `RESSAC_RECETTE_WALK` (`journal`): the walk `Main.qml` runs, with that walk's own
     /// automatic edition triggers. Empty: the usual walk, with every automatic trigger off.
     walk: QString,
+    /// `RESSAC_RECETTE_GRID_VARIANT`: which grid the measurement builds. Empty: none.
+    grid_variant: QString,
+    /// `RESSAC_RECETTE_GRID_SIZE`: the pixel size of the measured rows (20 when unset).
+    grid_size: f64,
 }
 
 const PRESS_DEFAULT_ENV: &str = "RESSAC_RECETTE_PRESS_DEFAULT";
 const WALK_ENV: &str = "RESSAC_RECETTE_WALK";
+const GRID_VARIANT_ENV: &str = "RESSAC_RECETTE_GRID_VARIANT";
+const GRID_SIZE_ENV: &str = "RESSAC_RECETTE_GRID_SIZE";
+const DEFAULT_GRID_SIZE: f64 = 20.0;
+
+const TITLE_WORDS: [&str; 12] = [
+    "Ressac",
+    "teletext",
+    "Antiope",
+    "Minitel",
+    "dimanche",
+    "edition",
+    "jardin",
+    "PAGE",
+    "nouvelles",
+    "BBC",
+    "Ceefax",
+    "Oracle",
+];
+
+/// Cells of a title row.
+const TITLE_CELLS: i64 = 24;
+
+/// The synthetic entry `index` of the grid measurement: two rows of a 2-cell marker, a 24-cell
+/// title and a 2-cell flag. Entry 7 is reversed.
+fn grid_entry(index: i32) -> String {
+    let index = i64::from(index.max(0));
+    let mut title = String::new();
+    let mut word = 0;
+    while title.chars().count() < 2 * TITLE_CELLS as usize {
+        // `% 12` keeps the index inside `TITLE_WORDS`.
+        let pick = ((index * 7 + word * 3) % 12) as usize;
+        title.push_str(TITLE_WORDS[pick]);
+        title.push(' ');
+        word += 1;
+    }
+    let cut = title
+        .char_indices()
+        .nth(TITLE_CELLS as usize)
+        .map_or(title.len(), |(at, _)| at);
+    let (first, second) = title.split_at(cut);
+    let marker = if index % 3 == 0 {
+        CellSpan::new("\u{25cf} ", 2, Color::Yellow)
+    } else {
+        CellSpan::new("  ", 2, Color::White)
+    };
+    let flag = if index % 5 == 0 {
+        CellSpan::new(" *", 2, Color::White)
+    } else {
+        CellSpan::new("", 2, Color::White)
+    };
+    let mut lines = vec![
+        CellLine::new(vec![
+            marker,
+            CellSpan::new(first, TITLE_CELLS, Color::White),
+            flag,
+        ]),
+        CellLine::new(vec![
+            CellSpan::new("", 2, Color::White),
+            CellSpan::new(second, TITLE_CELLS, Color::White),
+            CellSpan::new("", 2, Color::White),
+        ]),
+    ];
+    if index == 7 {
+        lines = lines
+            .iter()
+            .map(|line| line.reversed(Color::Black, Color::White))
+            .collect();
+    }
+    teletext::encode_lines(&lines)
+}
 
 /// The variable's value, only when `--screenshot` was given.
 fn recette_env(name: &str) -> QString {
@@ -80,6 +172,13 @@ impl Default for RecetteRust {
             active: DIR.get().is_some(),
             press_default: recette_env(PRESS_DEFAULT_ENV),
             walk: recette_env(WALK_ENV),
+            grid_variant: recette_env(GRID_VARIANT_ENV),
+            grid_size: recette_env(GRID_SIZE_ENV)
+                .to_string()
+                .parse()
+                .ok()
+                .filter(|size: &f64| size.is_finite() && *size >= 1.0)
+                .unwrap_or(DEFAULT_GRID_SIZE),
         }
     }
 }
@@ -90,6 +189,28 @@ impl qobject::Recette {
             // SAFETY: a test hook, run from QML on the GUI thread; no other thread reads the
             // environment at that point (the migration worker only touches the database).
             unsafe { std::env::remove_var("RESSAC_DB") };
+        }
+    }
+
+    fn frame_log_start(&self) {
+        if self.rust().active {
+            shim::ressac_frame_log_start();
+        }
+    }
+
+    fn frame_log_stop(&self) -> QString {
+        if self.rust().active {
+            QString::from(shim::ressac_frame_log_stop().as_str())
+        } else {
+            QString::default()
+        }
+    }
+
+    fn grid_line(&self, index: i32) -> QString {
+        if self.rust().active {
+            QString::from(grid_entry(index).as_str())
+        } else {
+            QString::default()
         }
     }
 

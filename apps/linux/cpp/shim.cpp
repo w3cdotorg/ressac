@@ -5,11 +5,13 @@
 #include <QtCore/QBuffer>
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
+#include <QtCore/QElapsedTimer>
 #include <QtCore/QMetaObject>
 #include <QtCore/QPointer>
 #include <QtCore/QSettings>
 #include <QtCore/QString>
 #include <QtCore/QStringList>
+#include <QtCore/QTimer>
 #include <QtCore/QVariant>
 #include <QtGui/QClipboard>
 #include <QtGui/QFontDatabase>
@@ -26,6 +28,10 @@
 #include <QtWebEngineQuick/QQuickWebEngineProfile>
 #include <QtWebEngineQuick/QtWebEngineQuick>
 #include <QtWidgets/QApplication>
+
+#include <algorithm>
+#include <mutex>
+#include <vector>
 
 namespace {
 
@@ -51,6 +57,20 @@ QQuickWindow *first_quick_window(bool visible_only)
     }
     return nullptr;
 }
+
+// The family Qt gave the registered bedstead.otf; empty when registration failed.
+QString g_bedstead_family;
+
+// The frame-time log: the intervals between the frames of the first visible window.
+struct FrameLog
+{
+    QMetaObject::Connection conn;
+    QElapsedTimer clock;
+    std::mutex lock;
+    std::vector<double> ms;
+    bool primed = false;
+};
+FrameLog g_frames;
 
 QSettings open(rust::Str file)
 {
@@ -225,7 +245,7 @@ void ressac_create_application()
     // The bundled faces, from the scheme's own table, so the font menu and the preview draw in them.
     for (const char *file : {"Newsreader-Variable.ttf", "Newsreader-Italic-Variable.ttf",
                              "AtkinsonHyperlegibleNext-Variable.ttf",
-                             "AtkinsonHyperlegibleNext-Italic-Variable.ttf"}) {
+                             "AtkinsonHyperlegibleNext-Italic-Variable.ttf", "bedstead.otf"}) {
         const std::string url = std::string("ressac:asset/") + file;
         rust::String mime;
         rust::Vec<std::uint8_t> body;
@@ -234,10 +254,92 @@ void ressac_create_application()
             continue;
         }
         const QByteArray data(reinterpret_cast<const char *>(body.data()), static_cast<qsizetype>(body.size()));
-        if (QFontDatabase::addApplicationFontFromData(data) == -1) {
+        const int id = QFontDatabase::addApplicationFontFromData(data);
+        if (id == -1) {
             qWarning("ressac-kde: cannot register %s", file);
+        } else if (std::string_view(file) == "bedstead.otf") {
+            g_bedstead_family = QFontDatabase::applicationFontFamilies(id).value(0);
         }
     }
+    if (g_bedstead_family.isEmpty()) {
+        qWarning("ressac-kde: cannot register bedstead.otf");
+    }
+}
+
+rust::String ressac_bedstead_family()
+{
+    return to_rust(g_bedstead_family);
+}
+
+void ressac_frame_log_start()
+{
+    QQuickWindow *window = first_quick_window(true);
+    if (window == nullptr) {
+        return;
+    }
+    QObject::disconnect(g_frames.conn);
+    {
+        const std::lock_guard<std::mutex> guard(g_frames.lock);
+        g_frames.ms.clear();
+        g_frames.primed = false;
+    }
+    g_frames.conn = QObject::connect(
+        window, &QQuickWindow::frameSwapped, window,
+        [] {
+            const std::lock_guard<std::mutex> guard(g_frames.lock);
+            if (g_frames.primed) {
+                g_frames.ms.push_back(static_cast<double>(g_frames.clock.nsecsElapsed()) / 1e6);
+            }
+            g_frames.primed = true;
+            g_frames.clock.restart();
+        },
+        Qt::DirectConnection);
+}
+
+rust::String ressac_frame_log_stop()
+{
+    QObject::disconnect(g_frames.conn);
+    std::vector<double> ms;
+    {
+        const std::lock_guard<std::mutex> guard(g_frames.lock);
+        ms = g_frames.ms;
+    }
+    if (ms.empty()) {
+        return rust::String("n=0");
+    }
+    std::sort(ms.begin(), ms.end());
+    const std::size_t n = ms.size();
+    double sum = 0;
+    int over16 = 0;
+    for (const double v : ms) {
+        sum += v;
+        if (v > 16.7) {
+            ++over16;
+        }
+    }
+    const QString line = QStringLiteral("n=%1 mean=%2 p50=%3 p95=%4 max=%5 over16=%6")
+                             .arg(n)
+                             .arg(sum / static_cast<double>(n), 0, 'f', 2)
+                             .arg(ms[n / 2], 0, 'f', 2)
+                             .arg(ms[n * 95 / 100], 0, 'f', 2)
+                             .arg(ms.back(), 0, 'f', 2)
+                             .arg(over16);
+    return to_rust(line);
+}
+
+void ressac_frame_log_auto()
+{
+    if (qgetenv("RESSAC_FRAME_LOG") != "1") {
+        return;
+    }
+    ressac_frame_log_start();
+    auto *timer = new QTimer(qApp);
+    QObject::connect(timer, &QTimer::timeout, timer, [] {
+        rust::String line = ressac_frame_log_stop();
+        qInfo("ressac-kde: frames %s", line.c_str());
+        ressac_frame_log_start();
+    });
+    timer->start(10000);
 }
 
 void ressac_destroy_application()

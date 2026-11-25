@@ -37,3 +37,14 @@ rust::String ressac_settings_default_file();
 bool ressac_settings_get(rust::Str file, rust::Str key, rust::String &value);
 bool ressac_settings_set(rust::Str file, rust::Str key, rust::Str value);
 bool ressac_settings_remove(rust::Str file, rust::Str key);
+
+// The family Qt gave the bundled bedstead.otf ("" when registration failed).
+rust::String ressac_bedstead_family();
+
+// Frame-time log of the first visible QQuickWindow: `start` clears and records the interval
+// between frameSwapped signals; `stop` ends it and returns "n=%d mean=%.2f p50=%.2f p95=%.2f
+// max=%.2f over16=%d" in ms ("n=0" when no interval came). `auto` (RESSAC_FRAME_LOG=1) records
+// and logs a summary every 10 s.
+void ressac_frame_log_start();
+rust::String ressac_frame_log_stop();
+void ressac_frame_log_auto();
