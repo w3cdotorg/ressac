@@ -164,7 +164,7 @@ It checks the Fedora packages listed in `apps/linux/dev/packages.txt`; when some
 - `apps/linux/install.sh --software-rendering` writes the desktop entry with `QT_QUICK_BACKEND=software` and `QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu`, for a virtual machine whose GPU draws blank or flickering views.
 - `apps/linux/install.sh --uninstall` removes exactly those four files. The database, the settings and the logs are never touched.
 
-**First launch.** Start Ressac from the Plasma launcher. With no feed yet, the window says "No Feeds Yet — Drop an OPML file here, or choose one…"; `ressac export > ressac.opml` on another machine gives one. The app and `ressac` in Konsole share `~/.local/share/ressac/ressac.sqlite`.
+**First launch.** Start Ressac from the Plasma launcher. With no feed yet, the window says "No Feeds Yet — Drop an OPML file here, or choose one…"; `ressac export -o ressac.opml` on another machine gives one. The app and `ressac` in Konsole share `~/.local/share/ressac/ressac.sqlite`.
 
 **Files.** Settings are in `~/.config/ressac/ressac-kde.conf` (the Mac app's keys). Logs are in `~/.local/state/ressac/logs/` (Settings ▸ Data ▸ Show Logs). The database is described in [Linux](#linux).
 
@@ -196,7 +196,7 @@ Letters act when the reading window has focus and no text field does.
 **For developers.**
 
 - `apps/linux/dev/dev.sh check` runs the whole Linux gate in the Fedora 44 container (fmt, clippy, tests, chart tests, layout smoke).
-- `ressac-kde --screenshot <dir>` walks every state, writes a picture of each and quits (it needs `RESSAC_DB`, and never touches the network). `RESSAC_RECETTE_WALK=<name>` runs one walk: `garden`, `journal`, `antiope`, `antiope-pages`, `mosaic`, `grid`, `smoke`, and others (see `apps/linux/qml/Main.qml`).
+- `ressac-kde --screenshot <dir>` walks every state, writes a picture of each and quits (it refuses to run without `RESSAC_DB`, so it never opens your real database). `RESSAC_RECETTE_WALK=<name>` runs one walk: `garden`, `journal`, `antiope`, `antiope-pages`, `mosaic`, `grid`, `smoke`, and others (see `apps/linux/qml/Main.qml`).
 - `RESSAC_FRAME_LOG=1` logs the frame times every 10 seconds.
 - `apps/linux/dev/marghe.sh` drives a Parallels VM: push the sources, install, take screenshots in the user's own session.
 
