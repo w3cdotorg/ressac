@@ -18,6 +18,11 @@ Kirigami.ApplicationWindow {
     minimumHeight: 500
     visible: true
 
+    // The mosaic scheme's object, made with the window: the scheme answers through it, and without
+    // it every image would get the failure placeholder and no `failed` (QML singletons are made on
+    // first use).
+    readonly property QtObject mosaics: Mosaics
+
     // The Sea Chart: a window of its own, made on demand and dropped when closed.
     Loader { id: chartLoader; active: false; sourceComponent: Component { SeaChartWindow { chrome: root } } }
     function openChart() {

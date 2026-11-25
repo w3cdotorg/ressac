@@ -201,9 +201,8 @@ Item {
         }
     }
 
-    // A mosaic answered with the failure placeholder: its boxes show the magenta IMAGE line. The
-    // target also creates `Mosaics` with the first pane, before any article loads (without it,
-    // every image would get the placeholder and no `failed`).
+    // A mosaic answered with the failure placeholder: its boxes show the magenta IMAGE line
+    // (`Mosaics` itself is made with the window, Main.qml).
     Connections {
         target: Mosaics
         enabled: pane.mosaics && pane.active

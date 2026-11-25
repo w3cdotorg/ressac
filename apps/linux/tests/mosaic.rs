@@ -33,7 +33,6 @@ struct Slow {
     started: AtomicBool,
     /// How long after the request the client closed the connection, before the answer.
     closed_after: Mutex<Option<Duration>>,
-    answered: AtomicBool,
 }
 
 /// `/photo.png` (120 × 120 red), `/broken.png` (HTML), `/slow.png` (after 30 s), anything else a
@@ -108,7 +107,6 @@ fn answer(mut stream: TcpStream, slow: &Slow) {
                 }
             }
             respond(&mut stream, "200 OK", "image/png", &red_png());
-            slow.answered.store(true, Ordering::SeqCst);
         }
         _ => respond(&mut stream, "404 Not Found", "text/html", b"<html></html>"),
     }
@@ -255,7 +253,7 @@ fn the_mosaic_walk_swaps_marks_and_cancels() {
         "{err}"
     );
     // The page cancelled /slow.png: the app stopped its download (the connection closed soon
-    // after the request, long before the exit) and never answered it.
+    // after the request, long before the exit) ...
     assert!(slow.started.load(Ordering::SeqCst), "{err}");
     let closed_after = slow
         .closed_after
@@ -266,7 +264,10 @@ fn the_mosaic_walk_swaps_marks_and_cancels() {
         closed_after < STOPPED_WITHIN,
         "closed after {closed_after:?}"
     );
-    assert!(!slow.answered.load(Ordering::SeqCst));
+    // ... and never answered it: an answer for a request the page cancelled reaches the C++
+    // handler after its job is gone and is logged `mosaic: dropped <token>` (the run enables the
+    // `ressac.mosaic` debug category). The server's own 30 s answer comes after the run.
+    assert!(!err.contains("mosaic: dropped"), "{err}");
 
     let o = origin(&err);
     let shot = |name: &str| {
