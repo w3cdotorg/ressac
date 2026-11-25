@@ -40,19 +40,24 @@ QQC2.ApplicationWindow {
         return "file://" + encodeURI(slash > 0 ? path.substring(0, slash) : "/")
     }
 
+    // The tabs and every page keep a margin from the window's edges (the Mac's Form insets).
     header: QQC2.TabBar {
         id: tabs
+        leftPadding: Kirigami.Units.largeSpacing
+        rightPadding: Kirigami.Units.largeSpacing
+        topPadding: Kirigami.Units.smallSpacing
         QQC2.TabButton { text: "Reading" }
         QQC2.TabButton { text: "Data" }
     }
 
+    // A StackLayout ignores its pages' `Layout.margins`: the margin is the StackLayout's own.
     StackLayout {
         anchors.fill: parent
+        anchors.margins: Kirigami.Units.largeSpacing
         currentIndex: tabs.currentIndex
 
         Kirigami.FormLayout {
             id: reading
-            Layout.margins: Kirigami.Units.largeSpacing
 
             ColumnLayout {
                 Kirigami.FormData.label: "Appearance:"
@@ -183,7 +188,6 @@ QQC2.ApplicationWindow {
 
         Kirigami.FormLayout {
             id: data
-            Layout.margins: Kirigami.Units.largeSpacing
 
             ColumnLayout {
                 Kirigami.FormData.label: "Database:"
