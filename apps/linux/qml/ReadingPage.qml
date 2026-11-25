@@ -17,7 +17,7 @@ Item {
     property alias starButton: starButton
     // The look on screen: Antiope's view over the hidden native panes, or the native panes alone.
     // An empty library is Native whatever the setting: First Run shows in the window's own chrome.
-    property string look: SourcesModel.emptyLibrary ? "native" : AppSettings.effectiveAppearance
+    readonly property string look: SourcesModel.emptyLibrary ? "native" : AppSettings.effectiveAppearance
     readonly property bool antiope: look === "antiope"
     readonly property Item antiopeView: antiopeLoader.item
     // The reader the keys and the toolbar act on: Antiope's own while it is shown.
@@ -190,13 +190,14 @@ Item {
     }
 
     // Back in Native the keyboard goes to the sidebar, never to the destroyed Antiope view, so the
-    // letters work at once; an open prompt closes first without taking the focus back (its text
-    // stays). Entering Antiope, the view's `onLoaded` focuses its column.
+    // letters work at once; the view leaves first: an open prompt closes without taking the focus
+    // back (its text stays), an open repairs question is dropped. Entering Antiope, the view's
+    // `onLoaded` focuses its column.
     onAntiopeChanged: {
         if (antiope)
             return
         if (antiopeLoader.item)
-            antiopeLoader.item.closePrompt(false, false)
+            antiopeLoader.item.leave()
         if (!SourcesModel.emptyLibrary)
             focusSidebar()
     }

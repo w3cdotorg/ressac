@@ -22,6 +22,9 @@ FocusScope {
     readonly property int readerCells: windowCells - Antiope.indexCells - Antiope.entryCells - 2
     readonly property Item reader: antiopeReader
     readonly property alias entriesList: entriesList
+    // The entries column's visible list: the entry list, or the garden's or P104's rows. Both are
+    // named `antiopeEntries` (the key filter's focus chain), so a lookup takes this one.
+    readonly property Item entriesItem: entriesPage === "list" ? entriesList : entriesCells
     // The entries column: the garden's feeds (P800–P802), P104's edition, or the entry list.
     readonly property string entriesPage: SourcesModel.isGarden ? "garden"
         : SourcesModel.selectedKey === "journal" ? "journal" : "list"
@@ -35,6 +38,8 @@ FocusScope {
     // never survives a switch; the search text does.
     property bool promptOpen: false
     readonly property bool promptFocused: minitelBar.promptFocused
+    // Set by `leave()`: the look is switching away, nothing may take the focus back.
+    property bool leaving: false
 
     // One page-down at a time; a page that never answers must not leave Antiope advancing for good.
     property int advanceGeneration: 0
@@ -159,6 +164,15 @@ FocusScope {
             EntriesModel.searchText = ""
         if (refocus !== false)
             focusColumn()
+    }
+
+    // The look switches away (the view is about to go): an open prompt closes keeping its text, and
+    // an open repairs question is dropped so `Garden.confirming` never stays true with no dialog.
+    function leave() {
+        leaving = true
+        closePrompt(false, false)
+        if (Garden.confirming && repairs.visible)
+            Garden.confirming = false                    // its `stateChanged` closes the dialog
     }
 
     function openLog() {
@@ -528,6 +542,7 @@ FocusScope {
         standardButtons: QQC2.Dialog.NoButton
         customFooterActions: [
             Kirigami.Action {
+                id: confirmAction
                 text: Garden.applyConfirmLabel
                 onTriggered: { Garden.applySafe(); repairs.close() }
             },
@@ -536,7 +551,17 @@ FocusScope {
                 onTriggered: repairs.close()
             }
         ]
-        onClosed: { Garden.confirming = false; view.focusColumn() }
+        // As Native's (GardenPane): the keyboard on the confirm button.
+        onOpened: {
+            const button = repairs.customFooterButton(confirmAction)
+            if (button)
+                button.forceActiveFocus()
+        }
+        onClosed: {
+            Garden.confirming = false
+            if (!view.leaving)
+                view.focusColumn()
+        }
     }
 
     Connections {
@@ -592,6 +617,12 @@ FocusScope {
     }
 
     Component.onCompleted: Antiope.reload()
-    // Native came back during a page-down: Antiope must not stay advancing for good.
-    Component.onDestruction: if (advanceGuard.running) Antiope.advanceFinished()
+    // Native came back during a page-down: Antiope must not stay advancing for good; nor may the
+    // garden stay confirming when the question goes with the view (`leave()` first did both).
+    Component.onDestruction: {
+        if (advanceGuard.running)
+            Antiope.advanceFinished()
+        if (Garden.confirming && repairs.visible)
+            Garden.confirming = false
+    }
 }
