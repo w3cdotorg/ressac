@@ -24,6 +24,11 @@ FocusScope {
     // One page-down at a time; a page that never answers must not leave Antiope advancing for good.
     property int advanceGeneration: 0
 
+    // The recette's scroll measurement (GridProbe.measure's loop on the entries list).
+    property int probeFramesLeft: 0
+    property real probeStep: 0
+    property var probeDone: null
+
     // A verb of the window's keys: Antiope's answer applied; false hands the key to the Native handling.
     function perform(verb) {
         return apply(Antiope.perform(verb))
@@ -102,6 +107,17 @@ FocusScope {
         default:
             indexList.forceActiveFocus()
         }
+    }
+
+    // Walk hook: scrolls the entries `entriesPerFrame` two-row entries per frame for `frames` frames,
+    // the frame times logged; `done` gets `Recette.frameLogStop()`.
+    function scrollProbe(entriesPerFrame, frames, done) {
+        entriesList.positionViewAtBeginning()
+        probeStep = entriesPerFrame * 2 * view.size
+        probeFramesLeft = frames
+        probeDone = done
+        Recette.frameLogStart()
+        entriesList.contentY = entriesList.originY + 1     // the first move asks for the first frame
     }
 
     function clickEntry(row) {
@@ -299,6 +315,7 @@ FocusScope {
                 ReaderPane {
                     id: antiopeReader
                     objectName: "readerPane"
+                    proofing: false                         // the recette proves the native pane's page once
                     anchors.top: readerTitle.bottom
                     anchors.bottom: parent.bottom
                     width: parent.width
@@ -346,5 +363,26 @@ FocusScope {
         onTriggered: Antiope.tick()
     }
 
+    Connections {
+        target: view.Window.window
+        enabled: view.probeFramesLeft > 0
+        function onFrameSwapped() {
+            if (view.probeFramesLeft <= 0)
+                return
+            view.probeFramesLeft -= 1
+            if (view.probeFramesLeft === 0) {
+                const done = view.probeDone
+                view.probeDone = null
+                done(Recette.frameLogStop())
+                return
+            }
+            const top = entriesList.originY
+            const next = entriesList.contentY + view.probeStep
+            entriesList.contentY = next > top + entriesList.contentHeight - entriesList.height ? top : next
+        }
+    }
+
     Component.onCompleted: Antiope.reload()
+    // Native came back during a page-down: Antiope must not stay advancing for good.
+    Component.onDestruction: if (advanceGuard.running) Antiope.advanceFinished()
 }

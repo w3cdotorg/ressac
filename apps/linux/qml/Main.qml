@@ -12,7 +12,9 @@ Kirigami.ApplicationWindow {
     title: "Ressac"
     width: 1100
     height: 720
-    minimumWidth: 960
+    // Antiope needs its minimum of cells (spec §7.9); Native its three panes.
+    readonly property bool antiope: readingLoader.item !== null && readingLoader.item.antiope
+    minimumWidth: antiope ? Math.ceil(Antiope.minimumCells * 0.6 * AppSettings.readerSizeAntiope) : 960
     minimumHeight: 500
     visible: true
 
@@ -349,7 +351,99 @@ Kirigami.ApplicationWindow {
                 console.warn("grid: text size=" + probe.size + " step=1 " + t1); probe.measure(10, 600, function (t10) {
                 console.warn("grid: text size=" + probe.size + " step=10 " + t10); root.walkPaused = false }) }) } else root.walkPaused = false }) }) } },
     ]
-    readonly property var steps: Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
+    // The `antiope` walk (B8b6): the look switched live, pages dialled, columns, the Minitel keys, back to Native.
+    readonly property var antiopeSteps: [
+        { name: "a01-antiope", enter: function () { AppSettings.appearance = "antiope" } },
+        { name: "a02-dial", enter: function () { const p = readingLoader.item
+            console.warn("walk: a01-antiope look=" + p.look + " page=" + Antiope.currentPage + " column=" + Antiope.column + " focus=" + p.focusName())
+            const o = p.antiopeView.mapToItem(null, 0, 0)
+            console.warn("walk: a01-origin x=" + o.x + " y=" + o.y + " width=" + p.antiopeView.width + " minimum=" + root.minimumWidth)
+            Recette.key(Qt.Key_2, "2", 0); Recette.key(Qt.Key_0, "0", 0); Recette.key(Qt.Key_1, "1", 0)
+            console.warn("walk: a02-dial selected=" + SourcesModel.selectedKey + " page=" + Antiope.currentPage) } },
+        { name: "a03-not-found", enter: function () { Recette.key(Qt.Key_4, "4", 0); Recette.key(Qt.Key_3, "3", 0); Recette.key(Qt.Key_7, "7", 0)
+            console.warn("walk: a03-not-found selected=" + SourcesModel.selectedKey + " page=" + Antiope.currentPage) } },
+        { name: "a04-columns", enter: function () {
+            // The next digit clears NOT FOUND at once; Esc (ANNULATION) then drops the half-typed page.
+            const shown = Antiope.header.indexOf("NOT FOUND") >= 0; Recette.key(Qt.Key_1, "1", 0); const cleared = Antiope.header.indexOf("NOT FOUND") < 0
+            Recette.key(Qt.Key_Escape, "", 0)
+            console.warn("walk: a03-cleared shown=" + shown + " cleared=" + cleared + " page=" + Antiope.currentPage)
+            Recette.key(Qt.Key_Right, "", 0)
+            console.warn("walk: a04-entries column=" + Antiope.column + " selected=" + EntriesModel.selectedEntryId); Recette.key(Qt.Key_Right, "", 0) } },
+        { name: "a05-sommaire", enter: function () { console.warn("walk: a04-reader column=" + Antiope.column + " focus=" + readingLoader.item.focusName())
+            Recette.key(Qt.Key_S, "s", Qt.AltModifier); console.warn("walk: a05-sommaire reader=" + Antiope.readerPage + " page=" + Antiope.currentPage) } },
+        { name: "a06-guide", enter: function () { Recette.key(Qt.Key_Question, "?", Qt.ShiftModifier)
+            console.warn("walk: a06-guide reader=" + Antiope.readerPage + " page=" + Antiope.currentPage) } },
+        { name: "a07-suite", enter: function () { const before = EntriesModel.selectedEntryId; Recette.key(Qt.Key_J, "j", 0)
+            console.warn("walk: a07-suite reader=" + Antiope.readerPage + " same=" + (EntriesModel.selectedEntryId === before)) } },
+        { name: "a08-index-arrows", enter: function () { Recette.key(Qt.Key_Left, "", 0); Recette.key(Qt.Key_Left, "", 0); Recette.key(Qt.Key_Down, "", 0)
+            console.warn("walk: a08-index-arrows column=" + Antiope.column + " page=" + Antiope.currentPage) } },
+        { name: "a09-native", enter: function () {
+            // A search typed and an entry selected: the switch keeps both, and Native's letters work at once.
+            EntriesModel.searchText = "comic"
+            const key = SourcesModel.selectedKey; const entry = EntriesModel.selectedEntryId
+            AppSettings.appearance = "native"
+            console.warn("walk: a09-native look=" + readingLoader.item.look + " selected=" + SourcesModel.selectedKey + " focus=" + readingLoader.item.focusName())
+            console.warn("walk: a09-kept source=" + (SourcesModel.selectedKey === key) + " entry=" + (EntriesModel.selectedEntryId === entry)
+                + " search=" + EntriesModel.searchText + " view=" + (readingLoader.item.antiopeView === null))
+            SourcesModel.selectKey("feed:1"); const before = EntriesModel.selectedEntryId     // potes has no entries
+            Recette.key(Qt.Key_J, "j", 0)
+            console.warn("walk: a09-letters verb=" + readingLoader.item.lastVerb + " handled=" + readingLoader.item.lastHandled
+                + " moved=" + (EntriesModel.selectedEntryId !== before) + " focus=" + readingLoader.item.focusName())
+            EntriesModel.searchText = "" } },
+        { name: "a10-awkward", enter: function () { AppSettings.appearance = "antiope"; SourcesModel.selectKey("feed:1")
+            console.warn("walk: a10-awkward focus=" + readingLoader.item.focusName()) } },
+    ]
+    // The `antiope-scroll` walk: the entries column scrolled (frame times), then `j` held on long articles.
+    readonly property var antiopeScrollSteps: [
+        { name: "s01-folder", enter: function () { AppSettings.appearance = "antiope"; SourcesModel.selectKey("feed:1") } },
+        { name: "s02-scroll", enter: function () { root.walkPaused = true; const view = readingLoader.item.antiopeView
+            view.scrollProbe(1, 600, function (s1) { console.warn("frames: antiope step=1 " + s1)
+            view.scrollProbe(10, 600, function (s10) { console.warn("frames: antiope step=10 " + s10); root.walkPaused = false }) }) } },
+        { name: "s03-hold-j", enter: function () { root.walkPaused = true; EntriesModel.select(0); holdJ.begin(60) } },
+    ]
+    // `antiope-bridges`: Task 7's wiring alone (the directory, digits to Antiope, the header).
+    readonly property var bridgeSteps: [
+        { name: "b00", enter: function () { AppSettings.appearance = "antiope" } },
+        { name: "b01", enter: function () { const before = Antiope.currentPage; const d = Antiope.perform("pageDigit2"); Antiope.perform("pageDigit0")
+            const s = Antiope.perform("pageDigit1"); readingLoader.item.antiopeView.apply(s); Antiope.tick()
+            console.warn("walk: b01 current=" + before + " index=" + Antiope.indexRows.length + " digit=" + d + " select=" + s
+                + " header=" + (Antiope.header.indexOf("P201") >= 0 ? "P201" : Antiope.header)) } },
+    ]
+    // `j` held (a press every 33 ms, the key repeat's pace) on long articles: the frame times while a 2 px
+    // square flips on every frame (so a frame is always due), and the time each press takes.
+    Timer {
+        id: holdJ
+        interval: 33
+        repeat: true
+        property int left: 0
+        property int presses: 0
+        property real worst: 0
+        property real total: 0
+        property int first: -1
+        function begin(count) {
+            left = count; presses = 0; worst = 0; total = 0; first = EntriesModel.selectedRow
+            Recette.frameLogStart(); frameDriver.visible = true; start()
+        }
+        onTriggered: {
+            if (left > 0) {
+                const t0 = Date.now(); Recette.key(Qt.Key_J, "j", 0); const ms = Date.now() - t0
+                left -= 1; presses += 1; total += ms; worst = Math.max(worst, ms)
+                return
+            }
+            stop(); frameDriver.visible = false
+            console.warn("frames: antiope hold-j " + Recette.frameLogStop() + " presses=" + presses + " moved=" + (EntriesModel.selectedRow - first)
+                + " press-mean=" + (total / Math.max(1, presses)).toFixed(2) + " press-max=" + worst)
+            root.walkPaused = false
+        }
+    }
+    Rectangle {
+        id: frameDriver
+        parent: QQC2.Overlay.overlay
+        visible: false
+        width: 2; height: 2; color: "black"
+        Connections { target: root; enabled: frameDriver.visible; function onFrameSwapped() { frameDriver.x = frameDriver.x > 0 ? 0 : 2 } }
+    }
+    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }
@@ -383,6 +477,8 @@ Kirigami.ApplicationWindow {
     pageStack.initialPage: Kirigami.Page {
         globalToolBarStyle: Kirigami.ApplicationHeaderStyle.None
         padding: 0
+        // Antiope's screen is black to the window's edges.
+        background: Rectangle { color: root.antiope ? "black" : Kirigami.Theme.backgroundColor }
 
         // Files dropped on the window; under everything, so the folder drop targets above it win.
         DropArea {

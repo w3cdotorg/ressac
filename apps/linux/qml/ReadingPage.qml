@@ -14,7 +14,12 @@ Item {
     property alias allButton: allButton
     property alias unreadButton: unreadButton
     property alias sourcesPane: sourcesPane
-    property string look: "native"
+    // The look on screen: Antiope's view over the hidden native panes, or the native panes alone.
+    property string look: AppSettings.effectiveAppearance
+    readonly property bool antiope: look === "antiope"
+    readonly property Item antiopeView: antiopeLoader.item
+    // The reader the keys and the toolbar act on: Antiope's own while it is shown.
+    readonly property Item activeReader: antiope && antiopeLoader.item ? antiopeLoader.item.reader : readerPane
     readonly property alias reader: readerPane
     readonly property alias garden: gardenPane
     readonly property bool searchFocused: searchField.activeFocus
@@ -40,6 +45,7 @@ Item {
 
     function focusName() {
         if (searchFocused) return "search"
+        if (antiope && antiopeLoader.item && focusWithin(antiopeLoader.item)) return "antiope-" + Antiope.column
         if (focusWithin(sourcesPane)) return "sidebar"
         if (focusWithin(gardenPane)) return "garden"
         if (focusWithin(entriesPane)) return "entries"
@@ -54,7 +60,7 @@ Item {
 
     function openInBrowser() {
         if (Reader.link !== "")
-            readerPane.openExternally(Reader.link)
+            activeReader.openExternally(Reader.link)
     }
 
     // Space: scroll the page, and at its end move to the next unread entry (marking the one left as read).
@@ -65,7 +71,7 @@ Item {
         advancing = true
         const generation = ++advanceGeneration
         const id = EntriesModel.selectedEntryId
-        readerPane.pageDown(id, function (spentOrScrolled) {
+        activeReader.pageDown(id, function (spentOrScrolled) {
             if (generation !== advanceGeneration)
                 return
             advancing = false
@@ -78,10 +84,17 @@ Item {
     }
 
     // The verb the window filter (cpp/shim.cpp, keys::route) asks for: true when the key was acted on or
-    // spent, false to let it through to the focused item. Antiope's verbs are B8's (its advancing-to-end
-    // flag must be cleared on every path of its own advance, as `advancing` is here).
+    // spent, false to let it through to the focused item. A held one-shot key is spent, as on the Mac;
+    // in Antiope its view answers first, and what it leaves (⌫, Esc, m, s…) goes to the Native table.
     function perform(verb) {
-        let handled = false
+        let handled = verb === "spent"
+        if (!handled && antiope && antiopeLoader.item)
+            handled = antiopeLoader.item.perform(verb)
+        if (handled) {
+            lastVerb = verb
+            lastHandled = true
+            return true
+        }
         switch (verb) {
         case "nextEntry":
             handled = EntriesModel.canNavigate
@@ -107,14 +120,14 @@ Item {
             handled = EntriesModel.canToggle
             if (handled) EntriesModel.toggleStarred(EntriesModel.selectedRow)
             break
-        case "spent":
-            handled = true                           // a held one-shot key (Antiope's) is consumed, as on the Mac
-            break
         case "toggleReadHeld":
         case "toggleStarHeld":
             handled = EntriesModel.canToggle        // spent: a held key never toggles again
             break
+        // The native panes' own moves: never into panes Antiope hides.
         case "focusEntryList":
+            if (antiope)
+                break
             if (SourcesModel.isGarden) {
                 gardenPane.focusList()
             } else {
@@ -124,6 +137,8 @@ Item {
             handled = true
             break
         case "focusSidebar":
+            if (antiope)
+                break
             sourcesPane.focusList()
             handled = true
             break
@@ -145,11 +160,18 @@ Item {
         Journal.reload()
         Garden.reload()
         Chart.noteChange()                       // the Sea Chart's debounced survey (ignored while its window is closed)
+        if (antiope)
+            Antiope.reload()
     }
+
+    // Back in Native the keyboard goes to the sidebar, never to the destroyed Antiope view, so the
+    // letters work at once. Entering Antiope, the view's `onLoaded` focuses its column.
+    onAntiopeChanged: if (!antiope) focusSidebar()
 
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
+        visible: !page.antiope
 
         QQC2.ToolBar {
             Layout.fillWidth: true
@@ -336,7 +358,7 @@ Item {
                 QQC2.SplitView.fillWidth: true
                 QQC2.SplitView.minimumWidth: 300
 
-                ReaderPane { id: readerPane; anchors.fill: parent; visible: !SourcesModel.isGarden }
+                ReaderPane { id: readerPane; anchors.fill: parent; visible: !SourcesModel.isGarden; active: !page.antiope }
                 GardenInspector {
                     anchors.fill: parent
                     visible: SourcesModel.isGarden
@@ -344,6 +366,15 @@ Item {
                 }
             }
         }
+    }
+
+    // The Antiope look (spec §7.9): made when it is chosen, dropped when Native comes back.
+    Loader {
+        id: antiopeLoader
+        anchors.fill: parent
+        active: page.antiope
+        source: Qt.resolvedUrl("AntiopeView.qml")
+        onLoaded: item.focusColumn()
     }
 
     Timer { id: advanceGuard; interval: 3000; onTriggered: { page.advanceGeneration++; page.advancing = false } }
@@ -405,6 +436,8 @@ Item {
         function onSelectionChanged() {
             EntriesModel.showSource(SourcesModel.selectedKey)
             Garden.show(SourcesModel.selectedKey)
+            if (page.antiope)
+                return                       // Antiope's view keeps the keyboard in its column
             if (SourcesModel.isGarden)
                 gardenPane.focusList()
             else if (SourcesModel.selectedKey === "journal")

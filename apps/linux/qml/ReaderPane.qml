@@ -13,9 +13,18 @@ Item {
 
     // The recette first loads the proof page (every kind of article script, no sanitiser, no CSP).
     property bool proofing: Recette.active
+    // The pane on screen for the look. An inactive one (Native's, hidden under Antiope) keeps its
+    // page and never navigates; it loads the current page when it becomes active again.
+    property bool active: true
 
     function runAppScript(script, done) {
         web.runJavaScript(script, WebEngineScript.ApplicationWorld, done)
+    }
+
+    function runSubpageScript() {
+        const script = Reader.subpageScript()
+        if (script !== "")
+            pane.runAppScript(script, function () {})
     }
 
     function focusWeb() {
@@ -99,7 +108,6 @@ Item {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         visible: Reader.hasEntry || pane.proofing
-        url: pane.proofing ? Reader.proofUrl : Reader.pageUrl
         backgroundColor: Reader.colorScheme === "dark" ? "#1C1C1E" : "#FFFFFF"
 
         settings.javascriptEnabled: false
@@ -138,9 +146,14 @@ Item {
         onJavaScriptConsoleMessage: (level, message) => console.debug("reader page:", message)
 
         onLoadingChanged: (info) => {
-            if (info.status !== WebEngineView.LoadSucceededStatus || !Recette.active)
+            if (info.status !== WebEngineView.LoadSucceededStatus)
                 return
             const proof = pane.proofing
+            // A sub-page label that moved while the page loaded: the page shows the current one.
+            if (!proof && pane.active)
+                pane.runSubpageScript()
+            if (!Recette.active)
+                return
             pane.runAppScript(Reader.probeScript(), function (result) {
                 if (proof) {
                     console.warn("reader-proof: " + result)
@@ -149,6 +162,24 @@ Item {
                     console.warn("reader: " + info.url + " " + result)
                 }
             })
+        }
+    }
+
+    // Only the active pane follows the reader's page.
+    Binding {
+        target: web
+        property: "url"
+        value: pane.proofing ? Reader.proofUrl : Reader.pageUrl
+        when: pane.active
+        restoreMode: Binding.RestoreNone
+    }
+
+    // Antiope's sub-page line ("412 3/20") changes in place, without a reload.
+    Connections {
+        target: Reader
+        function onSubpageChanged() {
+            if (pane.active && !pane.proofing)
+                pane.runSubpageScript()
         }
     }
 

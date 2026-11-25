@@ -118,3 +118,105 @@ pub fn shots(run: &Run) -> Vec<String> {
     names.sort();
     names
 }
+
+/// The eight teletext colours (black, red, green, yellow, blue, magenta, cyan, white).
+pub const TELETEXT: [[u8; 3]; 8] = [
+    [0, 0, 0],
+    [255, 0, 0],
+    [0, 255, 0],
+    [255, 255, 0],
+    [0, 0, 255],
+    [255, 0, 255],
+    [0, 255, 255],
+    [255, 255, 255],
+];
+
+/// A pixel rectangle of a screenshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Rect {
+    /// The same rectangle moved by `(dx, dy)` (a teletext screen's origin in the window).
+    pub fn offset(self, (dx, dy): (u32, u32)) -> Rect {
+        Rect {
+            x: self.x + dx,
+            y: self.y + dy,
+            ..self
+        }
+    }
+
+    pub fn pixels(self) -> impl Iterator<Item = (u32, u32)> {
+        (self.y..self.y + self.height)
+            .flat_map(move |y| (self.x..self.x + self.width).map(move |x| (x, y)))
+    }
+}
+
+/// Cells `first .. first + cells` of teletext row `row` (rows of `size` px, cells 0.6 × `size`
+/// wide), in device pixels at `scale`, from the screen's origin.
+pub fn row_rect(row: u32, first: u32, cells: u32, size: u32, scale: f64) -> Rect {
+    let device = |logical: f64| (logical * scale).round() as u32;
+    let cell = 0.6 * f64::from(size);
+    Rect {
+        x: device(f64::from(first) * cell),
+        y: device(f64::from(row * size)),
+        width: device(f64::from(cells) * cell),
+        height: device(f64::from(size)),
+    }
+}
+
+/// Whether any pixel of `rect` is exactly `rgb`.
+pub fn has_colour(image: &image::RgbImage, rect: Rect, rgb: [u8; 3]) -> bool {
+    rect.pixels().any(|(x, y)| image.get_pixel(x, y).0 == rgb)
+}
+
+/// The walk's line that starts with `prefix`, without the `qml: ` of the stderr log.
+pub fn walk_line<'a>(err: &'a str, prefix: &str) -> &'a str {
+    err.lines()
+        .map(|l| l.strip_prefix("qml: ").unwrap_or(l))
+        .find(|l| l.starts_with(prefix))
+        .unwrap_or_else(|| panic!("{prefix} missing in {err}"))
+}
+
+/// `count` unread entries in feed `feed`, newer than the fixture's, with titles that wrap over
+/// two rows of the entries column; the first 200 carry a long article (about 30 kB).
+pub fn insert_entries(db: &Path, feed: i64, count: usize) {
+    let mut conn = rusqlite::Connection::open(db).unwrap();
+    let tx = conn.transaction().unwrap();
+    let paragraph = "<p>The tide comes in over the flats twice a day, and the <a href=\"https://example.org/\">harbour</a> \
+        keeps its own <em>teletext</em> pages: every line is read, sanitised and laid out again.</p>";
+    let long = paragraph.repeat(150);
+    {
+        let mut insert = tx
+            .prepare(
+                "INSERT INTO entry (feed_id, guid, url, title, published_at, content_html, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '2026-10-10T08:00:00.000Z')",
+            )
+            .unwrap();
+        for i in 0..count {
+            // Newest first: entry i is published i minutes before 2026-11-20 00:00 (after the fixture's).
+            let minutes = 60 * 24 * 20 - i as i64;
+            let published = format!(
+                "2026-11-{:02}T{:02}:{:02}:00.000Z",
+                minutes / (60 * 24),
+                minutes / 60 % 24,
+                minutes % 60
+            );
+            insert
+                .execute(rusqlite::params![
+                    feed,
+                    format!("bulk-{i}"),
+                    format!("http://127.0.0.1:9/bulk/{i}"),
+                    format!("Bulk entry {i}: a title long enough to wrap over the second row"),
+                    published,
+                    if i < 200 { long.as_str() } else { paragraph },
+                ])
+                .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+}
