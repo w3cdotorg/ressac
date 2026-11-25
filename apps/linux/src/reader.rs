@@ -12,8 +12,8 @@ use ressac_core::service::{ExtractOutcome, NullSink};
 use ressac_core::store::{EntryDetail, FulltextRow};
 use ressac_ui::article::{
     ASSET_PREFIX, ArticlePage, ColorScheme, FullText, FullTextStep, Navigation, PAGE_PREFIX,
-    PROOF_PAGE, PROOF_SCRIPT, PROOF_URL, RECETTE_PROBE, ReaderStyle, ReaderTheme, asset, decide,
-    full_article_help, page_down_script, page_url,
+    PROOF_PAGE, PROOF_SCRIPT, PROOF_URL, RECETTE_PROBE, ReaderStyle, ReaderTheme, SubpageLabel,
+    asset, decide, full_article_help, page_down_script, page_url, subpage_script,
 };
 use ressac_ui::chart;
 use ressac_ui::chrono;
@@ -52,6 +52,10 @@ pub mod qobject {
         #[qproperty(bool, can_request_full_text, READ = can_request_full_text, NOTIFY = state_changed)]
         #[qproperty(QString, full_text_help, READ = full_text_help, NOTIFY = state_changed)]
         #[qproperty(QString, run_failure_notice, READ = run_failure_notice, NOTIFY = state_changed)]
+        // Antiope's sub-page line (`Antiope.subpage*`): page (−1 none), index (0 no label), count.
+        #[qproperty(i32, subpage_page, READ, WRITE = set_subpage_page, NOTIFY = subpage_changed)]
+        #[qproperty(i32, subpage_index, READ, WRITE = set_subpage_index, NOTIFY = subpage_changed)]
+        #[qproperty(i32, subpage_count, READ, WRITE = set_subpage_count, NOTIFY = subpage_changed)]
         type Reader = super::ReaderRust;
 
         fn entry_id(self: &Reader) -> i64;
@@ -76,6 +80,9 @@ pub mod qobject {
         fn can_request_full_text(self: &Reader) -> bool;
         fn full_text_help(self: &Reader) -> QString;
         fn run_failure_notice(self: &Reader) -> QString;
+        fn set_subpage_page(self: Pin<&mut Reader>, value: i32);
+        fn set_subpage_index(self: Pin<&mut Reader>, value: i32);
+        fn set_subpage_count(self: Pin<&mut Reader>, value: i32);
 
         /// Reads the selected entry again (the data changed) and rebuilds the page.
         #[qinvokable]
@@ -104,9 +111,17 @@ pub mod qobject {
         #[qinvokable]
         fn page_down_script(self: &Reader, expected: &QString) -> QString;
 
+        /// The app-world script rewriting the page's sub-page line in place ("412 3/20").
+        #[qinvokable]
+        fn subpage_script(self: &Reader) -> QString;
+
         /// The entry, its flags or the page state changed.
         #[qsignal]
         fn state_changed(self: Pin<&mut Reader>);
+
+        /// The sub-page label changed; the page keeps its address (`subpageScript` updates it).
+        #[qsignal]
+        fn subpage_changed(self: Pin<&mut Reader>);
 
         /// The page identity changed: `pageUrl` is another page.
         #[qsignal]
@@ -139,6 +154,9 @@ pub struct ReaderRust {
     page_url: QString,
     /// A new selection could not be read yet (no session): the next read resets the toggle.
     select_pending: bool,
+    subpage_page: i32,
+    subpage_index: i32,
+    subpage_count: i32,
 }
 
 impl Default for ReaderRust {
@@ -157,6 +175,9 @@ impl Default for ReaderRust {
             revision: 0,
             page_url: QString::default(),
             select_pending: false,
+            subpage_page: -1,
+            subpage_index: 0,
+            subpage_count: 0,
         }
     }
 }
@@ -187,9 +208,24 @@ impl ReaderRust {
                 appearance: look,
                 crt: false,
             },
-            subpage: None,
+            subpage: self.subpage_label(),
         })
     }
+
+    fn subpage_label(&self) -> Option<SubpageLabel> {
+        subpage_label(self.subpage_page, self.subpage_index, self.subpage_count)
+    }
+}
+
+/// The label of `Antiope.subpage*`: `None` for index 0 (no entry, or not in the list); a page
+/// below 0 or beyond `u16` is no page ("3/20").
+fn subpage_label(page: i32, index: i32, count: i32) -> Option<SubpageLabel> {
+    let index = usize::try_from(index).ok().filter(|index| *index > 0)?;
+    Some(SubpageLabel {
+        page: u16::try_from(page).ok(),
+        index,
+        count: usize::try_from(count).unwrap_or(0),
+    })
 }
 
 impl qobject::Reader {
@@ -358,6 +394,52 @@ impl qobject::Reader {
             .full_text
             .run_failure_notice(rust.selected_id(), rust.fulltext.as_ref());
         QString::from(notice.unwrap_or_default().as_str())
+    }
+
+    fn set_subpage_page(mut self: Pin<&mut Self>, value: i32) {
+        if self.rust().subpage_page != value {
+            self.as_mut().rust_mut().get_mut().subpage_page = value;
+            self.subpage_moved();
+        }
+    }
+
+    fn set_subpage_index(mut self: Pin<&mut Self>, value: i32) {
+        if self.rust().subpage_index != value {
+            self.as_mut().rust_mut().get_mut().subpage_index = value;
+            self.subpage_moved();
+        }
+    }
+
+    fn set_subpage_count(mut self: Pin<&mut Self>, value: i32) {
+        if self.rust().subpage_count != value {
+            self.as_mut().rust_mut().get_mut().subpage_count = value;
+            self.subpage_moved();
+        }
+    }
+
+    /// The label is not part of the page identity: the page keeps its address (no reload);
+    /// the stored HTML gets the new line, so a later load of the same address shows it too.
+    fn subpage_moved(mut self: Pin<&mut Self>) {
+        let rust = self.as_mut().rust_mut().get_mut();
+        let label = rust.subpage_label();
+        if let Some(page) = rust.page.as_mut()
+            && page.subpage != label
+        {
+            page.subpage = label;
+            if page.theme.appearance == Appearance::Antiope {
+                store_page(&rust.page_url.to_string(), page.html(&chrono::Local));
+            }
+        }
+        self.subpage_changed();
+    }
+
+    fn subpage_script(&self) -> QString {
+        let text = self
+            .rust()
+            .subpage_label()
+            .map(|label| label.text())
+            .unwrap_or_default();
+        QString::from(subpage_script(&text).as_str())
     }
 
     fn request_full_text(mut self: Pin<&mut Self>) {
@@ -574,6 +656,17 @@ pub fn ressac_scheme_serve(url: &str, mime: &mut String, body: &mut Vec<u8>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_subpage_label_needs_an_index_and_a_page_in_range() {
+        let text = |page, index, count| subpage_label(page, index, count).map(|l| l.text());
+        assert_eq!(text(412, 3, 20).as_deref(), Some("412 3/20"));
+        assert_eq!(text(-1, 3, 20).as_deref(), Some("3/20"));
+        assert_eq!(text(70_000, 3, 20).as_deref(), Some("3/20"));
+        assert_eq!(text(412, 0, 20), None);
+        assert_eq!(text(412, -2, 20), None);
+        assert_eq!(text(412, 1, -5).as_deref(), Some("412 1/0"));
+    }
 
     #[test]
     fn every_asset_is_served_with_its_mime_type_and_bytes() {

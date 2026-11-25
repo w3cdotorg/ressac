@@ -83,6 +83,8 @@ pub mod qobject {
         #[qml_element]
         #[qml_singleton]
         #[qproperty(QString, appearance, READ = appearance, WRITE = set_appearance, NOTIFY)]
+        #[qproperty(bool, bedstead_available, READ = bedstead_available, CONSTANT)]
+        #[qproperty(QString, effective_appearance, READ = effective_appearance, NOTIFY = appearance_changed)]
         #[qproperty(bool, crt, READ = crt, WRITE = set_crt, NOTIFY)]
         #[qproperty(QString, reader_font, READ = reader_font, WRITE = set_reader_font, NOTIFY)]
         #[qproperty(f64, reader_size, READ = reader_size, WRITE = set_reader_size, NOTIFY)]
@@ -117,6 +119,8 @@ pub mod qobject {
 
         fn appearance(self: &AppSettings) -> QString;
         fn set_appearance(self: Pin<&mut AppSettings>, value: &QString);
+        fn bedstead_available(self: &AppSettings) -> bool;
+        fn effective_appearance(self: &AppSettings) -> QString;
         fn crt(self: &AppSettings) -> bool;
         fn set_crt(self: Pin<&mut AppSettings>, value: bool);
         fn reader_font(self: &AppSettings) -> QString;
@@ -198,6 +202,10 @@ pub struct AppSettingsRust {
     ressac_db_set: bool,
     database_refusal: &'static str,
     needs_relaunch: bool,
+    /// Bedstead registered (`shim::ressac_bedstead_family` not empty), read once at start.
+    bedstead_available: bool,
+    /// The missing font was logged: once per process.
+    missing_bedstead_logged: bool,
     font_ids: QStringList,
     font_titles: QStringList,
     font_families: QStringList,
@@ -207,20 +215,48 @@ pub struct AppSettingsRust {
 
 impl Default for AppSettingsRust {
     fn default() -> Self {
-        let store = QSettingsStore::default_file();
+        AppSettingsRust::new(
+            QSettingsStore::default_file(),
+            !shim::ressac_bedstead_family().is_empty(),
+        )
+    }
+}
+
+impl AppSettingsRust {
+    fn new(store: QSettingsStore, bedstead_available: bool) -> Self {
         let settings = Settings::load(&store);
-        AppSettingsRust {
+        let mut rust = AppSettingsRust {
             store,
             settings,
             ressac_db_set: std::env::var_os("RESSAC_DB").is_some_and(|v| !v.is_empty()),
             database_refusal: "",
             needs_relaunch: false,
+            bedstead_available,
+            missing_bedstead_logged: false,
             font_ids: string_list(ReaderFont::ALL.map(ReaderFont::as_str)),
             font_titles: string_list(ReaderFont::ALL.map(ReaderFont::title)),
             font_families: string_list(ReaderFont::ALL.map(ReaderFont::family)),
             width_ids: string_list(LineWidth::ALL.map(LineWidth::as_str)),
             width_titles: string_list(LineWidth::ALL.map(LineWidth::title)),
+        };
+        rust.log_missing_bedstead();
+        rust
+    }
+
+    /// The look shown: the stored one, Native when Antiope's font is missing.
+    fn effective_appearance(&self) -> Appearance {
+        Appearance::effective(self.settings.appearance, self.bedstead_available)
+    }
+
+    /// Antiope stored without Bedstead: one error in the log (the window shows Native).
+    fn log_missing_bedstead(&mut self) {
+        if self.missing_bedstead_logged || self.effective_appearance() == self.settings.appearance {
+            return;
         }
+        self.missing_bedstead_logged = true;
+        tracing::error!(
+            "the Antiope look needs the Bedstead font, which did not register: showing Native"
+        );
     }
 }
 
@@ -246,8 +282,17 @@ impl qobject::AppSettings {
             .as_mut()
             .write(|s, store| s.set_appearance(store, &value))
         {
+            self.as_mut().rust_mut().get_mut().log_missing_bedstead();
             self.as_mut().appearance_changed();
         }
+    }
+
+    fn bedstead_available(&self) -> bool {
+        self.rust().bedstead_available
+    }
+
+    fn effective_appearance(&self) -> QString {
+        QString::from(self.rust().effective_appearance().as_str())
     }
 
     fn crt(&self) -> bool {
@@ -632,6 +677,22 @@ mod tests {
             Settings::load(&QSettingsStore::at(q.file())).reader_size_antiope,
             25.0
         );
+    }
+
+    #[test]
+    fn antiope_without_bedstead_shows_native_and_logs_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = QSettingsStore::at(&dir.path().join("ressac-kde.conf"));
+        store.set(keys::APPEARANCE, "antiope");
+        let mut rust = AppSettingsRust::new(store.clone(), false);
+        assert_eq!(rust.settings.appearance, Appearance::Antiope);
+        assert_eq!(rust.effective_appearance(), Appearance::Native);
+        assert!(rust.missing_bedstead_logged);
+        assert!(!AppSettingsRust::new(store, true).missing_bedstead_logged);
+        rust.bedstead_available = true;
+        assert_eq!(rust.effective_appearance(), Appearance::Antiope);
+        rust.settings.appearance = Appearance::Native;
+        assert_eq!(rust.effective_appearance(), Appearance::Native);
     }
 
     #[test]
