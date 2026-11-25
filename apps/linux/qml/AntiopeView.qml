@@ -269,7 +269,7 @@ FocusScope {
     Binding { target: Antiope; property: "windowWidth"; value: view.Window.window ? view.Window.window.width : 0 }
     Binding { target: Antiope; property: "windowHeight"; value: view.Window.window ? view.Window.window.height : 0 }
     Binding { target: Antiope; property: "cellWidth"; value: view.cellWidth }
-    Binding { target: Antiope; property: "crt"; value: false }      // B9 binds the CRT screen
+    Binding { target: Antiope; property: "crt"; value: false }      // no CRT screen on Linux yet (TODO.md)
     // The garden inspector's page, as wide as the reader column.
     Binding { target: Garden; property: "antiopeCells"; value: view.readerCells }
 

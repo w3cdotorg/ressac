@@ -638,9 +638,7 @@ fn asset_bytes(file: &str) -> Option<&'static [u8]> {
             "../../macos/Ressac/Resources/Fonts/AtkinsonHyperlegibleNext-Italic-Variable.ttf"
         )
         .as_slice(),
-        "bedstead.otf" => {
-            include_bytes!("../../macos/Ressac/Resources/Fonts/bedstead.otf").as_slice()
-        }
+        ressac_ui::teletext::FONT_FILE => ressac_ui::teletext::BEDSTEAD,
         "proof.js" => PROOF_SCRIPT.as_bytes(),
         _ => return None,
     })
@@ -730,6 +728,11 @@ mod tests {
             &mut body
         ));
         assert_eq!((mime.as_str(), &body[..4]), ("font/otf", &b"OTTO"[..]));
+        assert_eq!(
+            body.as_slice(),
+            ressac_ui::teletext::BEDSTEAD,
+            "one embedded copy"
+        );
         body.clear();
         assert!(ressac_scheme_serve(
             ressac_ui::article::PROOF_URL,

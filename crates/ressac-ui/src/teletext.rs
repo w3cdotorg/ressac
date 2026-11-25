@@ -1,7 +1,7 @@
-//! Teletext, as Antiope draws it (the Mac's `TeletextColor`, `TeletextFont`, `CellText`,
-//! `CellLine` and `CRTOverlay`): the eight colours, Bedstead's metrics and character map read
-//! from the bundled font, text fitted to an exact number of cells, cell lines and the wire
-//! format `CellRow` paints, teletext dates and the CRT geometry. No Qt.
+//! Teletext, as Antiope draws it (the Mac's `TeletextColor`, `TeletextFont`, `CellText` and
+//! `CellLine`): the eight colours, Bedstead's metrics and character map read from the bundled
+//! font, text fitted to an exact number of cells, cell lines and the wire format `CellRow`
+//! paints, teletext dates, and the geometry of the Mac's `CRTOverlay` (not drawn here). No Qt.
 
 use std::fmt::Display;
 use std::sync::OnceLock;
@@ -502,7 +502,9 @@ where
     }
 }
 
-/// The CRT screen (scanlines, vignette, corners, bleed): its numbers and geometry. B9 draws it.
+/// The CRT screen (scanlines, vignette, corners, bleed): its numbers and geometry. The KDE app
+/// does not draw it (B9 was cut on its frame budget); kept for a later attempt, see TODO.md,
+/// « Linux (sous-projet 8) », the CRT screen line. `pages::frame` reads its margins.
 pub mod crt {
     use super::Appearance;
 
