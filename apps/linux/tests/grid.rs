@@ -84,6 +84,44 @@ fn the_painted_grid_is_exact_at_every_size_and_scale() {
                     "{size}px x{scale} cell {i}"
                 );
             }
+            // The colour row: every cell holds its colour, sampled at mid-height and mid-cell.
+            let rh = px * s;
+            let colour_of = |i: usize| PALETTE[(i % 7) + 1];
+            let colours = row(y0 + rh + rh / 2);
+            for i in 0..28usize {
+                assert_eq!(
+                    colours[i * cw as usize + cw as usize / 2],
+                    colour_of(i),
+                    "{size}px x{scale} colour cell {i}"
+                );
+            }
+            // Runs start and end on cell boundaries, on both rows' mid-height scanlines.
+            for y in [y0 + rh / 2, y0 + rh + rh / 2] {
+                let line = row(y);
+                for x in 1..line.len() {
+                    if line[x] != line[x - 1] {
+                        assert_eq!(
+                            x % cw as usize,
+                            0,
+                            "{size}px x{scale}: transition at {x}, y {y}"
+                        );
+                    }
+                }
+            }
+            // Overhang: the pixel row just below the `█ █` row is the colour row's first, and the one
+            // below the last row (and above the first) is the black background.
+            for (i, p) in row(y0 + rh).chunks(cw as usize).enumerate() {
+                assert!(
+                    p.iter().all(|c| *c == colour_of(i)),
+                    "{size}px x{scale}: overhang into cell {i}"
+                );
+            }
+            for y in [y0 - 1, y0 + 4 * rh] {
+                assert!(
+                    row(y).iter().all(|c| *c == [0, 0, 0]),
+                    "{size}px x{scale}: foreground at row {y}"
+                );
+            }
         }
     }
 }
