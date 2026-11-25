@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+class QColor;
+class QFont;
 class QPainter;
 class QString;
 
@@ -60,9 +62,14 @@ void ressac_frame_log_auto();
 // debug level as "mosaic: dropped <token>" (category ressac.mosaic).
 void ressac_mosaic_reply(std::uint64_t token, rust::Str mime, rust::Slice<const std::uint8_t> body);
 
-// QPainter::drawText(QPointF, text): cxx-qt-lib wraps only the integer-point overload, and the CRT's
-// glow and colour bleed sit a device pixel (half a logical one at scale 2) from the glyphs.
-void ressac_draw_text_f(QPainter &painter, double x, double y, const QString &text);
+// The CRT bleed under one run of a CellRow (B9): `glow` four times, a device pixel (gx, gy) left,
+// right, up and down, then `red` at +offset and `blue` at -offset, all from the baseline point
+// (x, y). The glyphs are looked up once in `font` (one cell per character, the font's own advances,
+// no shaping) and drawn as glyph runs: grey antialiased, so the copies blend over the cell's ground
+// (a monochrome glyph blit writes a translucent pen as it is, punching the ground out).
+void ressac_draw_bleed(QPainter &painter, double x, double y, const QString &text, const QFont &font,
+                       const QColor &glow, const QColor &red, const QColor &blue, double gx, double gy,
+                       double offset);
 // Device pixels per painter unit, horizontally and vertically (the painter's device transform:
 // the item's content scale, the window's device pixel ratio, a window/viewport mapping).
 double ressac_painter_scale_x(const QPainter &painter);

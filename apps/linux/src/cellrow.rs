@@ -26,10 +26,25 @@ pub mod qobject {
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qcolor.h");
         type QColor = cxx_qt_lib::QColor;
+        include!("cxx-qt-lib/qfont.h");
+        type QFont = cxx_qt_lib::QFont;
 
         include!("shim.h");
-        /// `QPainter::drawText(QPointF, text)`.
-        fn ressac_draw_text_f(painter: Pin<&mut QPainter>, x: f64, y: f64, text: &QString);
+        /// The bleed's six copies of one run (glow, red, blue), blended over the ground.
+        #[allow(clippy::too_many_arguments)]
+        fn ressac_draw_bleed(
+            painter: Pin<&mut QPainter>,
+            x: f64,
+            y: f64,
+            text: &QString,
+            font: &QFont,
+            glow: &QColor,
+            red: &QColor,
+            blue: &QColor,
+            gx: f64,
+            gy: f64,
+            offset: f64,
+        );
         /// Device pixels per painter unit, across and down.
         fn ressac_painter_scale_x(painter: &QPainter) -> f64;
         fn ressac_painter_scale_y(painter: &QPainter) -> f64;
@@ -280,6 +295,9 @@ impl qobject::CellRow {
         font.set_hinting_preference(QFontHintingPreference::PreferFullHinting);
         font.set_kerning(false);
         painter.as_mut().set_font(&font);
+        // The bleed's copies: the same glyphs, grey antialiased (they blend over the ground).
+        let mut bleed_font = font.clone();
+        bleed_font.set_style_strategy(QFontStyleStrategy::NoSubpixelAntialias);
 
         let reverse_background = color(indexed(rust.reverse_background));
         let reverse_foreground = color(indexed(rust.reverse_foreground));
@@ -313,8 +331,6 @@ impl qobject::CellRow {
         let glow_y = 1.0 / qobject::ressac_painter_scale_y(&painter).max(1.0);
         let red = QColor::from_rgba(255, 0, 0, (BLEED_OPACITY * 255.0).round() as i32);
         let blue = QColor::from_rgba(0, 0, 255, (BLEED_OPACITY * 255.0).round() as i32);
-        let red_pen = QPen::from(&red);
-        let blue_pen = QPen::from(&blue);
         for (r, row) in rust.rows.iter().enumerate() {
             let top = (r as f64 * size) as i32;
             painter.as_mut().set_clip_rect(
@@ -331,21 +347,25 @@ impl qobject::CellRow {
                 let text = QString::from(run.text.as_str());
                 let baseline = top + pixel * 8 / 10;
                 if bleed {
-                    let (x, y) = (x.round(), f64::from(baseline));
-                    let glow_pen = QPen::from(&QColor::from_rgba(
+                    let glow = QColor::from_rgba(
                         foreground.red(),
                         foreground.green(),
                         foreground.blue(),
                         (GLOW_OPACITY * 255.0).round() as i32,
-                    ));
-                    painter.as_mut().set_pen(&glow_pen);
-                    for (dx, dy) in [(-glow_x, 0.0), (glow_x, 0.0), (0.0, -glow_y), (0.0, glow_y)] {
-                        qobject::ressac_draw_text_f(painter.as_mut(), x + dx, y + dy, &text);
-                    }
-                    painter.as_mut().set_pen(&red_pen);
-                    qobject::ressac_draw_text_f(painter.as_mut(), x + BLEED_OFFSET, y, &text);
-                    painter.as_mut().set_pen(&blue_pen);
-                    qobject::ressac_draw_text_f(painter.as_mut(), x - BLEED_OFFSET, y, &text);
+                    );
+                    qobject::ressac_draw_bleed(
+                        painter.as_mut(),
+                        x.round(),
+                        f64::from(baseline),
+                        &text,
+                        &bleed_font,
+                        &glow,
+                        &red,
+                        &blue,
+                        glow_x,
+                        glow_y,
+                        BLEED_OFFSET,
+                    );
                 }
                 painter.as_mut().set_pen(&QPen::from(&foreground));
                 painter

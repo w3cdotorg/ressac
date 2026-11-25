@@ -16,12 +16,16 @@
 #include <QtCore/QTimer>
 #include <QtCore/QVariant>
 #include <QtGui/QClipboard>
+#include <QtGui/QColor>
+#include <QtGui/QFont>
 #include <QtGui/QFontDatabase>
+#include <QtGui/QGlyphRun>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QIcon>
 #include <QtGui/QImage>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QRawFont>
 #include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickWindow>
 #include <QtQuickControls2/QQuickStyle>
@@ -532,9 +536,41 @@ bool ressac_settings_remove(rust::Str file, rust::Str key)
     return settings.status() == QSettings::NoError;
 }
 
-void ressac_draw_text_f(QPainter &painter, double x, double y, const QString &text)
+void ressac_draw_bleed(QPainter &painter, double x, double y, const QString &text, const QFont &font,
+                       const QColor &glow, const QColor &red, const QColor &blue, double gx, double gy,
+                       double offset)
 {
-    painter.drawText(QPointF(x, y), text);
+    // One raw font per font (every CellRow paints on the GUI thread, sizes change rarely).
+    static QFont cached_font;
+    static QRawFont raw;
+    if (!raw.isValid() || cached_font != font) {
+        raw = QRawFont::fromFont(font);
+        cached_font = font;
+    }
+    const QList<quint32> glyphs = raw.glyphIndexesForString(text);
+    const QList<QPointF> advances = raw.advancesForGlyphIndexes(glyphs);
+    QList<QPointF> positions;
+    positions.reserve(glyphs.size());
+    qreal along = 0;
+    for (const QPointF &advance : advances) {
+        positions.append(QPointF(along, 0));
+        along += advance.x();
+    }
+    QGlyphRun run;
+    run.setRawFont(raw);
+    run.setGlyphIndexes(glyphs);
+    run.setPositions(positions);
+    const QPen pen = painter.pen();
+    painter.setPen(glow);
+    painter.drawGlyphRun(QPointF(x - gx, y), run);
+    painter.drawGlyphRun(QPointF(x + gx, y), run);
+    painter.drawGlyphRun(QPointF(x, y - gy), run);
+    painter.drawGlyphRun(QPointF(x, y + gy), run);
+    painter.setPen(red);
+    painter.drawGlyphRun(QPointF(x + offset, y), run);
+    painter.setPen(blue);
+    painter.drawGlyphRun(QPointF(x - offset, y), run);
+    painter.setPen(pen);
 }
 
 double ressac_painter_scale_x(const QPainter &painter)
