@@ -338,7 +338,18 @@ Kirigami.ApplicationWindow {
             console.warn("walk: 30-default stored=" + AppSettings.databasePath + " note=" + AppSettings.databaseNote); settingsWindow.showLogs() } },
         { name: "31-back", enter: function () { settingsWindow.close(); root.requestActivate() } },
     ]
-    readonly property var steps: Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
+    // The `grid` walk (B8b2): the Antiope grid, drawn by CellRow (`painted`) and by one Text per run (`text`), exact pixels then frame times.
+    property bool walkPaused: false              // a step that measures asynchronously holds the walk
+    readonly property var gridSteps: [
+        { name: "g01-pattern", enter: function () { gridLoader.active = true; gridLoader.item.variant = Recette.gridVariant || "painted"; gridLoader.item.pattern() } },
+        { name: "g02-scroll", enter: function () { root.walkPaused = true; const probe = gridLoader.item
+            probe.measure(1, 600, function (s1) { console.warn("grid: " + probe.variant + " size=" + probe.size + " step=1 " + s1)
+            probe.measure(10, 600, function (s10) { console.warn("grid: " + probe.variant + " size=" + probe.size + " step=10 " + s10)
+            if (Recette.gridVariant === "" && probe.variant === "painted") { probe.variant = "text"; probe.measure(1, 600, function (t1) {
+                console.warn("grid: text size=" + probe.size + " step=1 " + t1); probe.measure(10, 600, function (t10) {
+                console.warn("grid: text size=" + probe.size + " step=10 " + t10); root.walkPaused = false }) }) } else root.walkPaused = false }) }) } },
+    ]
+    readonly property var steps: Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }
@@ -348,6 +359,7 @@ Kirigami.ApplicationWindow {
     Timer {
         id: walkTimer; interval: 400
         onTriggered: {
+            if (root.walkPaused) { walkTimer.start(); return }
             const name = root.walkIndex < 0 ? (root.pressedDefault ? "02-" : "01-") + root.slug() : root.steps[root.walkIndex].name
             if (!Recette.grab(name)) { Qt.exit(1); return }
             if (root.walkIndex === -1 && !root.pressedDefault && Recette.pressDefault !== "" && root.settled() && Launcher.phase !== Launcher.Ready) {
@@ -388,6 +400,9 @@ Kirigami.ApplicationWindow {
             active: Launcher.phase === Launcher.Ready
             source: Qt.resolvedUrl("ReadingPage.qml")
         }
+
+        // The `grid` walk's probe, over the page; parented to the window overlay so its origin is the window's (the test counts pixels from it, below the menu bar).
+        Loader { id: gridLoader; parent: QQC2.Overlay.overlay; anchors.fill: parent; z: 100; active: false; source: "GridProbe.qml" }
 
         FirstRun {
             anchors.fill: parent

@@ -366,6 +366,34 @@ Demandé par Clément le 23/10/2026 : Ressac sur marghe (Fedora KDE Plasma 44, a
 - Deux crates Unicode pour Antiope (B8a1) : `unicode-segmentation` 1.13.3, déjà dans `Cargo.lock` par ratatui, pour couper le texte en graphèmes comme le Mac, et `unicode-normalization` 0.1.26 pour la forme composée (NFC) qui fait de « e + accent » un « é » de Bedstead. Pas de crate de polices : la table `cmap` et les métriques de Bedstead sont lues à la main, une soixantaine de lignes.
 - La table `cmap` de Bedstead compte 2604 points de code dans ses groupes, mais l'un (U+F1FF) pointe sur le glyphe 0 (`.notdef`) : il est écarté, d'où les 2603 de fontTools.
 
+### Antiope sous KDE : la grille (B8)
+
+- **Décision** : une ligne peinte par `CellRow`, `QQuickPaintedItem` de cxx-qt, plutôt qu'un `Text` QML par segment. Mesuré dans l'appli (parcours `grid`, `apps/linux/tests/grid.rs`), la règle de décision est tenue : pixels exacts à toutes les tailles et échelles, et lignes peintes plus rapides que le texte par segment. Les étapes suivantes de B8 ne changent que le délégué.
+- **Essai de la planification** (images logicielles hors écran, Mac principal ; moyenne / p95 / max en ms) :
+
+| Variante | Échelle | 1 entrée par image | 10 entrées par image |
+|---|---|---|---|
+| `Text` QML par segment, `NativeRendering`, sans lissage, `PreferFullHinting` | 1 | 1,61 à 1,71 / 1,73 à 2,01 / 4,84 | 4,10 / 4,60 / 6,80 |
+| | 2 | 2,04 à 2,83 / 2,27 à 6,47 / 13,10 | 4,47 / 5,03 / 8,12 |
+| Un `QQuickPaintedItem` par entrée (2 lignes), `QPainter` | 1 | 0,09 à 0,10 / 0,10 à 0,11 / 1,67 | 0,27 / 0,28 / 0,56 |
+| | 2 | 0,29 / 0,44 à 0,59 / 1,48 | 0,54 / 0,78 / 1,35 |
+| Un seul item peint pour toute la colonne | 1 | 0,39 à 0,45 / 0,42 à 0,68 / 2,10 | 0,36 / 0,38 / 0,46 |
+| | 2 | 0,84 à 0,88 / 1,03 à 1,19 / 4,28 | 0,78 / 0,83 / 0,96 |
+
+- **Mesures dans l'appli** (conteneur Fedora 44 sous OrbStack, rendu logiciel hors écran, 600 images par série, taille 20 px, `QT_QPA_UPDATE_IDLE_TIME=0` ; charge du conteneur d'environ 2 pendant le passage, aucune autre compilation en parallèle ; moyenne / p95 / max en ms) :
+
+| Variante | Échelle | 1 entrée par image | 10 entrées par image |
+|---|---|---|---|
+| Peinte (`CellRow`) | 1 | 0,21 / 0,35 / 0,65 | 1,08 / 1,15 / 3,28 |
+| | 2 | 0,33 / 0,35 / 0,61 | 1,47 / 1,96 / 4,65 |
+| `Text` par segment | 1 | 1,52 / 1,87 / 3,91 | 5,40 / 7,20 / 17,37 |
+| | 2 | 1,83 / 2,15 / 3,61 | 5,61 / 7,00 / 9,14 |
+
+  Les lignes peintes sont 7 fois (échelle 1) et 5,5 fois (échelle 2) moins chères à une entrée par image, et 5 fois et 3,8 fois à dix. Une seule image dépasse 16 ms (le maximum de 17,37 ms du texte à dix entrées, échelle 1). Les chiffres de l'appli sont un peu plus hauts que ceux de la planification (la liste réelle, le menu et la fenêtre Kirigami sont dessinés avec), mais l'écart entre les deux variantes tient.
+- **Pixels** : le motif (`█ █ …` en un seul segment, 28 cellules `█` de couleurs 1 à 7, `ABC…` en blanc, `mmm…` jaune sur bleu) est dessiné sans autre couleur que les 8 de la palette à 15, 20, 25 et 30 px, aux échelles 1 et 2 ; la ligne `█ █ …` donne des cellules exactes de 9, 12, 15 et 18 px à l'échelle 1 et de 18, 24, 30 et 36 px à l'échelle 2, blanc puis noir en alternance.
+- **Écran CRT (B9)** : avec le moteur logiciel, `ShaderEffect` et `MultiEffect` ne dessinent rien ; un `Canvas` fonctionne et coûte +0,15 ms (échelle 1) et +0,4 ms (échelle 2) par image de défilement. B9 prend `Canvas` partout.
+- **Piège du parcours** : la sonde est parentée à la surcouche de la fenêtre (`QQC2.Overlay.overlay`) et non à la page, sinon la barre de menus décale tout de 26 px et le test de pixels, qui compte depuis le coin de la fenêtre, tombe à côté.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).
