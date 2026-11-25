@@ -18,6 +18,8 @@ Item {
     property bool active: true
     // The fetch failure notice over the page; Antiope draws its own teletext row instead.
     property bool showsNotice: true
+    // Antiope's pane: its pages hold mosaic boxes, marked here when their image failed.
+    property bool mosaics: false
 
     function runAppScript(script, done) {
         web.runJavaScript(script, WebEngineScript.ApplicationWorld, done)
@@ -63,6 +65,15 @@ Item {
     // Walk hook: a synthetic click in the app world reaches navigationRequested as LinkClickedNavigation.
     function clickTitleLink() {
         pane.runAppScript('document.querySelector("h1.title a").click()', function () {})
+    }
+
+    // Walk hook: a click on the element `#<id>` in the app world (a mosaic box's toggle link). Only
+    // a plain id is accepted, so nothing but a name ever reaches the script.
+    function clickSelector(selector) {
+        const id = /^#([A-Za-z][A-Za-z0-9_-]*)$/.exec(selector)
+        if (!Recette.active || id === null)
+            return
+        pane.runAppScript('document.getElementById("' + id[1] + '").click()', function () {})
     }
 
     TextEdit { id: clipboard; visible: false }
@@ -118,6 +129,12 @@ Item {
         settings.playbackRequiresUserGesture: true
         settings.pluginsEnabled: false
         settings.localContentCanAccessFileUrls: false
+        // Every link to a scheme WebEngine does not know (a mosaic box's ressac-toggle:) reaches
+        // onNavigationRequested, the one gate, which never accepts one (accepted, it would go to the
+        // desktop's URL handler). The default policy drops it silently unless a user gesture started
+        // it, so the walk's app-world click would never arrive. Article scripts never run: no page
+        // navigates by itself.
+        settings.unknownUrlSchemePolicy: WebEngineSettings.AllowAllUnknownUrlSchemes
 
         // Our own load is allowed; a clicked web link opens in the browser; everything else is refused.
         onNavigationRequested: (request) => {
@@ -128,7 +145,9 @@ Item {
             }
             request.reject()
             if (d.startsWith("open:"))
-                pane.openExternally(d.slice(5))      // a "toggle:" answer is B8d's
+                pane.openExternally(d.slice(5))
+            else if (d.startsWith("toggle:"))         // a mosaic box clicked: it swaps with its original
+                pane.runAppScript(Reader.toggleImageScript(Number(d.slice(7))), function () {})
         }
 
         onNewWindowRequested: (request) => {
@@ -182,6 +201,19 @@ Item {
         function onSubpageChanged() {
             if (pane.active && !pane.proofing)
                 pane.runSubpageScript()
+        }
+    }
+
+    // A mosaic answered with the failure placeholder: its boxes show the magenta IMAGE line. The
+    // target also creates `Mosaics` with the first pane, before any article loads (without it,
+    // every image would get the placeholder and no `failed`).
+    Connections {
+        target: Mosaics
+        enabled: pane.mosaics && pane.active
+        function onFailed(url) {
+            if (Recette.active)
+                console.warn("mosaic: failed " + url)
+            pane.runAppScript(Reader.markFailedScript(url), function () {})
         }
     }
 

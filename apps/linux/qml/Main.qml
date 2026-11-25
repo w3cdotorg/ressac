@@ -410,14 +410,46 @@ Kirigami.ApplicationWindow {
     function waitForWrote(ms) { root.waitWrote = true; root.waitFor(() => !root.waitWrote, ms) }
     // Holds the walk until `test()` holds (polled every 20 ms) or `ms` passed: a write or a
     // popup's transition lands in its own time on a loaded machine.
-    function waitFor(test, ms) { walkWait.test = test; walkWait.until = Date.now() + ms; root.walkPaused = true; walkWait.start() }
+    // `done`, when given, runs once the wait is over (it may wait again).
+    function waitFor(test, ms, done) { walkWait.test = test; walkWait.done = done || null; walkWait.until = Date.now() + ms; root.walkPaused = true; walkWait.start() }
     Timer {
         id: walkWait
         interval: 20
         repeat: true
         property var test: null
+        property var done: null
         property real until: 0
-        onTriggered: if (test() || Date.now() > until) { stop(); root.walkPaused = false }
+        onTriggered: if (test() || Date.now() > until) { stop(); root.walkPaused = false; const d = done; done = null; if (d) d() }
+    }
+    // Holds the walk while the reader's page answers `script` (app world, every 50 ms) with a result
+    // that is not `ready` yet, at most `ms`; then `done(result)` (the last answer, undefined if none).
+    function waitForPage(reader, script, ready, ms, done) {
+        pagePoll.reader = reader; pagePoll.script = script; pagePoll.ready = ready; pagePoll.done = done
+        pagePoll.until = Date.now() + ms; pagePoll.last = undefined; pagePoll.asking = false
+        root.walkPaused = true; pagePoll.start()
+    }
+    Timer {
+        id: pagePoll
+        interval: 50
+        repeat: true
+        property var reader: null
+        property string script: ""
+        property var ready: null
+        property var done: null
+        property var last
+        property real until: 0
+        property bool asking: false
+        function finish() { stop(); asking = false; const d = done; done = null; root.walkPaused = false; if (d) d(last) }
+        onTriggered: {
+            if (Date.now() > until) { finish(); return }
+            if (asking) return
+            asking = true
+            reader.runAppScript(script, function (result) {
+                if (!pagePoll.running) return
+                pagePoll.asking = false; pagePoll.last = result
+                if (pagePoll.ready(result)) pagePoll.finish()
+            })
+        }
     }
     readonly property var antiopePagesSteps: [
         { name: "c01-sommaire", enter: function () { AppSettings.appearance = "antiope"
@@ -515,6 +547,45 @@ Kirigami.ApplicationWindow {
             console.warn("walk: b01 current=" + before + " index=" + Antiope.indexRows.length + " digit=" + d + " select=" + s
                 + " header=" + (Antiope.header.indexOf("P201") >= 0 ? "P201" : Antiope.header)) } },
     ]
+    // The `mosaic` walk (B8d3): the test serves /photo.png (red), /broken.png (HTML) and /slow.png (30 s) on
+    // loopback; entry 9001 shows the photo and the broken image, 9002 the slow one, 9003 a failing address
+    // with a space and an é. Probes read the page in the app world; the page's own scripts stay off.
+    function mosaicPage(script, ready, done) { root.waitForPage(readingLoader.item.antiopeView.reader, script, ready, 10000, done) }
+    readonly property var mosaicSteps: [
+        { name: "d01-mosaic", enter: function () { AppSettings.appearance = "antiope"
+            const o = readingLoader.item.antiopeView.mapToItem(null, 0, 0)
+            console.warn("walk: d01-origin x=" + o.x + " y=" + o.y)
+            SourcesModel.selectKey("feed:1"); EntriesModel.selectEntry(9001)
+            // Until the photo's mosaic is drawn and the broken image's box is marked.
+            root.mosaicPage('(() => { const g = document.querySelector("#m0 img"); const f = document.getElementById("m1");'
+                + ' return !!(g && g.complete && g.naturalWidth > 0 && f && f.dataset.failed !== undefined) })()',
+                r => r === true, function (r) { console.warn("walk: d01 ready=" + r + " page=" + Reader.pageUrl) }) } },
+        { name: "d02-failed", enter: function () { root.mosaicPage('(() => { const m1 = document.getElementById("m1");'
+            + ' return "m0=" + document.querySelector("#m0 img").naturalWidth + " m1failed=" + (m1.dataset.failed !== undefined)'
+            + ' + " alt=" + getComputedStyle(m1.querySelector(".mosaic-alt")).display })()',
+            r => true, function (r) { console.warn("walk: d02 " + r) }) } },
+        { name: "d03-click", enter: function () { readingLoader.item.antiopeView.reader.clickSelector("#m0")
+            root.mosaicPage('(() => { const b = document.getElementById("m0"); const g = b.querySelector("img");'
+                + ' return { ready: b.classList.contains("original") && g.complete && g.naturalWidth > 0,'
+                + ' line: "src=" + g.src + " original=" + b.classList.contains("original") } })()',
+                r => r && r.ready, function (r) { console.warn("walk: d03 " + (r ? r.line : "no answer")) }) } },
+        { name: "d04-i", enter: function () { Recette.key(Qt.Key_I, "i", 0)
+            root.mosaicPage('document.querySelectorAll(".mosaic.original").length', r => true,
+                function (r) { console.warn("walk: d04 originals=" + r) }) } },
+        { name: "d05-i-again", enter: function () { Recette.key(Qt.Key_I, "i", 0)
+            root.mosaicPage('document.querySelectorAll(".mosaic.original").length', r => true,
+                function (r) { console.warn("walk: d05 originals=" + r) }) } },
+        // The slow image requested, then another entry at once: the page cancels the request.
+        { name: "d06-slow-reload", enter: function () { EntriesModel.selectEntry(9002)
+            root.waitFor(() => Mosaics.inFlight >= 1, 10000, function () { const pending = Mosaics.inFlight
+                EntriesModel.selectEntry(9003); console.warn("walk: d06 pending=" + pending) }) } },
+        { name: "d07-settled", enter: function () {
+            root.mosaicPage('(() => { const b = document.getElementById("m0"); return b ? { failed: b.dataset.failed !== undefined, mosaic: b.dataset.mosaic } : null })()',
+                r => r && r.failed && Mosaics.inFlight === 0,
+                function (r) { console.warn("walk: d07 inFlight=" + Mosaics.inFlight + " failed=" + (r ? r.failed : false) + " mosaic=" + (r ? r.mosaic : ""))
+                    // The walk lingers: the test's server sees the stopped download close well before the exit.
+                    root.waitFor(() => false, 2500) }) } },
+    ]
     // `j` held (a press every 33 ms, the key repeat's pace) on long articles: the frame times while a 2 px
     // square flips on every frame (so a frame is always due), and the time each press takes. Then how
     // long the sidebar badge and Antiope's index take to show the marks (the coalesced counts reload),
@@ -582,7 +653,7 @@ Kirigami.ApplicationWindow {
         width: 2; height: 2; color: "black"
         Connections { target: root; enabled: frameDriver.visible; function onFrameSwapped() { frameDriver.x = frameDriver.x > 0 ? 0 : 2 } }
     }
-    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
+    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }

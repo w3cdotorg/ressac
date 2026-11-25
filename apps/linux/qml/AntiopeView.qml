@@ -74,7 +74,8 @@ FocusScope {
                 Runs.refreshSource(SourcesModel.selectedKey)
                 break
             case "images":
-                break                                    // the mosaics come in Task 17
+                antiopeReader.runAppScript(Reader.toggleAllScript(), function () {})
+                break
             case "focusEntries":
                 if (!SourcesModel.isGarden)
                     EntriesModel.selectFirstIfNone()
@@ -496,6 +497,7 @@ FocusScope {
                     objectName: "readerPane"
                     proofing: false                         // the recette proves the native pane's page once
                     showsNotice: false                      // the teletext row above says it
+                    mosaics: true
                     anchors.top: failureNotice.bottom
                     anchors.bottom: parent.bottom
                     width: parent.width
