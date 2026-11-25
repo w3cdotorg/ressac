@@ -183,6 +183,10 @@ pub mod qobject {
         #[qinvokable]
         fn search_label(self: &Antiope, width: i32) -> QString;
 
+        /// The fetch failure notice over an article, ` <notice>` black on red, `width` cells.
+        #[qinvokable]
+        fn failure_notice(self: &Antiope, notice: &QString, width: i32) -> QString;
+
         /// The run banner as three encoded rows, `width` cells in all: the message, ` LOG `
         /// (`""` without a log to show) and ` X `.
         #[qinvokable]
@@ -873,6 +877,14 @@ impl qobject::Antiope {
 
     fn search_label(&self, width: i32) -> QString {
         QString::from(search_label_line(cells(width)).encode().as_str())
+    }
+
+    fn failure_notice(&self, notice: &QString, width: i32) -> QString {
+        QString::from(
+            frame::failure_notice_line(&notice.to_string(), cells(width))
+                .encode()
+                .as_str(),
+        )
     }
 
     fn banner_row(&self, message: &QString, show_log: bool, width: i32) -> QStringList {

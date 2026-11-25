@@ -16,6 +16,8 @@ Item {
     // The pane on screen for the look. An inactive one (Native's, hidden under Antiope) keeps its
     // page and never navigates; it loads the current page when it becomes active again.
     property bool active: true
+    // The fetch failure notice over the page; Antiope draws its own teletext row instead.
+    property bool showsNotice: true
 
     function runAppScript(script, done) {
         web.runJavaScript(script, WebEngineScript.ApplicationWorld, done)
@@ -72,7 +74,7 @@ Item {
         anchors.left: parent.left
         anchors.right: parent.right
         height: visible ? implicitHeight : 0
-        visible: Reader.runFailureNotice !== ""
+        visible: pane.showsNotice && Reader.runFailureNotice !== ""
         text: Reader.runFailureNotice
         color: Kirigami.Theme.disabledTextColor
         wrapMode: Text.Wrap

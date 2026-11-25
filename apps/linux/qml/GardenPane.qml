@@ -99,7 +99,8 @@ Item {
                 action: QQC2.Action {
                     text: "Undo"
                     shortcut: StandardKey.Undo
-                    enabled: Garden.active
+                    // Off under Antiope (the pane hidden): its view has its own Undo, and two would clash.
+                    enabled: Garden.active && pane.visible
                     onTriggered: Garden.undo()
                 }
                 QQC2.ToolTip.text: "Undo the last decision, here or in the terminal garden (U or Ctrl+Z)"
@@ -263,6 +264,7 @@ Item {
 
     Connections {
         target: Garden
-        function onStateChanged() { if (Garden.confirming && !repairs.visible) repairs.open() }
+        // Under Antiope (the pane hidden) its view asks instead.
+        function onStateChanged() { if (Garden.confirming && !repairs.visible && pane.visible) repairs.open() }
     }
 }

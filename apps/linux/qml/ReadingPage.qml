@@ -16,14 +16,16 @@ Item {
     property alias sourcesPane: sourcesPane
     property alias starButton: starButton
     // The look on screen: Antiope's view over the hidden native panes, or the native panes alone.
-    property string look: AppSettings.effectiveAppearance
+    // An empty library is Native whatever the setting: First Run shows in the window's own chrome.
+    property string look: SourcesModel.emptyLibrary ? "native" : AppSettings.effectiveAppearance
     readonly property bool antiope: look === "antiope"
     readonly property Item antiopeView: antiopeLoader.item
     // The reader the keys and the toolbar act on: Antiope's own while it is shown.
     readonly property Item activeReader: antiope && antiopeLoader.item ? antiopeLoader.item.reader : readerPane
     readonly property alias reader: readerPane
     readonly property alias garden: gardenPane
-    readonly property bool searchFocused: searchField.activeFocus
+    // Native's search field or Antiope's prompt: the menus' letters stay off while typing.
+    readonly property bool searchFocused: searchField.activeFocus || (antiopeView !== null && antiopeView.promptFocused === true)
     // The morning edition builds by itself, except in the screenshot walks that do not test it.
     readonly property bool editionTriggers: !Recette.active || Recette.walk === "journal"
 
@@ -57,7 +59,12 @@ Item {
     function focusSidebar() { sourcesPane.focusList() }
     function dragFeed(feedKey, targetKey) { return sourcesPane.dragFeed(feedKey, targetKey) }
     function focusGarden() { gardenPane.focusList() }
-    function focusSearch() { searchField.forceActiveFocus() }
+    function focusSearch() {
+        if (antiope && antiopeLoader.item)
+            antiopeLoader.item.openPrompt()
+        else
+            searchField.forceActiveFocus()
+    }
 
     function openInBrowser() {
         if (Reader.link !== "")
@@ -183,8 +190,16 @@ Item {
     }
 
     // Back in Native the keyboard goes to the sidebar, never to the destroyed Antiope view, so the
-    // letters work at once. Entering Antiope, the view's `onLoaded` focuses its column.
-    onAntiopeChanged: if (!antiope) focusSidebar()
+    // letters work at once; an open prompt closes first without taking the focus back (its text
+    // stays). Entering Antiope, the view's `onLoaded` focuses its column.
+    onAntiopeChanged: {
+        if (antiope)
+            return
+        if (antiopeLoader.item)
+            antiopeLoader.item.closePrompt(false, false)
+        if (!SourcesModel.emptyLibrary)
+            focusSidebar()
+    }
 
     ColumnLayout {
         anchors.fill: parent

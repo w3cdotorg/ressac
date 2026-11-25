@@ -5,19 +5,23 @@ import QtQuick.Dialogs
 import org.kde.kirigami as Kirigami
 import org.w3cdotorg.ressac
 
-// Settings (inventory §7.3): Reading (font, size, line width, preview) and Data (database, relaunch, logs).
+// Settings (inventory §7.3): Reading (appearance, font, size, line width, preview) and Data (database,
+// relaunch, logs).
 QQC2.ApplicationWindow {
     id: settings
     title: "Settings"
     width: 560
     minimumWidth: 540
-    height: 460
+    height: 520
     visible: false
 
     // Main.qml's window (the log folder opens through it).
     property var chrome: null
 
     readonly property int fontIndex: Math.max(0, AppSettings.fontIds.indexOf(AppSettings.readerFont))
+    // The look shown (Native whenever Bedstead did not load) and Antiope's four text sizes.
+    readonly property bool antiope: AppSettings.effectiveAppearance === "antiope"
+    readonly property var antiopeSizes: [15, 20, 25, 30]
     readonly property string previewFamily: AppSettings.fontFamilies[fontIndex] || Kirigami.Theme.defaultFont.family
 
     function showPage(name) { tabs.currentIndex = name === "data" ? 1 : 0 }
@@ -50,18 +54,64 @@ QQC2.ApplicationWindow {
             id: reading
             Layout.margins: Kirigami.Units.largeSpacing
 
-            QQC2.ComboBox {
+            ColumnLayout {
+                Kirigami.FormData.label: "Appearance:"
+                spacing: Kirigami.Units.smallSpacing
+
+                RowLayout {
+                    spacing: 0
+                    enabled: AppSettings.bedsteadAvailable
+                    QQC2.ButtonGroup { id: appearanceGroup }
+                    QQC2.ToolButton {
+                        objectName: "appearanceNative"
+                        text: "Native"
+                        checkable: true
+                        QQC2.ButtonGroup.group: appearanceGroup
+                        checked: !settings.antiope
+                        onClicked: AppSettings.appearance = "native"
+                    }
+                    QQC2.ToolButton {
+                        objectName: "appearanceAntiope"
+                        text: "Antiope"
+                        checkable: true
+                        QQC2.ButtonGroup.group: appearanceGroup
+                        checked: settings.antiope
+                        onClicked: AppSettings.appearance = "antiope"
+                    }
+                }
+                QQC2.Label {
+                    visible: !AppSettings.bedsteadAvailable
+                    text: "Antiope needs the Bedstead font, which did not load."
+                    font: Kirigami.Theme.smallFont
+                    color: Kirigami.Theme.disabledTextColor
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+            }
+
+            ColumnLayout {
                 Kirigami.FormData.label: "Font:"
-                model: AppSettings.fontTitles
-                currentIndex: settings.fontIndex
-                onActivated: (i) => AppSettings.readerFont = AppSettings.fontIds[i]
-                delegate: QQC2.ItemDelegate {
-                    required property int index
-                    required property var modelData
-                    width: ListView.view ? ListView.view.width : implicitWidth
-                    text: modelData
-                    font.family: AppSettings.fontFamilies[index] || Kirigami.Theme.defaultFont.family
-                    highlighted: index === settings.fontIndex
+                spacing: Kirigami.Units.smallSpacing
+
+                QQC2.ComboBox {
+                    enabled: !settings.antiope
+                    model: AppSettings.fontTitles
+                    currentIndex: settings.fontIndex
+                    onActivated: (i) => AppSettings.readerFont = AppSettings.fontIds[i]
+                    delegate: QQC2.ItemDelegate {
+                        required property int index
+                        required property var modelData
+                        width: ListView.view ? ListView.view.width : implicitWidth
+                        text: modelData
+                        font.family: AppSettings.fontFamilies[index] || Kirigami.Theme.defaultFont.family
+                        highlighted: index === settings.fontIndex
+                    }
+                }
+                QQC2.Label {
+                    visible: settings.antiope
+                    text: "Bedstead in Antiope"
+                    font: Kirigami.Theme.smallFont
+                    color: Kirigami.Theme.disabledTextColor
                 }
             }
 
@@ -70,14 +120,24 @@ QQC2.ApplicationWindow {
                 spacing: Kirigami.Units.smallSpacing
                 Kirigami.Icon { source: "format-font-size-less"; implicitWidth: Kirigami.Units.iconSizes.small; implicitHeight: Kirigami.Units.iconSizes.small }
                 QQC2.Slider {
+                    visible: !settings.antiope
                     from: 12; to: 28; stepSize: 1
                     snapMode: QQC2.Slider.SnapAlways
                     value: AppSettings.readerSize
                     onMoved: AppSettings.readerSize = value
                 }
+                // Antiope draws at one of four sizes of its own.
+                QQC2.Slider {
+                    objectName: "antiopeSize"
+                    visible: settings.antiope
+                    from: 0; to: 3; stepSize: 1
+                    snapMode: QQC2.Slider.SnapAlways
+                    value: settings.antiopeSizes.indexOf(AppSettings.readerSizeAntiope)
+                    onMoved: AppSettings.readerSizeAntiope = settings.antiopeSizes[value]
+                }
                 Kirigami.Icon { source: "format-font-size-more"; implicitWidth: Kirigami.Units.iconSizes.small; implicitHeight: Kirigami.Units.iconSizes.small }
                 QQC2.Label {
-                    text: Math.round(AppSettings.readerSize) + " pt"
+                    text: Math.round(settings.antiope ? AppSettings.readerSizeAntiope : AppSettings.readerSize) + " pt"
                     font.features: { "tnum": 1 }
                     color: Kirigami.Theme.disabledTextColor
                 }
@@ -104,8 +164,8 @@ QQC2.ApplicationWindow {
             QQC2.Label {
                 Kirigami.FormData.label: "Preview:"
                 text: AppSettings.previewText
-                font.family: settings.previewFamily
-                font.pixelSize: Math.round(AppSettings.readerSize)
+                font.family: settings.antiope ? "Bedstead" : settings.previewFamily
+                font.pixelSize: Math.round(settings.antiope ? AppSettings.readerSizeAntiope : AppSettings.readerSize)
                 wrapMode: Text.Wrap
                 maximumLineCount: 3
                 elide: Text.ElideRight

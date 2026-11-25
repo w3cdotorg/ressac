@@ -1,12 +1,14 @@
 pragma ComponentBehavior: Bound
 import QtQuick
+import QtQuick.Controls as QQC2
 import org.kde.kirigami as Kirigami
 import org.w3cdotorg.ressac
 
 // The Antiope look (spec §7.9): a black teletext screen of whole cells. The header row; three columns
 // (the page index, the entries, the reader) with a blue rule between them, each under its title row;
-// the Minitel bar at the foot. The rules are the `Antiope` singleton's; this view binds its inputs,
-// draws its rows and applies the effects of what it answers (`apply`). Focus follows `Antiope.column`.
+// the Minitel bar at the foot, the run banner under the header when there is one. The rules are the
+// `Antiope` singleton's; this view binds its inputs, draws its rows and applies the effects of what it
+// answers (`apply`) and of the rows clicked (`activate`). Focus follows `Antiope.column`.
 FocusScope {
     id: view
 
@@ -20,6 +22,19 @@ FocusScope {
     readonly property int readerCells: windowCells - Antiope.indexCells - Antiope.entryCells - 2
     readonly property Item reader: antiopeReader
     readonly property alias entriesList: entriesList
+    // The entries column: the garden's feeds (P800–P802), P104's edition, or the entry list.
+    readonly property string entriesPage: SourcesModel.isGarden ? "garden"
+        : SourcesModel.selectedKey === "journal" ? "journal" : "list"
+    // The reader column, in the Mac's order: P100, P899 or the end page; the inspector in a garden;
+    // NO ENTRY SELECTED; else the article.
+    readonly property string readerShows: Antiope.readerPage !== "article" ? "rows"
+        : SourcesModel.isGarden ? "inspector"
+        : EntriesModel.selectedEntryId < 0 ? "rows" : "article"
+
+    // The search prompt in the Minitel bar (Ctrl+F). The view goes with the look, so the prompt
+    // never survives a switch; the search text does.
+    property bool promptOpen: false
+    readonly property bool promptFocused: minitelBar.promptFocused
 
     // One page-down at a time; a page that never answers must not leave Antiope advancing for good.
     property int advanceGeneration: 0
@@ -94,10 +109,13 @@ FocusScope {
     function focusColumn() {
         switch (Antiope.column) {
         case "entries":
-            entriesList.forceActiveFocus()
+            if (view.entriesPage === "list")
+                entriesList.forceActiveFocus()
+            else
+                entriesCells.forceActiveFocus()
             break
         case "reader":
-            if (Antiope.readerPage !== "article")
+            if (view.readerShows !== "article")
                 readerList.forceActiveFocus()
             else if (Reader.hasEntry)
                 antiopeReader.focusWeb()
@@ -127,9 +145,74 @@ FocusScope {
         focusColumn()
     }
 
-    function clickIndexRow(action) {
-        if (action.startsWith("jump:"))
-            apply(Antiope.jump(Number(action.slice(5))))
+    function openPrompt() {
+        promptOpen = true
+        minitelBar.focusPrompt()
+    }
+
+    // `clearing` empties the search (Esc); `refocus` false when the view is being left.
+    function closePrompt(clearing, refocus) {
+        if (!promptOpen)
+            return
+        promptOpen = false
+        if (clearing)
+            EntriesModel.searchText = ""
+        if (refocus !== false)
+            focusColumn()
+    }
+
+    function openLog() {
+        if (Recette.active)
+            console.warn("walk: open log")
+        else
+            Qt.openUrlExternally("file://" + encodeURI(Runs.logDir))
+    }
+
+    // A click on a row with an action (`Line::action`), `x` in the row's pixels.
+    function activate(action, x) {
+        const parts = action.split(":")
+        switch (parts[0]) {
+        case "jump":                                     // an index row, a page of P100's
+            apply(Antiope.jump(Number(parts[1])))
+            break
+        case "pair": {                                   // P100's two pages on one row: the half clicked
+            const page = x < Number(parts[3]) * view.cellWidth ? parts[1] : parts[2]
+            if (page !== "-")
+                apply(Antiope.jump(Number(page)))
+            break
+        }
+        case "entry":                                    // an entry of P104's edition
+            EntriesModel.selectEntry(Number(parts[1]))
+            Antiope.showArticle()
+            Antiope.column = "entries"
+            focusColumn()
+            break
+        case "overflow":                                 // P104's "more from this feed": its page, or the feed
+            if (parts[2] !== "-") {
+                apply(Antiope.jump(Number(parts[2])))
+            } else {
+                SourcesModel.selectKey("feed:" + parts[1])
+                Antiope.showArticle()
+                Antiope.column = "index"
+                focusColumn()
+            }
+            break
+        case "feed":                                     // a feed of a garden page
+            Garden.selectFeed(Number(parts[1]))
+            Antiope.column = "entries"
+            focusColumn()
+            break
+        case "cadence":                                  // the inspector's Rhythm and Theme choices
+            Garden.setCadence(Number(parts[1]))
+            Antiope.column = "reader"
+            focusColumn()
+            break
+        case "theme":
+            Garden.setTheme(Number(parts[1]))
+            Antiope.column = "reader"
+            focusColumn()
+            break
+        }
     }
 
     // One cell: black, with a blue rule half a cell wide on its right.
@@ -163,12 +246,17 @@ FocusScope {
     Binding { target: Antiope; property: "reduceMotion"; value: view.reduceMotion }
     Binding { target: Antiope; property: "gardenMessage"; value: Garden.message }
     Binding { target: Antiope; property: "journalPhase"; value: Journal.phase }
+    Binding { target: Antiope; property: "journalFailure"; value: Journal.failure }
+    Binding { target: Antiope; property: "journalDone"; value: Journal.progressDone }
+    Binding { target: Antiope; property: "journalTotal"; value: Journal.progressTotal }
     Binding { target: Antiope; property: "windowCells"; value: view.windowCells }
     Binding { target: Antiope; property: "readerCells"; value: view.readerCells }
     Binding { target: Antiope; property: "windowWidth"; value: view.Window.window ? view.Window.window.width : 0 }
     Binding { target: Antiope; property: "windowHeight"; value: view.Window.window ? view.Window.window.height : 0 }
     Binding { target: Antiope; property: "cellWidth"; value: view.cellWidth }
     Binding { target: Antiope; property: "crt"; value: false }      // B9 binds the CRT screen
+    // The garden inspector's page, as wide as the reader column.
+    Binding { target: Garden; property: "antiopeCells"; value: view.readerCells }
 
     // The reader's sub-page line ("412 3/20").
     Binding { target: Reader; property: "subpagePage"; value: Antiope.subpagePage }
@@ -189,9 +277,50 @@ FocusScope {
             size: view.size
         }
 
+        // The run banner: the message, ` LOG ` when the log explains it, ` X ` to dismiss.
+        Row {
+            id: banner
+            objectName: "antiopeBanner"
+
+            readonly property var lines: Runs.bannerVisible
+                ? Antiope.bannerRow(Runs.bannerMessage, Runs.bannerShowLog, view.windowCells) : ["", "", ""]
+
+            visible: Runs.bannerVisible
+            height: view.size
+
+            CellRow {
+                line: banner.lines[0]
+                size: view.size
+            }
+
+            CellRow {
+                visible: banner.lines[1] !== ""
+                line: banner.lines[1]
+                size: view.size
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: view.openLog()
+                }
+            }
+
+            CellRow {
+                line: banner.lines[2]
+                size: view.size
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: Runs.dismissBanner()
+                }
+            }
+        }
+
         Row {
             width: parent.width
-            height: Math.max(0, view.height - 2 * view.size)     // the header and the Minitel bar
+            // The header, the banner when shown, and the Minitel bar.
+            height: Math.max(0, view.height - (banner.visible ? 3 : 2) * view.size)
 
             FocusScope {
                 id: indexColumn
@@ -215,7 +344,7 @@ FocusScope {
                     width: parent.width
                     size: view.size
                     rows: Antiope.indexRows
-                    onActivated: (action, x) => view.clickIndexRow(action)
+                    onActivated: (action, x) => view.activate(action, x)
                 }
             }
 
@@ -251,6 +380,7 @@ FocusScope {
                     anchors.top: entriesTitle.bottom
                     anchors.bottom: parent.bottom
                     width: parent.width
+                    visible: view.entriesPage === "list"
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
                     keyNavigationEnabled: false
@@ -290,9 +420,33 @@ FocusScope {
                 CellRow {
                     objectName: "antiopeEmpty"
                     anchors.top: entriesTitle.bottom
-                    visible: entriesList.count === 0
+                    visible: view.entriesPage === "list" && entriesList.count === 0
                     line: Antiope.emptyLine(EntriesModel.emptyText)
                     size: view.size
+                }
+
+                // P800–P802 (the garden's feeds; its keys, ↑ and ↓ move between them) or P104's edition.
+                CellList {
+                    id: entriesCells
+                    objectName: "antiopeEntries"
+                    anchors.top: entriesTitle.bottom
+                    anchors.bottom: parent.bottom
+                    width: parent.width
+                    size: view.size
+                    visible: view.entriesPage !== "list"
+                    rows: view.entriesPage === "garden" ? Garden.antiopeRows
+                        : view.entriesPage === "journal" ? Antiope.journalRows : []
+                    onActivated: (action, x) => view.activate(action, x)
+                    Keys.onPressed: (event) => { event.accepted = view.entriesPage === "garden" && Garden.key(event.text, event.modifiers) }
+                    Keys.onUpPressed: if (view.entriesPage === "garden") Garden.antiopeMove(-1)
+                    Keys.onDownPressed: if (view.entriesPage === "garden") Garden.antiopeMove(1)
+
+                    // P104's list follows the selection (its rows move after the selection signal).
+                    Connections {
+                        target: EntriesModel
+                        enabled: view.entriesPage === "journal"
+                        function onSelectionChanged() { Qt.callLater(entriesCells.showSelected) }
+                    }
                 }
             }
 
@@ -312,17 +466,29 @@ FocusScope {
                     size: view.size
                 }
 
+                // A fetch that failed without a stored error, black on red over the article.
+                CellRow {
+                    id: failureNotice
+                    objectName: "antiopeNotice"
+                    anchors.top: readerTitle.bottom
+                    visible: view.readerShows === "article" && Reader.runFailureNotice !== ""
+                    height: visible ? view.size : 0
+                    line: visible ? Antiope.failureNotice(Reader.runFailureNotice, view.readerCells) : ""
+                    size: view.size
+                }
+
                 ReaderPane {
                     id: antiopeReader
                     objectName: "readerPane"
                     proofing: false                         // the recette proves the native pane's page once
-                    anchors.top: readerTitle.bottom
+                    showsNotice: false                      // the teletext row above says it
+                    anchors.top: failureNotice.bottom
                     anchors.bottom: parent.bottom
                     width: parent.width
-                    visible: Antiope.readerPage === "article"
+                    visible: view.readerShows === "article"
                 }
 
-                // The reader's teletext pages (P100, P899, the end of the edition) come in Task 12.
+                // P100, P899, the end of the edition, NO ENTRY SELECTED, or the garden's inspector.
                 CellList {
                     id: readerList
                     objectName: "antiopeReader"
@@ -330,13 +496,56 @@ FocusScope {
                     anchors.bottom: parent.bottom
                     width: parent.width
                     size: view.size
-                    visible: Antiope.readerPage !== "article"
+                    visible: view.readerShows !== "article"
+                    rows: view.readerShows === "inspector" ? Garden.antiopeInspector
+                        : view.readerShows === "rows" ? Antiope.readerRows : []
+                    onActivated: (action, x) => view.activate(action, x)
                 }
             }
         }
 
         MinitelBar {
+            id: minitelBar
             size: view.size
+            cells: view.windowCells - Antiope.keysCells
+            promptOpen: view.promptOpen
+            onCloseRequested: (clearing) => view.closePrompt(clearing)
+        }
+    }
+
+    // The garden's Undo (Ctrl+Z), Native's being hidden with its pane.
+    QQC2.Action {
+        shortcut: StandardKey.Undo
+        enabled: SourcesModel.isGarden
+        onTriggered: Garden.undo()
+    }
+
+    // Shift+R in a garden: every safe repair, after this question (B5's texts and buttons).
+    Kirigami.PromptDialog {
+        id: repairs
+        title: Garden.applyQuestion
+        subtitle: Garden.applyPreview
+        standardButtons: QQC2.Dialog.NoButton
+        customFooterActions: [
+            Kirigami.Action {
+                text: Garden.applyConfirmLabel
+                onTriggered: { Garden.applySafe(); repairs.close() }
+            },
+            Kirigami.Action {
+                text: "Cancel"
+                onTriggered: repairs.close()
+            }
+        ]
+        onClosed: { Garden.confirming = false; view.focusColumn() }
+    }
+
+    Connections {
+        target: Garden
+        function onStateChanged() {
+            if (Garden.confirming && !repairs.visible)
+                repairs.open()
+            else if (!Garden.confirming && repairs.visible)
+                repairs.close()
         }
     }
 
