@@ -90,7 +90,7 @@ pub fn read(g: &Globals) -> anyhow::Result<ExitCode> {
     crate::tui::reader::run(
         &app,
         &g.db,
-        &crate::tui::reader::settings::TerminalSettings::default_path(),
+        crate::tui::reader::settings::TerminalSettings::default_path().as_deref(),
     )?;
     Ok(ExitCode::SUCCESS)
 }

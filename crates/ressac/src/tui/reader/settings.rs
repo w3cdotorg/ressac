@@ -1,7 +1,8 @@
 //! The terminal's own settings (spec §5, The look setting): the look and whether images show,
 //! in `terminal.json` (`Paths::terminal_settings`: next to the database on macOS,
 //! `$XDG_CONFIG_HOME/ressac/` on Linux). A missing or unreadable file means the defaults;
-//! saving never blocks reading (the caller ignores a failed save, beyond a message).
+//! saving never blocks reading (the caller ignores a failed save, beyond a message). Without a
+//! usable home there is no file: the choices last for the session (spec §5.1).
 
 use std::path::{Path, PathBuf};
 
@@ -45,12 +46,13 @@ impl TerminalSettings {
     }
 
     /// `terminal.json` from the layout: `~/Library/Application Support/Ressac/` (next to the
-    /// default database) on macOS, `$XDG_CONFIG_HOME/ressac/` on Linux. Without a usable home
-    /// it falls back to next to the default database.
-    pub fn default_path() -> PathBuf {
+    /// default database) on macOS, `$XDG_CONFIG_HOME/ressac/` on Linux. `None` without a usable
+    /// home (`HOME` unset or relative, reachable with `--db`): never a path relative to the
+    /// working directory.
+    pub fn default_path() -> Option<PathBuf> {
         ressac_core::paths::Paths::from_env()
+            .ok()
             .map(|p| p.terminal_settings())
-            .unwrap_or_else(|_| ressac_core::store::default_path().with_file_name("terminal.json"))
     }
 }
 
@@ -108,10 +110,43 @@ mod tests {
         );
     }
 
+    /// `default_path` reads the process environment: the check runs in a child test process
+    /// with `HOME` unset, then relative, so no other test sees the change (spec §5.1: no
+    /// usable home, never a path relative to the working directory).
+    #[test]
+    fn without_a_usable_home_there_is_no_settings_file() {
+        const CHILD: &str = "RESSAC_TEST_SETTINGS_CHILD";
+        const NAME: &str =
+            "tui::reader::settings::tests::without_a_usable_home_there_is_no_settings_file";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(TerminalSettings::default_path(), None);
+            return;
+        }
+        for home in [None, Some("relative/home")] {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args(["--exact", NAME, "--test-threads=1"])
+                .env(CHILD, "1");
+            for var in ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "RESSAC_DB"] {
+                cmd.env_remove(var);
+            }
+            match home {
+                None => cmd.env_remove("HOME"),
+                Some(home) => cmd.env("HOME", home),
+            };
+            let out = cmd.output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "HOME={home:?}: {stdout}");
+            assert!(
+                stdout.contains("1 passed"),
+                "the child ran the check: {stdout}"
+            );
+        }
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_default_path_is_in_the_config_directory() {
-        let path = TerminalSettings::default_path();
+        let path = TerminalSettings::default_path().unwrap();
         assert!(path.ends_with("ressac/terminal.json"), "{path:?}");
         assert_ne!(
             path.parent(),
@@ -123,7 +158,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_default_path_sits_next_to_the_database() {
-        let path = TerminalSettings::default_path();
+        let path = TerminalSettings::default_path().unwrap();
         assert!(
             path.ends_with("Library/Application Support/Ressac/terminal.json"),
             "{path:?}"

@@ -462,9 +462,12 @@ fn busy_or(e: &anyhow::Error) -> String {
     jobs::sentence(format!("{e:#}"))
 }
 
-/// Opens the reader on `app` (already opened by `commands::read`) until `q`.
-pub fn run(app: &Ressac, db: &Path, settings_path: &Path) -> anyhow::Result<()> {
-    let settings = TerminalSettings::load(settings_path);
+/// Opens the reader on `app` (already opened by `commands::read`) until `q`. Without a settings
+/// path (no usable home) it starts from the defaults and never saves.
+pub fn run(app: &Ressac, db: &Path, settings_path: Option<&Path>) -> anyhow::Result<()> {
+    let settings = settings_path
+        .map(TerminalSettings::load)
+        .unwrap_or_default();
     let original: Arc<PanicHook> = Arc::new(std::panic::take_hook());
     forward_panics_to(&original);
     let mut terminal = match ratatui::try_init() {
@@ -517,7 +520,7 @@ fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &Ressac,
     db: &Path,
-    settings_path: &Path,
+    settings_path: Option<&Path>,
     state: &mut ReaderState,
     images: &mut images::ImageStore,
 ) -> anyhow::Result<()> {
@@ -539,8 +542,10 @@ fn event_loop(
                     return Ok(());
                 }
                 Command::SaveSettings => {
-                    // Never blocks reading: an unwritable file only forgets the choice.
-                    let _ = state.settings.save(settings_path);
+                    // Never blocks reading: an unwritable file, or none, only forgets the choice.
+                    if let Some(path) = settings_path {
+                        let _ = state.settings.save(path);
+                    }
                 }
                 other => {
                     for event in exec.run(other, Clock::system()) {
