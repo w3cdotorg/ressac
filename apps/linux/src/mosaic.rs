@@ -3,11 +3,12 @@
 //! back through `ressac_mosaic_reply`, always a PNG made here: the mosaic, or `failure_png()`
 //! with the `failed(url)` signal (the handler has no page to script, so QML marks the boxes
 //! with `Reader.markFailedScript`). Originals are downloaded by the core's guarded
-//! `Ressac::fetch_image` on one mosaic thread, at most `MAX_IN_FLIGHT` at once. Mosaics and
-//! lasting failures are cached; transient failures are not.
+//! `Ressac::fetch_image` on one mosaic thread, at most `MAX_IN_FLIGHT` at once. A request the
+//! page cancels (`ressac_mosaic_cancel`) leaves the queue, and its download stops if it had
+//! started. Mosaics and lasting failures are cached; transient failures are not.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -17,6 +18,7 @@ use std::time::{Duration, Instant};
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use futures::StreamExt;
+use futures::future::{AbortHandle, Abortable};
 use futures::stream::FuturesUnordered;
 use ressac_core::service::Ressac;
 use ressac_ui::mosaic::{
@@ -45,7 +47,7 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[qml_singleton]
-        /// Mosaic downloads sent to the mosaic thread and not answered yet.
+        /// Requests sent to the mosaic thread and neither answered nor cancelled yet.
         #[qproperty(i32, in_flight, READ, NOTIFY)]
         type Mosaics = super::MosaicsRust;
 
@@ -65,8 +67,13 @@ pub struct MosaicsRust {
 }
 
 impl qobject::Mosaics {
-    fn add_in_flight(mut self: Pin<&mut Self>, delta: i32) {
-        let count = self.rust().in_flight.saturating_add(delta).max(0);
+    /// `inFlight` from the GUI thread's pending set, the one count: the order in which the
+    /// queued updates arrive does not matter.
+    fn sync_in_flight(mut self: Pin<&mut Self>) {
+        let pending = LANE
+            .try_with(|lane| lane.try_borrow().map_or(0, |lane| lane.pending.len()))
+            .unwrap_or(0);
+        let count = i32::try_from(pending).unwrap_or(i32::MAX);
         if count != self.rust().in_flight {
             self.as_mut().rust_mut().get_mut().in_flight = count;
             self.in_flight_changed();
@@ -85,6 +92,13 @@ impl cxx_qt::Initialize for qobject::Mosaics {
     }
 }
 
+/// What the GUI thread tells the mosaic thread, in order: a cancel always follows its job.
+enum Message<R> {
+    Job(Job<R>),
+    /// The page cancelled request `token`: drop it from the queue, stop its download.
+    Cancel(u64),
+}
+
 /// One request on its way through the mosaic thread; `reply` is where the answer goes (the
 /// `Mosaics` object in the app, nothing in the tests).
 struct Job<R> {
@@ -100,10 +114,14 @@ struct Job<R> {
 #[derive(Default)]
 struct Lane {
     qt: Option<CxxQtThread<qobject::Mosaics>>,
-    sender: Option<UnboundedSender<Job<CxxQtThread<qobject::Mosaics>>>>,
+    sender: Option<Sender>,
     thread: Option<JoinHandle<()>>,
     cache: Arc<Mutex<MosaicCache>>,
+    /// Tokens sent to the mosaic thread, neither answered nor cancelled yet (`inFlight`).
+    pending: HashSet<u64>,
 }
+
+type Sender = UnboundedSender<Message<CxxQtThread<qobject::Mosaics>>>;
 
 thread_local! {
     // The scheme handler, `Mosaics` and the exit all run on the GUI thread.
@@ -168,20 +186,21 @@ impl Lane {
             request,
             reply: qt.clone(),
         };
-        if sender.send(job).is_err() {
+        // Pending before the send: the answer, queued from the mosaic thread, finds it there.
+        self.pending.insert(token);
+        if sender.send(Message::Job(job)).is_err() {
+            self.pending.remove(&token);
             tracing::warn!(
                 "mosaic: the mosaic thread is gone, request {token} gets the placeholder"
             );
             return Start::failure();
         }
-        if qt.queue(|mosaics| mosaics.add_in_flight(1)).is_err() {
-            tracing::debug!("mosaic: the app is quitting");
-        }
+        queue_sync(&qt);
         Start::Sent
     }
 
     /// The running thread's sender, the thread started (again, after a panic) when needed.
-    fn sender(&mut self) -> Option<UnboundedSender<Job<CxxQtThread<qobject::Mosaics>>>> {
+    fn sender(&mut self) -> Option<Sender> {
         if let Some(sender) = self.sender.as_ref().filter(|sender| !sender.is_closed()) {
             return Some(sender.clone());
         }
@@ -205,6 +224,7 @@ impl Lane {
                 // A thread that ended (it panicked) is joined here; its requests stay unanswered.
                 if let Some(old) = self.thread.replace(thread) {
                     let _ = old.join();
+                    self.pending.clear();
                 }
                 self.sender = Some(sender.clone());
                 Some(sender)
@@ -217,21 +237,33 @@ impl Lane {
     }
 }
 
+/// Queues an `inFlight` update onto `Mosaics`.
+fn queue_sync(qt: &CxxQtThread<qobject::Mosaics>) {
+    if qt.queue(|mosaics| mosaics.sync_in_flight()).is_err() {
+        tracing::debug!("mosaic: the app is quitting");
+    }
+}
+
 /// The C++ handler's request `token` for the mosaic address `url` (GUI thread). An unparsable
 /// address or a cached result is answered at once; otherwise the mosaic thread downloads and
 /// renders, and the answer is queued back. A failure also emits `Mosaics.failed(url)`. Called
 /// from C++: it never panics.
 pub fn ressac_mosaic_start(token: u64, url: &str) {
-    let start = LANE.with(|lane| match lane.try_borrow_mut() {
-        Ok(mut lane) => lane.start(token, url),
-        Err(_) => Start::failure(),
-    });
+    let start = LANE
+        .try_with(|lane| match lane.try_borrow_mut() {
+            Ok(mut lane) => lane.start(token, url),
+            Err(_) => Start::failure(),
+        })
+        .unwrap_or_else(|_| Start::failure());
     let Start::Answer { body, failed } = start else {
         return;
     };
     ressac_mosaic_reply(token, PNG, &body);
     if failed {
-        let qt = LANE.with(|lane| lane.try_borrow().ok().and_then(|lane| lane.qt.clone()));
+        let qt = LANE
+            .try_with(|lane| lane.try_borrow().ok().and_then(|lane| lane.qt.clone()))
+            .ok()
+            .flatten();
         let url = url.to_string();
         let queued = qt.map(|qt| qt.queue(move |mosaics| mosaics.failed(&QString::from(&url))));
         if !matches!(queued, Some(Ok(()))) {
@@ -240,18 +272,41 @@ pub fn ressac_mosaic_start(token: u64, url: &str) {
     }
 }
 
+/// The C++ handler's request `token` was cancelled by its page before its answer (GUI
+/// thread): it leaves the queue, its download stops, `inFlight` drops. A token already
+/// answered or unknown is ignored. Called from C++: it never panics.
+pub fn ressac_mosaic_cancel(token: u64) {
+    let _ = LANE.try_with(|lane| {
+        let Ok(mut lane) = lane.try_borrow_mut() else {
+            return;
+        };
+        if !lane.pending.remove(&token) {
+            return;
+        }
+        if let Some(sender) = &lane.sender {
+            let _ = sender.send(Message::Cancel(token));
+        }
+        if let Some(qt) = &lane.qt {
+            queue_sync(qt);
+        }
+    });
+}
+
 /// Ends the mosaic thread at exit, after the QML engine is gone and before the application:
 /// the channel closes, the downloads in flight are dropped, and the thread is joined within
 /// `SHUTDOWN_WAIT` (one still decoding is logged and left to the process exit; its answer can
 /// only queue onto the deleted `Mosaics`, which refuses it).
 pub(crate) fn shutdown() -> bool {
-    let (sender, thread) = LANE.with(|lane| match lane.try_borrow_mut() {
-        Ok(mut lane) => {
-            lane.qt = None;
-            (lane.sender.take(), lane.thread.take())
-        }
-        Err(_) => (None, None),
-    });
+    let (sender, thread) = LANE
+        .try_with(|lane| match lane.try_borrow_mut() {
+            Ok(mut lane) => {
+                lane.qt = None;
+                lane.pending.clear();
+                (lane.sender.take(), lane.thread.take())
+            }
+            Err(_) => (None, None),
+        })
+        .unwrap_or((None, None));
     drop(sender);
     let Some(thread) = thread else {
         return true;
@@ -281,7 +336,7 @@ fn mosaic_thread(
     db: &Path,
     allow_private: bool,
     cache: &Mutex<MosaicCache>,
-    receiver: UnboundedReceiver<Job<CxxQtThread<qobject::Mosaics>>>,
+    receiver: UnboundedReceiver<Message<CxxQtThread<qobject::Mosaics>>>,
 ) {
     let app = open_app(db, allow_private);
     run_lane(app.as_ref(), cache, receiver, |job, result| {
@@ -291,9 +346,16 @@ fn mosaic_thread(
             token, url, reply, ..
         } = job;
         let queued = reply.queue(move |mut mosaics| {
+            // A request cancelled meanwhile is no longer pending: C++ drops its answer.
+            let pending = LANE
+                .try_with(|lane| {
+                    lane.try_borrow_mut()
+                        .is_ok_and(|mut lane| lane.pending.remove(&token))
+                })
+                .unwrap_or(false);
             ressac_mosaic_reply(token, PNG, &body);
-            mosaics.as_mut().add_in_flight(-1);
-            if failed {
+            mosaics.as_mut().sync_in_flight();
+            if failed && pending {
                 mosaics.failed(&QString::from(&url));
             }
         });
@@ -322,12 +384,14 @@ fn open_app(db: &Path, allow_private: bool) -> Option<Ressac> {
 
 /// Runs the jobs from `receiver` until it closes, at most `MAX_IN_FLIGHT` downloads at once,
 /// the others waiting in order. Each result is cached (the cache keeps only lasting ones) and
-/// then handed to `deliver`, exactly once per job. A closed channel ends the lane at once: the
-/// downloads in flight are dropped unanswered.
+/// then handed to `deliver`, exactly once per job that was not cancelled. A cancel removes a
+/// waiting job and aborts a running download (never answered). A closed channel ends the lane
+/// at once: the downloads in flight are dropped unanswered, and the runtime is shut down in
+/// the background so a blocking DNS lookup cannot hold the thread.
 fn run_lane<R>(
     app: Option<&Ressac>,
     cache: &Mutex<MosaicCache>,
-    mut receiver: UnboundedReceiver<Job<R>>,
+    mut receiver: UnboundedReceiver<Message<R>>,
     mut deliver: impl FnMut(Job<R>, Result<Vec<u8>, MosaicFailure>),
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -337,39 +401,59 @@ fn run_lane<R>(
         Ok(runtime) => runtime,
         Err(error) => {
             tracing::warn!("mosaic: no runtime, no download: {error}");
-            while let Some(job) = receiver.blocking_recv() {
-                deliver(job, Err(MosaicFailure::Network));
+            while let Some(message) = receiver.blocking_recv() {
+                if let Message::Job(job) = message {
+                    deliver(job, Err(MosaicFailure::Network));
+                }
             }
             return;
         }
     };
     runtime.block_on(async {
-        let mut waiting = VecDeque::new();
+        let mut waiting: VecDeque<Job<R>> = VecDeque::new();
         let mut running = FuturesUnordered::new();
+        let mut aborts: HashMap<u64, AbortHandle> = HashMap::new();
         loop {
             while running.len() < MAX_IN_FLIGHT
                 && let Some(job) = waiting.pop_front()
             {
-                let job: Job<R> = job;
                 // Another request for the same image may have finished meanwhile.
                 let cached = lock(cache).get(&job.request.cache_key());
                 match cached {
                     Some(result) => deliver(job, result),
-                    None => running.push(produce(app, job)),
+                    None => {
+                        let (abort, registration) = AbortHandle::new_pair();
+                        aborts.insert(job.token, abort);
+                        running.push(Abortable::new(produce(app, job), registration));
+                    }
                 }
             }
             tokio::select! {
-                job = receiver.recv() => match job {
-                    Some(job) => waiting.push_back(job),
+                // Messages first: the cancels already sent take effect before a freed slot
+                // starts the next download.
+                biased;
+                message = receiver.recv() => match message {
+                    Some(Message::Job(job)) => waiting.push_back(job),
+                    Some(Message::Cancel(token)) => {
+                        waiting.retain(|job| job.token != token);
+                        if let Some(abort) = aborts.remove(&token) {
+                            abort.abort();
+                        }
+                    }
                     None => break,
                 },
-                Some((job, result)) = running.next(), if !running.is_empty() => {
-                    lock(cache).put(&job.request.cache_key(), result.clone());
-                    deliver(job, result);
+                Some(outcome) = running.next(), if !running.is_empty() => {
+                    // An aborted download ends as `Err(Aborted)`: nothing to answer.
+                    if let Ok((job, result)) = outcome {
+                        aborts.remove(&job.token);
+                        lock(cache).put(&job.request.cache_key(), result.clone());
+                        deliver(job, result);
+                    }
                 }
             }
         }
     });
+    runtime.shutdown_background();
 }
 
 /// Download, then render (the decode is bounded by `ressac_ui::mosaic::decode`'s guards).
@@ -529,28 +613,76 @@ mod tests {
         }
     }
 
-    /// Runs `paths` through a lane (private addresses allowed) and returns each token's result.
-    fn run(
-        server: &Server,
-        cache: &Mutex<MosaicCache>,
-        paths: &[&str],
-    ) -> Vec<(u64, Result<Vec<u8>, MosaicFailure>)> {
-        let dir = tempfile::tempdir().unwrap();
-        let app = open_app(&test_db(dir.path()), true).expect("a test app");
-        let (sender, receiver) = unbounded_channel();
-        for (token, path) in paths.iter().enumerate() {
-            let original = format!("{}{path}", server.base);
-            sender.send(job(token as u64, &original)).ok().unwrap();
-        }
-        // A closed channel ends the lane at once: it stays open until every job is answered.
-        let sender = Mutex::new(Some(sender));
-        let mut results = Vec::new();
-        run_lane(Some(&app), cache, receiver, |job, result| {
-            results.push((job.token, result));
-            if results.len() == paths.len() {
-                sender.lock().unwrap().take();
+    type Answered = (u64, Result<Vec<u8>, MosaicFailure>);
+
+    /// A lane on its own thread (private addresses allowed), its answers on a channel, so a
+    /// lost answer fails the test by `recv_timeout` instead of hanging it.
+    struct TestLane {
+        sender: Option<UnboundedSender<Message<()>>>,
+        answers: mpsc::Receiver<Answered>,
+        thread: Option<JoinHandle<()>>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl TestLane {
+        fn start(cache: Arc<Mutex<MosaicCache>>) -> TestLane {
+            let dir = tempfile::tempdir().unwrap();
+            let db = test_db(dir.path());
+            let (sender, receiver) = unbounded_channel();
+            let (answer_tx, answers) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let app = open_app(&db, true).expect("a test app");
+                run_lane(Some(&app), &cache, receiver, |job: Job<()>, result| {
+                    let _ = answer_tx.send((job.token, result));
+                });
+            });
+            TestLane {
+                sender: Some(sender),
+                answers,
+                thread: Some(thread),
+                _dir: dir,
             }
-        });
+        }
+
+        fn send(&self, token: u64, original: &str) {
+            let sender = self.sender.as_ref().unwrap();
+            sender
+                .send(Message::Job(job(token, original)))
+                .ok()
+                .unwrap();
+        }
+
+        fn cancel(&self, token: u64) {
+            let sender = self.sender.as_ref().unwrap();
+            sender.send(Message::Cancel(token)).ok().unwrap();
+        }
+
+        /// The next answer, or a failed test once `deadline` has passed.
+        fn answer_by(&self, deadline: Instant) -> Answered {
+            let left = deadline.saturating_duration_since(Instant::now());
+            self.answers
+                .recv_timeout(left)
+                .expect("an answer before the deadline")
+        }
+
+        /// Closes the channel; whether the lane thread ended within 2 s.
+        fn close(&mut self) -> bool {
+            drop(self.sender.take());
+            self.thread
+                .take()
+                .is_none_or(|thread| join_within(thread, Duration::from_secs(2)))
+        }
+    }
+
+    /// Runs `paths` through a test lane and returns each token's result, all within 30 s.
+    fn run(server: &Server, cache: &Arc<Mutex<MosaicCache>>, paths: &[&str]) -> Vec<Answered> {
+        let mut lane = TestLane::start(cache.clone());
+        for (token, path) in paths.iter().enumerate() {
+            lane.send(token as u64, &format!("{}{path}", server.base));
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut results: Vec<Answered> = paths.iter().map(|_| lane.answer_by(deadline)).collect();
+        assert!(lane.close(), "the lane did not end");
         results.sort_by_key(|(token, _)| *token);
         results
     }
@@ -595,7 +727,7 @@ mod tests {
                 ))],
             ),
         ]));
-        let cache = Mutex::new(MosaicCache::default());
+        let cache = Arc::new(Mutex::new(MosaicCache::default()));
         let paths = [
             "/ok.png",
             "/anim.gif",
@@ -659,46 +791,64 @@ mod tests {
         assert!(again[0].1.is_ok(), "{:?}", again[0].1);
     }
 
-    #[test]
-    fn at_most_four_downloads_run_at_once_and_a_closed_lane_ends_without_waiting() {
-        let server = serve(HashMap::from([("/hang.png", vec![None])]));
-        let dir = tempfile::tempdir().unwrap();
-        let db = test_db(dir.path());
-        let (sender, receiver) = unbounded_channel();
-        let (delivered_tx, delivered_rx) = mpsc::channel();
-        let lane = std::thread::spawn(move || {
-            let app = open_app(&db, true).expect("a test app");
-            let cache = Mutex::new(MosaicCache::default());
-            run_lane(Some(&app), &cache, receiver, |job: Job<()>, _| {
-                let _ = delivered_tx.send(job.token);
-            });
-        });
-        // Six requests for distinct images that never answer.
-        for token in 0..6u64 {
-            let original = format!("{}/hang.png?{token}", server.base);
-            sender.send(job(token, &original)).ok().unwrap();
-        }
+    /// Waits (5 s at most) until `server` has accepted `count` connections, then a little
+    /// longer so that more would show.
+    fn settle(server: &Server, count: usize) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while server.accepted.load(Ordering::SeqCst) < MAX_IN_FLIGHT && Instant::now() < deadline {
+        while server.accepted.load(Ordering::SeqCst) < count && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(server.accepted.load(Ordering::SeqCst), MAX_IN_FLIGHT);
+    }
 
-        let closed = Instant::now();
-        drop(sender);
-        let deadline = closed + Duration::from_secs(2);
-        while !lane.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
+    #[test]
+    fn at_most_four_downloads_run_at_once_and_a_closed_lane_ends_without_waiting() {
+        let server = serve(HashMap::from([("/hang.png", vec![None])]));
+        let mut lane = TestLane::start(Arc::default());
+        // Six requests for distinct images that never answer.
+        for token in 0..6u64 {
+            lane.send(token, &format!("{}/hang.png?{token}", server.base));
         }
+        settle(&server, MAX_IN_FLIGHT);
+        assert_eq!(server.accepted.load(Ordering::SeqCst), MAX_IN_FLIGHT);
+        assert!(lane.close(), "the lane still runs after its channel closed");
         assert!(
-            lane.is_finished(),
-            "the lane still runs after its channel closed"
-        );
-        lane.join().unwrap();
-        assert!(
-            delivered_rx.try_recv().is_err(),
+            lane.answers.try_recv().is_err(),
             "a dropped download is never answered"
+        );
+    }
+
+    #[test]
+    fn cancelled_requests_leave_the_queue_and_free_their_downloads() {
+        let server = serve(HashMap::from([
+            ("/hang.png", vec![None]),
+            (
+                "/ok.png",
+                vec![typed(200, "image/png", encoded(ImageFormat::Png))],
+            ),
+        ]));
+        let mut lane = TestLane::start(Arc::default());
+        // Four downloads hang, two more wait behind them.
+        for token in 0..6u64 {
+            lane.send(token, &format!("{}/hang.png?{token}", server.base));
+        }
+        settle(&server, MAX_IN_FLIGHT);
+        assert_eq!(server.accepted.load(Ordering::SeqCst), MAX_IN_FLIGHT);
+        // The page goes away: every one is cancelled, the waiting ones first (a slot freed by
+        // an abort would otherwise start the next waiting one), then the running ones.
+        for token in (0..6u64).rev() {
+            lane.cancel(token);
+        }
+        lane.send(6, &format!("{}/ok.png", server.base));
+        let (token, result) = lane.answer_by(Instant::now() + Duration::from_secs(5));
+        assert_eq!(token, 6, "only the seventh request is answered");
+        assert!(result.is_ok(), "{result:?}");
+        // The two waiting ones never started: the hanging server saw only the first four.
+        assert_eq!(server.accepted.load(Ordering::SeqCst), MAX_IN_FLIGHT + 1);
+        assert!(lane.close());
+        assert!(
+            lane.answers.try_recv().is_err(),
+            "a cancelled request is never answered"
         );
     }
 

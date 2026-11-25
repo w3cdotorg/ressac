@@ -30,7 +30,7 @@ use ressac_ui::launch::parse_args;
 use ressac_ui::settings::Appearance;
 
 // Named by the `shim` bridge's `extern "Rust"` block (cxx looks them up in this scope).
-use mosaic::ressac_mosaic_start;
+use mosaic::{ressac_mosaic_cancel, ressac_mosaic_start};
 use reader::ressac_scheme_serve;
 
 /// What cxx-qt-lib does not wrap (`cpp/shim.h`).
@@ -75,6 +75,10 @@ mod shim {
         /// The `ressac-mosaic:` handler's request `token` for `url` (`mosaic.rs`): answered
         /// later through `ressac_mosaic_reply`, at once when cached or unparsable.
         fn ressac_mosaic_start(token: u64, url: &str);
+
+        /// The page cancelled the `ressac-mosaic:` request `token` before its answer: it
+        /// leaves the mosaic queue and its download stops (`mosaic.rs`).
+        fn ressac_mosaic_cancel(token: u64);
 
         /// The window key filter's question (`ressac_ui::keys::route`): fills `verb` (empty
         /// when the key maps to no command) and returns whether the key's `ShortcutOverride`

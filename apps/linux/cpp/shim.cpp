@@ -108,7 +108,8 @@ public:
 // Serves ressac-mosaic:image?cols=<n>&src=<original>: each request gets a token and goes to Rust
 // (`ressac_mosaic_start`), which answers later, possibly at once, through `ressac_mosaic_reply`
 // with PNG bytes it produced. The pending jobs are held by QPointer: a request the page cancels
-// is deleted by WebEngine, its entry removed on `destroyed`, and its answer dropped.
+// is deleted by WebEngine, its entry removed on `destroyed` and Rust told
+// (`ressac_mosaic_cancel`), and an answer that still comes is dropped.
 class MosaicHandler : public QWebEngineUrlSchemeHandler
 {
 public:
@@ -118,7 +119,13 @@ public:
     {
         const std::uint64_t token = ++m_next;
         m_jobs.emplace(token, QPointer<QWebEngineUrlRequestJob>(job));
-        QObject::connect(job, &QObject::destroyed, this, [this, token] { m_jobs.erase(token); });
+        // A job WebEngine deletes before its answer was cancelled by its page: Rust drops it
+        // from the mosaic queue (or stops its download).
+        QObject::connect(job, &QObject::destroyed, this, [this, token] {
+            if (m_jobs.erase(token) > 0) {
+                ressac_mosaic_cancel(token);
+            }
+        });
         const std::string url = job->requestUrl().toString(QUrl::FullyEncoded).toStdString();
         ressac_mosaic_start(token, rust::Str(url.data(), url.size()));
     }
