@@ -252,8 +252,52 @@ fn scrolling_two_thousand_entries_is_logged() {
         assert!(p95 < 16.7, "{line}"); // smooth in the container's software renderer
         println!("{line}");
     }
-    // `j` held on long articles: logged for the ledger (each press re-sanitises the article).
-    let line = walk_line(&err, "frames: antiope hold-j n=");
-    assert!(line.contains(" presses=60 "), "{line}");
-    println!("{line}");
+    // `j` held on long unread articles: each press marks the entry it leaves read. The list
+    // already shows the mark (its optimistic rows), so a write only asks for the coalesced
+    // counts reload, never a full reload (which re-read every loaded row, once per press).
+    let holds = [
+        "native hold-j-page",
+        "antiope hold-j-page",
+        "antiope hold-j",
+    ]
+    .map(|hold| {
+        let line = walk_line(&err, &format!("frames: {hold} n="));
+        let counts = walk_line(&err, &format!("walk: {hold} counts "));
+        println!("{line}\n{counts}");
+        (line, counts)
+    });
+    for (line, counts) in holds {
+        assert!(line.contains(" presses=60 moved=60 "), "{line}");
+        assert!(counts.contains(" wrote=0 settled=60 "), "{counts}");
+        // The sidebar badge (and Antiope's index) show the 60 marks soon after the release.
+        let after: u32 = field(counts, "after");
+        assert!(counts.contains("caught=true") && after <= 1500, "{counts}");
+        // No long frame comes from the writes: the long frames are the presses whose own
+        // handling fills a frame (`slow`: the list's per-press sync, which grows with the
+        // loaded rows and the load on the machine), the coalesced counts reloads (at most 2 in
+        // a 2 s hold), the `data_version` echo of the writes (a full reload per 3 s poll), and
+        // under load a few render frames a slow press pushed past 16.7 ms (`SLACK`). Before
+        // the fix every write added its own full reload: 58 to 75 long frames for 60 presses.
+        // `frameDriver` flips a square on every swap, so p95 is diluted by filler frames.
+        const SLACK: u32 = 5;
+        let over16: u32 = field(line, "over16");
+        let slow: u32 = field(line, "slow");
+        let invalidated: u32 = field(counts, "invalidated");
+        assert!(over16 <= slow + 2 + invalidated + SLACK, "{line}\n{counts}");
+    }
+}
+
+/// The number after ` key=` in a logged line.
+fn field<T: std::str::FromStr>(line: &str, key: &str) -> T
+where
+    T::Err: std::fmt::Debug,
+{
+    line.split(&format!(" {key}="))
+        .nth(1)
+        .unwrap_or_else(|| panic!("{key} missing in {line}"))
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
 }

@@ -164,6 +164,23 @@ Item {
             Antiope.reload()
     }
 
+    // After own entry writes the list already shows: the counts only (sidebar badges, the Journal's
+    // header, the Sea Chart, Antiope's pages), never the entries list (spec §7.1 "Live data").
+    function reloadCounts() {
+        SourcesModel.reload()
+        Journal.reload()
+        Chart.noteChange()
+        if (antiope)
+            Antiope.reload()
+    }
+
+    // Coalesces the counts reloads: `EntriesModel.settled` gives the due time (200 ms after the last
+    // write, at most 1 s after the first of a burst, `ressac_ui::live::Settle`).
+    Timer {
+        id: settleTimer
+        onTriggered: { EntriesModel.settleFired(); page.reloadCounts() }
+    }
+
     // Back in Native the keyboard goes to the sidebar, never to the destroyed Antiope view, so the
     // letters work at once. Entering Antiope, the view's `onLoaded` focuses its column.
     onAntiopeChanged: if (!antiope) focusSidebar()
@@ -429,6 +446,7 @@ Item {
     Connections { target: Runs; function onDatabaseChanged() { page.reloadAll() } }
     Connections { target: SourcesModel; function onWrote() { page.reloadAll() } }
     Connections { target: EntriesModel; function onWrote() { page.reloadAll() } }
+    Connections { target: EntriesModel; function onSettled(dueMs) { settleTimer.interval = Math.max(1, dueMs); settleTimer.restart() } }
     Connections { target: SourcesModel; function onBanner(m, l) { Runs.showBanner(m, l) } }
     Connections { target: EntriesModel; function onBanner(m, l) { Runs.showBanner(m, l) } }
     Connections {

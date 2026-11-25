@@ -1,6 +1,7 @@
 //! When the lists reload (the Mac's `AppState` and `DataWatcher` rules) and how a reload
 //! becomes row operations: the 3 s `data_version` poll, the one-a-second reload during a run,
-//! the midnight rollover, and `plan_rows`, which diffs two lists by id so a model never resets.
+//! the midnight rollover, the coalesced counts reload after own entry writes, and
+//! `plan_rows`, which diffs two lists by id so a model never resets.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -12,6 +13,12 @@ use chrono::{DateTime, Utc};
 pub const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// The least gap between two reloads caused by a run's progress.
 pub const PROGRESS_RELOAD_GAP: Duration = Duration::from_secs(1);
+
+/// How long the counts reload waits after the last settled own entry write.
+pub const SETTLE_DELAY: Duration = Duration::from_millis(200);
+/// The longest a burst of settled own entry writes delays the counts reload (a held key
+/// still refreshes the counts once a second).
+pub const SETTLE_CAP: Duration = Duration::from_secs(1);
 
 /// The watcher runs while a window is active or the chart is on screen.
 pub fn should_poll(window_active: bool, chart_on_screen: bool) -> bool {
@@ -64,6 +71,35 @@ impl Invalidation {
         let changed = self.today.is_some_and(|old| old != today_start);
         self.today = Some(today_start);
         changed
+    }
+}
+
+/// The counts reload after own entry writes the list already shows (its optimistic rows): the
+/// Mac's observations refresh the counts off the main thread and coalesced; here the sidebar,
+/// Journal and Antiope counts reload `SETTLE_DELAY` after the last such write, and at most
+/// `SETTLE_CAP` after the first one of a burst. The list itself is never re-read.
+#[derive(Debug, Clone, Default)]
+pub struct Settle {
+    burst: Option<Instant>,
+}
+
+impl Settle {
+    /// An own write settled at `now`: how long from `now` until the counts reload is due
+    /// (zero when the burst's cap has passed). Each call replaces the last answer.
+    pub fn noted(&mut self, now: Instant) -> Duration {
+        let first = *self.burst.get_or_insert(now);
+        let due = (now + SETTLE_DELAY).min(first + SETTLE_CAP);
+        due.saturating_duration_since(now)
+    }
+
+    /// The counts reload ran: the next settled write starts a new burst.
+    pub fn fired(&mut self) {
+        self.burst = None;
+    }
+
+    /// Whether a counts reload is pending.
+    pub fn pending(&self) -> bool {
+        self.burst.is_some()
     }
 }
 
@@ -240,6 +276,76 @@ mod tests {
         assert!(!live.day_seen(paris_midnight("2026-10-15")), "baseline");
         assert!(!live.day_seen(paris_midnight("2026-10-15")));
         assert!(live.day_seen(paris_midnight("2026-10-16")));
+    }
+
+    /// A held key: own writes `every` ms apart from 0 to `until` ms, the timer of the last
+    /// answer firing when it is due. The times (ms) at which the counts reload ran.
+    fn held(every: u64, until: u64) -> Vec<u64> {
+        let t0 = Instant::now();
+        let mut settle = Settle::default();
+        let mut due: Option<u64> = None;
+        let mut fired = Vec::new();
+        let mut at = 0;
+        loop {
+            let write = (at <= until).then_some(at);
+            // The timer fires before a write that comes at or after its due time.
+            if let Some(d) = due
+                && write.is_none_or(|w| d <= w)
+            {
+                fired.push(d);
+                settle.fired();
+                due = None;
+                continue;
+            }
+            let Some(w) = write else { break };
+            let wait = settle.noted(t0 + Duration::from_millis(w));
+            due = Some(w + u64::try_from(wait.as_millis()).unwrap());
+            at += every;
+        }
+        assert!(!settle.pending());
+        fired
+    }
+
+    #[test]
+    fn writes_close_together_reload_the_counts_once_200_ms_after_the_last() {
+        assert_eq!(held(33, 0), [200], "one write");
+        assert_eq!(held(33, 33 * 5), [33 * 5 + 200]);
+        assert_eq!(
+            (SETTLE_DELAY, SETTLE_CAP),
+            (Duration::from_millis(200), Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn a_held_key_reloads_the_counts_once_a_second_and_once_after_release() {
+        // `j` held 3.1 s at the key repeat's pace (last write at 3069 ms): one reload a
+        // second, then one 200 ms after the last write.
+        let fired = held(33, 3100);
+        assert_eq!(fired, [1000, 2023, 3046, 3069 + 200]);
+        assert!(
+            fired.windows(2).all(|w| w[1] - w[0] <= 1000 + 33),
+            "{fired:?}"
+        );
+    }
+
+    #[test]
+    fn an_overdue_burst_is_due_at_once_and_a_write_after_a_reload_starts_a_new_burst() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut settle = Settle::default();
+        assert!(!settle.pending());
+        assert_eq!(settle.noted(ms(0)), Duration::from_millis(200));
+        assert_eq!(settle.noted(ms(900)), Duration::from_millis(100), "capped");
+        // The timer was late (a busy turn): the next write finds the burst overdue.
+        assert_eq!(settle.noted(ms(1100)), Duration::ZERO);
+        assert!(settle.pending());
+        settle.fired();
+        assert!(!settle.pending());
+        assert_eq!(
+            settle.noted(ms(1150)),
+            Duration::from_millis(200),
+            "a new burst"
+        );
     }
 
     fn rows(ids: &[u32]) -> Vec<(u32, u32)> {

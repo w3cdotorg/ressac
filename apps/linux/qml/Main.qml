@@ -393,13 +393,18 @@ Kirigami.ApplicationWindow {
         { name: "a10-awkward", enter: function () { AppSettings.appearance = "antiope"; SourcesModel.selectKey("feed:1")
             console.warn("walk: a10-awkward focus=" + readingLoader.item.focusName()) } },
     ]
-    // The `antiope-scroll` walk: the entries column scrolled (frame times), then `j` held on long articles.
+    // The `antiope-scroll` walk: `j` held on long unread articles with one page loaded (Native, then
+    // Antiope), the entries column scrolled (frame times), then `j` held again with 2000 rows loaded.
+    // Each hold starts on rows the last one left unread.
     readonly property var antiopeScrollSteps: [
-        { name: "s01-folder", enter: function () { AppSettings.appearance = "antiope"; SourcesModel.selectKey("feed:1") } },
-        { name: "s02-scroll", enter: function () { root.walkPaused = true; const view = readingLoader.item.antiopeView
+        { name: "s00-native", enter: function () { AppSettings.appearance = "native"; SourcesModel.selectKey("feed:1") } },
+        { name: "s01-hold-j-native", enter: function () { root.walkPaused = true; holdJ.begin("native hold-j-page", 0, 60) } },
+        { name: "s02-folder", enter: function () { AppSettings.appearance = "antiope"; SourcesModel.selectKey("feed:1") } },
+        { name: "s03-hold-j-page", enter: function () { root.walkPaused = true; holdJ.begin("antiope hold-j-page", 70, 60) } },
+        { name: "s04-scroll", enter: function () { root.walkPaused = true; const view = readingLoader.item.antiopeView
             view.scrollProbe(1, 600, function (s1) { console.warn("frames: antiope step=1 " + s1)
             view.scrollProbe(10, 600, function (s10) { console.warn("frames: antiope step=10 " + s10); root.walkPaused = false }) }) } },
-        { name: "s03-hold-j", enter: function () { root.walkPaused = true; EntriesModel.select(0); holdJ.begin(60) } },
+        { name: "s05-hold-j", enter: function () { root.walkPaused = true; holdJ.begin("antiope hold-j", 140, 60) } },
     ]
     // `antiope-bridges`: Task 7's wiring alone (the directory, digits to Antiope, the header).
     readonly property var bridgeSteps: [
@@ -410,7 +415,9 @@ Kirigami.ApplicationWindow {
                 + " header=" + (Antiope.header.indexOf("P201") >= 0 ? "P201" : Antiope.header)) } },
     ]
     // `j` held (a press every 33 ms, the key repeat's pace) on long articles: the frame times while a 2 px
-    // square flips on every frame (so a frame is always due), and the time each press takes.
+    // square flips on every frame (so a frame is always due), and the time each press takes. Then how
+    // long the sidebar badge and Antiope's index take to show the marks (the coalesced counts reload),
+    // and what the writes asked for meanwhile (`wrote` = a full reload, `settled` = the counts only).
     Timer {
         id: holdJ
         interval: 33
@@ -419,20 +426,51 @@ Kirigami.ApplicationWindow {
         property int presses: 0
         property real worst: 0
         property real total: 0
+        property int slow: 0                     // presses whose own handling (≥ 14 ms) fills a 16.7 ms frame
         property int first: -1
-        function begin(count) {
-            left = count; presses = 0; worst = 0; total = 0; first = EntriesModel.selectedRow
+        property bool counting: false
+        property int wrote: 0
+        property int settled: 0
+        property int invalidated: 0
+        property int badgeBefore: 0
+        property string indexBefore: ""
+        property real released: 0
+        property string label: ""
+        function badge() { return SourcesModel.data(SourcesModel.index(SourcesModel.rowOfKey("feed:1"), 0), 256 + 4) }   // role "badge"
+        function begin(name, row, count) {
+            EntriesModel.select(row)
+            label = name; left = count; presses = 0; worst = 0; total = 0; slow = 0; first = EntriesModel.selectedRow
+            wrote = 0; settled = 0; invalidated = 0; counting = true
+            badgeBefore = badge(); indexBefore = Antiope.indexRows.join("|")
             Recette.frameLogStart(); frameDriver.visible = true; start()
         }
         onTriggered: {
             if (left > 0) {
                 const t0 = Date.now(); Recette.key(Qt.Key_J, "j", 0); const ms = Date.now() - t0
-                left -= 1; presses += 1; total += ms; worst = Math.max(worst, ms)
+                left -= 1; presses += 1; total += ms; worst = Math.max(worst, ms); if (ms >= 14) slow += 1
                 return
             }
             stop(); frameDriver.visible = false
-            console.warn("frames: antiope hold-j " + Recette.frameLogStop() + " presses=" + presses + " moved=" + (EntriesModel.selectedRow - first)
-                + " press-mean=" + (total / Math.max(1, presses)).toFixed(2) + " press-max=" + worst)
+            console.warn("frames: " + label + " " + Recette.frameLogStop() + " rows=" + EntriesModel.rowCount() + " presses=" + presses + " moved=" + (EntriesModel.selectedRow - first)
+                + " press-mean=" + (total / Math.max(1, presses)).toFixed(2) + " press-max=" + worst + " slow=" + slow)
+            released = Date.now(); holdCounts.start()
+        }
+    }
+    Connections { target: EntriesModel; enabled: holdJ.counting; function onWrote() { holdJ.wrote++ } function onSettled() { holdJ.settled++ } }
+    Connections { target: Live; enabled: holdJ.counting; function onInvalidated() { holdJ.invalidated++ } }
+    Timer {
+        id: holdCounts
+        interval: 20
+        repeat: true
+        onTriggered: {
+            const after = Date.now() - holdJ.released
+            const caught = holdJ.badgeBefore - holdJ.badge() >= holdJ.presses
+                && (AppSettings.appearance !== "antiope" || Antiope.indexRows.join("|") !== holdJ.indexBefore)
+            if (!caught && after < 3000)
+                return
+            stop(); holdJ.counting = false
+            console.warn("walk: " + holdJ.label + " counts caught=" + caught + " after=" + after + " badge-before=" + holdJ.badgeBefore + " badge-after=" + holdJ.badge()
+                + " wrote=" + holdJ.wrote + " settled=" + holdJ.settled + " invalidated=" + holdJ.invalidated)
             root.walkPaused = false
         }
     }

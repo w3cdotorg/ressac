@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::time::Instant;
 
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QString, QVariant};
@@ -14,7 +15,7 @@ use ressac_core::store::{JournalView, ListFilter, ListQuery, Source, Store};
 use ressac_ui::chrono::{self, DateTime, Utc};
 use ressac_ui::entries::{AUTO_READ_DELAY, EntryList, ListRow, LocalEdit, relative_date};
 use ressac_ui::journal::{JournalRow, overflow_label, section_title, sections};
-use ressac_ui::live::plan_rows;
+use ressac_ui::live::{Settle, plan_rows};
 use ressac_ui::pages::ENTRY_CELLS;
 use ressac_ui::pages::frame::entry_lines;
 use ressac_ui::runs::{DirectWrite, read_failure, write_failure};
@@ -196,9 +197,20 @@ pub mod qobject {
         #[qsignal]
         fn banner(self: Pin<&mut EntriesModel>, message: &QString, show_log: bool);
 
-        /// An own write ended (landed or reverted): the window reloads.
+        /// An own write ended that the list does not already show (another source's Mark
+        /// All as Read, an answer for an older list, a failure): the window reloads it all.
         #[qsignal]
         fn wrote(self: Pin<&mut EntriesModel>);
+
+        /// An own write landed that the list already shows (its optimistic rows): only the
+        /// counts reload, `due_ms` from now (`ressac_ui::live::Settle`, coalesced). Each
+        /// signal replaces the last due time.
+        #[qsignal]
+        fn settled(self: Pin<&mut EntriesModel>, due_ms: i32);
+
+        /// The counts reload that `settled` asked for ran: the next one starts a new burst.
+        #[qinvokable]
+        fn settle_fired(self: Pin<&mut EntriesModel>);
     }
 
     #[auto_cxx_name]
@@ -268,6 +280,8 @@ pub struct EntriesModelRust {
     search: String,
     /// Bumped whenever the list is replaced: a write's answer for an older list only reports.
     epoch: u64,
+    /// When the counts reload after the settled own writes is due.
+    settle: Settle,
 }
 
 /// What the properties show, to tell QML only what moved.
@@ -1010,8 +1024,13 @@ impl qobject::EntriesModel {
         }
     }
 
+    fn settle_fired(self: Pin<&mut Self>) {
+        self.rust_mut().get_mut().settle.fired();
+    }
+
     /// The write's answer, back on the GUI thread. An answer for another list (the source
-    /// changed meanwhile) only reports.
+    /// changed meanwhile) only reports. A landed write the list already shows only asks for
+    /// the coalesced counts reload (`settled`); every other answer reloads it all (`wrote`).
     fn write_done(
         mut self: Pin<&mut Self>,
         epoch: u64,
@@ -1020,11 +1039,15 @@ impl qobject::EntriesModel {
     ) {
         let before = self.view();
         let same_list = self.rust().epoch == epoch;
+        let mut shown = false;
         if let Some(edit) = edit.filter(|_| same_list)
             && let Some(list) = self.as_mut().rust_mut().get_mut().list.as_mut()
         {
             match &result {
-                Ok(()) => list.settle(edit),
+                Ok(()) => {
+                    list.settle(edit);
+                    shown = true;
+                }
                 Err(_) => list.revert(edit),
             }
         }
@@ -1033,7 +1056,17 @@ impl qobject::EntriesModel {
             tracing::warn!("a write failed: {}", failure.message());
             self.as_mut().show_banner_for(write_failure(&failure));
         }
-        self.wrote();
+        if shown {
+            let due = self
+                .as_mut()
+                .rust_mut()
+                .get_mut()
+                .settle
+                .noted(Instant::now());
+            self.settled(i32::try_from(due.as_millis()).unwrap_or(i32::MAX));
+        } else {
+            self.wrote();
+        }
     }
 }
 
