@@ -5,16 +5,18 @@ import org.w3cdotorg.ressac
 // The CRT screen over the Antiope view (spec §7.9): a dark band on the lower part of every font-pixel
 // row (the bands come from `Antiope.scanlineBands`, the Rust geometry; never computed here), a
 // vignette, and the rounded corners of the tube. Drawn once, and again only when the size, the text
-// size or the device pixel ratio changes: scrolling never repaints it. It takes no input.
+// size or the device pixel ratio of its screen changes: scrolling never repaints it. It takes no input.
 Item {
     id: overlay
 
     // The view's text size, in pixels: a font pixel is a tenth of it.
     property real textSize: 20
-    // How many times the canvas has painted (the recette reads it: 1 after a long scroll).
+    // How many times the canvas has painted (the recette reads it: a scroll never changes it).
     property int paints: 0
 
     enabled: false
+
+    onTextSizeChanged: canvas.requestPaint()
 
     Canvas {
         id: canvas
@@ -26,15 +28,9 @@ Item {
         onWidthChanged: requestPaint()
         onHeightChanged: requestPaint()
 
-        Connections {
-            target: overlay
-            function onTextSizeChanged() { canvas.requestPaint() }
-        }
-
-        Connections {
-            target: Screen
-            function onDevicePixelRatioChanged() { canvas.requestPaint() }
-        }
+        // The ratio of the window's own screen (a Connections would see the primary one).
+        readonly property real dpr: Screen.devicePixelRatio
+        onDprChanged: requestPaint()
 
         onPaint: {
             const ctx = getContext("2d")
@@ -47,7 +43,7 @@ Item {
             overlay.paints += 1
 
             // The scanlines: flattened (top, bottom) pairs.
-            const bands = Antiope.scanlineBands(h, overlay.textSize / 10, Screen.devicePixelRatio)
+            const bands = Antiope.scanlineBands(h, overlay.textSize / 10, canvas.dpr)
             ctx.fillStyle = "rgba(0, 0, 0, 0.28)"
             for (let i = 0; i + 1 < bands.length; i += 2)
                 ctx.fillRect(0, bands[i], w, bands[i + 1] - bands[i])

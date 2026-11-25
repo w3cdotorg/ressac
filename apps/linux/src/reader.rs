@@ -228,7 +228,8 @@ impl ReaderRust {
                 .unwrap_or(ColorScheme::Light),
             theme: ReaderTheme {
                 appearance: look,
-                crt: self.crt,
+                // Native never shows the screen, so its toggle never makes a new page.
+                crt: self.crt && look == Appearance::Antiope,
             },
             subpage: self.subpage_label(),
         })
@@ -717,6 +718,54 @@ mod tests {
         assert_eq!(text(412, 0, 20), None);
         assert_eq!(text(412, -2, 20), None);
         assert_eq!(text(412, 1, -5).as_deref(), Some("412 1/0"));
+    }
+
+    fn state(look: &str) -> ReaderRust {
+        use ressac_core::store::EntryRow;
+        use ressac_ui::chrono::{TimeZone, Utc};
+        ReaderRust {
+            look: QString::from(look),
+            detail: Some(EntryDetail {
+                row: EntryRow {
+                    entry_id: 1,
+                    feed_id: 7,
+                    feed_title: "Example Blog".into(),
+                    title: Some("A title".into()),
+                    author: None,
+                    url: None,
+                    published_at: Utc.with_ymd_and_hms(2026, 10, 9, 8, 0, 0).unwrap(),
+                    is_read: false,
+                    is_starred: false,
+                    has_fulltext: false,
+                },
+                summary_html: Some("<p>Summary</p>".into()),
+                content_html: None,
+                fulltext_html: None,
+                fulltext_error: None,
+                prefer_full_text: false,
+            }),
+            ..ReaderRust::default()
+        }
+    }
+
+    #[test]
+    fn the_crt_reloads_the_page_in_antiope_only_and_reading_never_does() {
+        let mut antiope = state("antiope");
+        let before = antiope.wanted_page().unwrap();
+        antiope.crt = true;
+        let on = antiope.wanted_page().unwrap();
+        assert!(on.theme.shows_crt() && !before.same_page(&on), "one reload");
+        // Marking read changes neither the identity nor a second reload.
+        if let Some(detail) = antiope.detail.as_mut() {
+            detail.row.is_read = true;
+        }
+        assert!(on.same_page(&antiope.wanted_page().unwrap()));
+
+        let mut native = state("native");
+        let before = native.wanted_page().unwrap();
+        native.crt = true;
+        let after = native.wanted_page().unwrap();
+        assert!(!after.theme.shows_crt() && before.same_page(&after));
     }
 
     #[test]

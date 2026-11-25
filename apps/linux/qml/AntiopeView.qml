@@ -652,5 +652,8 @@ FocusScope {
             Antiope.advanceFinished()
         if (Garden.confirming && repairs.visible)
             Garden.confirming = false
+        // A destroyed Binding leaves its target as it was: Native never shows the CRT.
+        Reader.crt = false
+        Antiope.crt = false
     }
 }

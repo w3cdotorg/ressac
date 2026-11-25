@@ -30,6 +30,9 @@ pub mod qobject {
         include!("shim.h");
         /// `QPainter::drawText(QPointF, text)`.
         fn ressac_draw_text_f(painter: Pin<&mut QPainter>, x: f64, y: f64, text: &QString);
+        /// Device pixels per painter unit, across and down.
+        fn ressac_painter_scale_x(painter: &QPainter) -> f64;
+        fn ressac_painter_scale_y(painter: &QPainter) -> f64;
     }
 
     #[auto_cxx_name]
@@ -63,9 +66,6 @@ pub mod qobject {
         fn update(self: Pin<&mut CellRow>);
         #[inherit]
         fn width(self: &CellRow) -> f64;
-        #[inherit]
-        #[cxx_name = "contentsScale"]
-        fn contents_scale(self: &CellRow) -> f64;
         #[inherit]
         #[cxx_name = "setImplicitWidth"]
         fn set_implicit_width(self: Pin<&mut CellRow>, width: f64);
@@ -142,8 +142,8 @@ fn color(color: Color) -> QColor {
     QColor::from_rgb(i32::from(r), i32::from(g), i32::from(b))
 }
 
-/// The glow's alpha (the Mac's 2-point shadow at a quarter of the text's strength).
-const GLOW_ALPHA: i32 = 64;
+/// The glow's opacity (the Mac's 2-point shadow at a quarter of the text's strength).
+const GLOW_OPACITY: f64 = 0.25;
 
 fn indexed(index: i32) -> Color {
     u8::try_from(index)
@@ -307,7 +307,10 @@ impl qobject::CellRow {
         // (four copies in its own colour, a device pixel up, down, left and right), a red copy
         // right and a blue copy left; backgrounds never bleed.
         let bleed = rust.bleed;
-        let glow = 1.0 / self.contents_scale().max(1.0);
+        // One device pixel in painter units, across and down (the device pixel ratio, and
+        // the double-height mapping's doubled y).
+        let glow_x = 1.0 / qobject::ressac_painter_scale_x(&painter).max(1.0);
+        let glow_y = 1.0 / qobject::ressac_painter_scale_y(&painter).max(1.0);
         let red = QColor::from_rgba(255, 0, 0, (BLEED_OPACITY * 255.0).round() as i32);
         let blue = QColor::from_rgba(0, 0, 255, (BLEED_OPACITY * 255.0).round() as i32);
         let red_pen = QPen::from(&red);
@@ -333,10 +336,10 @@ impl qobject::CellRow {
                         foreground.red(),
                         foreground.green(),
                         foreground.blue(),
-                        GLOW_ALPHA,
+                        (GLOW_OPACITY * 255.0).round() as i32,
                     ));
                     painter.as_mut().set_pen(&glow_pen);
-                    for (dx, dy) in [(-glow, 0.0), (glow, 0.0), (0.0, -glow), (0.0, glow)] {
+                    for (dx, dy) in [(-glow_x, 0.0), (glow_x, 0.0), (0.0, -glow_y), (0.0, glow_y)] {
                         qobject::ressac_draw_text_f(painter.as_mut(), x + dx, y + dy, &text);
                     }
                     painter.as_mut().set_pen(&red_pen);

@@ -7,7 +7,7 @@ class QPainter;
 class QString;
 
 // What cxx-qt-lib does not wrap. Every function is declared to Rust in the `shim` bridge of
-// src/lib.rs.
+// src/lib.rs, except the two QPainter helpers at the end (declared in src/cellrow.rs).
 
 // Must run before the application object is constructed (WebEngine needs it there).
 void ressac_init_webengine();
@@ -63,3 +63,7 @@ void ressac_mosaic_reply(std::uint64_t token, rust::Str mime, rust::Slice<const 
 // QPainter::drawText(QPointF, text): cxx-qt-lib wraps only the integer-point overload, and the CRT's
 // glow and colour bleed sit a device pixel (half a logical one at scale 2) from the glyphs.
 void ressac_draw_text_f(QPainter &painter, double x, double y, const QString &text);
+// Device pixels per painter unit, horizontally and vertically (the painter's device transform:
+// the item's content scale, the window's device pixel ratio, a window/viewport mapping).
+double ressac_painter_scale_x(const QPainter &painter);
+double ressac_painter_scale_y(const QPainter &painter);

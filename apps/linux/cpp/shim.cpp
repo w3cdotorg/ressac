@@ -536,3 +536,13 @@ void ressac_draw_text_f(QPainter &painter, double x, double y, const QString &te
 {
     painter.drawText(QPointF(x, y), text);
 }
+
+double ressac_painter_scale_x(const QPainter &painter)
+{
+    return painter.deviceTransform().m11();
+}
+
+double ressac_painter_scale_y(const QPainter &painter)
+{
+    return painter.deviceTransform().m22();
+}
