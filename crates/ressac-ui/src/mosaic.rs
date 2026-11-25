@@ -444,8 +444,8 @@ fn decode_guarded(bytes: &[u8], max_columns: usize) -> Result<(RgbaImage, usize)
 fn black_paper(image: &mut RgbaImage) {
     for pixel in image.pixels_mut() {
         let alpha = u32::from(pixel.0[3]);
-        for k in 0..3 {
-            pixel.0[k] = (u32::from(pixel.0[k]) * alpha / 255) as u8;
+        for channel in &mut pixel.0[..3] {
+            *channel = (u32::from(*channel) * alpha / 255) as u8;
         }
         pixel.0[3] = 255;
     }
@@ -456,8 +456,8 @@ fn over_black(image: &RgbaImage) -> RgbImage {
     let mut paper = RgbImage::new(image.width(), image.height());
     for (source, target) in image.pixels().zip(paper.pixels_mut()) {
         let alpha = u32::from(source.0[3]);
-        for k in 0..3 {
-            target.0[k] = (u32::from(source.0[k]) * alpha / 255) as u8;
+        for (out, channel) in target.0.iter_mut().zip(source.0) {
+            *out = (u32::from(channel) * alpha / 255) as u8;
         }
     }
     paper
