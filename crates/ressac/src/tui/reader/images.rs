@@ -257,7 +257,8 @@ pub struct ProtocolDecision {
 
 /// The override wins; otherwise a detected real protocol stands; otherwise, outside tmux,
 /// Konsole gets iTerm2 images (its query answers nothing usable; Kitty images pile up there,
-/// never cleared); otherwise, only inside tmux, the outer terminal's name decides (Ghostty and Kitty speak Kitty, iTerm2 and WezTerm iTerm2).
+/// never cleared); otherwise, only inside tmux, the outer terminal's name decides (Ghostty and
+/// Kitty speak Kitty, iTerm2 and WezTerm iTerm2).
 pub fn decide_protocol(inputs: &ProtocolInputs<'_>) -> ProtocolDecision {
     let decision = |protocol, reason| ProtocolDecision { protocol, reason };
     if let Some(value) = inputs.env_override {
