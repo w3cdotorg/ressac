@@ -126,26 +126,39 @@ fn the_painted_grid_is_exact_at_every_size_and_scale() {
     }
 }
 
+/// The walk measures both variants one after the other in one launch (painted about 5 times
+/// quicker at rest). A stall of a loaded host during the painted half inverts one mean now and
+/// then (the gate runs the other crates' tests next to it), so a launch that fails is run again,
+/// up to three times: one inverted run is the host, three in a row are the code.
 #[test]
 fn the_painted_rows_scroll_faster_than_text_per_span() {
     for scale in ["1", "2"] {
-        let run = Run::new();
-        let out = run.launch_with(
-            Some(&run.copy_fixture()),
-            &[
-                ("RESSAC_RECETTE_WALK", "grid"),
-                ("QT_SCALE_FACTOR", scale),
-                ("QT_QPA_UPDATE_IDLE_TIME", "0"),
-            ],
-        );
-        let err = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert_eq!(out.status.code(), Some(0), "{err}");
-        for step in [1, 10] {
-            assert!(
-                mean(&err, "painted", step) < mean(&err, "text", step),
-                "x{scale} step {step}: {err}"
+        let mut failures = Vec::new();
+        let err = loop {
+            let run = Run::new();
+            let out = run.launch_with(
+                Some(&run.copy_fixture()),
+                &[
+                    ("RESSAC_RECETTE_WALK", "grid"),
+                    ("QT_SCALE_FACTOR", scale),
+                    ("QT_QPA_UPDATE_IDLE_TIME", "0"),
+                ],
             );
-        }
+            let err = String::from_utf8_lossy(&out.stderr).into_owned();
+            assert_eq!(out.status.code(), Some(0), "{err}");
+            let slower: Vec<u32> = [1, 10]
+                .into_iter()
+                .filter(|&step| mean(&err, "painted", step) >= mean(&err, "text", step))
+                .collect();
+            if slower.is_empty() {
+                break err;
+            }
+            failures.push(format!("steps {slower:?}: {err}"));
+            assert!(
+                failures.len() < 3,
+                "x{scale}: painted not faster in three launches: {failures:#?}"
+            );
+        };
         for line in err
             .lines()
             .filter_map(|l| l.strip_prefix("qml: "))
@@ -153,5 +166,11 @@ fn the_painted_rows_scroll_faster_than_text_per_span() {
         {
             println!("x{scale} {line}");
         } // for notes.md
+        for failure in &failures {
+            println!(
+                "x{scale} retried after {}",
+                failure.lines().next().unwrap_or("")
+            );
+        }
     }
 }

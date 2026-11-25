@@ -603,6 +603,23 @@ mod tests {
         sanitize(html, Some(ARTICLE), Images::Web)
     }
 
+    /// The quickest of up to three runs of `f`, stopping at the first under `bound`. The gate
+    /// runs these debug-build tests next to the KDE crate's Chromium walks: one slow run is a
+    /// stall of the host (seen once at 200 ms for a 10 ms guard), three in a row are the code.
+    /// `f` must bypass the memo (`sanitize_uncached`), or the later runs are cache hits.
+    pub(super) fn quickest_of_three(bound: Duration, mut f: impl FnMut()) -> Duration {
+        let mut best = Duration::MAX;
+        for _ in 0..3 {
+            let started = Instant::now();
+            f();
+            best = best.min(started.elapsed());
+            if best < bound {
+                break;
+            }
+        }
+        best
+    }
+
     #[test]
     fn sanitizer_strips_active_content() {
         let c = clean(HOSTILE);
@@ -804,10 +821,16 @@ mod tests {
         let many = tag(20_000);
         assert_eq!(most_attributes_on_a_tag(&many, usize::MAX), 20_000);
         assert_eq!(most_attributes_on_a_tag(&many, 2_048), 2_049);
-        let started = Instant::now();
         let c = clean(&many);
-        assert!(started.elapsed() < Duration::from_millis(200));
         assert!(!c.contains("<b>") && c.contains("kept"));
+        // The guard answers in about 10 ms (debug build); without it the parse takes about 6 s
+        // and the budget's fallback gives the same text after `PARSE_BUDGET`. A bound under the
+        // budget is what proves the guard answered; half of it leaves room for a loaded host.
+        let bound = PARSE_BUDGET / 2;
+        let best = quickest_of_three(bound, || {
+            let _ = sanitize_uncached(&many, Some(ARTICLE), Images::Web, PARSE_BUDGET);
+        });
+        assert!(best < bound, "{best:?}");
         assert!(!clean(&tag(2_049)).contains("<b>"));
         assert!(clean(&tag(2_000)).contains("<b>kept</b>"));
         assert_eq!(

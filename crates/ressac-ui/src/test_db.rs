@@ -60,6 +60,23 @@ impl Default for NewEntry<'_> {
     }
 }
 
+/// A scratch copy of the fixture, switched to WAL as every app database is (the core sets it on
+/// each open, and the mode stays in the file). The fixture itself is in rollback mode: on a raw
+/// copy, the worker's lanes opening at once raced to switch it, before their busy timeout was
+/// set, and one of them failed with "database is locked".
+fn copy_fixture() -> (TempDir, PathBuf, Connection) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ressac.sqlite");
+    std::fs::copy(FIXTURE, &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.busy_timeout(Duration::from_secs(10)).unwrap();
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    (dir, path, conn)
+}
+
 const STAMP: &str = "2026-10-10T08:00:00.000Z";
 
 pub struct TestDb {
@@ -71,11 +88,7 @@ pub struct TestDb {
 impl TestDb {
     /// The fixture as it is: its diagnoses, decisions, fetch log and buried feed 4.
     pub fn full() -> TestDb {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ressac.sqlite");
-        std::fs::copy(FIXTURE, &path).unwrap();
-        let conn = Connection::open(&path).unwrap();
-        conn.busy_timeout(Duration::from_secs(10)).unwrap();
+        let (dir, path, conn) = copy_fixture();
         TestDb {
             path,
             _dir: dir,
@@ -85,11 +98,7 @@ impl TestDb {
 
     /// A copy of the fixture with no entries, editions or health rows and every feed active.
     pub fn new() -> TestDb {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ressac.sqlite");
-        std::fs::copy(FIXTURE, &path).unwrap();
-        let conn = Connection::open(&path).unwrap();
-        conn.busy_timeout(Duration::from_secs(10)).unwrap();
+        let (dir, path, conn) = copy_fixture();
         conn.execute_batch(
             "DELETE FROM edition_overflow; DELETE FROM edition_entry; DELETE FROM edition; \
              DELETE FROM entry_fts; DELETE FROM entry_fulltext; DELETE FROM entry; \
@@ -594,5 +603,37 @@ impl GardenRowExt for GardenRow {
     fn remarks(mut self, remarks: Vec<Remark>) -> Self {
         self.diagnosis.as_mut().expect("a diagnosed row").remarks = remarks;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    /// The worker's lanes each open the database on their first job, at the same moment; a
+    /// copy of the fixture must open on all of them, as an app database (already in WAL) does.
+    #[test]
+    fn a_fresh_copy_opens_on_several_lanes_at_once() {
+        const LANES: usize = 4;
+        for round in 0..20 {
+            let db = TestDb::new();
+            let barrier = Arc::new(Barrier::new(LANES));
+            let lanes: Vec<_> = (0..LANES)
+                .map(|_| {
+                    let path = db.path.clone();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        ressac_core::service::Ressac::open(&path).map(|_| ())
+                    })
+                })
+                .collect();
+            for lane in lanes {
+                if let Err(e) = lane.join().unwrap() {
+                    panic!("round {round}: {e}");
+                }
+            }
+        }
     }
 }
