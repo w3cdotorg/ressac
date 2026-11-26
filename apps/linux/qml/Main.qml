@@ -299,6 +299,19 @@ Kirigami.ApplicationWindow {
             console.warn("walk: 03-mark-all can=" + EntriesModel.canMarkAllRead) } },
         { name: "04-marked", enter: function () { console.warn("walk: 04-marked rows=" + EntriesModel.rowCount() + " header=" + Journal.header) } }
     ]
+    // The `redraw` walk (recette fix 1): frames alone never redraw the reader; a stop of the window's scene graph
+    // (what minimising does) is followed by one redraw at the next frames.
+    readonly property var redrawSteps: [
+        { name: "02-select", enter: function () { SourcesModel.selectKey("unread"); EntriesModel.select(0) } },
+        { name: "03-frames", enter: function () { frameDriver.visible = true } },
+        { name: "04-stop", enter: function () { const r = readingLoader.item.reader.redraw
+            const idle = "redraws=" + r.redraws + " inset=" + r.inset + " stopped=" + r.stopped
+            root.sceneGraphAboutToStop()
+            console.warn("walk: 04-stop idle " + idle + " then redraws=" + r.redraws + " stopped=" + r.stopped) } },
+        { name: "05-wait", enter: function () {} },
+        { name: "06-redrawn", enter: function () { const r = readingLoader.item.reader.redraw; frameDriver.visible = false
+            console.warn("walk: 06-redrawn redraws=" + r.redraws + " inset=" + r.inset + " stopped=" + r.stopped + " page=" + Reader.pageUrl) } }
+    ]
     // The `garden` walk (fixture: queue Hijacked 6, Moved 5 (a safe repair), Fossil 2; Unphotographable 7 kept; feed 4 buried;
     // the test adds the themes Literature and Technology, feed 8 on Technology).
     readonly property var gardenSteps: [
@@ -760,7 +773,7 @@ Kirigami.ApplicationWindow {
         width: 2; height: 2; color: "black"
         Connections { target: root; enabled: frameDriver.visible; function onFrameSwapped() { frameDriver.x = frameDriver.x > 0 ? 0 : 2 } }
     }
-    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : Recette.walk === "smoke" ? smokeSteps : walkSteps
+    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : Recette.walk === "redraw" ? redrawSteps : Recette.walk === "smoke" ? smokeSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }

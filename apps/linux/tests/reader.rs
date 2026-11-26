@@ -92,3 +92,23 @@ fn the_reader_shows_full_articles_sends_links_out_and_reports_a_failed_extractio
         assert_drawn(&run.shots.join(shot));
     }
 }
+
+/// Recette fix 1: Qt WebEngine frees the view's last frame when the window's scene graph stops (the
+/// window minimised), and a still page then stays black until Chromium draws again. The reader is
+/// redrawn once at the frames after a stop, and never by frames alone.
+#[test]
+fn the_reader_is_redrawn_after_the_scene_graph_stops_and_only_then() {
+    let run = Run::new();
+    let db = run.copy_fixture();
+    let out = run.launch_with(Some(&db), &[("RESSAC_RECETTE_WALK", "redraw")]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_clean(&out);
+    for line in [
+        "walk: 04-stop idle redraws=0 inset=0 stopped=false then redraws=0 stopped=true",
+        "walk: 06-redrawn redraws=1 inset=0 stopped=false page=ressac:page/",
+    ] {
+        assert!(err.contains(line), "{line} missing in {err}");
+    }
+    assert_drawn(&run.shots.join("06-redrawn.png"));
+}

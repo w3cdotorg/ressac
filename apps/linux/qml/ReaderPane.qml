@@ -78,6 +78,10 @@ Item {
 
     TextEdit { id: clipboard; visible: false }
 
+    // The view's last frame is freed when the window is minimised: one redraw after (WebRedraw.qml).
+    readonly property alias redraw: redraw
+    WebRedraw { id: redraw }
+
     // A fetch that failed without a stored error (a stored one is already in the page).
     QQC2.Label {
         id: notice
@@ -120,6 +124,7 @@ Item {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
+        anchors.bottomMargin: redraw.inset
         visible: Reader.hasEntry || pane.proofing
         backgroundColor: Reader.colorScheme === "dark" ? "#1C1C1E" : "#FFFFFF"
 

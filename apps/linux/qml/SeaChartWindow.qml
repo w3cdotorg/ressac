@@ -57,9 +57,13 @@ QQC2.ApplicationWindow {
 
     WebChannel { id: channel; registeredObjects: [relay] }
 
+    // A still chart (Reduce Motion) loses its frame when the window is minimised (WebRedraw.qml).
+    WebRedraw { id: redraw }
+
     WebEngineView {
         id: web
         anchors.fill: parent
+        anchors.bottomMargin: redraw.inset
         visible: Launcher.phase === Launcher.Ready && Chart.phase === "ready"
         webChannel: channel
         settings.javascriptCanOpenWindows: false
