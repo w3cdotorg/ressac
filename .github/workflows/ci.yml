@@ -1,12 +1,18 @@
 name: CI
 on:
+  # Pull requests run once (pull_request); a push runs only on main, after a merge.
   push:
+    branches: [main]
   pull_request:
 permissions:
   contents: read
 jobs:
-  # ressac-kde needs Qt/KDE development packages: the fedora job builds it.
+  # The fedora job runs the whole Linux gate (fmt, clippy, every test, the chart page,
+  # the XDG layout smoke). This job only guards what fedora cannot see, because Fedora has
+  # Qt installed: the terminal app still builds on a Linux machine without Qt, as
+  # release.yml builds it on Ubuntu at each tag.
   check:
+    name: Terminal app builds without Qt
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -14,17 +20,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --exclude ressac-kde --all-targets -- -D warnings
-      - run: cargo test --workspace --exclude ressac-kde
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Test the sea chart page
-        run: node --test 'apps/macos/ChartTests/*.test.cjs'
+      - run: cargo build --locked -p ressac
   fedora:
     name: Fedora 44 (Linux gate, non-root)
     runs-on: ubuntu-latest
