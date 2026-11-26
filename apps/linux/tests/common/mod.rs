@@ -10,6 +10,15 @@ pub const FIXTURE: &str = concat!(
     "/../../tests/fixtures/contract.sqlite"
 );
 
+/// One app at a time per test binary. Every test here launches the whole app, and the Sea Chart's
+/// WebEngine page is drawn in software: on the 4-vCPU CI runner it does not draw within the walk's
+/// 15 s wait when several apps compete for the CPUs. A test that waits for the chart holds this guard
+/// for its whole run. A poisoned lock (an earlier test panicked) is still a free lock.
+pub fn one_app_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub struct Run {
     _home: tempfile::TempDir,
     pub home: PathBuf,

@@ -26,6 +26,7 @@ fn number(facts: &std::collections::HashMap<String, String>, key: &str) -> u64 {
 
 #[test]
 fn the_sea_chart_draws_the_fixture_with_the_stored_prefs_and_answers_the_page() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     std::fs::create_dir_all(run.home.join("config/ressac")).unwrap();
@@ -116,6 +117,7 @@ fn the_sea_chart_draws_the_fixture_with_the_stored_prefs_and_answers_the_page() 
 
 #[test]
 fn the_sea_chart_follows_the_database_and_stops_when_closed() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     let out = run.launch_with(

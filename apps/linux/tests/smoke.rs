@@ -124,16 +124,19 @@ fn smoke(scale: &str) {
 
 #[test]
 fn the_smoke_walk_reaches_every_page_at_scale_1() {
+    let _turn = one_app_at_a_time();
     smoke("1")
 }
 
 #[test]
 fn the_smoke_walk_reaches_every_page_at_scale_2() {
+    let _turn = one_app_at_a_time();
     smoke("2")
 }
 
 #[test]
 fn the_default_walk_shows_every_state_the_spec_lists() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let out = run.launch(Some(&run.copy_fixture()));
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -185,6 +188,7 @@ fn the_default_walk_shows_every_state_the_spec_lists() {
 
 #[test]
 fn the_first_run_on_an_empty_home_offers_the_import() {
+    let _turn = one_app_at_a_time();
     // --screenshot needs RESSAC_DB, so the walk starts on a file that is not a database and the
     // hook presses "Use Default Database": the launch then runs on the empty home, as a first launch.
     let run = Run::new();
