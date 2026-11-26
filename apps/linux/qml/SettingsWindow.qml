@@ -24,6 +24,10 @@ QQC2.ApplicationWindow {
     readonly property var antiopeSizes: [15, 20, 25, 30]
     readonly property string previewFamily: AppSettings.fontFamilies[fontIndex] || Kirigami.Theme.defaultFont.family
 
+    property alias sizeSlider: sizeSlider
+    property alias antiopeSlider: antiopeSlider
+    property alias previewLabel: previewLabel
+
     function showPage(name) { tabs.currentIndex = name === "data" ? 1 : 0 }
 
     // Quits only once the new instance has started (the Mac opens a new instance and terminates).
@@ -125,7 +129,10 @@ QQC2.ApplicationWindow {
                 spacing: Kirigami.Units.smallSpacing
                 Kirigami.Icon { source: "format-font-size-less"; implicitWidth: Kirigami.Units.iconSizes.small; implicitHeight: Kirigami.Units.iconSizes.small }
                 QQC2.Slider {
+                    id: sizeSlider
                     visible: !settings.antiope
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                    Kirigami.StyleHints.tickMarkStepSize: -1      // no tick per point (the Mac's slider has none)
                     from: 12; to: 28; stepSize: 1
                     snapMode: QQC2.Slider.SnapAlways
                     value: AppSettings.readerSize
@@ -133,8 +140,11 @@ QQC2.ApplicationWindow {
                 }
                 // Antiope draws at one of four sizes of its own.
                 QQC2.Slider {
+                    id: antiopeSlider
                     objectName: "antiopeSize"
                     visible: settings.antiope
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                    Kirigami.StyleHints.tickMarkStepSize: 1       // a tick on each of the four sizes
                     from: 0; to: 3; stepSize: 1
                     snapMode: QQC2.Slider.SnapAlways
                     value: settings.antiopeSizes.indexOf(AppSettings.readerSizeAntiope)
@@ -167,6 +177,7 @@ QQC2.ApplicationWindow {
             }
 
             QQC2.Label {
+                id: previewLabel
                 Kirigami.FormData.label: "Preview:"
                 text: AppSettings.previewText
                 font.family: settings.antiope ? "Bedstead" : settings.previewFamily
@@ -174,6 +185,9 @@ QQC2.ApplicationWindow {
                 wrapMode: Text.Wrap
                 maximumLineCount: 3
                 elide: Text.ElideRight
+                // A FormLayout centres its content and sizes it by its widest field: the preview's own width
+                // (it follows the text size) must not decide it, or the whole form jumps as the slider moves.
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 24
                 Layout.fillWidth: true
             }
 

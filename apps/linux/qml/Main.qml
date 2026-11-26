@@ -312,6 +312,26 @@ Kirigami.ApplicationWindow {
         { name: "06-redrawn", enter: function () { const r = readingLoader.item.reader.redraw; frameDriver.visible = false
             console.warn("walk: 06-redrawn redraws=" + r.redraws + " inset=" + r.inset + " stopped=" + r.stopped + " page=" + Reader.pageUrl) } }
     ]
+    // The `settings-size` walk (recette fix 2): the Text size row stays where it is whatever the size, Native and Antiope.
+    function sizeRow(tag) {
+        const s = settingsWindow
+        const x = s.sizeSlider.visible ? s.sizeSlider : s.antiopeSlider
+        console.warn("walk: " + tag + " size=" + Math.round(s.antiope ? AppSettings.readerSizeAntiope : AppSettings.readerSize)
+            + " sliderX=" + Math.round(x.mapToItem(null, 0, 0).x) + " sliderW=" + Math.round(x.width)
+            + " previewW=" + Math.round(s.previewLabel.width) + " ticks=" + x.Kirigami.StyleHints.tickMarkStepSize)
+    }
+    readonly property var settingsSizeSteps: [
+        { name: "02-open", enter: function () { AppSettings.appearance = "native"; root.openSettings(); settingsWindow.showPage("reading"); AppSettings.readerSize = 12 } },
+        { name: "03-n12", enter: function () { root.sizeRow("03-n12") } },
+        { name: "04-set20", enter: function () { AppSettings.readerSize = 20 } },
+        { name: "05-n20", enter: function () { root.sizeRow("05-n20") } },
+        { name: "06-set28", enter: function () { AppSettings.readerSize = 28 } },
+        { name: "07-n28", enter: function () { root.sizeRow("07-n28") } },
+        { name: "08-antiope", enter: function () { AppSettings.appearance = "antiope"; AppSettings.readerSizeAntiope = 15 } },
+        { name: "09-a15", enter: function () { root.sizeRow("09-a15") } },
+        { name: "10-set30", enter: function () { AppSettings.readerSizeAntiope = 30 } },
+        { name: "11-a30", enter: function () { root.sizeRow("11-a30"); AppSettings.appearance = "native" } }
+    ]
     // The `garden` walk (fixture: queue Hijacked 6, Moved 5 (a safe repair), Fossil 2; Unphotographable 7 kept; feed 4 buried;
     // the test adds the themes Literature and Technology, feed 8 on Technology).
     readonly property var gardenSteps: [
@@ -773,7 +793,7 @@ Kirigami.ApplicationWindow {
         width: 2; height: 2; color: "black"
         Connections { target: root; enabled: frameDriver.visible; function onFrameSwapped() { frameDriver.x = frameDriver.x > 0 ? 0 : 2 } }
     }
-    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : Recette.walk === "redraw" ? redrawSteps : Recette.walk === "smoke" ? smokeSteps : walkSteps
+    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : Recette.walk === "redraw" ? redrawSteps : Recette.walk === "settings-size" ? settingsSizeSteps : Recette.walk === "smoke" ? smokeSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }
