@@ -12,7 +12,7 @@ Prochaines étapes de Ressac, au 23/10/2026. Le détail des décisions passées 
 
 ## Sous-projets suivants
 
-- [ ] **8 : Ressac sous Linux.** Partie A (terminal, chemins XDG, conteneur Fedora, CI et release Linux) faite le 23/10/2026 sur la branche `linux` (spec `docs/specs/2026-10-23-linux-design.md`) ; partie B (appli KDE) faite le 25/11/2026, en recette sur marghe, PR à ouvrir ; bilan et trouvailles dans `notes.md`.
+- [ ] **8 : Ressac sous Linux.** Partie A (terminal, chemins XDG, conteneur Fedora, CI et release Linux) faite le 23/10/2026 sur la branche `linux` (spec `docs/specs/2026-10-23-linux-design.md`) ; partie B (appli KDE) faite le 25/11/2026, recette validée sur marghe le 26/11/2026, PR à ouvrir ; bilan et trouvailles dans `notes.md`.
 - [x] **7 : ajouter un flux.** Code fait le 20/10/2026 sur la branche `add-feed` (spec `docs/specs/2026-10-20-add-feed-design.md`) ; recette en attente ; trouvailles dans `notes.md`.
 - [x] **6 : la carte marine.** Code fait le 19/10/2026 sur la branche `sea-chart` (spec `docs/specs/2026-10-19-sea-chart-design.md`) ; recette en attente (import de l'amorce dans la vraie base, remplacement de l'appli, essai des quatre encres) ; trouvailles dans `notes.md`.
 - [x] **5 : le bandeau tmux.** Fait le 19/10/2026 sur la branche `tmux-ticker` ; recette et trouvailles dans `notes.md`.
@@ -156,6 +156,9 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Appli KDE, comme le Mac : un `databasePath` relatif dans `ressac-kde.conf` s'emploie tel quel, relatif au dossier courant (`launch.rs`) ; le refuser dans `database_location` ou le résoudre contre `HOME` (revue finale, M9).
 - [ ] `CellRow::paint` appelle `ressac_bedstead_family()` (FFI) et alloue une `String` à chaque peinture (`cellrow.rs`) ; la lire une fois (`OnceLock`) (revue finale, M12, reste de B8b1).
 - [ ] Appli KDE : l'entrée de menu Sea Chart est active avant que la base soit prête (`Main.qml`) ; l'inventaire veut chaque entrée grisée quand elle ne peut rien faire (la fenêtre affiche alors « not open ») (revue finale, M14).
+- [ ] Appli KDE : `visibility !== Window.Minimized` ne se déclenche jamais sous Wayland (`SeaChartWindow.qml`, `ReadingPage.qml`) : une carte marine réduite compte toujours comme à l'écran et le test de `Main.qml` est mort. Prendre `active` ou l'exposition de la fenêtre à la place.
+- [ ] Appli KDE : le lecteur blanc après le verrouillage de la session (B8e) n'a pas été retesté avec la correction de redessin de `88ce669` ; la correction n'a pas non plus été essayée en rendu logiciel.
+- [ ] Appli KDE, Réglages › Lecture : en Antiope à 30 pt l'aperçu fait 3 à 4 lignes et sa distance au bas de la fenêtre (hauteur 520) n'est pas mesurée ; aucun test ne simule un glissement du curseur sur le curseur de taille (recette 26/11, `66de864`).
 
 ### Durcissement proposé, non fait
 

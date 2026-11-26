@@ -164,7 +164,7 @@ It checks the Fedora packages listed in `apps/linux/dev/packages.txt`; when some
 - `apps/linux/install.sh --software-rendering` writes the desktop entry with `QT_QUICK_BACKEND=software` and `QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu`, for a virtual machine whose GPU draws blank or flickering views.
 - `apps/linux/install.sh --uninstall` removes exactly those four files. The database, the settings and the logs are never touched.
 
-**First launch.** Start Ressac from the Plasma launcher. With no feed yet, the window says "No Feeds Yet — Drop an OPML file here, or choose one…"; `ressac export -o ressac.opml` on another machine gives one. The app and `ressac` in Konsole share `~/.local/share/ressac/ressac.sqlite`.
+**First launch.** Start Ressac from the Plasma launcher. With no feed yet, the window shows the title "No Feeds Yet" with the text "Drop an OPML file here, or choose one…"; `ressac export -o ressac.opml` on another machine gives one. The app and `ressac` in Konsole share `~/.local/share/ressac/ressac.sqlite`.
 
 **Files.** Settings are in `~/.config/ressac/ressac-kde.conf` (the Mac app's keys). Logs are in `~/.local/state/ressac/logs/` (Settings ▸ Data ▸ Show Logs). The database is described in [Linux](#linux).
 
@@ -174,7 +174,7 @@ It checks the Fedora packages listed in `apps/linux/dev/packages.txt`; when some
 |---|---|
 | ⌘N Add Feed… | Ctrl+N |
 | ⌘O Import OPML… / ⇧⌘E Export OPML… | Ctrl+O / Ctrl+Shift+E |
-| ⌘R Refresh / ⇧⌘R Refresh All | F5 and Ctrl+R / Ctrl+Shift+R |
+| ⌘R Refresh / ⇧⌘R Refresh All | Ctrl+R / Ctrl+Shift+R (F5 also refreshes, the current source only) |
 | ⌘F Search | Ctrl+F |
 | ⌥⌘U Show Unread Only | Ctrl+Alt+U |
 | ⌘+ / ⌘− / ⌘0 text size | Ctrl++ / Ctrl+− / Ctrl+0 |
@@ -185,9 +185,10 @@ It checks the Fedora packages listed in `apps/linux/dev/packages.txt`; when some
 | ⌘, Settings | Ctrl+Shift+, (KDE's Configure) |
 | ⌥S / ⌥G / ⌥R (Antiope) | Alt+S / Alt+G / Alt+R |
 | ⌘Q | Ctrl+Q |
-| Letters `j k m s Space ? i`, digits, arrows | unchanged |
+| Letters `j k m s Space`, arrows | unchanged |
+| `?`, `i`, digits (Antiope only) | unchanged |
 
-Letters act when the reading window has focus and no text field does.
+Letters act when the reading window has focus, also with a toolbar control focused; they do nothing while a text field or a menu has focus.
 
 **Antiope.** Settings ▸ Reading ▸ Appearance switches to it, as on the Mac (see [Antiope](#antiope)). Text sizes are 15, 20, 25 and 30 (Ctrl++ and Ctrl+−); digits jump to pages, Backspace and Esc correct them; Alt+S is SOMMAIRE, Alt+G (or `?`) the GUIDE, Alt+R the refresh; ← and → move between the columns; `i` shows the mosaics' originals. The CRT screen is not ported (it cost more than the 2 ms a frame budget).
 
