@@ -39,7 +39,7 @@ pub fn apply_garden_command(app: &Ressac, command: Command) -> anyhow::Result<Op
             Ok(Some(crate::output::apply_safe_text(applied, &skipped)))
         }
         Command::Open(url) => {
-            open::that(&url)?;
+            crate::open_in_browser(&url)?;
             Ok(None)
         }
     }

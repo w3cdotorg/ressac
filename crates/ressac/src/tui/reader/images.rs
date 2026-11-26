@@ -205,9 +205,11 @@ pub fn detect_picker() -> Picker {
     let client_term = (is_tmux && detected == ProtocolType::Halfblocks && override_value.is_none())
         .then(tmux_client_term)
         .flatten();
+    let konsole = std::env::var_os("KONSOLE_VERSION").is_some_and(|v| !v.is_empty());
     let decision = decide_protocol(&ProtocolInputs {
         detected,
         is_tmux,
+        konsole,
         client_term: client_term.as_deref(),
         env_override: override_value.as_deref(),
     });
@@ -216,6 +218,7 @@ pub fn detect_picker() -> Picker {
         font_size = ?(picker.font_size().width, picker.font_size().height),
         window_font = ?window_font,
         is_tmux,
+        konsole,
         client_term = ?client_term,
         env_override = ?override_value,
         query_error = ?queried.as_ref().err().map(ToString::to_string),
@@ -238,6 +241,8 @@ pub struct ProtocolInputs<'a> {
     /// What the capability query settled on (Halfblocks when it found nothing).
     pub detected: ProtocolType,
     pub is_tmux: bool,
+    /// `KONSOLE_VERSION` is set and not empty.
+    pub konsole: bool,
     /// tmux's `client_termname` and `client_termtype` of the outer terminal, lowercased.
     pub client_term: Option<&'a str>,
     /// The `RESSAC_IMAGES` value.
@@ -250,8 +255,10 @@ pub struct ProtocolDecision {
     pub reason: &'static str,
 }
 
-/// The override wins; otherwise a detected real protocol stands; otherwise, only inside tmux,
-/// the outer terminal's name decides (Ghostty and Kitty speak Kitty, iTerm2 and WezTerm iTerm2).
+/// The override wins; otherwise a detected real protocol stands; otherwise, outside tmux,
+/// Konsole gets iTerm2 images (its query answers nothing usable; Kitty images pile up there,
+/// never cleared); otherwise, only inside tmux, the outer terminal's name decides (Ghostty and
+/// Kitty speak Kitty, iTerm2 and WezTerm iTerm2).
 pub fn decide_protocol(inputs: &ProtocolInputs<'_>) -> ProtocolDecision {
     let decision = |protocol, reason| ProtocolDecision { protocol, reason };
     if let Some(value) = inputs.env_override {
@@ -270,6 +277,12 @@ pub fn decide_protocol(inputs: &ProtocolInputs<'_>) -> ProtocolDecision {
         return decision(inputs.detected, "detected by the terminal query");
     }
     if !inputs.is_tmux {
+        if inputs.konsole {
+            return decision(
+                ProtocolType::Iterm2,
+                "Konsole: iTerm2 images (kitty is not cleared there)",
+            );
+        }
         return decision(ProtocolType::Halfblocks, "nothing detected");
     }
     let term = inputs.client_term.unwrap_or_default().to_ascii_lowercase();
@@ -726,9 +739,60 @@ mod tests {
         ProtocolInputs {
             detected,
             is_tmux,
+            konsole: false,
             client_term,
             env_override,
         }
+    }
+
+    fn in_konsole<'a>(mut inputs: ProtocolInputs<'a>) -> ProtocolInputs<'a> {
+        inputs.konsole = true;
+        inputs
+    }
+
+    #[test]
+    fn konsole_alone_gets_iterm2_images() {
+        let d = decide_protocol(&in_konsole(inputs(
+            ProtocolType::Halfblocks,
+            false,
+            None,
+            None,
+        )));
+        assert_eq!(d.protocol, ProtocolType::Iterm2);
+        assert!(d.reason.contains("Konsole"), "{}", d.reason);
+    }
+
+    #[test]
+    fn konsole_with_an_override_follows_the_override() {
+        let d = decide_protocol(&in_konsole(inputs(
+            ProtocolType::Halfblocks,
+            false,
+            None,
+            Some("sixel"),
+        )));
+        assert_eq!(d.protocol, ProtocolType::Sixel);
+    }
+
+    #[test]
+    fn konsole_with_a_detected_protocol_keeps_it() {
+        let d = decide_protocol(&in_konsole(inputs(ProtocolType::Sixel, false, None, None)));
+        assert_eq!(d.protocol, ProtocolType::Sixel);
+    }
+
+    #[test]
+    fn konsole_inside_tmux_is_left_to_the_tmux_rule() {
+        let under = |term| {
+            decide_protocol(&in_konsole(inputs(
+                ProtocolType::Halfblocks,
+                true,
+                term,
+                None,
+            )))
+            .protocol
+        };
+        assert_eq!(under(Some("xterm-256color")), ProtocolType::Halfblocks);
+        assert_eq!(under(None), ProtocolType::Halfblocks);
+        assert_eq!(under(Some("xterm-kitty")), ProtocolType::Kitty);
     }
 
     #[test]

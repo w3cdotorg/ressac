@@ -1,6 +1,6 @@
 # TODO
 
-Prochaines étapes de Ressac, au 20/10/2026. Le détail des décisions passées est dans `notes.md`.
+Prochaines étapes de Ressac, au 23/10/2026. Le détail des décisions passées est dans `notes.md`.
 
 ## Mise en service
 
@@ -12,6 +12,7 @@ Prochaines étapes de Ressac, au 20/10/2026. Le détail des décisions passées 
 
 ## Sous-projets suivants
 
+- [ ] **8 : Ressac sous Linux.** Partie A (terminal, chemins XDG, conteneur Fedora, CI et release Linux) faite le 23/10/2026 sur la branche `linux` (spec `docs/specs/2026-10-23-linux-design.md`) ; partie B (appli KDE) faite le 25/11/2026, recette validée sur marghe le 26/11/2026, PR à ouvrir ; bilan et trouvailles dans `notes.md`.
 - [x] **7 : ajouter un flux.** Code fait le 20/10/2026 sur la branche `add-feed` (spec `docs/specs/2026-10-20-add-feed-design.md`) ; recette en attente ; trouvailles dans `notes.md`.
 - [x] **6 : la carte marine.** Code fait le 19/10/2026 sur la branche `sea-chart` (spec `docs/specs/2026-10-19-sea-chart-design.md`) ; recette en attente (import de l'amorce dans la vraie base, remplacement de l'appli, essai des quatre encres) ; trouvailles dans `notes.md`.
 - [x] **5 : le bandeau tmux.** Fait le 19/10/2026 sur la branche `tmux-ticker` ; recette et trouvailles dans `notes.md`.
@@ -133,6 +134,31 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Petites dettes du cœur : la résolution d'un thème par clé ou par nom est maintenant unique (`resolve_theme_in`), mais la lecture d'une ligne de thème en `ThemeDef` reste écrite à trois endroits (`resolve_theme_in`, `themes`, relecture dans `insert_added_feed`) ; `COALESCE(html_url, xml_url)` prend un `html_url` vide pour présent (`NULLIF`) ; un territoire peut différer du thème hérité ; dérivations `Serialize` inutilisées ; ménage préalable (« Step 0 ») non fait sur `feeds.rs` ; `service.rs` à découper (`service/add.rs`) ; un déplacement sans effet calcule quand même la page.
 - [ ] CLI : pas de test qu'un refus en `--json` laisse stdout vide.
 - [ ] Appli : le presse-papiers est relu à chaque recréation de la fenêtre d'ajout ; un ajout qui se termine après Annuler sélectionne quand même le flux, affiche la note et peut fermer une fenêtre rouverte entre-temps ; deux notes identiques de suite ne relancent pas la minuterie.
+
+### Linux (sous-projet 8)
+
+- [ ] Konsole : le lecteur du terminal choisit maintenant iTerm2 sous `KONSOLE_VERSION` quand rien n'est détecté (B10, essais de Clément le 25/11 : `iterm2` et `sixel` dessinent, `kitty` n'efface pas). Reste à vérifier sur la VM, dans Konsole et sans `RESSAC_IMAGES`, que les images s'affichent et s'effacent au changement d'article.
+- [ ] Réglages › Données : Clément n'a pas vu « Relaunch Now » à la VM 2. Comme sur le Mac, le bouton n'apparaît qu'après un chemin de base changé ; lui demander s'il a choisi un autre fichier (si oui, c'est un bogue à reproduire).
+- [x] Listes déroulantes de dossiers (Add Feed) : tous les dossiers au même niveau, sans retrait (fait en B10, `FolderChoice::title` renvoie le nom seul) ; deux dossiers homonymes se ressemblent, choix de Clément.
+- [ ] `marghe.sh` recopie maintenant `KDE_SESSION_VERSION`, `XDG_SESSION_DESKTOP` et `DESKTOP_SESSION` de la session (B10). Reste à vérifier sur la VM que « Open Site » du jardin ouvre bien le navigateur dans `manual`.
+- [ ] Lecteur et jardin du terminal : un SIGTERM venu d'ailleurs les arrête sans restaurer le terminal (mode brut, écran alternatif). Il faudrait que les deux boucles surveillent le signal et quittent proprement (`commands/mod.rs`, `commands/garden.rs`, une boucle du jardin qui n'attend plus `event::read` sans fin).
+- [ ] Après le 02/11/2026 (crédits Actions) : vérifier le premier passage de `ci.yml` (job `fedora`, avertissement attendu de `--exclude ressac-kde` tant que l'appli n'existe pas) et, au premier tag, celui de `release.yml` (le runner `ubuntu-22.04-arm` est-il offert à ce dépôt ? il est public, donc normalement oui ; sinon le job attend sans fin dans la file).
+- [ ] Release : le build x86_64 n'a jamais été rejoué et le plafond glibc (2.35) est affiché, pas contrôlé ; ajouter un garde-fou qui échoue au-delà.
+- [ ] Recette `--screenshot` : attendre le `loadingChanged` (ou la première peinture) de la page WebEngine avant chaque capture ; sur la VM, le panneau du lecteur sort gris, vide ou périmé sur plusieurs captures (artefact de minutage, Clément ne le voit pas à la main). Le menu global de Plasma est vérifié (VM 2, 25/11) ; à la main, Clément n'a pas vu de lecteur gris au premier affichage.
+- [ ] Appli KDE : l'écran CRT d'Antiope (lignes de balayage, vignette, coins du tube, bavure des couleurs ; réglage antiope.crt) n'est pas porté : le défilement de 2000 articles à l'échelle 2 (conteneur, rendu logiciel, build debug) dépasse le budget de 2 ms par image, p95 au pas de 10 articles par image de 2,48 à 5,36, de 2,60 à 5,29, de 2,67 à 4,87 et de 2,49 à 4,85 ms (+2,2 à +2,9 ms ; au pas de 1, +0,6 ms), le code de B9a seul coûtait déjà +2,0 à +2,8 ms, et sur la VM (Fedora 45, virgl) la surcouche n'apparaît qu'après un redimensionnement de la fenêtre. Pistes : un ShaderEffect avec des shaders .qsb (paquet qt6-qtshadertools) sur le rendu OpenGL de la VM, ou une bavure pré-calculée par ligne peinte (spec §7.10). Le code est dans l'historique (commits aeed578, 051e202, 51c8eb5), avec deux pistes déjà mesurées : sans les copies horizontales de la lueur (+1,2 à +1,9 ms) et un repeint à l'apparition.
+- [ ] Appli Mac : les dossiers des menus déroulants (ajout d'un flux, Réglages) au même niveau, sans retrait, comme dans l'appli KDE depuis B10 (choix de Clément, 25/11/2026).
+- [ ] Appli KDE : `Live.windowActive` ne suit que la fenêtre principale (`ReadingPage.qml`) ; avec les Réglages au premier plan, la liste ne se rafraîchit plus jusqu'au retour (un rechargement à ce moment-là, rien de durable). Le Mac suit `NSApp.isActive` : prendre `Qt.application.state === Qt.ApplicationActive` (revue finale, M1).
+- [ ] Appli KDE : l'extraction de l'article complet passe par `session.worker.short` et non par `runs::submit_short` (`apps/linux/src/reader.rs`), à rebours de la règle de B4 (Runs, seul chemin de toute exécution) ; même file d'attente, mais le coordinateur ne la voit pas. Il faudrait une demande `RunRequest` pour l'extraction (revue finale, M2).
+- [ ] Appli KDE : `std::thread::spawn` panique si le fil ne peut pas démarrer (`worker.rs` : voies et exécution longue ; `launcher.rs`) ; passer par `thread::Builder::spawn` avec un chemin d'erreur, comme `chart.rs`, `mosaic.rs` et `sanitize/worker.rs` (revue finale, M3).
+- [ ] ressac-ui : `live::apply_rows` et `EntryList::with_page_size` ne servent qu'aux tests mais sont `pub` ; les passer en `#[cfg(test)]` ou `pub(crate)` (revue finale, M4 ; `ReaderTheme::NATIVE` est fait).
+- [ ] Appli KDE : `runs::PROGRESS_INSET` est recopié en littéral dans `ReadingPage.qml` ; l'exposer par `Runs` ou retirer la constante (revue finale, M5).
+- [ ] Test `smoke` : aucune fenêtre surgissante n'est capturée à l'échelle 2 (Add Feed, confirmation d'import, Réglages › Données, article en mosaïques) ; en ajouter une ou deux (revue finale, M6).
+- [ ] Appli KDE, comme le Mac : un `databasePath` relatif dans `ressac-kde.conf` s'emploie tel quel, relatif au dossier courant (`launch.rs`) ; le refuser dans `database_location` ou le résoudre contre `HOME` (revue finale, M9).
+- [ ] `CellRow::paint` appelle `ressac_bedstead_family()` (FFI) et alloue une `String` à chaque peinture (`cellrow.rs`) ; la lire une fois (`OnceLock`) (revue finale, M12, reste de B8b1).
+- [ ] Appli KDE : l'entrée de menu Sea Chart est active avant que la base soit prête (`Main.qml`) ; l'inventaire veut chaque entrée grisée quand elle ne peut rien faire (la fenêtre affiche alors « not open ») (revue finale, M14).
+- [ ] Appli KDE : `visibility !== Window.Minimized` ne se déclenche jamais sous Wayland (`SeaChartWindow.qml`, `ReadingPage.qml`) : une carte marine réduite compte toujours comme à l'écran et le test de `Main.qml` est mort. Prendre `active` ou l'exposition de la fenêtre à la place.
+- [ ] Appli KDE : le lecteur blanc après le verrouillage de la session (B8e) n'a pas été retesté avec la correction de redessin de `88ce669` ; la correction n'a pas non plus été essayée en rendu logiciel.
+- [ ] Appli KDE, Réglages › Lecture : en Antiope à 30 pt l'aperçu fait 3 à 4 lignes et sa distance au bas de la fenêtre (hauteur 520) n'est pas mesurée ; aucun test ne simule un glissement du curseur sur le curseur de taille (recette 26/11, `66de864`).
 
 ### Durcissement proposé, non fait
 

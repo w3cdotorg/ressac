@@ -60,21 +60,6 @@ fn tick_redraws(look: Look, before: DateTime<FixedOffset>, after: DateTime<Fixed
         || before.format("%Y%m%d%H%M").to_string() != after.format("%Y%m%d%H%M").to_string()
 }
 
-/// Local midnight of the day `now` belongs to, in UTC (the app's "Today").
-pub fn today_start<Tz: TimeZone>(now: DateTime<Tz>) -> DateTime<Utc> {
-    let midnight = now.date_naive().and_hms_opt(0, 0, 0).expect("00:00 exists");
-    let zone = now.timezone();
-    zone.from_local_datetime(&midnight)
-        .earliest()
-        // A zone that skips midnight (DST at 00:00): the day starts at the first valid hour.
-        .or_else(|| {
-            zone.from_local_datetime(&(midnight + chrono::Duration::hours(1)))
-                .earliest()
-        })
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|| now.with_timezone(&Utc))
-}
-
 /// The clock a command needs: `now` for writes and the zone for "Today" and the edition's day.
 /// Production passes `chrono::Local` itself, so that a day with a clock change keeps its true
 /// midnight and 04:00 (a `FixedOffset` captured at `now` would shift them by an hour); tests
@@ -101,7 +86,7 @@ impl<Tz: TimeZone> Clock<Tz> {
     }
 
     fn today(&self) -> DateTime<Utc> {
-        today_start(self.now.with_timezone(&self.zone))
+        ressac_core::clock::today_start(self.now.with_timezone(&self.zone))
     }
 
     fn tick(&self) -> Event {
@@ -308,7 +293,9 @@ impl<'a> Executor<'a> {
                     events.push(Event::DataChanged);
                     events
                 }),
-            Command::OpenUrl(url) => open::that(&url).map(|()| Vec::new()).map_err(Into::into),
+            Command::OpenUrl(url) => crate::open_in_browser(&url)
+                .map(|()| Vec::new())
+                .map_err(Into::into),
             Command::Extract(id) => {
                 let _ = self.tx.send(Msg::Event(Event::Progress {
                     label: EXTRACT_PROGRESS_LABEL.into(),
@@ -475,9 +462,12 @@ fn busy_or(e: &anyhow::Error) -> String {
     jobs::sentence(format!("{e:#}"))
 }
 
-/// Opens the reader on `app` (already opened by `commands::read`) until `q`.
-pub fn run(app: &Ressac, db: &Path, settings_path: &Path) -> anyhow::Result<()> {
-    let settings = TerminalSettings::load(settings_path);
+/// Opens the reader on `app` (already opened by `commands::read`) until `q`. Without a settings
+/// path (no usable home) it starts from the defaults and never saves.
+pub fn run(app: &Ressac, db: &Path, settings_path: Option<&Path>) -> anyhow::Result<()> {
+    let settings = settings_path
+        .map(TerminalSettings::load)
+        .unwrap_or_default();
     let original: Arc<PanicHook> = Arc::new(std::panic::take_hook());
     forward_panics_to(&original);
     let mut terminal = match ratatui::try_init() {
@@ -530,7 +520,7 @@ fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &Ressac,
     db: &Path,
-    settings_path: &Path,
+    settings_path: Option<&Path>,
     state: &mut ReaderState,
     images: &mut images::ImageStore,
 ) -> anyhow::Result<()> {
@@ -552,8 +542,10 @@ fn event_loop(
                     return Ok(());
                 }
                 Command::SaveSettings => {
-                    // Never blocks reading: an unwritable file only forgets the choice.
-                    let _ = state.settings.save(settings_path);
+                    // Never blocks reading: an unwritable file, or none, only forgets the choice.
+                    if let Some(path) = settings_path {
+                        let _ = state.settings.save(path);
+                    }
                 }
                 other => {
                     for event in exec.run(other, Clock::system()) {
@@ -617,7 +609,7 @@ fn event_loop(
                 _ => {}
             }
         }
-        // The clock, and what Ressac.app or a job wrote.
+        // The clock, and what the app, another `ressac` or a job wrote.
         if last_tick.elapsed() >= tick_interval(state) {
             last_tick = Instant::now();
             let before = state.local;
@@ -710,24 +702,6 @@ mod tests {
             .with_ymd_and_hms(2026, 10, 16, 9, 1, 0)
             .unwrap();
         assert!(tick_redraws(Look::Native, at("59"), next_minute));
-    }
-
-    #[test]
-    fn today_starts_at_local_midnight() {
-        let now = paris_summer()
-            .with_ymd_and_hms(2026, 10, 16, 0, 30, 0)
-            .unwrap();
-        assert_eq!(
-            today_start(now),
-            Utc.with_ymd_and_hms(2026, 10, 15, 22, 0, 0).unwrap()
-        );
-        let evening = paris_summer()
-            .with_ymd_and_hms(2026, 10, 16, 23, 59, 0)
-            .unwrap();
-        assert_eq!(
-            today_start(evening),
-            Utc.with_ymd_and_hms(2026, 10, 15, 22, 0, 0).unwrap()
-        );
     }
 
     /// Europe/Paris for 2026 only (CEST from 2026-03-29 01:00 UTC to 2026-10-25 01:00 UTC): a
@@ -865,7 +839,7 @@ mod tests {
 
     #[test]
     fn data_version_moves_when_another_connection_writes() {
-        // Review Focus 2, loop side: what Ressac.app's writes look like to the reader.
+        // Review Focus 2, loop side: what another process's writes look like to the reader.
         let dir = tempfile::tempdir().unwrap();
         let (reader, db) = open_app(&dir);
         let before = reader.store().data_version().unwrap();
@@ -1146,10 +1120,7 @@ mod tests {
             matches!(events.as_slice(), [Event::JobDone(JobOutcome::Failed(_))]),
             "{events:?}"
         );
-        assert_eq!(
-            busy_or(&anyhow::anyhow!("database is locked")),
-            "The database is busy (is Ressac.app writing?)"
-        );
+        assert_eq!(busy_or(&anyhow::anyhow!("database is locked")), jobs::BUSY);
         assert_eq!(busy_or(&anyhow::anyhow!("boom")), "boom");
     }
 

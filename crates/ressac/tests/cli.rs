@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use ressac_core::model::{Action, Cadence, Diagnosis, Evidence, FeedId, Status};
 use ressac_core::store::Store;
@@ -15,14 +16,77 @@ const FIXTURE: &str = concat!(
     "/../../tests/fixtures/vienna-like.opml"
 );
 
+/// Variables of the developer's shell that would move the files a run reads or writes.
+const SCRUBBED: [&str; 6] = [
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "RESSAC_DB",
+    "RUST_LOG",
+];
+
+/// The binary with `HOME` set to `home` and none of `SCRUBBED` inherited. Sets no `--db`
+/// (clap refuses it twice): callers add it.
+fn hermetic(home: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ressac"));
+    cmd.env("HOME", home);
+    for var in SCRUBBED {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
+#[test]
+fn every_run_drops_the_developer_s_xdg_variables() {
+    let home = tempfile::tempdir().unwrap();
+    let cmd = hermetic(home.path());
+    let envs: HashMap<_, _> = cmd.get_envs().collect();
+    assert_eq!(
+        envs.get(std::ffi::OsStr::new("HOME")),
+        Some(&Some(home.path().as_os_str()))
+    );
+    for var in SCRUBBED {
+        // `get_envs` reports a removed variable as `None`.
+        assert_eq!(envs.get(std::ffi::OsStr::new(var)), Some(&None), "{var}");
+    }
+}
+
 fn ressac(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ressac"))
+    hermetic(home)
         .args(["--db", home.join("db.sqlite").to_str().unwrap()])
         .args(args)
-        .env("HOME", home)
         .env("RESSAC_ALLOW_PRIVATE_ARTICLES", "1")
         .output()
         .expect("binary runs")
+}
+
+/// The layout's log directory for `home` (macOS frozen; XDG defaults, the tests clear `XDG_*`).
+fn log_dir(home: &Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Logs/Ressac")
+    } else {
+        home.join(".local/state/ressac/logs")
+    }
+}
+
+#[test]
+fn a_run_creates_the_layout_s_log_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let out = ressac(home.path(), &["export"]);
+    assert!(log_dir(home.path()).is_dir(), "{out:?}");
+}
+
+#[test]
+fn db_help_names_the_layout_s_default() {
+    let home = tempfile::tempdir().unwrap();
+    let help = stdout(&ressac(home.path(), &["--help"]));
+    let expected = if cfg!(target_os = "macos") {
+        "Database file [default: ~/Library/Application Support/Ressac/ressac.sqlite]"
+    } else {
+        "Database file [default: ~/.local/share/ressac/ressac.sqlite, or $XDG_DATA_HOME/ressac/ressac.sqlite]"
+    };
+    assert!(help.contains(expected), "{help}");
 }
 
 fn stdout(o: &Output) -> String {
@@ -192,13 +256,12 @@ fn closed_stdout_does_not_panic() {
             .success()
     );
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ressac"))
+    let mut child = hermetic(home.path())
         .args([
             "--db",
             home.path().join("db.sqlite").to_str().unwrap(),
             "export",
         ])
-        .env("HOME", home.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1267,15 +1330,152 @@ fn ticker_on_a_missing_database_prints_an_empty_line() {
     assert_eq!(stdout(&out), "\n");
     assert_eq!(stderr(&out), "");
     assert!(!home.path().join("db.sqlite").exists());
+    assert!(ticker_files(&state_dir(home.path())).is_empty());
+    #[cfg(target_os = "macos")]
+    assert!(!state_dir(home.path()).exists());
+}
+
+/// Where the layout keeps the ticker state for `home` (macOS: beside the default database).
+fn state_dir(home: &Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Ressac")
+    } else {
+        home.join(".local/state/ressac")
+    }
+}
+
+/// The layout's default database for `home`.
+fn default_db(home: &Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Ressac/ressac.sqlite")
+    } else {
+        home.join(".local/share/ressac/ressac.sqlite")
+    }
+}
+
+/// The names starting with `ticker` in `dir`, sorted (none when `dir` is missing).
+fn ticker_files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|it| {
+            it.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("ticker"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn is_hashed_ticker_name(name: &str) -> bool {
+    name.strip_prefix("ticker-")
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .is_some_and(|hex| {
+            hex.len() == 16
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+}
+
+#[test]
+fn the_default_database_keeps_ticker_json() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(
+        hermetic(home.path())
+            .args(["import", FIXTURE])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(default_db(home.path()).exists());
+    let out = hermetic(home.path())
+        .args(["ticker", "--tmux"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        ticker_files(&state_dir(home.path())),
+        ["ticker.json", "ticker.json.lock"]
+    );
+}
+
+#[test]
+fn each_database_gets_its_own_ticker_state() {
+    let home = tempfile::tempdir().unwrap();
+    for db in ["one.sqlite", "two.sqlite"] {
+        let db = home.path().join(db);
+        let db = db.to_str().unwrap();
+        assert!(
+            hermetic(home.path())
+                .args(["--db", db, "import", FIXTURE])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            hermetic(home.path())
+                .args(["--db", db, "ticker", "--tmux"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    let states: Vec<String> = ticker_files(&state_dir(home.path()))
+        .into_iter()
+        .filter(|n| n.ends_with(".json"))
+        .collect();
+    assert_eq!(states.len(), 2, "{states:?}");
+    assert!(
+        states.iter().all(|n| is_hashed_ticker_name(n)),
+        "{states:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn one_database_named_four_ways_shares_one_ticker_state() {
+    // `./r.sqlite` from its folder, the absolute path, a `..` detour, a symlink.
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("dbs");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let db = dir.join("r.sqlite");
+    assert!(
+        hermetic(home.path())
+            .args(["--db", db.to_str().unwrap(), "import", FIXTURE])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    std::os::unix::fs::symlink(&db, dir.join("link.sqlite")).unwrap();
+    for spelling in [
+        "./r.sqlite".to_string(),
+        db.to_str().unwrap().to_string(),
+        dir.join("sub/../r.sqlite").to_str().unwrap().to_string(),
+        dir.join("link.sqlite").to_str().unwrap().to_string(),
+    ] {
+        let out = hermetic(home.path())
+            .current_dir(&dir)
+            .args(["--db", spelling.as_str(), "ticker", "--tmux"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{spelling}: {out:?}");
+    }
+    let files = ticker_files(&state_dir(home.path()));
+    assert_eq!(files.len(), 2, "one state and its lock: {files:?}");
+    assert!(is_hashed_ticker_name(&files[0]), "{files:?}");
+    assert_eq!(files[1], format!("{}.lock", files[0]));
 }
 
 #[test]
 fn ticker_open_is_silent() {
     let home = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_ressac"))
+    let out = hermetic(home.path())
         .args(["--db", home.path().join("db.sqlite").to_str().unwrap()])
         .args(["ticker", "open", "rs1"])
-        .env("HOME", home.path())
         .env("RESSAC_NO_BROWSER", "1")
         .output()
         .expect("binary runs");
@@ -1289,7 +1489,7 @@ fn ticker_open_is_silent() {
 fn ticker_survives_an_unwritable_log_directory() {
     use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
-    let logs = home.path().join("Library/Logs/Ressac");
+    let logs = log_dir(home.path());
     std::fs::create_dir_all(&logs).unwrap();
     std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o500)).unwrap();
     let out = ressac(home.path(), &["ticker", "--tmux"]);
@@ -1674,10 +1874,9 @@ fn feed_theme_unknown_key_exits_2() {
 
 /// `ressac` with the production private-address guard back on.
 fn ressac_guarded(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ressac"))
+    hermetic(home)
         .args(["--db", home.join("db.sqlite").to_str().unwrap()])
         .args(args)
-        .env("HOME", home)
         .env_remove("RESSAC_ALLOW_PRIVATE_ARTICLES")
         .output()
         .expect("binary runs")
@@ -2173,4 +2372,215 @@ async fn feed_move_unknown_exit_2() {
         assert_eq!(stderr(&out), message, "{args:?}");
         assert!(out.stdout.is_empty(), "{args:?}");
     }
+}
+
+/// `ressac fetch` on four feeds of one host that answer after `delay`, started in the
+/// background. Returns once the server has seen a request: the signal listeners are in place.
+#[cfg(unix)]
+async fn slow_fetch(
+    server: &MockServer,
+    delay: Duration,
+) -> (tempfile::TempDir, std::process::Child) {
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(channel("Slow", ""), "application/rss+xml")
+                .set_delay(delay),
+        )
+        .mount(server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let outlines: String = (1..=4)
+        .map(|i| {
+            format!(
+                r#"<outline text="S{i}" xmlUrl="{}/s{i}.xml"/>"#,
+                server.uri()
+            )
+        })
+        .collect();
+    let opml = home.path().join("slow.opml");
+    std::fs::write(&opml, format!("<opml><body>{outlines}</body></opml>")).unwrap();
+    assert!(
+        ressac_async(home.path(), &["import", opml.to_str().unwrap()])
+            .await
+            .status
+            .success()
+    );
+    let child = hermetic(home.path())
+        .args([
+            "--db",
+            home.path().join("db.sqlite").to_str().unwrap(),
+            "fetch",
+        ])
+        .env("RESSAC_ALLOW_PRIVATE_ARTICLES", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the fetch never reached the server"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    (home, child)
+}
+
+#[cfg(unix)]
+fn signal(name: &str, pid: u32) {
+    let status = Command::new("kill")
+        .args([name, &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_stops_a_fetch_like_a_first_ctrl_c() {
+    let server = MockServer::start().await;
+    let (_home, child) = slow_fetch(&server, Duration::from_millis(1500)).await;
+    signal("-TERM", child.id());
+    let out = tokio::task::spawn_blocking(move || child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+    assert!(stderr(&out).contains("Interrupted: "), "{}", stderr(&out));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_second_signal_of_either_kind_leaves_at_once() {
+    let server = MockServer::start().await;
+    let (_home, child) = slow_fetch(&server, Duration::from_secs(20)).await;
+    let started = Instant::now();
+    signal("-TERM", child.id());
+    // Two signals sent together may be delivered as one.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    signal("-INT", child.id());
+    let out = tokio::task::spawn_blocking(move || child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "waited for the slow feed"
+    );
+}
+
+const LEGACY: &str = "An older Ressac database is still at";
+
+fn make_legacy_db(home: &Path) {
+    let legacy = home.join("Library/Application Support/Ressac/ressac.sqlite");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, b"").unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_legacy_database_is_warned_about_once_per_run() {
+    let home = tempfile::tempdir().unwrap();
+    make_legacy_db(home.path());
+    let out = ressac(home.path(), &["-v", "export"]);
+    assert_eq!(stderr(&out).matches(LEGACY).count(), 1, "{}", stderr(&out));
+    // The tmux ticker runs every 15 s: debug only, so not on stderr at the default level.
+    let out = ressac(home.path(), &["-v", "ticker", "--tmux"]);
+    assert!(!stderr(&out).contains(LEGACY), "{}", stderr(&out));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_mac_never_calls_its_own_database_legacy() {
+    let home = tempfile::tempdir().unwrap();
+    make_legacy_db(home.path());
+    let out = ressac(home.path(), &["-v", "export"]);
+    assert!(!stderr(&out).contains(LEGACY), "{}", stderr(&out));
+}
+
+/// `hermetic` without `HOME` at all, run from `cwd`.
+fn without_home(cwd: &Path) -> Command {
+    let mut cmd = hermetic(cwd);
+    cmd.env_remove("HOME").current_dir(cwd);
+    cmd
+}
+
+#[test]
+fn no_home_and_no_database_is_refused_and_writes_nothing() {
+    let cwd = tempfile::tempdir().unwrap();
+    let out = without_home(cwd.path())
+        .arg("migrate")
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        "error: no home directory: set HOME or pass --db\n"
+    );
+    assert_eq!(std::fs::read_dir(cwd.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn no_home_with_a_database_still_works() {
+    let cwd = tempfile::tempdir().unwrap();
+    let db = cwd.path().join("x.sqlite");
+    let out = without_home(cwd.path())
+        .args(["--db", db.to_str().unwrap(), "migrate"])
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(db.exists());
+}
+
+#[test]
+fn the_ticker_without_home_prints_an_empty_line() {
+    let cwd = tempfile::tempdir().unwrap();
+    let out = without_home(cwd.path())
+        .args(["ticker", "--tmux"])
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "\n");
+    assert_eq!(stderr(&out), "");
+    assert_eq!(std::fs::read_dir(cwd.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn ticker_open_without_home_touches_nothing() {
+    let cwd = tempfile::tempdir().unwrap();
+    let planted = cwd
+        .path()
+        .join("Library/Application Support/Ressac/ressac.sqlite");
+    std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+    std::fs::write(&planted, b"not a database").unwrap();
+    let before = std::fs::metadata(&planted).unwrap().modified().unwrap();
+    let out = without_home(cwd.path())
+        .args(["ticker", "open", "rs1"])
+        .env("RESSAC_NO_BROWSER", "1")
+        .env("RUST_LOG", "info")
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "");
+    assert_eq!(stderr(&out), "");
+    assert_eq!(std::fs::read(&planted).unwrap(), b"not a database");
+    assert_eq!(
+        std::fs::metadata(&planted).unwrap().modified().unwrap(),
+        before
+    );
+    let mut names: Vec<_> =
+        std::fs::read_dir(cwd.path().join("Library/Application Support/Ressac"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+    names.sort();
+    assert_eq!(names, ["ressac.sqlite"]);
 }

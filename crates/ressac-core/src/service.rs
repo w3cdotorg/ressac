@@ -117,7 +117,10 @@ pub enum Event {
     },
 }
 
-pub trait EventSink {
+/// Receives a job's progress on the job's thread. `Send + Sync`, so one sink can be handed
+/// to a worker thread and its events forwarded across threads (the KDE app's runs); every
+/// sink of the workspace already is.
+pub trait EventSink: Send + Sync {
     fn emit(&self, event: &Event);
 }
 
@@ -269,6 +272,34 @@ pub struct Ressac {
     host_gap: Duration,
 }
 
+/// The feeds a subset refresh (`--feed`, `--folder`) will check. A folder wins over the
+/// named feeds and lists its active feeds, subfolders included, in id order; otherwise the
+/// named feeds are returned in the order given. An unknown folder or feed is an error
+/// (`Error::UnknownFolder`, then the first unknown `Error::UnknownFeed`). Buried feeds stay
+/// in the list, and `refresh` skips them. Nothing named gives an empty list: the caller
+/// maps that to "no restriction" (`RefreshOptions::only: None`).
+pub fn check_subset(
+    store: &Store,
+    feeds: &[FeedId],
+    folder: Option<FolderId>,
+) -> Result<Vec<FeedId>> {
+    if let Some(folder) = folder {
+        if !store.folders()?.iter().any(|f| f.id == folder) {
+            return Err(Error::UnknownFolder(folder));
+        }
+        return store.feeds_in_folder(folder);
+    }
+    if feeds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let known: std::collections::HashSet<FeedId> =
+        store.feeds()?.into_iter().map(|f| f.id).collect();
+    if let Some(missing) = feeds.iter().find(|id| !known.contains(id)) {
+        return Err(Error::UnknownFeed(*missing));
+    }
+    Ok(feeds.to_vec())
+}
+
 impl Ressac {
     pub fn open(path: &Path) -> Result<Self> {
         Self::with_parts(
@@ -276,6 +307,17 @@ impl Ressac {
             FetchLimits::default(),
             PRODUCTION_WAYBACK,
         )
+    }
+
+    /// Opens the database only when it exists and holds at least one feed: the first-run
+    /// rule of the commands that need feeds. `None` otherwise (no file, or no feed yet), and
+    /// nothing is created. It prints nothing: the caller shows the first-run hint.
+    pub fn open_with_feeds(path: &Path) -> Result<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let app = Self::open(path)?;
+        Ok((app.store().feed_count()? > 0).then_some(app))
     }
 
     pub fn with_parts(store: Store, limits: FetchLimits, wayback_base: &str) -> Result<Self> {
@@ -1351,6 +1393,126 @@ mod tests {
                 "{e:?}"
             );
         }
+    }
+
+    #[test]
+    fn open_with_feeds_opens_only_a_database_that_has_feeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sub/ressac.sqlite");
+        assert!(Ressac::open_with_feeds(&db).unwrap().is_none());
+        assert!(
+            !db.parent().unwrap().exists(),
+            "a missing database is not created"
+        );
+
+        drop(Ressac::open(&db).unwrap());
+        assert!(
+            Ressac::open_with_feeds(&db).unwrap().is_none(),
+            "no feed yet"
+        );
+
+        Ressac::open(&db)
+            .unwrap()
+            .import_opml(r#"<opml><body><outline text="A" xmlUrl="https://a.example.org/feed"/></body></opml>"#, false)
+            .unwrap();
+        let app = Ressac::open_with_feeds(&db).unwrap().expect("one feed");
+        assert_eq!(app.store().feed_count().unwrap(), 1);
+    }
+
+    /// News (folder 1) holds A (feed 1) and Sub (folder 2) with B (feed 2); C (feed 3) is at the top level.
+    fn subset_store() -> Store {
+        let store = Store::open_in_memory().unwrap();
+        let xml = r#"<opml><body>
+            <outline text="News"><outline text="A" xmlUrl="https://a.example.org/feed"/>
+              <outline text="Sub"><outline text="B" xmlUrl="https://b.example.org/feed"/></outline></outline>
+            <outline text="C" xmlUrl="https://c.example.org/feed"/>
+            </body></opml>"#;
+        store
+            .import_outlines(&opml::parse(xml).unwrap(), false, Utc::now())
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn check_subset_lists_a_folder_s_feeds_or_checks_the_named_ones() {
+        let store = subset_store();
+        let feeds: Vec<(FeedId, String)> = store
+            .feeds()
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.id, f.title))
+            .collect();
+        assert_eq!(
+            feeds,
+            [(1, "A".into()), (2, "B".into()), (3, "C".into())],
+            "fixture ids"
+        );
+        let folders: Vec<(FolderId, String)> = store
+            .folders()
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.id, f.name))
+            .collect();
+        assert_eq!(
+            folders,
+            [(1, "News".into()), (2, "Sub".into())],
+            "fixture ids"
+        );
+        assert_eq!(
+            check_subset(&store, &[], Some(1)).unwrap(),
+            [1, 2],
+            "subfolders included, id order"
+        );
+        assert_eq!(check_subset(&store, &[], Some(2)).unwrap(), [2]);
+        assert_eq!(
+            check_subset(&store, &[3, 1], None).unwrap(),
+            [3, 1],
+            "order kept"
+        );
+        assert_eq!(
+            check_subset(&store, &[], None).unwrap(),
+            Vec::<FeedId>::new()
+        );
+        assert_eq!(
+            check_subset(&store, &[99], Some(2)).unwrap(),
+            [2],
+            "the folder wins"
+        );
+        garden::decide(&store, 3, crate::model::Decision::Bury, Utc::now()).unwrap();
+        assert_eq!(
+            check_subset(&store, &[3], None).unwrap(),
+            [3],
+            "a buried feed stays; refresh skips it"
+        );
+    }
+
+    #[test]
+    fn check_subset_refuses_unknown_ids_with_the_cli_s_sentences() {
+        let store = subset_store();
+        let folder = check_subset(&store, &[1], Some(99)).unwrap_err();
+        assert!(matches!(folder, Error::UnknownFolder(99)), "{folder:?}");
+        assert_eq!(folder.to_string(), "No folder #99.");
+        let feed = check_subset(&store, &[1, 98, 99], None).unwrap_err();
+        assert!(
+            matches!(feed, Error::UnknownFeed(98)),
+            "the first unknown id: {feed:?}"
+        );
+        assert_eq!(feed.to_string(), "No feed #98.");
+    }
+
+    #[test]
+    fn an_event_sink_can_be_shared_across_threads() {
+        fn shareable<T: Send + Sync + ?Sized>() {}
+        shareable::<dyn EventSink>();
+        let recorder = Recorder::default();
+        let sink: &dyn EventSink = &recorder;
+        std::thread::scope(|s| {
+            s.spawn(|| sink.emit(&Event::Started { total: 2 }));
+        });
+        assert!(matches!(
+            recorder.0.lock().unwrap().as_slice(),
+            [Event::Started { total: 2 }]
+        ));
     }
 
     #[derive(Default)]

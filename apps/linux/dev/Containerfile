@@ -1,0 +1,22 @@
+FROM fedora:44
+
+ARG USER_UID=1000
+
+COPY packages.txt /tmp/packages.txt
+
+RUN dnf install -y $(sed 's/#.*//' /tmp/packages.txt) \
+    && dnf clean all \
+    && if getent passwd "$USER_UID" >/dev/null; then \
+         useradd --create-home --user-group ressac; \
+       else \
+         useradd --create-home --user-group --uid "$USER_UID" ressac; \
+       fi \
+    && mkdir -p /home/ressac/target /home/ressac/.cargo /work/ressac \
+    && chown ressac:ressac /home/ressac/target /home/ressac/.cargo
+
+ENV CARGO_HOME=/home/ressac/.cargo \
+    CARGO_TARGET_DIR=/home/ressac/target \
+    QT_FORCE_STDERR_LOGGING=1
+
+USER ressac
+WORKDIR /work/ressac

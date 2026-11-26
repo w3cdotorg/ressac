@@ -324,6 +324,146 @@ Demandé par Clément le 19/10/2026 (jusque-là un flux n'entrait que par l'impo
 
 Voir TODO, section « Ajouter un flux (sous-projet 7) » : choix parmi plusieurs flux annoncés, dossier dans la fenêtre d'ajout, commandes Antiope, `ressac chart export`, et les mineurs de la relecture finale.
 
+## Ressac sous Linux (sous-projet 8)
+
+Demandé par Clément le 23/10/2026 : Ressac sur marghe (Fedora KDE Plasma 44, aarch64, dans Parallels), avec sa propre base. Spec `docs/specs/2026-10-23-linux-design.md`, plan `docs/plans/2026-10-23-linux.md`, une fiche par phase dans `docs/plans/linux/`. Partie A (le terminal) faite le 23/10/2026, sur la branche `linux`.
+
+### Décisions de la partie A (prises par Claude)
+
+- **Chemins** : un seul module, `ressac_core::paths`, écrit à la main (la crate `dirs` ne reproduirait pas les noms macOS). macOS ne bouge pas d'un octet. Linux suit XDG : base dans `~/.local/share/ressac/`, `terminal.json` dans `~/.config/ressac/`, bandeau et journaux dans `~/.local/state/ressac/`, `~/.cache/ressac/` réservé. Une variable `XDG_*` vide ou relative est ignorée ; sans `HOME` absolu, erreur `NoHome`, jamais un chemin relatif au dossier courant.
+- **Bandeau tmux, un état par base** : la base par défaut garde `ticker.json` ; toute autre base a `ticker-<16 hex>.json` dans le même dossier (FNV-1a 64 du chemin canonique, écrit à la main, stable entre `./r.sqlite`, le chemin absolu et un lien symbolique). Corrige au passage le défaut du Mac, où une seconde base partageait la rotation de la première. Le dossier d'état n'est créé que si la base existe.
+- **Ancienne base `~/Library` sous Linux** : nommée dans le journal une fois par lancement (`warn`, mais `debug` pour `ressac ticker`, que tmux lance toutes les 15 s), jamais déplacée.
+- **Petites corrections** : « The database is busy (is another Ressac writing?) » au lieu de nommer Ressac.app ; les liens s'ouvrent par `open::that_detached`, le terminal n'attend plus `xdg-open` ; SIGTERM vaut un premier Ctrl-C (arrêt propre, code 130) pour les commandes qui surveillent l'arrêt (`add`, `fetch`, `check`, `edition`), le lecteur et le jardin gardent le SIGTERM par défaut (voir TODO).
+- **Conteneur de développement** : Fedora 44 aarch64 sous OrbStack (`ressac-fedora`), utilisateur non root `ressac` avec l'uid du Mac, rust 1.99 de dnf, `lld` obligatoire, dossier de compilation dans un volume du conteneur et jamais `target/` du Mac. `apps/linux/dev/dev.sh check` est la porte Linux tant qu'Actions n'a pas de crédits (jusqu'au 02/11/2026). Une seule liste de paquets, `apps/linux/dev/packages.txt`, lue par le conteneur et par la CI.
+- **CI** : le job Ubuntu exclut `ressac-kde` dès maintenant (`--exclude` d'un paquet absent n'est qu'un avertissement de cargo, vérifié avec cargo 1.99.1) ; un job Fedora 44 lance le script de la porte locale en utilisateur non root.
+- **Release** : binaire `ressac` Linux pour x86_64 et aarch64, construit sur Ubuntu 22.04 (glibc 2.35), en `tar.gz` ; un seul `SHA256SUMS` pour le Mac et Linux ; un job de publication à part, seul à pouvoir écrire dans le dépôt.
+
+### Trouvailles de la construction
+
+- **Première porte Linux** : `dev.sh check` vert du premier coup, 1018 tests passés, 1 ignoré, 0 échec, graphique 28/28, clippy sans avertissement. Deuxième passage à chaud : 30 s. Le temps du premier passage à froid (téléchargement des crates compris) n'a pas été mesuré, quelques minutes ; l'image du conteneur met environ 4 min à se construire à froid.
+- **Aucun échec propre à Linux** : les tests XDG, du dossier de journaux, de `terminal.json`, de l'ancienne base `~/Library` et du SIGTERM ont tous passé en utilisateur `ressac`, sans correctif.
+- **Déviation du plan maître** : le routage de `terminal.json` est passé de A1 à A2 pour tenir le plafond de 5 fichiers par phase ; les interfaces du plan maître sont restées les mêmes.
+- **Piège du conteneur** : `dev.sh up` réutilisait un conteneur monté sur un autre dépôt (faux vert depuis un worktree) ; il compare maintenant la source du montage de `/work/ressac` et recrée `ressac-fedora` seulement. Changer de copie du dépôt recrée donc le conteneur et tue un `sh` ou un `check` en cours de l'autre.
+- **Test du SIGTERM** : écrit d'abord en rouge (statut 15 au lieu de 130), puis vert ; un test unitaire garde la liste des commandes qui écoutent le signal.
+- **Rejeu de la CI** : le job Fedora rejoué sur `fedora:44` arm64 : 4 min 56 s, porte verte. La construction de la release rejouée sur `ubuntu:22.04` arm64 : 2 min 29 s de compilation (3 min 36 s en tout), symbole glibc le plus haut vu `GLIBC_2.34`, `ressac 0.2.0`, migration en JSON « finished ». Le x86_64 n'a jamais été rejoué (pas de machine) et le plafond glibc est affiché, pas contrôlé.
+- **`ubuntu-22.04-arm`** : gratuit pour les dépôts publics, ce que `w3cdotorg/ressac` est ; pas un trou.
+- **README** : la ligne `dnf install` a été essayée sur un Fedora 44 nu (`cargo install --locked --path crates/ressac` puis `ressac --version` : 0.2.0, en 2 min 47 s, `tar` seulement pour la copie des sources) et le bloc tmux est sourcé tel quel par tmux 3.8 dans le conteneur.
+
+### Point d'étape VM 1 (B3, 23/10/2026)
+
+- **Commit testé** : `03989d8`, transféré par l'entrée standard (`prlctl exec` la relaie ; les morceaux base64 n'ont pas servi). Piège de l'outillage : `prlctl exec` recolle ses arguments en une seule ligne de shell sans guillemets, donc `marghe.sh` envoie chaque script par l'entrée standard dans `/tmp/ressac-vm/.script.sh`, puis l'exécute.
+- **Paquets installés par dnf** (accord de Clément) : gcc-c++, clang, lld, qt6-qtbase-devel, qt6-qtdeclarative-devel, qt6-qtwebengine-devel, qt6-qtwebchannel-devel, kf6-kirigami-devel, kf6-kcoreaddons-devel, kf6-ki18n-devel, dejavu-sans-fonts, sqlite, openssl-devel (50 paquets avec leurs dépendances).
+- **Compilation release** : 3 min 23 s (205 s en tout, première fois, dossier de compilation vide).
+- **Rendu** : virgl tenu, pas de rendu logiciel imposé. Aucune ligne virgl, QRhi ou crash dans `run.log` ; seulement « Failed to release graphics resources because QQuickWindow is not exposed » (environ 7 fois) et l'avertissement de locale C. Le rendu logiciel dessine le lecteur dans plus de captures, mais Clément n'a rien vu de gris à la main : c'est un artefact de minutage de la recette (voir TODO), pas une panne de rendu.
+- **Page de l'article** : dessinée (captures 12 et 23 : titre, avis HTTP 404, texte) ; preuve des scripts : aucun script d'article exécuté (toutes les marques `null`). Dans la recette automatique, le panneau du lecteur est gris ou périmé sur plusieurs captures (9 sur 24 en GPU) parce que la capture part avant la première peinture de la page.
+- **Polices à l'échelle 2** : Noto Sans nette (Breeze, icônes, PNG 2200 x 1440) ; Newsreader reconnaissable (empattements propres à Newsreader sur la capture 12, pas Noto Serif).
+- **Touches** : parcours automatique vert (24 étapes, `exit=0` trois fois), puis vérification de Clément au clavier réel dans sa session Plasma le 23/10 : « toutes les touches fonctionnent » (Espace, j, k, m, s, flèches, Ctrl+R, Ctrl+Maj+A).
+- **Menu global** : non vérifié (Clément ne l'a pas mentionné).
+- **Anomalies** : le panneau du lecteur de la recette (voir ci-dessus) ; l'écran de la VM était peut-être verrouillé pendant les captures (`kscreenlocker_greet` actif).
+
+### Décisions de la partie B
+
+- Deux crates Unicode pour Antiope (B8a1) : `unicode-segmentation` 1.13.3, déjà dans `Cargo.lock` par ratatui, pour couper le texte en graphèmes comme le Mac, et `unicode-normalization` 0.1.26 pour la forme composée (NFC) qui fait de « e + accent » un « é » de Bedstead. Pas de crate de polices : la table `cmap` et les métriques de Bedstead sont lues à la main, une soixantaine de lignes.
+- La table `cmap` de Bedstead compte 2604 points de code dans ses groupes, mais l'un (U+F1FF) pointe sur le glyphe 0 (`.notdef`) : il est écarté, d'où les 2603 de fontTools.
+
+### Antiope sous KDE : la grille (B8)
+
+- **Décision** : une ligne peinte par `CellRow`, `QQuickPaintedItem` de cxx-qt, plutôt qu'un `Text` QML par segment. Mesuré dans l'appli (parcours `grid`, `apps/linux/tests/grid.rs`), la règle de décision est tenue : pixels exacts à toutes les tailles et échelles, et lignes peintes plus rapides que le texte par segment. Les étapes suivantes de B8 ne changent que le délégué.
+- **Essai de la planification** (images logicielles hors écran, Mac principal ; moyenne / p95 / max en ms) :
+
+| Variante | Échelle | 1 entrée par image | 10 entrées par image |
+|---|---|---|---|
+| `Text` QML par segment, `NativeRendering`, sans lissage, `PreferFullHinting` | 1 | 1,61 à 1,71 / 1,73 à 2,01 / 4,84 | 4,10 / 4,60 / 6,80 |
+| | 2 | 2,04 à 2,83 / 2,27 à 6,47 / 13,10 | 4,47 / 5,03 / 8,12 |
+| Un `QQuickPaintedItem` par entrée (2 lignes), `QPainter` | 1 | 0,09 à 0,10 / 0,10 à 0,11 / 1,67 | 0,27 / 0,28 / 0,56 |
+| | 2 | 0,29 / 0,44 à 0,59 / 1,48 | 0,54 / 0,78 / 1,35 |
+| Un seul item peint pour toute la colonne | 1 | 0,39 à 0,45 / 0,42 à 0,68 / 2,10 | 0,36 / 0,38 / 0,46 |
+| | 2 | 0,84 à 0,88 / 1,03 à 1,19 / 4,28 | 0,78 / 0,83 / 0,96 |
+
+- **Mesures dans l'appli** (conteneur Fedora 44 sous OrbStack, rendu logiciel hors écran, 600 images par série, taille 20 px, `QT_QPA_UPDATE_IDLE_TIME=0` ; charge du conteneur d'environ 2 pendant le passage, aucune autre compilation en parallèle ; moyenne / p95 / max en ms) :
+
+| Variante | Échelle | 1 entrée par image | 10 entrées par image |
+|---|---|---|---|
+| Peinte (`CellRow`) | 1 | 0,21 / 0,35 / 0,65 | 1,08 / 1,15 / 3,28 |
+| | 2 | 0,33 / 0,35 / 0,61 | 1,47 / 1,96 / 4,65 |
+| `Text` par segment | 1 | 1,52 / 1,87 / 3,91 | 5,40 / 7,20 / 17,37 |
+| | 2 | 1,83 / 2,15 / 3,61 | 5,61 / 7,00 / 9,14 |
+
+  Les lignes peintes sont 7 fois (échelle 1) et 5,5 fois (échelle 2) moins chères à une entrée par image, et 5 fois et 3,8 fois à dix. Une seule image dépasse 16 ms (le maximum de 17,37 ms du texte à dix entrées, échelle 1). Les chiffres de l'appli sont un peu plus hauts que ceux de la planification (la liste réelle, le menu et la fenêtre Kirigami sont dessinés avec), mais l'écart entre les deux variantes tient.
+- **Pixels** : le motif (`█ █ …` en un seul segment, 28 cellules `█` de couleurs 1 à 7, `ABC…` en blanc, `mmm…` jaune sur bleu) est dessiné sans autre couleur que les 8 de la palette à 15, 20, 25 et 30 px, aux échelles 1 et 2 ; la ligne `█ █ …` donne des cellules exactes de 9, 12, 15 et 18 px à l'échelle 1 et de 18, 24, 30 et 36 px à l'échelle 2, blanc puis noir en alternance.
+- **Écran CRT (B9)** : avec le moteur logiciel, `ShaderEffect` et `MultiEffect` ne dessinent rien ; un `Canvas` fonctionne et coûte +0,15 ms (échelle 1) et +0,4 ms (échelle 2) par image de défilement. B9 prend `Canvas` partout.
+- **Piège du parcours** : la sonde est parentée à la surcouche de la fenêtre (`QQC2.Overlay.overlay`) et non à la page, sinon la barre de menus décale tout de 26 px et le test de pixels, qui compte depuis le coin de la fenêtre, tombe à côté.
+
+### Point d'étape VM 2 (B8, 25/11/2026)
+
+- **Commit testé** : `5bed1d0`, transféré par l'entrée standard, compilé en release sur la VM (2 min 47 s, 171 s en tout), aucun paquet Fedora en plus. `marghe.sh` gagne `shots … --look --walk --big N [--long] --env K=V`, `manual --look --big N [--long] --frame-log` et note le commit installé (`check` affiche `installed: <sha>`). `shots` et `manual` lancent le binaire installé : leurs mesures sont des mesures release.
+- **Piège** : une session Plasma ouverte mais verrouillée (`kscreenlocker_greet`, `LockedHint=yes`) ne présente aucune image ; tout ce qui compte les images (grille, défilement, maintien de `j`) se bloque jusqu'au délai de 60 s du parcours. Il faut que Clément déverrouille avant les mesures (`loginctl show-session <n> -p LockedHint`).
+- **Rendu** : virgl gardé. Le rendu logiciel ne fait pas mieux (mêmes intervalles, même p95). Un panneau de lecteur blanc à `a07-suite` sur le premier passage, avec une perte de contexte GPU de Chromium dans le journal (`Context lost during MakeCurrent`), est venu avec l'écran verrouillé : écran déverrouillé, aucune perte de contexte et le lecteur dessiné.
+- **Grille à l'échelle 2** (captures `a01`, `a05`, `c03`, `c06`, `g01`, 2200 x 1440) : les 8 couleurs seulement sous la barre de menus, aucun pixel hors palette, Bedstead net ; cellules de 24 pixels de large et lignes de 40 pixels à 20 px, filets bleus droits (même étendue sur toutes les lignes). Dans le lecteur, le texte de l'article est en Bedstead mais Chromium lisse la police web (bords gris, 44 couleurs dans la colonne).
+- **Images par seconde sur la VM** (release, virgl sauf mention ; moyenne / p50 / p95 / max en ms). Dans une vraie session Wayland, KWin cale chaque image sur la synchro verticale à 60 Hz : la moyenne et la médiane restent à 16,6 ou 16,7 ms, et `over16` (près de la moitié des images) ne compte que la gigue autour de 16,67 ms. Ces chiffres ne se comparent donc pas aux temps de rendu hors écran du conteneur (tableau ci-dessus).
+
+| Mesure | virgl | logiciel |
+|---|---|---|
+| `grid: painted` pas 1 | 17,33 / 16,70 / 18,05 / 176,09 | 16,72 / 16,69 / 18,19 / 34,47 |
+| `grid: painted` pas 10 | 16,70 / 16,65 / 18,29 / 23,73 | 16,76 / 16,65 / 18,43 / 33,90 |
+| `grid: text` pas 1 | 16,69 / 16,66 / 18,92 / 32,44 | 16,71 / 16,68 / 18,32 / 33,39 |
+| `grid: text` pas 10 | 16,73 / 16,67 / 18,52 / 32,00 | 16,74 / 16,70 / 18,73 / 32,90 |
+| `frames: antiope` pas 1 (2004 lignes) | 16,74 / 16,70 / 18,27 / 51,67 | 16,65 / 16,66 / 18,87 / 21,71 |
+| `frames: antiope` pas 10 | 16,68 / 16,69 / 17,89 / 19,76 | 16,67 / 16,65 / 18,42 / 21,69 |
+
+- **Maintien de `j`** (60 appuis, release ; temps de l'appui seul, moyenne / max en ms) : Native sur une page (500 lignes) 2,85 / 5 ; Antiope sur une page 3,27 / 9 ; **Antiope à 2004 lignes 5,40 / 8** (virgl), 5,25 / 9 (logiciel), 5,75 / 8 avec 200 articles longs de 29 ko (`--long`, les données du test du conteneur). Aucun appui lent (`slow=0`), `wrote=0 settled=60` partout, la pastille rattrape 21 à 87 ms après le relâchement. Le conteneur en debug donnait environ 24 ms par appui : sous le seuil de 12 ms, pas d'optimisation de plus. Native à 2000 lignes n'est pas mesuré (le parcours ne tient Native que sur une page).
+- **Session de Clément** (`manual --look antiope --big 2000 --frame-log`, 48 lignes `ressac-kde: frames` toutes les 10 s) : dans les fenêtres actives, médiane de 16,7 à 17,5 ms (par exemple `n=313 mean=28.43 p50=16.72 p95=35.39`, `n=293 mean=29.61 p50=16.80 p95=27.37`) ; les moyennes hautes et les maxima autour de 1000 ms sont les secondes d'inactivité (l'horloge de l'en-tête ne redessine qu'une fois par seconde). Clément juge le défilement fluide, à la molette comme au clavier.
+- **Touches** : parcours `antiope` vert (lignes a01 à a10 identiques à `tests/antiope.rs`), parcours `antiope-pages` vert (les écarts de comptes avec `tests/antiope_pages.rs` viennent des données : le test prépare la base et fixe `TZ=UTC`). À la main, Clément : 201 puis 437 (NOT FOUND), Alt+S, Alt+G, ?, flèches entre colonnes et dans l'index, Espace, j, k, `i` et clic sur une image, Ctrl+F puis Entrée : « tout OK ».
+- **Mosaïques sur de vrais flux** : non vérifiées en tant que telles (la base de test n'a pas de vrais flux) ; `i` et le clic sur une image vont bien.
+- **Gestes de B6 et B7, un par un** (Clément, 25/11) : menu global de Plasma OK ; glisser un flux sur un dossier et un article hors de la fenêtre OK ; dialogues de fichiers par le portail (OPML, chemin des données) OK ; Entrée dans les listes déroulantes OK ; touches du libellé du jardin et Entrée du dialogue OK ; Ctrl+Z et dialogue des réparations sûres dans le jardin d'Antiope OK ; carte marine mise au premier plan et rafraîchissement arrêté une fois réduite OK ; pas de lecteur gris au premier affichage ; page à image lente OK ; Ctrl+N OK.
+- **Anomalies** :
+  - « Relaunch Now » absent dans Réglages › Données. Comme sur le Mac (`SettingsView.swift`, `update`), le bouton n'apparaît qu'après un chemin de base changé (`choose_database` renvoie `Stored`, `apps/linux/src/settings.rs`) ; un chemin inchangé, une annulation ou « Use Default » sans chemin enregistré n'en montrent pas. Probablement le comportement attendu : reste à savoir si Clément a choisi un autre fichier.
+  - Listes déroulantes de dossiers en retrait : le dossier est précédé d'une espace cadratin par niveau (`FolderChoice::title`, `crates/ressac-ui/src/library.rs`), comme le menu du Mac (`AddFeedSheet.swift`). Clément voudrait tous les dossiers au même niveau.
+  - « Open Site » du jardin ne fait rien : `Qt.openUrlExternally` passe par `xdg-open`, qui, sans `KDE_SESSION_VERSION`, croit à un vieux KDE et appelle `kfmclient` (« command not found », trois fois dans le journal). La variable vaut 6 dans la session, mais `marghe.sh` ne la recopie pas : artefact de l'outillage, pas de l'appli lancée depuis le menu.
+  - Lecteur du terminal dans Konsole : images en demi-blocs. `ratatui-image` 11.1 écarte exprès Kitty et Sixel quand `KONSOLE_VERSION` est posé (Sixel bogué, bug KDE 456354) et ne connaît pas l'iTerm2 de Konsole ; le journal dit `detected=Halfblocks … reason="nothing detected"`.
+  - Le premier passage, écran verrouillé : perte de contexte GPU de Chromium et lecteur blanc (voir Rendu).
+
+### Écran CRT (B9)
+
+- **Verdict** : écarté (critère 4 du plan : le coût du défilement reste au-dessus du budget après deux tours de correction de B9b). Le code est dans l'historique, commits `aeed578` et `051e202` (B9a) puis `51c8eb5` (B9b : parcours `crt` et `crt-scroll`, `tests/crt.rs`, correction de la bavure), retiré d'un seul `git revert` ; l'arbre est revenu à B8e et `Antiope.crt` reste lié à `false`. La ligne de `TODO.md` dit pourquoi.
+- **Coût** (critère 2, conteneur Fedora 44, rendu logiciel hors écran, build debug, échelle 2, 2000 articles, 600 images par série, chaque test lancé seul ; p95 CRT éteint puis allumé, en ms) : au pas de 1 article par image, 0,41 à 0,96, 0,48 à 1,05, 0,46 à 1,04 (+0,6, tenu) ; au pas de 10, 2,48 à 5,36, 2,60 à 5,29, 2,67 à 4,87, 2,49 à 4,85 (+2,2 à +2,9, au-dessus des 2 ms). Aucune image au-dessus de 33 ms avec le CRT (maximum 11,4 ms) ; sans CRT, la première image de la première série monte à 42 à 79 ms (démarrage à froid). Dans `dev.sh check`, avec les autres binaires de test en parallèle, la même mesure donnait 10,38 à 15,20 : le test de coût ne se lit que seul.
+- **Décomposition au pas de 10** (trois passages chacun, écart de p95) : le code de B9a tel que commité +2,78, +2,02, +2,52 ; la surcouche seule +0,50, +0,26, +0,40 ; la bavure seule +1,64, +0,68, +1,50 ; témoin, second passage CRT toujours éteint, +0,22, +0,27, +0,48 (l'ordre des séries pénalise d'environ 0,3 ms la série allumée) ; sans les deux copies horizontales de la lueur, +1,58, +1,92, +1,17.
+- **Pixels** (critère 1, tenu aux échelles et tailles 1/20, 2/15 et 2/20) : sur le RESSAC blanc de l'en-tête, les lignes de bande valent 183 ± 4 une fois la vignette de la ligne voisine retirée (mesuré de 182,4 à 185,7 à 2/15), les lignes entre les bandes 255 moins la vignette calculée (± 4, écart mesuré de −0,3 à +0,75) ; mêmes valeurs après un redimensionnement, donc pas de dérive. Bandes nettes d'un pixel physique toutes les 3 lignes (15 px) ou 4 lignes (20 px) à l'échelle 2, sans moiré. Coin bas gauche noir sur la touche SOMMAIRE, la touche revient deux rayons plus loin (coins arrondis). Filet bleu plus clair au centre (245) qu'en haut (197). Rouge à droite et bleu à gauche de presque tous les bords de glyphes blancs, aucun CRT éteint. Les chiffres tapés traversent la surcouche (`enabled: false`), `data-crt` part puis revient au basculement (deux pages), rien en Native.
+- **Bogue de la bavure** : les six copies (lueur, rouge, bleu) étaient dessinées avec la police monochrome de la ligne ; sur le moteur raster de Qt 6.11.2, un stylo translucide sur des glyphes monochromes remplace le pixel au lieu de se fondre dessus. À droite d'un texte noir sur cyan, le rouge valait (90, 0, 0), le cyan percé jusqu'au noir de la page (attendu vers (90, 109, 109)) : d'où le contour sombre et lourd des lignes claires. Correction de B9b : une fonction C++ (`ressac_draw_bleed`) cherche les glyphes une fois dans un `QRawFont` en gris lissé et dessine les copies en `QGlyphRun` ; 1242 bords sur 1250 gardent le cyan, contre 160 avant. Un premier essai, une police lissée changée à chaque segment, fondait bien mais coûtait +3,3 à +7,2 ms.
+- **VM** (critère 3, marghe passée à Fedora 45 le 25/11, Qt 6.11.2, Kirigami 6.32, virgl, échelle 2) : compilé en release (203 s), parcours `crt` à `exit=0`. La surcouche ne se peint pas quand on coche le CRT (`paints=0` après 3 s, capture sans bandes) : le `Canvas` n'a reçu ses demandes de peinture qu'en étant caché et ne repeint qu'au redimensionnement suivant ; le moteur logiciel du conteneur, lui, peignait. Après redimensionnement, le rendu est juste : lignes régulières de 2 pixels physiques sur 4, sans moiré, vignette douce, coins ronds, texte lisible, bavure fine et fondue sur les lignes cyan.
+- **Échelle 1 à 15 px** (hors de la matrice du test) : un pixel de police fait 1,5 pixel physique, les bandes d'un pixel tombent sur des demi-pixels et aucune ligne n'est épargnée (0,86, 0,86, 0,72 de la valeur sans bande) ; même chose à 25 px. Limite de la géométrie, pas du dessin.
+- **Coin du tube** : le « P » de « P201 » est rogné par le coin haut gauche (la marge de droite de l'en-tête est réservée, celle de gauche non).
+- **Deux pistes mesurées pour une reprise** : retirer les copies horizontales de la lueur, toujours sous les copies rouge et bleue (+1,2 à +1,9 ms au pas de 10) ; repeindre la surcouche à son apparition (`onVisibleChanged` puis `requestPaint`), ce qui devrait corriger la VM. Le test de coût est alors à lancer seul (`--test-threads=1`) ou contre un témoin du même passage.
+- **Mesure en release** (après la coupe, conteneur Fedora 44, commit `51c8eb5` dans un worktree jetable, échelle 2, test lancé seul) : au pas de 10 articles par image, le CRT complet passe de 1,1 à 1,5 ms à 3,5 à 3,9 ms de p95 (+2,3 à +2,7 ms) ; au pas de 1, +0,3 à +1,1 ms (hors un pic isolé à +2,93 ms sur une série, écarté comme bruit) ; aucune image au-delà de 33 ms, maximum de 5,5 à 6,5 ms au pas de 10. Sans les deux copies horizontales de la lueur : +2,10, +1,69 et +1,99 ms (la ligne du budget, bruit d'environ ±0,3 ms). La ligne de repeinte à l'apparition fait journaliser `paints=2` à e02 dans le conteneur ; son effet sur la VM n'est pas vérifié. La coupe tient donc sur le budget de 2 ms du plan en release aussi.
+
+### Bilan de la partie B (25/11/2026)
+
+- **Ce que fait l'appli** : `ressac-kde` (Kirigami, Qt Quick, WebEngine, cxx-qt) lit et range la même base que le terminal : trois volets, journal du matin, jardin, ajout de flux, OPML, réglages, carte marine, thème Antiope (pages, mosaïques, grille peinte), dans le noyau `ressac-core` appelé dans le même processus. Installation par `apps/linux/install.sh`, outillage de recette dans `apps/linux/dev/` (`dev.sh`, `marghe.sh`). Le README décrit l'usage.
+- **Ce qu'elle ne fait pas** : ce que le spec §4 écarte (RPM, Flatpak, COPR, essai de l'appli en x86_64, traductions, synchro entre deux bases) ; l'écran CRT d'Antiope, écarté en B9 (voir « Écran CRT (B9) » et la ligne de `TODO.md`). Les lacunes du Mac de l'inventaire §11 sont gardées, sauf deux corrigées d'office : le sélecteur de thème dans l'inspecteur d'Antiope et un type de glisser privé (`application/x-ressac-feed`) pour les flux.
+- **Écarts qui comptent pour la suite** :
+  - le noyau tourne dans le processus de l'appli (pas d'appel du binaire `ressac`) ; les écritures directes ont leur propre fil FIFO, les tâches courtes un autre, hors du fil de l'interface ;
+  - la page de l'article vient du schéma `ressac:` (`ressac:page/<entrée>`, `ressac:asset/<fichier>`), JavaScript de l'article coupé (désactivé, CSP, assainisseur Rust), scripts de l'appli lancés dans le monde `ApplicationWorld` ; `reader.css` est inlinée, les polices passent par `ressac:asset/` ;
+  - le filtre de touches est un filtre d'événements de `QQuickWindow` dans le shim C++ (les `Keys` de QML perdent contre WebEngine) ; les lettres n'agissent que si la fenêtre de lecture a le focus et qu'aucun champ de texte ne l'a ;
+  - les lignes d'Antiope sont peintes (`CellRow`, une ligne par `QQuickPaintedItem`), pas du `Text` QML ; les mosaïques passent par `fetch_image` du noyau (plafond de 16 Mpx au lieu des 40 du Mac, loopback permis seulement en mode capture) ;
+  - Journal : le sommeil jusqu'à 04:00 du Mac devient une vérification d'horloge à la minute, qui rejoue aussi la reconstruction après l'attente de 15 minutes ;
+  - les adresses saisies sont masquées dans les journaux par `ressac_core::logging` ;
+  - les parcours de recette (`--screenshot`, `RESSAC_RECETTE_WALK`) livrés dans `Main.qml` restent inertes sans `Recette.active` (acceptés à la revue finale, M8).
+- **Tests** (porte `dev.sh check`, conteneur Fedora 44, 25/11/2026) : `ressac-ui` 436 réussis, 1 ignoré ; `ressac-kde` 66 au total (la répartition entre bibliothèque et `apps/linux/tests/` n'a pas été relevée) ; 1549 réussis et 2 ignorés pour tout l'espace de travail ; graphique 28/28 ; clippy et rustfmt propres. Côté Mac, `cargo test --workspace` passe aussi.
+- **Suite Swift** (une seule fois, B10c, `xcodegen generate` puis `xcodebuild test`) : `** TEST SUCCEEDED **`, 492 tests dans 107 suites, 0 échec, sans rejeu (le `ChartBridgeTests` à l'écran n'a pas échoué). `apps/macos/` est inchangé sur la branche.
+- **Revues** : B9a, 1 tour de correction ; B9 écarté (build debug et release au-dessus du budget de 2 ms) ; B10b, revue finale de toute la branche, 4 tours de correction (`b321b0e`, `ae13884`, `7ffb865`, `016c8fc`), aucune anomalie critique, 12 mineures reportées (9 lignes dans `TODO.md`, 3 acceptées au registre) ; M7 (le README) fait ici, M13 à l'ouverture de la PR.
+- **Reste** : la recette de B10d avec Clément sur marghe (Fedora 45, sa propre base), puis le push et la PR (B10e). B9b a vérifié que `marghe.sh install` marche sur Fedora 45 (Qt 6.11.2, Kirigami 6.32).
+
+### Recette finale (B10, 26/11/2026)
+
+- **Commit testé** : `66de864` (branche `linux`), installé sur marghe en build release. VM : Fedora 45 aarch64, session Plasma Wayland, échelle 2, rendu virgl (GPU), jamais de rendu logiciel. Le plan attendait Fedora 44 ; la VM est passée en 45 le 26/11.
+- **Réponses de Clément (09:16)** : points 1 à 9 tous OK. Le point 8 est OK sans bandeau tmux configuré de son côté (il est facultatif) ; au point 9, pas de CRT, la coupe est confirmée.
+- **Trois anomalies** :
+  - (A) Les sites en IPv4 (electrek.co, 1password.com) étaient injoignables. Cause : la carte réseau de la VM était en mode `bridged` sur le Wi-Fi du Mac, sans bail DHCPv4 depuis le 21/10 (l'IPv6 passait par SLAAC, d'où xkcd qui chargeait). Clément l'a passée en « Shared » (`prlctl set ... --type shared`) : la VM a repris 10.211.55.56 et les trois sites répondent. Ce n'est pas un bogue de Ressac.
+  - (B) Lecteur noir après réduction puis restauration de la fenêtre. Cause : la fenêtre réduite n'est plus exposée, WebEngine 6.11 libère alors la texture de la dernière image à l'arrêt du graphe de scène, et une page immobile n'envoie jamais de nouvelle image. Correction : `88ce669` (`WebRedraw.qml`, la vue perd 1 px de hauteur pendant une image après `sceneGraphAboutToStop`, lecteur et carte marine) et `e0b4c6f` (le parcours de test vérifie ce décalage lui-même, rouge si une liaison est retirée).
+  - (C) La ligne « Text size » sautait dans Réglages › Lecture. Cause : l'aperçu était le champ le plus large du formulaire et sa largeur suivait la taille du texte, donc la colonne se recentrait et le curseur bougeait sous la souris (valeur 12, 17, 28). Correction : `f8d81ca` (largeurs fixes pour l'aperçu et les curseurs) et `66de864` (aucune graduation dans les deux apparences, comme `SettingsView.swift`, aperçu entier montré, vérifié à largeur double).
+- **Verdict (10:35)** : « tout est résolu », (B) et (C) revérifiés sur la VM au commit `66de864`. La recette est validée.
+- **Reporté** (les trois premiers points ont une ligne dans `TODO.md`, le reste est noté ici) : `visibility !== Window.Minimized` ne se déclenche jamais sous Wayland (la carte marine réduite compte comme à l'écran) ; le lecteur blanc après verrouillage de session (B8e) n'est pas retesté avec la correction de redessin ; la correction de redessin n'a pas été essayée en rendu logiciel ; l'image de décalage pourrait être fusionnée quand elle se répète ; l'aperçu à 30 pt en Antiope (3 à 4 lignes) n'a pas été mesuré par rapport au bas de la fenêtre ; aucun test ne simule un glissement de curseur.
+
 ## Paysage existant (10/10/2026)
 
 - macOS : NetNewsWire (Swift, MIT, la référence), quick-rss (SwiftUI), Petal Feed (accessibilité, juillet 2026, pas open source a priori).

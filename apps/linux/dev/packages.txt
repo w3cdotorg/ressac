@@ -1,0 +1,51 @@
+# The one Fedora package list: apps/linux/dev/Containerfile, .github/workflows/ci.yml (fedora job) and apps/linux/install.sh read it. lld is required: GNU ld fails to link cxx-qt (docs/specs/linux/qt-spike-notes.md).
+# One package per line; "#" starts a comment.
+
+# Toolchain and build tools
+rust
+cargo
+cmake
+gcc
+gcc-c++
+clang
+lld
+make
+pkgconf-pkg-config
+
+# Qt 6, KDE Frameworks 6 and WebEngine
+qt6-qtbase-devel
+qt6-qtdeclarative-devel
+qt6-qtwebengine-devel
+qt6-qtwebchannel-devel
+kf6-kirigami
+kf6-kirigami-devel
+kf6-qqc2-desktop-style
+kf6-kcoreaddons-devel
+kf6-ki18n-devel
+breeze-icon-theme
+
+# Offscreen rendering and fonts
+mesa-dri-drivers
+mesa-libGL
+mesa-libEGL
+dejavu-sans-fonts
+
+# Runtime dependencies
+tmux
+sqlite
+openssl-devel
+
+# Gate tools (separate packages on Fedora)
+rustfmt
+clippy
+nodejs # chart tests; Node 22 or newer reads the quoted glob
+
+# Base tools
+shadow-utils # useradd
+util-linux-core # runuser, for CI
+procps-ng # kill, for the SIGTERM tests
+findutils
+diffutils
+tar
+gzip
+git-core # CI's checkout in a container

@@ -5,6 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
+  # ressac-kde needs Qt/KDE development packages: the fedora job builds it.
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -17,13 +18,37 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --exclude ressac-kde --all-targets -- -D warnings
+      - run: cargo test --workspace --exclude ressac-kde
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Test the sea chart page
         run: node --test 'apps/macos/ChartTests/*.test.cjs'
+  fedora:
+    name: Fedora 44 (Linux gate, non-root)
+    runs-on: ubuntu-latest
+    container: fedora:44
+    timeout-minutes: 60
+    steps:
+      # The checkout action needs git inside the container to make a real clone.
+      - name: Install git
+        run: dnf install -y git-core
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the dev container's packages
+        run: |
+          # Word splitting is the point: one argument per package name.
+          # shellcheck disable=SC2046
+          dnf install -y $(sed 's/#.*//' apps/linux/dev/packages.txt)
+      # The tests and, from B1a on, QtWebEngine's sandbox need a non-root user (spec §8.1).
+      - name: Create the non-root user
+        run: |
+          useradd --create-home --user-group ressac
+          chown -R ressac:ressac "$GITHUB_WORKSPACE"
+      - name: Linux gate (fmt, clippy, tests, chart, layout smoke)
+        run: runuser -u ressac -- bash scripts/check-linux.sh
   macos:
     name: macOS app
     runs-on: xcode-27
@@ -40,7 +65,7 @@ jobs:
           required=27
           major() { xcodebuild -version | awk 'NR == 1 { split($2, v, "."); print v[1] }'; }
           if [ "$(major)" -lt "$required" ]; then
-            candidate=$(ls -d /Applications/Xcode_"$required"*.app 2>/dev/null | sort -V | tail -n 1 || true)
+            candidate=$(find /Applications -maxdepth 1 -name "Xcode_${required}*.app" 2>/dev/null | sort -V | tail -n 1 || true)
             if [ -n "$candidate" ]; then
               sudo xcode-select -s "$candidate/Contents/Developer"
             fi

@@ -58,10 +58,18 @@ pub fn usage(message: impl Into<String>) -> anyhow::Error {
     UsageError(message.into()).into()
 }
 
+/// What opening the database says when it fails.
+fn cannot_open(db: &Path) -> String {
+    format!("cannot open database {}", db.display())
+}
+
 pub(crate) fn open(db: &Path) -> anyhow::Result<Ressac> {
-    let app = Ressac::open(db).with_context(|| format!("cannot open database {}", db.display()))?;
-    // Test hook: the CLI tests serve article pages from a local mock server. Debug builds
-    // only: a release binary never lifts the private-address guard.
+    with_test_hooks(Ressac::open(db).with_context(|| cannot_open(db))?)
+}
+
+/// Test hook: the CLI tests serve article pages from a local mock server. Debug builds
+/// only: a release binary never lifts the private-address guard.
+fn with_test_hooks(app: Ressac) -> anyhow::Result<Ressac> {
     if cfg!(debug_assertions) && std::env::var_os("RESSAC_ALLOW_PRIVATE_ARTICLES").is_some() {
         return Ok(app.allow_private_articles()?);
     }
@@ -82,7 +90,7 @@ pub fn read(g: &Globals) -> anyhow::Result<ExitCode> {
     crate::tui::reader::run(
         &app,
         &g.db,
-        &crate::tui::reader::settings::TerminalSettings::default_path(),
+        crate::tui::reader::settings::TerminalSettings::default_path().as_deref(),
     )?;
     Ok(ExitCode::SUCCESS)
 }
@@ -90,14 +98,13 @@ pub fn read(g: &Globals) -> anyhow::Result<ExitCode> {
 /// Opens the database for a command that needs feeds. With none (or no database yet),
 /// prints the first-run hint instead, without creating anything.
 fn open_with_feeds(db: &Path) -> anyhow::Result<Option<Ressac>> {
-    if db.exists() {
-        let app = open(db)?;
-        if app.store().feed_count()? > 0 {
-            return Ok(Some(app));
+    match Ressac::open_with_feeds(db).with_context(|| cannot_open(db))? {
+        Some(app) => Ok(Some(with_test_hooks(app)?)),
+        None => {
+            eprintln!("{NO_FEEDS}");
+            Ok(None)
         }
     }
-    eprintln!("{NO_FEEDS}");
-    Ok(None)
 }
 
 /// `ressac import`: reads and parses the file before touching the database, so a bad

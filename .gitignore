@@ -16,3 +16,6 @@ xcuserdata/
 
 # Brainstorming mockups (local)
 .superpowers/
+
+# qmlls (Qt language server) writes this next to the QML files
+apps/linux/.qmlls.ini

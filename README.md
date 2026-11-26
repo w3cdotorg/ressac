@@ -1,6 +1,6 @@
 # Ressac
 
-Un lecteur de flux RSS/Atom/JSON Feed pour macOS, en deux interfaces : terminal (Rust, ratatui) et appli native (SwiftUI). Le flux et le reflux de vos abonnements, avec le ménage en prime : un jardin pour trier les flux, un Journal du matin composé selon leur rythme, un bandeau tmux pour voir passer ce qu'on a laissé filer, et une carte marine des flux à garder sur un second écran.
+Un lecteur de flux RSS/Atom/JSON Feed pour macOS (et Linux pour le terminal), en deux interfaces : terminal (Rust, ratatui) et appli native (SwiftUI). Le flux et le reflux de vos abonnements, avec le ménage en prime : un jardin pour trier les flux, un Journal du matin composé selon leur rythme, un bandeau tmux pour voir passer ce qu'on a laissé filer, et une carte marine des flux à garder sur un second écran.
 
 Thème graphique rétro : **Antiope**, en hommage au télétexte français.
 
@@ -40,8 +40,8 @@ ressac ticker --tmux                   # one unread entry for tmux's status bar 
 Bare `ressac` opens the reader and no longer prints usage: scripts that need it call `ressac --help`. `--json` makes no sense for an interactive reader, so `ressac --json` and `ressac --json read` are refused (exit 2).
 
 Global flags: `--db <file>` (or `RESSAC_DB`), `--json`, `--ascii`, `-v`.
-Exit codes: `0` done, `1` error, `2` a refused request (an unknown id, nothing to repair, an address another active feed already uses or the Cemetery holds, an invalid address, a private or local address, a page that announces no feed, an unknown theme, an edition already built this morning, no network to build one), `130` stopped by Ctrl-C.
-The database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs in `~/Library/Logs/Ressac/`.
+Exit codes: `0` done, `1` error, `2` a refused request (an unknown id, nothing to repair, an address another active feed already uses or the Cemetery holds, an invalid address, a private or local address, a page that announces no feed, an unknown theme, an edition already built this morning, no network to build one), `130` stopped by Ctrl-C (or SIGTERM, for the commands that stop cleanly).
+On macOS the database lives in `~/Library/Application Support/Ressac/ressac.sqlite`, logs in `~/Library/Logs/Ressac/`; on Linux, see [Linux](#linux).
 
 **Schema v4.** The Mac app migrates the shared database to schema v4 on first launch, after a backup next to it (`ressac.sqlite.bak-v3`, or the backup of whichever older version it found). v4 adds each feed's rhythm group, the per-feed override and the morning editions; v3 already gave every folder and feed a three-digit page number (`ressac page list`). A `ressac` built before v4 refuses the database ("database created by a newer Ressac"). Get a v4 CLI with `cargo install --path crates/ressac`, or use the app's own copy at `Ressac.app/Contents/Helpers/ressac`.
 
@@ -80,11 +80,11 @@ On a garden page (800 to 802) the garden's keys apply: `k` keep, `r` repair, `b`
 
 **Antiope keys.** The teletext look, as in the app: type a page number (`104` the Journal, `105` to `109` the rhythm groups, `800` to `802` the garden, `100` SOMMAIRE, `899` GUIDE), `⌫` corrects, `Esc` cancels; SUITE `Space` or `j`, RETOUR `k`, SOMMAIRE `S`, GUIDE `?`, RÉPÉTITION `r`. Images become teletext mosaics; `i` shows the original.
 
-**Images.** Shown inline when the terminal speaks a graphics protocol (Kitty, as Ghostty does, iTerm2 or Sixel; under tmux, `set -g allow-passthrough on`), as half-blocks otherwise, or as `[image: …]` when they cannot load or are turned off. Under tmux the outer terminal is read from the client's terminal name when the library finds no protocol. `RESSAC_IMAGES=kitty|iterm2|sixel|halfblocks|off` forces the choice (`off` shows alt text and never queries the terminal). The decision is logged as "image protocol".
+**Images.** Shown inline when the terminal speaks a graphics protocol (Kitty, as Ghostty does, iTerm2 or Sixel; under tmux, `set -g allow-passthrough on`), as half-blocks otherwise, or as `[image: …]` when they cannot load or are turned off. Under tmux the outer terminal is read from the client's terminal name when the library finds no protocol. `RESSAC_IMAGES=kitty|iterm2|sixel|halfblocks|off` forces the choice (`off` shows alt text and never queries the terminal). Outside tmux, Konsole gets iTerm2 images automatically when the terminal query finds no usable protocol. The decision is logged as "image protocol".
 
-**Settings.** The look and the images switch are kept in `~/Library/Application Support/Ressac/terminal.json`.
+**Settings.** The look and the images switch are kept in `~/Library/Application Support/Ressac/terminal.json` (on Linux, `~/.config/ressac/terminal.json`).
 
-**Logs.** `~/Library/Logs/Ressac/` (with `-v`, tracing also goes to stderr, which garbles the alternate screen: prefer the log file).
+**Logs.** `~/Library/Logs/Ressac/` (on Linux `~/.local/state/ressac/logs/`; with `-v`, tracing also goes to stderr, which garbles the alternate screen: prefer the log file).
 
 ## The tmux ticker
 
@@ -101,9 +101,105 @@ bind -n MouseDown1Status if -F '#{m/r:^rs[0-9]+$,#{mouse_status_range}}' \
   'switch-client -t ='
 ```
 
-The binding only accepts the ticker's own click ranges (`rs` and digits) and passes them quoted; the pane title is escaped so that no program can add a clickable range or a style to the bar through it. `status-interval` stays at tmux's default, 15 seconds. Without `--tmux`, `ressac ticker` prints plain text (`Feed · Title`) for other bars; `--width` caps it (70 columns by default). The rotation is kept in `~/Library/Application Support/Ressac/ticker.json`. To remove the ticker, delete these lines and run `tmux source-file ~/.tmux.conf`.
+The binding only accepts the ticker's own click ranges (`rs` and digits) and passes them quoted; the pane title is escaped so that no program can add a clickable range or a style to the bar through it. `status-interval` stays at tmux's default, 15 seconds. Without `--tmux`, `ressac ticker` prints plain text (`Feed · Title`) for other bars; `--width` caps it (70 columns by default). The rotation of the default database is kept in `ticker.json`, next to it on macOS (`~/Library/Application Support/Ressac/`) and in `~/.local/state/ressac/` on Linux; another database (`--db` or `RESSAC_DB`) keeps its own rotation in `ticker-<16 hex digits>.json` in the same directory, so two databases never share one, whatever path spelling names them. To remove the ticker, delete these lines and run `tmux source-file ~/.tmux.conf`.
 
-The ticker runs the `ressac` named in `~/.tmux.conf`. When that copy is older than the database (after an update migrated it), the line stays empty and each call logs "Database schema vN does not match" at debug level only (set `RUST_LOG=debug` to see it in `~/Library/Logs/Ressac/`), so a tmux client does not fill the log. A missing database, a busy one and a schema mismatch never write a warning, so point tmux at the new app's helper, or rebuild the app.
+The ticker runs the `ressac` named in `~/.tmux.conf`. When that copy is older than the database (after an update migrated it), the line stays empty and each call logs "Database schema vN does not match" at debug level only (set `RUST_LOG=debug` to see it in `~/Library/Logs/Ressac/`, or `~/.local/state/ressac/logs/` on Linux), so a tmux client does not fill the log. A missing database, a busy one and a schema mismatch never write a warning, so point tmux at the new app's helper, or rebuild the app.
+
+## Linux
+
+The terminal side and [the KDE app](#the-linux-app-kde) run on Linux: the reader, the garden, the tmux ticker, every subcommand and a Kirigami window. They keep their own database; nothing is shared with a Mac. Design: `docs/specs/2026-10-23-linux-design.md`.
+
+**Where the files live.** Ressac follows the XDG base directories. An `XDG_*` variable that is empty or not an absolute path is ignored, and Ressac refuses to run without an absolute `HOME` rather than write anywhere relative.
+
+| File | Linux | macOS (unchanged) |
+|---|---|---|
+| Database `ressac.sqlite` (and `-wal`, `-shm`, the `.bak-vN` backups) | `$XDG_DATA_HOME/ressac/`, by default `~/.local/share/ressac/` | `~/Library/Application Support/Ressac/` |
+| `terminal.json` (the reader's look and images switch) | `$XDG_CONFIG_HOME/ressac/`, by default `~/.config/ressac/` | next to the database |
+| Ticker rotation (`ticker.json`, `ticker-<hash>.json`, their locks) | `$XDG_STATE_HOME/ressac/`, by default `~/.local/state/ressac/` | next to the default database, in `~/Library/Application Support/Ressac/` (another `--db` keeps `ticker-<hash>.json` there too, not beside itself) |
+| Logs | `$XDG_STATE_HOME/ressac/logs/` | `~/Library/Logs/Ressac/` |
+
+`--db` and `RESSAC_DB` still win over the default database. If a database exists at the macOS path under your Linux home (`~/Library/Application Support/Ressac/ressac.sqlite`, left by a `ressac` built before Linux support), each run names it in the log (at debug level for `ressac ticker`, which tmux runs every 15 s); Ressac never moves it. Move it to `~/.local/share/ressac/` yourself, or pass it with `--db`.
+
+**Install.** Either download `ressac-X.Y.Z-linux-<arch>.tar.gz` from a release (`x86_64` or `aarch64`, glibc 2.35 or newer) and `tar -xzf` it into `~/.local/bin`, or build it:
+
+```sh
+sudo dnf install rust cargo gcc gcc-c++ cmake clang   # Fedora; other distributions: a Rust toolchain and a C compiler
+cargo install --locked --path crates/ressac           # installs ~/.cargo/bin/ressac
+```
+
+Links open in your browser through `xdg-open` (package `xdg-utils`, present on desktop installs), without the terminal waiting for it.
+
+**tmux.** The same lines as in [The tmux ticker](#the-tmux-ticker), with the Linux binary:
+
+```tmux
+# Ressac ticker: a recent unread entry the Journal left out, every 15 s; click to open it.
+set -g status-right-length 160
+set -g status-right '#(~/.cargo/bin/ressac ticker --tmux) "#{=21:#{q/h:pane_title}}" %H:%M %d-%b-%y'
+bind -n MouseDown1Status if -F '#{m/r:^rs[0-9]+$,#{mouse_status_range}}' \
+  "run-shell -b '~/.cargo/bin/ressac ticker open #{q:mouse_status_range}'" \
+  'switch-client -t ='
+```
+
+(`~/.local/bin/ressac` if you installed a release tarball there.)
+
+**In a virtual machine** (Parallels, UTM, VMware):
+
+- Keep the database on the VM's own disk. Never point `--db` or `RESSAC_DB` at a shared folder from the host (Parallels mounts them under `/media/psf/`): SQLite's WAL mode needs a local file system, and a shared folder can corrupt the database or leave it locked.
+- Check the VM's time zone (`timedatectl`; set it with `sudo timedatectl set-timezone Europe/Paris`). A VM is often left on UTC, and the Journal's day starts at 04:00 local time, so a wrong zone builds the morning edition at the wrong hour and moves "Today".
+
+**Developing on Linux.** `apps/linux/dev/dev.sh check` runs the whole check (format, clippy, tests, the chart's tests and a smoke test of the paths above) in a Fedora 44 container under OrbStack, as a non-root user; `dev.sh sh` opens a shell there. The script only ever touches its own container, `ressac-fedora`.
+
+## The Linux app (KDE)
+
+A Kirigami and Qt Quick app for Fedora KDE Plasma, built from `apps/linux/` (Rust with cxx-qt, QML, WebEngine) on the same core as the Mac app and the terminal. It reads, tidies and charts a database of its own; nothing is shared with a Mac. Fedora 44 (dev container) and Fedora 45 (aarch64 VM) were tried; x86_64 should build.
+
+**Install.** From a clone, as your user (not root):
+
+```sh
+apps/linux/install.sh
+```
+
+It checks the Fedora packages listed in `apps/linux/dev/packages.txt`; when some are missing it prints the `sudo dnf install ...` line and stops, and it never runs dnf itself. Then it builds `ressac` and `ressac-kde` in release mode and installs `~/.local/bin/ressac`, `~/.local/bin/ressac-kde`, `~/.local/share/applications/org.w3cdotorg.ressac.desktop` and the icon `~/.local/share/icons/hicolor/scalable/apps/org.w3cdotorg.ressac.svg` (under `$XDG_DATA_HOME` when it is set). Run it again to update.
+
+- `apps/linux/install.sh --software-rendering` writes the desktop entry with `QT_QUICK_BACKEND=software` and `QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu`, for a virtual machine whose GPU draws blank or flickering views.
+- `apps/linux/install.sh --uninstall` removes exactly those four files. The database, the settings and the logs are never touched.
+
+**First launch.** Start Ressac from the Plasma launcher. With no feed yet, the window shows the title "No Feeds Yet" with the text "Drop an OPML file here, or choose one…"; `ressac export -o ressac.opml` on another machine gives one. The app and `ressac` in Konsole share `~/.local/share/ressac/ressac.sqlite`.
+
+**Files.** Settings are in `~/.config/ressac/ressac-kde.conf` (the Mac app's keys). Logs are in `~/.local/state/ressac/logs/` (Settings ▸ Data ▸ Show Logs). The database is described in [Linux](#linux).
+
+**Keys.** The Mac's shortcuts, with Command as Ctrl and Option as Alt:
+
+| Mac | KDE |
+|---|---|
+| ⌘N Add Feed… | Ctrl+N |
+| ⌘O Import OPML… / ⇧⌘E Export OPML… | Ctrl+O / Ctrl+Shift+E |
+| ⌘R Refresh / ⇧⌘R Refresh All | Ctrl+R / Ctrl+Shift+R (F5 also refreshes, the current source only) |
+| ⌘F Search | Ctrl+F |
+| ⌥⌘U Show Unread Only | Ctrl+Alt+U |
+| ⌘+ / ⌘− / ⌘0 text size | Ctrl++ / Ctrl+− / Ctrl+0 |
+| ⇧⌘M Sea Chart | Ctrl+Shift+M |
+| ⇧⌘A Mark All as Read | Ctrl+Shift+A |
+| ⌘↩ Open in Browser | Ctrl+Return |
+| ⌘Z garden Undo | Ctrl+Z |
+| ⌘, Settings | Ctrl+Shift+, (KDE's Configure) |
+| ⌥S / ⌥G / ⌥R (Antiope) | Alt+S / Alt+G / Alt+R |
+| ⌘Q | Ctrl+Q |
+| Letters `j k m s Space`, arrows | unchanged |
+| `?`, `i`, digits (Antiope only) | unchanged |
+
+Letters act when the reading window has focus, also with a toolbar control focused; they do nothing while a text field or a menu has focus.
+
+**Antiope.** Settings ▸ Reading ▸ Appearance switches to it, as on the Mac (see [Antiope](#antiope)). Text sizes are 15, 20, 25 and 30 (Ctrl++ and Ctrl+−); digits jump to pages, Backspace and Esc correct them; Alt+S is SOMMAIRE, Alt+G (or `?`) the GUIDE, Alt+R the refresh; ← and → move between the columns; `i` shows the mosaics' originals. The CRT screen is not ported (it cost more than the 2 ms a frame budget).
+
+**Sea Chart.** Ctrl+Shift+M opens it in its own window, whose size is remembered. When Plasma's animation speed is at Instant, its animation stops.
+
+**For developers.**
+
+- `apps/linux/dev/dev.sh check` runs the whole Linux gate in the Fedora 44 container (fmt, clippy, tests, chart tests, layout smoke).
+- `ressac-kde --screenshot <dir>` walks every state, writes a picture of each and quits (it refuses to run without `RESSAC_DB`, so it never opens your real database). `RESSAC_RECETTE_WALK=<name>` runs one walk: `garden`, `journal`, `antiope`, `antiope-pages`, `mosaic`, `grid`, `smoke`, and others (see `apps/linux/qml/Main.qml`).
+- `RESSAC_FRAME_LOG=1` logs the frame times every 10 seconds.
+- `apps/linux/dev/marghe.sh` drives a Parallels VM: push the sources, install, take screenshots in the user's own session.
 
 ## The Mac app
 
@@ -122,7 +218,7 @@ cp -R "$TMPDIR/ressac-build/Build/Products/Release/Ressac.app" build/
 open build/Ressac.app
 ```
 
-**Releases.** Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`: it checks that the tag matches both `Cargo.toml` and `MARKETING_VERSION` in `apps/macos/project.yml`, builds the Release app on the `xcode-27` runner and publishes a GitHub Release with `Ressac-X.Y.Z-macos-arm64.zip` (the app), `ressac-X.Y.Z-macos-arm64.tar.gz` (the terminal binary) and `SHA256SUMS`. The builds are signed ad hoc and not notarized: after downloading, clear the quarantine flag (`xattr -dr com.apple.quarantine /Applications/Ressac.app`). A tag with a suffix (`v0.2.0-beta.1`) gives a pre-release.
+**Releases.** Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`: it checks that the tag matches both `Cargo.toml` and `MARKETING_VERSION` in `apps/macos/project.yml`, builds the Release app on the `xcode-27` runner and the Linux binaries on `ubuntu-22.04` and `ubuntu-22.04-arm`, and publishes a GitHub Release with `Ressac-X.Y.Z-macos-arm64.zip` (the app), `ressac-X.Y.Z-macos-arm64.tar.gz` (the terminal binary) and `ressac-X.Y.Z-linux-x86_64.tar.gz` / `ressac-X.Y.Z-linux-aarch64.tar.gz` (the terminal binary for Linux, built on Ubuntu 22.04), all listed in `SHA256SUMS`. The builds are signed ad hoc and not notarized: after downloading, clear the quarantine flag (`xattr -dr com.apple.quarantine /Applications/Ressac.app`). A tag with a suffix (`v0.2.0-beta.1`) gives a pre-release.
 
 ```sh
 git tag -a v0.1.0 -m "Ressac 0.1.0" && git push origin v0.1.0

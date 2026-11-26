@@ -2,7 +2,7 @@
 //! search, over the contract views. Every rule mirrors the Mac app's `Queries.swift`, so the
 //! terminal and the app show the same lists.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
@@ -13,7 +13,7 @@ use super::edition::{EditionOverflowRow, EditionRecord};
 use super::fetch::bad_timestamp;
 use crate::edition::Section;
 use crate::error::Result;
-use crate::model::{CadenceGroup, FeedId, FolderId, parse_ts, ts};
+use crate::model::{CadenceGroup, FeedId, FolderId, Status, parse_ts, ts};
 
 /// What the reader lists: a smart list, a folder (its subfolders included), a feed, or a
 /// rhythm group. The garden is not a source of entries.
@@ -308,6 +308,65 @@ pub struct CadenceDetail {
     pub unread: usize,
 }
 
+/// Characters of the body each list row carries for its excerpt (the app's list query).
+pub const LIST_SNIPPET_CHARS: usize = 1200;
+
+/// A list as the app shows it. With `search` (words, see `fts_query`) the `filter` is
+/// ignored, as in the app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListQuery {
+    pub source: Source,
+    pub filter: ListFilter,
+    pub search: Option<String>,
+}
+
+/// A list row: the entry, the start of its body and, in the Journal, its edition rank.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListedEntry {
+    pub row: EntryRow,
+    pub snippet: Option<String>,
+    pub rank: Option<u32>,
+}
+
+/// The rows at or above a floor and the counts of the whole list.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ListRows {
+    pub rows: Vec<ListedEntry>,
+    pub total: usize,
+    pub unread: usize,
+}
+
+/// What the sidebar shows of an active feed beyond its title and count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedFacts {
+    pub status: Option<Status>,
+    pub prefer_full_text: bool,
+    pub html_url: Option<String>,
+}
+
+/// The `v_entry` condition of `list` and its arguments; `None` for a search without words
+/// (the empty list).
+fn list_condition(list: &ListQuery, today_start: DateTime<Utc>) -> Option<(String, Vec<Value>)> {
+    let (condition, args) = predicate(list.source, today_start);
+    match &list.search {
+        Some(text) => {
+            let query = fts_query(text)?;
+            let mut all = vec![Value::Text(query)];
+            all.extend(args);
+            Some((
+                format!(
+                    "entry_id IN (SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?) AND ({condition})"
+                ),
+                all,
+            ))
+        }
+        None if list.filter == ListFilter::Unread => {
+            Some((format!("{condition} AND NOT is_read"), args))
+        }
+        None => Some((condition, args)),
+    }
+}
+
 impl Store {
     /// The reader's sources column (spec §4, Sources). `today_start` is local midnight in UTC,
     /// computed by the caller from its zone.
@@ -380,6 +439,16 @@ impl Store {
             counts,
             tree: children(None, &folders, &feeds),
         })
+    }
+
+    /// Unread entries of each buried feed (absent: none). `v_unread_count` covers active feeds only.
+    pub fn buried_unread(&self) -> Result<HashMap<FeedId, usize>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT e.feed_id, COUNT(*) FROM entry e JOIN feed f ON f.id = e.feed_id \
+             WHERE f.state = 'buried' AND e.read_at IS NULL GROUP BY e.feed_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as usize)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     /// The entries of `source` (spec §4, Entry lists): newest first, pages of `PAGE_SIZE`
@@ -517,6 +586,191 @@ impl Store {
         self.page_of(&list, all, after, source == Source::Journal)
     }
 
+    /// Where a list of `rows` rows ends below `below` (the whole list when `None`): the
+    /// app's `Queries.floor`. `None` for the Journal, for a list that fits and for an empty
+    /// search. With `keeping`, the floor is lowered to include that entry when it is older.
+    pub fn list_floor(
+        &self,
+        list: &ListQuery,
+        below: Option<&ListCursor>,
+        rows: usize,
+        keeping: Option<i64>,
+        today_start: DateTime<Utc>,
+    ) -> Result<Option<ListCursor>> {
+        use rusqlite::OptionalExtension;
+        let cursor = |r: &Row<'_>| {
+            Ok(ListCursor {
+                published_at: r.get(0)?,
+                entry_id: r.get(1)?,
+            })
+        };
+        if list.source == Source::Journal {
+            return Ok(None);
+        }
+        let Some((mut condition, mut args)) = list_condition(list, today_start) else {
+            return Ok(None);
+        };
+        if let Some(cursor) = below {
+            condition.push_str(" AND (published_at, entry_id) < (?, ?)");
+            args.push(Value::Text(cursor.published_at.clone()));
+            args.push(Value::Integer(cursor.entry_id));
+        }
+        let conn = self.conn();
+        let floor: Option<ListCursor> = conn
+            .query_row(
+                &format!(
+                    "SELECT published_at, entry_id FROM v_entry WHERE {condition} \
+                     ORDER BY published_at DESC, entry_id DESC LIMIT 1 OFFSET {}",
+                    rows.max(1) - 1
+                ),
+                params_from_iter(args.iter()),
+                cursor,
+            )
+            .optional()?;
+        let (Some(floor), Some(id)) = (floor.clone(), keeping) else {
+            return Ok(floor);
+        };
+        let kept: Option<ListCursor> = conn
+            .query_row(
+                "SELECT published_at, id FROM entry WHERE id = ?1",
+                [id],
+                cursor,
+            )
+            .optional()?;
+        Ok(Some(match kept {
+            Some(kept)
+                if (kept.published_at.as_str(), kept.entry_id)
+                    < (floor.published_at.as_str(), floor.entry_id) =>
+            {
+                kept
+            }
+            _ => floor,
+        }))
+    }
+
+    /// The first unread row of `list` after the entry `after` (the first of the list without
+    /// one), in list order: the app's `Queries.nextUnread`. `None` for the Journal (it is
+    /// whole and ranked), an empty search, or when nothing unread follows.
+    pub fn next_unread(
+        &self,
+        list: &ListQuery,
+        after: Option<i64>,
+        today_start: DateTime<Utc>,
+    ) -> Result<Option<ListCursor>> {
+        use rusqlite::OptionalExtension;
+        if list.source == Source::Journal {
+            return Ok(None);
+        }
+        let Some((mut condition, mut args)) = list_condition(list, today_start) else {
+            return Ok(None);
+        };
+        let cursor = |r: &Row<'_>| {
+            Ok(ListCursor {
+                published_at: r.get(0)?,
+                entry_id: r.get(1)?,
+            })
+        };
+        let conn = self.conn();
+        condition.push_str(" AND NOT is_read");
+        if let Some(id) = after {
+            let from: Option<String> = conn
+                .query_row("SELECT published_at FROM entry WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if let Some(published_at) = from {
+                condition.push_str(" AND (published_at, entry_id) < (?, ?)");
+                args.push(Value::Text(published_at));
+                args.push(Value::Integer(id));
+            }
+        }
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT published_at, entry_id FROM v_entry WHERE {condition} \
+                     ORDER BY published_at DESC, entry_id DESC LIMIT 1"
+                ),
+                params_from_iter(args.iter()),
+                cursor,
+            )
+            .optional()?)
+    }
+
+    /// The rows of `list` at or above `floor` (all of them when `None`), with the counts of
+    /// the whole list: the app's `Queries.page`. The Journal is in rank order, the other
+    /// lists newest first.
+    pub fn list_rows(
+        &self,
+        list: &ListQuery,
+        floor: Option<&ListCursor>,
+        today_start: DateTime<Utc>,
+    ) -> Result<ListRows> {
+        let Some((condition, args)) = list_condition(list, today_start) else {
+            return Ok(ListRows::default());
+        };
+        let conn = self.conn();
+        let (total, unread): (i64, i64) = conn.query_row(
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(NOT is_read), 0) FROM v_entry WHERE {condition}"
+            ),
+            params_from_iter(args.iter()),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let journal = list.source == Source::Journal;
+        let mut bounded = condition;
+        let mut bound_args = args;
+        if let Some(floor) = floor {
+            bounded.push_str(" AND (published_at, entry_id) >= (?, ?)");
+            bound_args.push(Value::Text(floor.published_at.clone()));
+            bound_args.push(Value::Integer(floor.entry_id));
+        }
+        let (rank, order) = if journal {
+            (EDITION_RANK, format!("{EDITION_RANK}, entry_id"))
+        } else {
+            ("NULL", "published_at DESC, entry_id DESC".to_string())
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ROW_COLUMNS}, substr(COALESCE(summary_html, content_html), 1, {LIST_SNIPPET_CHARS}), \
+             {rank} FROM v_entry WHERE {bounded} ORDER BY {order}"
+        ))?;
+        let rows = stmt
+            .query_map(params_from_iter(bound_args.iter()), |r| {
+                Ok(ListedEntry {
+                    row: entry_row(r)?.0,
+                    snippet: r.get(10)?,
+                    rank: r.get(11)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ListRows {
+            rows,
+            total: total as usize,
+            unread: unread as usize,
+        })
+    }
+
+    /// Status, full-text preference and site of every active feed, for the sidebar.
+    pub fn feed_facts(&self) -> Result<HashMap<FeedId, FeedFacts>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT f.id, h.status, f.prefer_full_text, f.html_url FROM feed f \
+             LEFT JOIN feed_health h ON h.feed_id = f.id WHERE f.state = 'active'",
+        )?;
+        let facts = stmt
+            .query_map([], |r| {
+                let status: Option<String> = r.get(1)?;
+                Ok((
+                    r.get::<_, FeedId>(0)?,
+                    FeedFacts {
+                        status: status.as_deref().and_then(Status::parse),
+                        prefer_full_text: r.get(2)?,
+                        html_url: r.get(3)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+        Ok(facts)
+    }
+
     /// The entry for the reader, `None` when it is unknown or its feed is buried (`v_entry`).
     pub fn entry_detail(&self, entry_id: i64) -> Result<Option<EntryDetail>> {
         use rusqlite::OptionalExtension;
@@ -590,6 +844,16 @@ impl Store {
             self.conn()
                 .execute("UPDATE entry SET read_at = NULL WHERE id = ?1", [entry_id])?;
         }
+        Ok(())
+    }
+
+    /// `set_read` for several entries in one transaction: a busy database leaves none changed.
+    pub fn set_read_many(&self, ids: &[i64], read: bool, now: DateTime<Utc>) -> Result<()> {
+        let tx = self.conn().unchecked_transaction()?;
+        for id in ids {
+            self.set_read(*id, read, now)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1318,5 +1582,264 @@ pub(super) mod tests {
         let after = reader.data_version().unwrap();
         assert_ne!(after, before, "the app's write is seen by the reader");
         assert_eq!(reader.sources(today()).unwrap().counts.unread, 0);
+    }
+    fn listed_ids(rows: &ListRows) -> Vec<i64> {
+        rows.rows.iter().map(|e| e.row.entry_id).collect()
+    }
+
+    fn query(source: Source) -> ListQuery {
+        ListQuery {
+            source,
+            filter: ListFilter::All,
+            search: None,
+        }
+    }
+
+    #[test]
+    fn next_unread_is_the_first_unread_row_after_an_entry() {
+        let s = Store::open_in_memory().unwrap();
+        add_feed(&s, 1, None, 0, None, "active", "daily");
+        add_entry(&s, 1, 1, "e1", "2026-10-03T08:00:00Z", false, false);
+        add_entry(&s, 2, 1, "e2", "2026-10-02T08:00:00Z", true, false);
+        add_entry(&s, 3, 1, "e3", "2026-10-01T08:00:00Z", false, false);
+        let next = |source: Source, after: Option<i64>| {
+            s.next_unread(&query(source), after, today())
+                .unwrap()
+                .map(|c| c.entry_id)
+        };
+        let feed = Source::Feed(1);
+        assert_eq!(next(feed, None), Some(1));
+        assert_eq!(next(feed, Some(1)), Some(3));
+        assert_eq!(next(feed, Some(3)), None);
+        assert_eq!(next(Source::Journal, None), None);
+        assert_eq!(
+            s.next_unread(&query(feed), Some(1), today())
+                .unwrap()
+                .map(|c| c.published_at),
+            Some("2026-10-01T08:00:00.000Z".to_string())
+        );
+    }
+
+    #[test]
+    fn next_unread_handles_empty_searches_missing_entries_and_other_sources() {
+        let s = library();
+        let first = |q: &ListQuery, after: Option<i64>| {
+            s.next_unread(q, after, today())
+                .unwrap()
+                .map(|c| c.entry_id)
+        };
+        let blank = ListQuery {
+            search: Some("  ".into()),
+            ..query(Source::Unread)
+        };
+        assert_eq!(first(&blank, None), None, "a search without words is empty");
+        assert_eq!(
+            first(&query(Source::Unread), Some(999)),
+            first(&query(Source::Unread), None),
+            "an unknown entry reads as no entry"
+        );
+        assert_eq!(
+            first(&query(Source::Cadence(CadenceGroup::Daily)), None),
+            Some(1)
+        );
+    }
+
+    /// Mac DataTests.entry_pages_stop_at_the_floor_and_count_the_whole_list. Folder 1 lists
+    /// entries 1 (10-16), 3 (10-15), 2 (10-14); 5 is a buried feed's.
+    #[test]
+    fn list_rows_stop_at_the_floor_and_count_the_whole_list() {
+        let s = library();
+        let infos = query(Source::Folder(1));
+        let first = s
+            .list_floor(&infos, None, 2, None, today())
+            .unwrap()
+            .expect("a third row remains");
+        assert_eq!(
+            (first.published_at.as_str(), first.entry_id),
+            ("2026-10-15T09:00:00.000Z", 3)
+        );
+        let page = s.list_rows(&infos, Some(&first), today()).unwrap();
+        assert_eq!(listed_ids(&page), [1, 3]);
+        assert_eq!((page.total, page.unread), (3, 2));
+        assert_eq!(
+            s.list_floor(&infos, Some(&first), 2, None, today())
+                .unwrap(),
+            None,
+            "one row left: it fits"
+        );
+        assert_eq!(
+            s.list_floor(&infos, Some(&first), 1, None, today())
+                .unwrap()
+                .map(|f| f.entry_id),
+            Some(2)
+        );
+        assert_eq!(
+            listed_ids(&s.list_rows(&infos, None, today()).unwrap()),
+            [1, 3, 2],
+            "no floor: the whole list"
+        );
+        assert_eq!(
+            s.list_floor(&infos, None, 1, Some(2), today())
+                .unwrap()
+                .map(|f| f.entry_id),
+            Some(2),
+            "kept older entry lowers it"
+        );
+        assert_eq!(
+            s.list_floor(&infos, None, 2, Some(1), today()).unwrap(),
+            Some(first),
+            "a newer one changes nothing"
+        );
+        assert_eq!(
+            s.list_floor(&query(Source::Journal), None, 1, None, today())
+                .unwrap(),
+            None,
+            "the Journal loads whole"
+        );
+    }
+
+    #[test]
+    fn list_rows_carry_a_short_snippet_and_the_journal_rank() {
+        let s = library();
+        s.conn()
+            .execute(
+                "UPDATE entry SET summary_html = NULL, content_html = ?1 WHERE id = 1",
+                ["x".repeat(5000)],
+            )
+            .unwrap();
+        let unread = s.list_rows(&query(Source::Unread), None, today()).unwrap();
+        let snippet = |id| {
+            unread
+                .rows
+                .iter()
+                .find(|e| e.row.entry_id == id)
+                .unwrap()
+                .snippet
+                .clone()
+        };
+        assert_eq!(snippet(1).map(|s| s.len()), Some(LIST_SNIPPET_CHARS));
+        assert_eq!(snippet(4).as_deref(), Some("<p>Rare bird</p>"));
+        assert!(unread.rows.iter().all(|e| e.rank.is_none()));
+        add_edition(
+            &s,
+            1,
+            &[(3, "front", 1), (4, "wire", 2), (1, "wire", 3)],
+            &[],
+        );
+        let journal = s.list_rows(&query(Source::Journal), None, today()).unwrap();
+        assert_eq!(listed_ids(&journal), [3, 4, 1]);
+        assert_eq!(
+            journal.rows.iter().map(|e| e.rank).collect::<Vec<_>>(),
+            [Some(1), Some(2), Some(3)]
+        );
+    }
+
+    #[test]
+    fn a_search_list_ignores_the_unread_filter_and_matches_every_word() {
+        let s = library();
+        let search = |source, filter, text: &str| ListQuery {
+            source,
+            filter,
+            search: Some(text.to_string()),
+        };
+        let old = s
+            .list_rows(
+                &search(Source::Folder(1), ListFilter::Unread, "old news"),
+                None,
+                today(),
+            )
+            .unwrap();
+        assert_eq!(
+            (listed_ids(&old), old.total),
+            (vec![2], 1),
+            "a read entry is found under the unread filter"
+        );
+        assert_eq!(
+            listed_ids(
+                &s.list_rows(
+                    &search(Source::Folder(1), ListFilter::All, "tides"),
+                    None,
+                    today()
+                )
+                .unwrap()
+            ),
+            [1],
+            "the buried feed's \"Buried tides\" stays out"
+        );
+        assert_eq!(
+            s.list_rows(
+                &search(Source::Unread, ListFilter::All, "   "),
+                None,
+                today()
+            )
+            .unwrap(),
+            ListRows::default()
+        );
+        assert_eq!(
+            s.list_floor(
+                &search(Source::Unread, ListFilter::All, "   "),
+                None,
+                1,
+                None,
+                today()
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            s.list_floor(
+                &search(Source::Folder(1), ListFilter::All, "tides"),
+                None,
+                1,
+                None,
+                today()
+            )
+            .unwrap()
+            .map(|f| f.entry_id),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn feed_facts_give_the_sidebar_status_preference_and_site() {
+        let s = library();
+        s.conn().execute_batch(
+            "UPDATE feed_health SET status = 'Dead' WHERE feed_id = 2; DELETE FROM feed_health WHERE feed_id = 3; \
+             UPDATE feed SET prefer_full_text = 1, html_url = 'https://f1.example.org/' WHERE id = 1;").unwrap();
+        let facts = s.feed_facts().unwrap();
+        let mut ids: Vec<FeedId> = facts.keys().copied().collect();
+        ids.sort();
+        assert_eq!(ids, [1, 2, 3], "active feeds only");
+        assert_eq!(
+            facts[&1],
+            FeedFacts {
+                status: Some(Status::Alive),
+                prefer_full_text: true,
+                html_url: Some("https://f1.example.org/".into())
+            }
+        );
+        assert_eq!(
+            (facts[&2].status, facts[&3].status),
+            (Some(Status::Dead), None)
+        );
+    }
+
+    #[test]
+    fn buried_unread_counts_the_unread_entries_of_buried_feeds_only() {
+        let s = Store::open_in_memory().unwrap();
+        add_feed(&s, 1, None, 1, None, "active", "daily");
+        add_feed(&s, 4, None, 2, None, "buried", "daily");
+        add_entry(&s, 1, 1, "a", "2026-10-15T08:00:00Z", false, false);
+        add_entry(&s, 2, 4, "b", "2026-10-15T08:00:00Z", false, false);
+        add_entry(&s, 3, 4, "c", "2026-10-15T09:00:00Z", false, false);
+        add_entry(&s, 4, 4, "d", "2026-10-15T10:00:00Z", true, false);
+        assert_eq!(s.buried_unread().unwrap(), HashMap::from([(4, 2)]));
+        s.conn()
+            .execute(
+                "UPDATE entry SET read_at = '2026-10-16T08:00:00.000Z' WHERE feed_id = 4",
+                [],
+            )
+            .unwrap();
+        assert!(s.buried_unread().unwrap().is_empty());
     }
 }

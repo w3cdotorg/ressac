@@ -1,13 +1,12 @@
 //! The commands that go to the network: `fetch`, `check` and `extract`.
 
-use std::collections::HashSet;
 use std::io::Write;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ressac_core::logging::redact_address;
 use ressac_core::model::{FeedId, FolderId};
-use ressac_core::service::{ExtractOutcome, NullSink, RefreshOptions};
-use ressac_core::store::Store;
+use ressac_core::service::{ExtractOutcome, NullSink, RefreshOptions, check_subset};
 
 use super::{Globals, INTERRUPTED, open, open_with_feeds, usage};
 use crate::output;
@@ -25,48 +24,15 @@ fn interrupted(stop: &AtomicBool, sink: &output::Sink) -> ExitCode {
     }
 }
 
-/// The feeds named by `--feed` or `--folder` (`None`: no restriction). Unknown ids are
-/// usage errors. Buried feeds stay in the list, and `refresh` skips them.
-fn subset(
-    store: &Store,
-    feeds: Vec<FeedId>,
-    folder: Option<FolderId>,
-) -> anyhow::Result<Option<Vec<FeedId>>> {
-    if let Some(folder) = folder {
-        if !store.folders()?.iter().any(|f| f.id == folder) {
-            return Err(usage(format!("No folder #{folder}.")));
+/// The refusals of `service::check_subset` (an unknown feed or folder) are usage errors
+/// (exit 2); any other error stays fatal (exit 1).
+fn subset_error(e: ressac_core::Error) -> anyhow::Error {
+    match e {
+        e @ (ressac_core::Error::UnknownFeed(_) | ressac_core::Error::UnknownFolder(_)) => {
+            usage(e.to_string())
         }
-        return Ok(Some(store.feeds_in_folder(folder)?));
+        other => other.into(),
     }
-    if feeds.is_empty() {
-        return Ok(None);
-    }
-    let known: HashSet<FeedId> = store.feeds()?.into_iter().map(|f| f.id).collect();
-    if let Some(missing) = feeds.iter().find(|id| !known.contains(id)) {
-        return Err(usage(format!("No feed #{missing}.")));
-    }
-    Ok(Some(feeds))
-}
-
-/// An address as the log may show it: scheme, host (port) and path. The userinfo, the query and the
-/// fragment can carry a secret (`user:pass@host`, `?token=...`), so they are dropped, and `?...`
-/// marks a query that was there. Text that is not an http(s) address is cut the same way by hand.
-fn redact_address(address: &str) -> String {
-    let rest_start = address.find("://").map_or(0, |i| i + 3);
-    let (head, rest) = address.split_at(rest_start);
-    // Userinfo first: up to the last `@` of the authority, even past a `?` or `#` in a password.
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    let rest = match rest[..authority_end].rfind('@') {
-        Some(at) => &rest[at + 1..],
-        None => rest,
-    };
-    let end = rest.find(['?', '#']).unwrap_or(rest.len());
-    let marker = if rest[end..].starts_with('?') {
-        "?..."
-    } else {
-        ""
-    };
-    format!("{head}{}{marker}", &rest[..end])
 }
 
 /// The refusals of `add` (nothing to follow, already followed, unknown theme or folder, private or
@@ -128,7 +94,11 @@ pub async fn fetch(
     let Some(app) = open_with_feeds(&g.db)? else {
         return Ok(ExitCode::SUCCESS);
     };
-    let only = subset(app.store(), feeds, folder)?;
+    let only = if feeds.is_empty() && folder.is_none() {
+        None
+    } else {
+        Some(check_subset(app.store(), &feeds, folder).map_err(subset_error)?)
+    };
     // A manual refresh of some feeds ignores the 30-minute freshness rule (spec §2).
     let opts = RefreshOptions {
         force: force || only.is_some(),
@@ -204,36 +174,6 @@ pub async fn extract(g: &Globals, entry_id: i64, out: &mut impl Write) -> anyhow
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn redact_address_drops_userinfo_query_and_fragment() {
-        use super::redact_address;
-        assert_eq!(
-            redact_address("https://user:pass@host.example:8080/feed.xml?token=abc#top"),
-            "https://host.example:8080/feed.xml?..."
-        );
-        assert_eq!(
-            redact_address("https://u:p@host.example?token=abc"),
-            "https://host.example?..."
-        );
-        assert_eq!(
-            redact_address("https://host.example/a/b.xml"),
-            "https://host.example/a/b.xml"
-        );
-        assert_eq!(
-            redact_address("host.example/feed#frag"),
-            "host.example/feed"
-        );
-        assert_eq!(
-            redact_address("u:p@host.example/feed?k=v"),
-            "host.example/feed?..."
-        );
-        assert_eq!(
-            redact_address("https://u:pa?ss@host.example/f"),
-            "https://host.example/f"
-        );
-        assert_eq!(redact_address("u:pa?ss@host/f"), "host/f");
-    }
-
     use super::*;
     use crate::commands::UsageError;
     use ressac_core::Error;
@@ -271,6 +211,26 @@ mod tests {
         assert_eq!(
             down.to_string(),
             "Could not reach https://e.org/\u{FFFD}[31m: timed out."
+        );
+    }
+
+    #[test]
+    fn subset_refusals_are_usage_errors_and_others_stay_fatal() {
+        use super::subset_error;
+        use crate::commands::UsageError;
+        use ressac_core::Error;
+        for refusal in [Error::UnknownFeed(99), Error::UnknownFolder(99)] {
+            let text = refusal.to_string();
+            let e = subset_error(refusal);
+            assert_eq!(
+                e.downcast_ref::<UsageError>().map(ToString::to_string),
+                Some(text)
+            );
+        }
+        assert!(
+            subset_error(Error::Invalid("disk".into()))
+                .downcast_ref::<UsageError>()
+                .is_none()
         );
     }
 }
