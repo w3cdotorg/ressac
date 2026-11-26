@@ -344,10 +344,14 @@ Kirigami.ApplicationWindow {
         const x = s.sizeSlider.visible ? s.sizeSlider : s.antiopeSlider
         console.warn("walk: " + tag + " size=" + Math.round(s.antiope ? AppSettings.readerSizeAntiope : AppSettings.readerSize)
             + " sliderX=" + Math.round(x.mapToItem(null, 0, 0).x) + " sliderW=" + Math.round(x.width)
-            + " previewW=" + Math.round(s.previewLabel.width) + " ticks=" + x.Kirigami.StyleHints.tickMarkStepSize)
+            + " previewW=" + Math.round(s.previewLabel.width) + " ticks=" + x.Kirigami.StyleHints.tickMarkStepSize
+            + " truncated=" + s.previewLabel.truncated + " lines=" + s.previewLabel.lineCount
+            + " right=" + Math.round(s.previewLabel.mapToItem(null, 0, 0).x + s.previewLabel.width) + " winW=" + Math.round(s.width))
     }
     readonly property var settingsSizeSteps: [
-        { name: "02-open", enter: function () { AppSettings.appearance = "native"; root.openSettings(); settingsWindow.showPage("reading"); AppSettings.readerSize = 12 } },
+        { name: "02-open", enter: function () { AppSettings.appearance = "native"; root.openSettings(); settingsWindow.showPage("reading"); settingsWindow.width = settingsWindow.minimumWidth
+            // Scale 2 doubles Kirigami's grid unit: its widths, as they come out at the VM.
+            if (Recette.walk === "settings-size-x2") { settingsWindow.previewWidth *= 2; settingsWindow.sliderWidth *= 2 } AppSettings.readerSize = 12 } },
         { name: "03-n12", enter: function () { root.sizeRow("03-n12") } },
         { name: "04-set20", enter: function () { AppSettings.readerSize = 20 } },
         { name: "05-n20", enter: function () { root.sizeRow("05-n20") } },
@@ -819,7 +823,7 @@ Kirigami.ApplicationWindow {
         width: 2; height: 2; color: "black"
         Connections { target: root; enabled: frameDriver.visible; function onFrameSwapped() { frameDriver.x = frameDriver.x > 0 ? 0 : 2 } }
     }
-    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : Recette.walk === "redraw" ? redrawSteps : Recette.walk === "settings-size" ? settingsSizeSteps : Recette.walk === "smoke" ? smokeSteps : walkSteps
+    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : Recette.walk === "redraw" ? redrawSteps : (Recette.walk === "settings-size" || Recette.walk === "settings-size-x2") ? settingsSizeSteps : Recette.walk === "smoke" ? smokeSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }

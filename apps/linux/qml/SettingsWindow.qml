@@ -24,6 +24,10 @@ QQC2.ApplicationWindow {
     readonly property var antiopeSizes: [15, 20, 25, 30]
     readonly property string previewFamily: AppSettings.fontFamilies[fontIndex] || Kirigami.Theme.defaultFont.family
 
+    // Fixed widths, so that no field's content (the preview follows the text size) decides the form's width.
+    property real previewWidth: Kirigami.Units.gridUnit * 24
+    property real sliderWidth: Kirigami.Units.gridUnit * 10
+
     property alias sizeSlider: sizeSlider
     property alias antiopeSlider: antiopeSlider
     property alias previewLabel: previewLabel
@@ -131,8 +135,8 @@ QQC2.ApplicationWindow {
                 QQC2.Slider {
                     id: sizeSlider
                     visible: !settings.antiope
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
-                    Kirigami.StyleHints.tickMarkStepSize: -1      // no tick per point (the Mac's slider has none)
+                    Layout.preferredWidth: settings.sliderWidth
+                    Kirigami.StyleHints.tickMarkStepSize: -1      // no ticks: the Mac's Slider has none (SettingsView.swift)
                     from: 12; to: 28; stepSize: 1
                     snapMode: QQC2.Slider.SnapAlways
                     value: AppSettings.readerSize
@@ -143,8 +147,8 @@ QQC2.ApplicationWindow {
                     id: antiopeSlider
                     objectName: "antiopeSize"
                     visible: settings.antiope
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
-                    Kirigami.StyleHints.tickMarkStepSize: 1       // a tick on each of the four sizes
+                    Layout.preferredWidth: settings.sliderWidth
+                    Kirigami.StyleHints.tickMarkStepSize: -1      // none either, as on the Mac (SettingsView.swift)
                     from: 0; to: 3; stepSize: 1
                     snapMode: QQC2.Slider.SnapAlways
                     value: settings.antiopeSizes.indexOf(AppSettings.readerSizeAntiope)
@@ -183,11 +187,10 @@ QQC2.ApplicationWindow {
                 font.family: settings.antiope ? "Bedstead" : settings.previewFamily
                 font.pixelSize: Math.round(settings.antiope ? AppSettings.readerSizeAntiope : AppSettings.readerSize)
                 wrapMode: Text.Wrap
-                maximumLineCount: 3
-                elide: Text.ElideRight
+                // No line limit: the Mac's 3 lines fit its wide window; here Antiope at 30 pt needs more than 3 in 432 px.
                 // A FormLayout centres its content and sizes it by its widest field: the preview's own width
                 // (it follows the text size) must not decide it, or the whole form jumps as the slider moves.
-                Layout.preferredWidth: Kirigami.Units.gridUnit * 24
+                Layout.preferredWidth: settings.previewWidth
                 Layout.fillWidth: true
             }
 
