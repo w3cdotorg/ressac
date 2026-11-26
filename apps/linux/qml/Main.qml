@@ -299,18 +299,44 @@ Kirigami.ApplicationWindow {
             console.warn("walk: 03-mark-all can=" + EntriesModel.canMarkAllRead) } },
         { name: "04-marked", enter: function () { console.warn("walk: 04-marked rows=" + EntriesModel.rowCount() + " header=" + Journal.header) } }
     ]
-    // The `redraw` walk (recette fix 1): frames alone never redraw the reader; a stop of the window's scene graph
-    // (what minimising does) is followed by one redraw at the next frames.
+    // The `redraw` walk (recette fix 1): frames alone never redraw a web view; a stop of the window's scene graph
+    // (what minimising does) is followed by one redraw at the next frames, the view 1 px shorter for one of them.
+    // The walk emits the window's own sceneGraphAboutToStop, the very signal Qt emits when the window is no longer
+    // exposed, and WebRedraw listens to nothing else. Its other listener, WebEngine's releaseResources, acts only
+    // under the native (GPU) compositor; offscreen, the views use the software one, so nothing else changes.
+    property var readerHeights: []                // the view's height before, during and after the redraw
+    property var chartHeights: []
+    property int chartRedrawsBefore: 0            // the chart window may stop once while it opens
+    function watchRedraw(owner, heights) {
+        heights.push(owner.viewHeight)
+        // Once every binding of the new inset has run: the anchors moved the view's bottom edge.
+        owner.redraw.insetChanged.connect(function () { Qt.callLater(function () { heights.push(owner.viewHeight) }) })
+    }
     readonly property var redrawSteps: [
         { name: "02-select", enter: function () { SourcesModel.selectKey("unread"); EntriesModel.select(0) } },
         { name: "03-frames", enter: function () { frameDriver.visible = true } },
-        { name: "04-stop", enter: function () { const r = readingLoader.item.reader.redraw
+        { name: "04-stop", enter: function () { const pane = readingLoader.item.reader, r = pane.redraw
             const idle = "redraws=" + r.redraws + " inset=" + r.inset + " stopped=" + r.stopped
+            root.watchRedraw(pane, root.readerHeights)
             root.sceneGraphAboutToStop()
             console.warn("walk: 04-stop idle " + idle + " then redraws=" + r.redraws + " stopped=" + r.stopped) } },
         { name: "05-wait", enter: function () {} },
         { name: "06-redrawn", enter: function () { const r = readingLoader.item.reader.redraw; frameDriver.visible = false
-            console.warn("walk: 06-redrawn redraws=" + r.redraws + " inset=" + r.inset + " stopped=" + r.stopped + " page=" + Reader.pageUrl) } }
+            console.warn("walk: 06-redrawn redraws=" + r.redraws + " inset=" + r.inset + " stopped=" + r.stopped
+                + " heights=" + root.readerHeights.join(">") + " page=" + Reader.pageUrl) } },
+        { name: "07-chart", enter: function () { root.openChart() } },
+        { name: "08-wait", enter: function () {} },
+        { name: "09-chart-stop", enter: function () { const w = chartLoader.item, r = w.redraw
+            const idle = "inset=" + r.inset + " stopped=" + r.stopped
+            root.chartRedrawsBefore = r.redraws
+            root.watchRedraw(w, root.chartHeights)
+            w.sceneGraphAboutToStop(); w.requestUpdate()
+            console.warn("walk: 09-chart-stop idle " + idle + " then stopped=" + r.stopped) } },
+        { name: "10-wait", enter: function () { chartLoader.item.requestUpdate() } },
+        { name: "11-wait", enter: function () { chartLoader.item.requestUpdate() } },
+        { name: "12-chart-redrawn", enter: function () { const r = chartLoader.item.redraw
+            console.warn("walk: 12-chart-redrawn added=" + (r.redraws - root.chartRedrawsBefore) + " inset=" + r.inset + " stopped=" + r.stopped
+                + " heights=" + root.chartHeights.join(">")) } }
     ]
     // The `settings-size` walk (recette fix 2): the Text size row stays where it is whatever the size, Native and Antiope.
     function sizeRow(tag) {

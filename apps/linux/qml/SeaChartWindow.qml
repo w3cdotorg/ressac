@@ -58,6 +58,8 @@ QQC2.ApplicationWindow {
     WebChannel { id: channel; registeredObjects: [relay] }
 
     // A still chart (Reduce Motion) loses its frame when the window is minimised (WebRedraw.qml).
+    readonly property alias redraw: redraw
+    readonly property real viewHeight: web.height        // the `redraw` walk: 1 px less during a redraw
     WebRedraw { id: redraw }
 
     WebEngineView {

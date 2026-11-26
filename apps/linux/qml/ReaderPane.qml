@@ -80,6 +80,7 @@ Item {
 
     // The view's last frame is freed when the window is minimised: one redraw after (WebRedraw.qml).
     readonly property alias redraw: redraw
+    readonly property real viewHeight: web.height        // the `redraw` walk: 1 px less during a redraw
     WebRedraw { id: redraw }
 
     // A fetch that failed without a stored error (a stored one is already in the page).
