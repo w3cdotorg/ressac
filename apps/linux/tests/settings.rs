@@ -66,6 +66,12 @@ fn size_row_at(scale: &str, walk: &str) {
         [12, 20, 28],
         "{err}"
     );
+    // With Settings in front and the main window minimised, the list keeps polling: `Live.windowActive`
+    // follows the application, as the Mac's `NSApp.isActive` does, not the main window alone.
+    let away = walk_line(&err, "walk: 13-away ");
+    assert_eq!(word(away, "mainState"), "3", "{away}"); // Window.Minimized
+    assert_eq!(word(away, "app"), "true", "{away}");
+    assert_eq!(word(away, "windowActive"), "true", "{away}");
     // No tick per point on the Native slider (the Mac's Slider has none in either look: SettingsView.swift).
     assert!(native.iter().all(|l| field(l, "ticks") < 0), "{native:#?}");
     assert!(

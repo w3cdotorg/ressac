@@ -39,12 +39,13 @@ Kirigami.ApplicationWindow {
         else
             Qt.openUrlExternally(url)
     }
-    Binding { target: mainMenu.seaChart; property: "enabled"; value: true }
+    Binding { target: mainMenu.seaChart; property: "enabled"; value: Launcher.phase === Launcher.Ready }
     Connections { target: mainMenu.seaChart; function onTriggered() { root.openChart() } }
     Connections {
         target: Chart
         function onOpenFeed(key) {
             SourcesModel.selectKey(key)
+            // Dead on Wayland (no Window.Minimized there: observed in the recette, not re-verified; the raise below is what brings it back); harmless on X11.
             if (root.visibility === Window.Minimized) root.showNormal()
             root.show(); root.raise(); root.requestActivate()
         }
@@ -331,12 +332,12 @@ Kirigami.ApplicationWindow {
             root.chartRedrawsBefore = r.redraws
             root.watchRedraw(w, root.chartHeights)
             w.sceneGraphAboutToStop(); w.requestUpdate()
-            console.warn("walk: 09-chart-stop idle " + idle + " then stopped=" + r.stopped) } },
+            console.warn("walk: 09-chart-stop idle " + idle + " then stopped=" + r.stopped + " onScreen=" + Live.chartOnScreen) } },
         { name: "10-wait", enter: function () { chartLoader.item.requestUpdate() } },
         { name: "11-wait", enter: function () { chartLoader.item.requestUpdate() } },
         { name: "12-chart-redrawn", enter: function () { const r = chartLoader.item.redraw
             console.warn("walk: 12-chart-redrawn added=" + (r.redraws - root.chartRedrawsBefore) + " inset=" + r.inset + " stopped=" + r.stopped
-                + " heights=" + root.chartHeights.join(">")) } }
+                + " onScreen=" + Live.chartOnScreen + " heights=" + root.chartHeights.join(">")) } }
     ]
     // The `settings-size` walk (recette fix 2): the Text size row stays where it is whatever the size, Native and Antiope.
     function sizeRow(tag) {
@@ -344,7 +345,7 @@ Kirigami.ApplicationWindow {
         const x = s.sizeSlider.visible ? s.sizeSlider : s.antiopeSlider
         console.warn("walk: " + tag + " size=" + Math.round(s.antiope ? AppSettings.readerSizeAntiope : AppSettings.readerSize)
             + " sliderX=" + Math.round(x.mapToItem(null, 0, 0).x) + " sliderW=" + Math.round(x.width)
-            + " previewW=" + Math.round(s.previewLabel.width) + " ticks=" + x.Kirigami.StyleHints.tickMarkStepSize
+            + " windowActive=" + Live.windowActive + " previewW=" + Math.round(s.previewLabel.width) + " ticks=" + x.Kirigami.StyleHints.tickMarkStepSize
             + " truncated=" + s.previewLabel.truncated + " lines=" + s.previewLabel.lineCount
             + " right=" + Math.round(s.previewLabel.mapToItem(null, 0, 0).x + s.previewLabel.width) + " winW=" + Math.round(s.width))
     }
@@ -360,7 +361,13 @@ Kirigami.ApplicationWindow {
         { name: "08-antiope", enter: function () { AppSettings.appearance = "antiope"; AppSettings.readerSizeAntiope = 15 } },
         { name: "09-a15", enter: function () { root.sizeRow("09-a15") } },
         { name: "10-set30", enter: function () { AppSettings.readerSizeAntiope = 30 } },
-        { name: "11-a30", enter: function () { root.sizeRow("11-a30"); AppSettings.appearance = "native" } }
+        { name: "11-a30", enter: function () { root.sizeRow("11-a30"); AppSettings.appearance = "native" } },
+        // Settings in front, the main window not the active one (offscreen keeps both active, so the main window is minimised):
+        // the list keeps polling, `Live.windowActive` follows the application.
+        { name: "12-main-away", enter: function () { root.showMinimized() } },
+        { name: "12b-wait", enter: function () {} },
+        { name: "13-away", enter: function () { console.warn("walk: 13-away mainState=" + root.visibility + " mainActive=" + root.active + " settings=" + settingsWindow.visible
+            + " app=" + (Qt.application.state === Qt.ApplicationActive) + " windowActive=" + Live.windowActive) } }
     ]
     // The `garden` walk (fixture: queue Hijacked 6, Moved 5 (a safe repair), Fossil 2; Unphotographable 7 kept; feed 4 buried;
     // the test adds the themes Literature and Technology, feed 8 on Technology).
@@ -399,8 +406,9 @@ Kirigami.ApplicationWindow {
     // The `chart` and `chart-live` walks: the Sea Chart window (B7c).
     readonly property var chartSteps: [
         { name: "02-open", enter: function () { root.openChart()
-            console.warn("walk: 02-open open=" + Chart.open + " reduce=" + Chart.reduceMotion + " onScreen=" + Live.chartOnScreen) } },
-        { name: "03-wait", enter: function () {} }, { name: "04-wait", enter: function () {} }, { name: "05-wait", enter: function () {} },
+            console.warn("walk: 02-open open=" + Chart.open + " reduce=" + Chart.reduceMotion) } },
+        // The chart is on screen once its window has drawn (its scene graph may stop once while it opens).
+        { name: "03-wait", enter: function () { console.warn("walk: 03-wait onScreen=" + Live.chartOnScreen) } }, { name: "04-wait", enter: function () {} }, { name: "05-wait", enter: function () {} },
         { name: "06-wait", enter: function () {} }, { name: "07-wait", enter: function () {} }, { name: "08-wait", enter: function () {} },
         { name: "09-wait", enter: function () {} },
         { name: "10-first", enter: function () { chartLoader.item.probe("10-first") } },
@@ -897,6 +905,7 @@ Kirigami.ApplicationWindow {
             if (root.walkPaused) { walkTimer.start(); return }
             const name = root.walkIndex < 0 ? (root.pressedDefault ? "02-" : "01-") + root.slug() : root.steps[root.walkIndex].name
             if (!Recette.grab(name)) { Qt.exit(1); return }
+            if (root.walkIndex === -1) console.warn("walk: " + name + " seaChart=" + mainMenu.seaChart.enabled)
             if (root.walkIndex === -1 && !root.pressedDefault && Recette.pressDefault !== "" && root.settled() && Launcher.phase !== Launcher.Ready) {
                 root.pressedDefault = true; root.walkIndex = -2
                 Recette.prepareDefault(); root.useDefaultDatabase()

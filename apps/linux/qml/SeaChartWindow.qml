@@ -24,8 +24,9 @@ QQC2.ApplicationWindow {
 
     // Plasma's instant animations (longDuration 1 with the org.kde.desktop style) are the chart's Reduce Motion.
     Binding { target: Chart; property: "reduceMotion"; value: Kirigami.Units.longDuration <= 1 }
-    // Not on screen: hidden or minimised (Wayland gives no occlusion).
-    Binding { target: Live; property: "chartOnScreen"; value: chartWindow.visible && chartWindow.visibility !== Window.Minimized }
+    // Not on screen: hidden, or its scene graph stopped (minimised: Wayland reports no Window.Minimized and gives
+    // no occlusion, so the exposure is what WebRedraw tracks; an unfocused visible chart keeps animating).
+    Binding { target: Live; property: "chartOnScreen"; value: chartWindow.visible && redraw.exposed }
     Timer { interval: Chart.tickMs; repeat: true; running: Chart.open; onTriggered: Chart.tick() }
 
     onClosing: {

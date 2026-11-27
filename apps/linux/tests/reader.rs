@@ -128,8 +128,8 @@ fn the_web_views_are_redrawn_1_px_shorter_after_the_scene_graph_stops_and_only_t
     for line in [
         "walk: 04-stop idle redraws=0 inset=0 stopped=false then redraws=0 stopped=true",
         "walk: 06-redrawn redraws=1 inset=0 stopped=false heights=",
-        "walk: 09-chart-stop idle inset=0 stopped=false then stopped=true",
-        "walk: 12-chart-redrawn added=1 inset=0 stopped=false heights=",
+        "walk: 09-chart-stop idle inset=0 stopped=false then stopped=true onScreen=false",
+        "walk: 12-chart-redrawn added=1 inset=0 stopped=false onScreen=true heights=",
     ] {
         assert!(err.contains(line), "{line} missing in {err}");
     }
