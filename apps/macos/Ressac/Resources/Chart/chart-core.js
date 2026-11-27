@@ -625,11 +625,166 @@
     },
   });
 
+  // ---------- gestures: presses, loops, drop targets and the cartouche's spot (pure geometry) ----------
+  const STROKE_PX = 4; // a press that strays this far from where it began is a stroke, not a click
+  const LOOP_MIN = 120, LOOP_CLOSE = 40; // chart units: the shortest loop, and how near its end must come to its start
+  const DROP_RING = 12, LINK_REACH = 24; // an island takes a drop within r + 12, a territory's link within 24
+  const MARGIN = 40; // the cartouche keeps this far from the chart's edge
+  const pt = p => (Array.isArray(p) ? {x: p[0], y: p[1]} : p);
+
+  // "click" until any point is STROKE_PX or more from the first, whatever lies under the press (points in screen px)
+  function classifyPress(points) {
+    if (!points || points.length < 2) return "click";
+    const a = pt(points[0]);
+    return points.some(p => Math.hypot(pt(p).x - a.x, pt(p).y - a.y) >= STROKE_PX) ? "stroke" : "click";
+  }
+
+  // a loop is a path of at least LOOP_MIN units whose end comes back within LOOP_CLOSE of its start (chart units)
+  function closedLoop(points) {
+    if (!points || points.length < 3) return false;
+    const ps = points.map(pt);
+    let length = 0;
+    for (let i = 1; i < ps.length; i++) length += Math.hypot(ps[i].x - ps[i - 1].x, ps[i].y - ps[i - 1].y);
+    const a = ps[0], z = ps[ps.length - 1];
+    return length >= LOOP_MIN && Math.hypot(z.x - a.x, z.y - a.y) <= LOOP_CLOSE;
+  }
+
+  // The islands a loop selects: those whose centre lies inside it (d3.polygonContains), in any sea, as feed ids in
+  // the order of data.feeds; continental islands are left out (rule 2). `continentSea` is the sea's key when the
+  // loop holds every island of exactly one sea, at least two, and that sea has no continent; else null.
+  function loopSelection(nodes, loop, data) {
+    const none = {islands: [], continentSea: null};
+    const poly = (loop || []).map(pt).map(p => [p.x, p.y]);
+    if (poly.length < 3) return none;
+    const D = d3(), inside = nodes.filter(n => D.polygonContains(poly, [n.x, n.y]));
+    const continental = new Set((data.continents || []).map(c => c.theme));
+    const picked = new Set(inside.filter(n => !continental.has(n.theme)).map(n => n.id));
+    const islands = data.feeds.map(f => f.id).filter(id => picked.has(id));
+    const seaKeys = new Set(inside.map(n => n.theme));
+    let continentSea = null;
+    if (inside.length >= 2 && seaKeys.size === 1) {
+      const key = inside[0].theme;
+      if (key !== null && !continental.has(key) && nodes.filter(n => n.theme === key).length === inside.length) continentSea = key;
+    }
+    return {islands, continentSea};
+  }
+
+  // the territory, continent or sea name under (x, y): the first placement (by priority) whose box holds the point
+  function nameAt(placements, x, y) {
+    return placements.find(p => (p.kind === "territory" || p.kind === "continent" || p.kind === "sea")
+      && x >= p.box[0] && x <= p.box[2] && y >= p.box[1] && y <= p.box[3]) || null;
+  }
+
+  /**
+   * What dropTarget reads: the scene Task 11's buildScene returns (tests there feed the real one to sceneProblems).
+   * @typedef {object} Scene
+   * @property {"harbour"|"themes"} view
+   * @property {SceneNode[]} nodes                 every island (place's nodes)
+   * @property {SceneLand[]} territories           territories() of those nodes, continents included
+   * @property {{at: function(number, number): number}} ground   field(): at(x, y) < .5 is open water
+   * @typedef {object} SceneNode  {id: feed id, theme: sea key or null, x, y, r: finite numbers, r > 0}
+   * @typedef {object} SceneLand  {name: string, continent: boolean, links: [SceneNode, SceneNode][], members: SceneNode[]}
+   */
+  function sceneProblems(scene) {
+    const out = [];
+    if (!scene || typeof scene !== "object") return ["scene: not an object"];
+    if (scene.view !== "harbour" && scene.view !== "themes") out.push("view: not harbour or themes");
+    const ids = new Set();
+    if (!Array.isArray(scene.nodes)) out.push("nodes: not an array");
+    else scene.nodes.forEach((n, i) => {
+      const ok = n && Number.isFinite(n.id) && Number.isFinite(n.x) && Number.isFinite(n.y) && Number.isFinite(n.r) && n.r > 0
+        && (n.theme === null || typeof n.theme === "string");
+      if (!ok) out.push(`node ${i}: needs a numeric id, x, y, r > 0 and a theme string or null`);
+      else ids.add(n.id);
+    });
+    if (!Array.isArray(scene.territories)) out.push("territories: not an array");
+    else scene.territories.forEach((t, i) => {
+      const known = n => n && ids.has(n.id);
+      if (!t || typeof t.name !== "string" || typeof t.continent !== "boolean") out.push(`territory ${i}: needs a name and a continent flag`);
+      else if (!Array.isArray(t.members) || !t.members.every(known)) out.push(`territory ${i}: members must be scene nodes`);
+      else if (!Array.isArray(t.links) || !t.links.every(l => Array.isArray(l) && l.length === 2 && l.every(known))) out.push(`territory ${i}: links must be pairs of scene nodes`);
+    });
+    if (!scene.ground || typeof scene.ground.at !== "function") out.push("ground: needs an at(x, y) function");
+    return out;
+  }
+
+  const segDist = (x, y, a, b) => {
+    const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy || 1;
+    const u = Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / l2));
+    return Math.hypot(x - a.x - u * dx, y - a.y - u * dy);
+  };
+
+  // Where a dragged island lands when dropped at (x, y). Precedence: an island within r + 12; a territory's link
+  // within 24; in the themes view the nearest sea cell if it is not the island's own; open water for an island in a
+  // territory (leave); else none. Rule 2 then turns join, pair and leave into refuse for a continental island.
+  // `land` is the scene's territory entry (it has the name, not the id); `with` is a feed id.
+  function dropTarget(scene, data, dragged, x, y) {
+    const found = (() => {
+      const land = of => scene.territories.find(t => t.members.some(m => m.id === of));
+      const sameLand = id => scene.territories.some(t => t.members.some(m => m.id === dragged.id) && t.members.some(m => m.id === id));
+      const hit = scene.nodes.reduce((best, n) => {
+        const d = Math.hypot(n.x - x, n.y - y) - n.r;
+        return d <= DROP_RING && (!best || d < best.d) ? {n, d} : best;
+      }, null);
+      if (hit) {
+        const n = hit.n;
+        if (n.id === dragged.id || sameLand(n.id)) return {kind: "none"};
+        const t = scene.territories.find(l => !l.continent && l.members.some(m => m.id === n.id));
+        if (t) return {kind: "join", land: t};
+        if (land(n.id)) return {kind: "none"}; // an island of a continent
+        return {kind: "pair", with: n.id};
+      }
+      for (const t of scene.territories) {
+        if (!t.links.some(([a, b]) => segDist(x, y, a, b) <= LINK_REACH)) continue;
+        if (t.members.some(m => m.id === dragged.id)) return {kind: "none"};
+        return t.continent ? {kind: "none"} : {kind: "join", land: t};
+      }
+      if (scene.view === "themes") {
+        const cell = seas(data).reduce((b, s) => (Math.hypot(s.x - x, s.y - y) < Math.hypot(b.x - x, b.y - y) ? s : b));
+        if (cell.key !== dragged.theme) return {kind: "sea", key: cell.key};
+      }
+      if (scene.ground.at(x, y) < .5) {
+        const mine = scene.territories.filter(t => t.members.some(m => m.id === dragged.id));
+        const t = mine.find(l => !l.continent) || mine[0];
+        if (t) return {kind: "leave", land: t};
+      }
+      return {kind: "none"};
+    })();
+    if (found.kind === "join" || found.kind === "pair" || found.kind === "leave") {
+      const c = dragged.theme === null ? null : (data.continents || []).find(k => k.theme === dragged.theme);
+      if (c) return {kind: "refuse", hint: EDIT_TEXT.continentHint(c.name)};
+    }
+    return found;
+  }
+
+  // The four places a cartouche of `size` ({w, h}) may go beside a loop's box [x0, y0, x1, y1]: right, left,
+  // below, above, as [x0, y0, x1, y1], not yet checked against the margin or the labels.
+  function cartoucheSpots(box, size) {
+    const gap = 12, cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
+    const clampX = x => Math.max(MARGIN, Math.min(W - MARGIN - size.w, x)), clampY = y => Math.max(MARGIN, Math.min(H - MARGIN - size.h, y));
+    const right = [box[2] + gap, clampY(cy - size.h / 2)], left = [box[0] - gap - size.w, clampY(cy - size.h / 2)];
+    const below = [clampX(cx - size.w / 2), box[3] + gap], above = [clampX(cx - size.w / 2), box[1] - gap - size.h];
+    return [right, left, below, above].map(([x, y]) => [x, y, x + size.w, y + size.h]);
+  }
+
+  // The centre of the first spot (right, left, below, above) inside the margin and meeting no placement's box;
+  // when none is free, the chart's top-left corner inside the margin.
+  function cartouchePlace(box, placements, size) {
+    const meets = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    const spot = cartoucheSpots(box, size).find(s => s[0] >= MARGIN && s[1] >= MARGIN && s[2] <= W - MARGIN && s[3] <= H - MARGIN
+      && !placements.some(p => meets(s, p.box)));
+    return spot ? {x: (spot[0] + spot[2]) / 2, y: (spot[1] + spot[3]) / 2} : {x: MARGIN + size.w / 2, y: MARGIN + size.h / 2};
+  }
+
+  // ink, spring-back and the drawing flourish run only when neither the app's preference nor the system asks for none
+  const editMotion = (prefs, reducedMatches) => !(prefs && prefs.reduceMotion) && !reducedMatches;
+
   return Object.freeze({
     useD3,
     W, H, CELL, GW, GH, PORT, RX, RY, RINGS, RADIUS, ISOBATHS, CARTOUCHE, COMPASS, UNCHARTED, FONTS, INKS,
     font, hash, mulberry, fbm, ringFrac,
     seas, place, territories, field, labels, heatLevel, heat,
+    classifyPress, closedLoop, loopSelection, nameAt, sceneProblems, dropTarget, cartoucheSpots, cartouchePlace, editMotion,
     EDIT_TEXT, MAX_EDIT, PENDING_MS, editBytes, editTooBig, trimName, checkName, deleteSeaQuestion, ledgerIndex, edits, editFailure, history,
   });
 });

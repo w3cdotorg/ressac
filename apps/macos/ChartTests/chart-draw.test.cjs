@@ -12,51 +12,9 @@ const core = require(path.join(CHART, "chart-core.js"));
 
 const fixture = () => JSON.parse(JSON.stringify(require("./fixture.json")));
 const empty = () => ({...fixture(), feeds: [], territories: [], totals: {feeds: 0, unread_week: 0}});
-const measure = (text, font) => [...text].length * parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)[1]) * 0.55;
 const EMPTY = "No feed has published in six months";
 
-// ---------- a small DOM: enough for the builders, and it refuses innerHTML outright ----------
-function fakeDocument() {
-  const text = data => ({nodeType: 3, data: String(data)});
-  const element = tag => {
-    const el = {
-      nodeType: 1, tagName: tag.toUpperCase(), childNodes: [], attributes: {}, listeners: {}, className: "", style: {},
-      append(...nodes) { nodes.forEach(n => el.childNodes.push(typeof n === "string" ? text(n) : n)); },
-      setAttribute(k, v) { el.attributes[k] = String(v); },
-      getAttribute(k) { return el.attributes[k] ?? null; },
-      addEventListener(type, fn) { (el.listeners[type] ||= []).push(fn); },
-      dispatch(type, event) { (el.listeners[type] || []).forEach(fn => fn(event)); },
-      set textContent(v) { el.childNodes = [text(v)]; },
-      get textContent() { return el.childNodes.map(n => (n.nodeType === 3 ? n.data : n.textContent)).join(""); },
-      set innerHTML(_) { throw new Error("innerHTML must never be used"); },
-      set outerHTML(_) { throw new Error("outerHTML must never be used"); },
-      insertAdjacentHTML() { throw new Error("insertAdjacentHTML must never be used"); },
-    };
-    return el;
-  };
-  return {createElement: element, createTextNode: text};
-}
-const walk = (nodes, out = []) => { nodes.forEach(n => { out.push(n); if (n.childNodes) walk(n.childNodes, out); }); return out; };
-const elements = nodes => walk(nodes).filter(n => n.nodeType === 1);
-const byClass = (nodes, cls) => elements(nodes).find(n => n.className.split(" ").includes(cls));
-
-// ---------- a canvas context that records what is drawn ----------
-function recordingContext() {
-  const log = [], state = {};
-  const ctx = new Proxy(state, {
-    get(target, prop) {
-      if (prop in target) return target[prop];
-      return (...args) => {
-        log.push([prop, ...args]);
-        if (prop === "measureText") return {width: measure(String(args[0]), target.font || "10px serif")};
-        if (prop === "createRadialGradient" || prop === "createLinearGradient") return {addColorStop() {}};
-        return undefined;
-      };
-    },
-    set(target, prop, value) { target[prop] = value; return true; },
-  });
-  return {ctx, log, texts: () => log.filter(([op]) => op === "fillText").map(([, t]) => t)};
-}
+const {measure, fakeDocument, walk, elements, byClass, recordingContext} = require("./fake-dom.cjs");
 
 const TRICKY_TITLE = '<b>Bold</b> & "Quoted" Notes <img src=x onerror=alert(1)> </option>';
 const tricky = () => fixture().feeds.find(f => f.title.includes("<b>"));
