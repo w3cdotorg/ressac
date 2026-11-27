@@ -157,6 +157,25 @@ private func chart(version: Int) -> Result<Data, any Error> {
         #expect(model.phase == .loading)
     }
 
+    /// Final review I-2: a survey that began before the edit's commit never shows after it. The edit drops the
+    /// running survey as well as the scheduled one, and surveys afresh.
+    @Test func a_survey_from_before_an_edit_never_publishes_after_it() async throws {
+        let before = #"{"version":1,"feeds":[],"seas":"before"}"#, after = #"{"version":1,"feeds":[],"seas":"after"}"#
+        let runner = DelayedChartRunner([(.milliseconds(400), before), (.milliseconds(10), after)])
+        let model = ChartModel(runner: runner, debounce: .milliseconds(20))
+        model.refresh() // the survey read before the commit
+        model.noteChange() // and one scheduled by a notice
+        try await Task.sleep(for: .milliseconds(50))
+        model.refreshAfterEdit()
+        var seen: [ChartModel.Phase] = []
+        let deadline = ContinuousClock.now + .milliseconds(800)
+        while ContinuousClock.now < deadline {
+            if seen.last != model.phase { seen.append(model.phase) }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(seen == [.loading, .ready(json: after)], "never the survey from before the edit")
+    }
+
     /// Wired to the real counter: a write to the database redraws the chart.
     @Test func following_app_state_redraws_on_database_writes() async throws {
         let (state, test, _) = try makeState()
@@ -173,6 +192,18 @@ private func chart(version: Int) -> Result<Data, any Error> {
 }
 
 /// Answers after 200 ms, or throws `CancellationError` when cancelled first.
+/// Final review I-2: each survey answers after its own delay; the last one repeats.
+final class DelayedChartRunner: ChartRunner {
+    private let script: Mutex<[(Duration, String)]>
+    init(_ script: [(Duration, String)]) { self.script = Mutex(script) }
+
+    func chartJSON() async throws -> Data {
+        let (delay, json) = script.withLock { $0.count > 1 ? $0.removeFirst() : $0[0] }
+        try await Task.sleep(for: delay)
+        return Data(json.utf8)
+    }
+}
+
 final class SlowChartRunner: ChartRunner {
     func chartJSON() async throws -> Data {
         try await Task.sleep(for: .milliseconds(200))

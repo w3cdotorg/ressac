@@ -52,12 +52,16 @@ struct CLIChartRunner: ChartRunner {
         self.resurvey = resurvey
     }
 
-    /// The app's own edit was just written: surveys at once and drops a scheduled run, which the edit's own notice
-    /// raised. The notices that come later (the poll) survey again, but `load` publishes nothing when the chart
-    /// is unchanged, so one edit is one `Chart.update`; a real change in between is published as usual.
+    /// The app's own edit was just written: drops the scheduled run (the edit's own notice raised it) and the running
+    /// one, which may have read the chart before the edit's commit and would show it after the reply, then surveys
+    /// afresh. The notices that come later (the poll) survey again, but `load` publishes nothing when the chart is
+    /// unchanged, so one edit is one `Chart.update`; a real change in between is published as usual.
     func refreshAfterEdit() {
         scheduled?.cancel()
         scheduled = nil
+        run?.cancel()
+        run = nil
+        rerunAfterRun = false
         refresh()
     }
 

@@ -185,6 +185,31 @@ func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async 
         #expect(runs.banner?.message == "The network looks unreachable: 4 of 5 feeds could not connect.")
     }
 
+    /// Final review I-1: a chart edit has a serial tail of its own. It never waits behind an extraction (up to the
+    /// 30 s fetch timeout, longer than the page's 15 s wait), and edits still run one at a time in order.
+    @Test func a_chart_edit_does_not_wait_behind_a_blocked_short_run() async throws {
+        let stub = try Stub("""
+            log="$(dirname "$0")/log"
+            case "$4" in
+              extract) echo "start extract" >> "$log"; sleep 3; echo "end extract" >> "$log" ;;
+              chart)
+                echo "start $6" >> "$log"; sleep 0.2; echo "end $6" >> "$log"
+                echo '{"event":"chart_edit","label":"x","undo":{"op":"patch","label":"x","changes":[]}}' ;;
+            esac
+            """)
+        let runs = RunCoordinator(cli: stub.cli)
+        let log = { (try? String(contentsOf: stub.file("log"), encoding: .utf8)) ?? "" }
+        let extraction = runs.start(.extract(entryId: 1))
+        #expect(await eventually { log().contains("start extract") })
+        let first = runs.start(.chartEdit(json: "A"))
+        let second = runs.start(.chartEdit(json: "B"))
+        #expect(await first.value == .succeeded)
+        #expect(await second.value == .succeeded)
+        #expect(log() == "start extract\nstart A\nend A\nstart B\nend B\n", "the edits ran while the extraction slept, in order")
+        _ = await extraction.value
+        #expect(log().hasSuffix("end extract\n"))
+    }
+
     @Test func observations_are_told_after_each_run() async throws {
         let stub = try Stub(script)
         let runs = RunCoordinator(cli: stub.cli)

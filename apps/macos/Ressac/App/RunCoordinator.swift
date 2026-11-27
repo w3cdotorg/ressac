@@ -27,7 +27,8 @@ enum RunOutcome: Equatable, Sendable {
 }
 
 /// Owns every `ressac` subprocess the app starts: at most one long run, short runs in
-/// FIFO order, progress, banners, and change notices for the observations.
+/// FIFO order (chart edits in a FIFO of their own, never behind an extraction), progress,
+/// banners, and change notices for the observations.
 @MainActor @Observable final class RunCoordinator {
     private(set) var isLongRunActive = false
     private(set) var progress: RunProgress?
@@ -40,6 +41,8 @@ enum RunOutcome: Equatable, Sendable {
     /// The helper the runs go through; the Sea Chart captures `ressac chart` with it too.
     @ObservationIgnored let cli: RessacCLI
     @ObservationIgnored private var shortTail: Task<RunOutcome, Never>?
+    /// Chart edits' own tail (`RunRequest.isChartEdit`).
+    @ObservationIgnored private var editTail: Task<RunOutcome, Never>?
     @ObservationIgnored private var lastChangeNotice = ContinuousClock.now
     @ObservationIgnored private var bannerSetDuringRun = false
     private static let log = Logger(subsystem: "org.w3cdotorg.ressac", category: "runs")
@@ -79,12 +82,17 @@ enum RunOutcome: Equatable, Sendable {
                 return outcome
             }
         case .short:
-            let previous = shortTail
+            let edit = request.isChartEdit
+            let previous = edit ? editTail : shortTail
             let task = Task {
                 _ = await previous?.value
                 return await execute(request, onEvent: onEvent)
             }
-            shortTail = task
+            if edit {
+                editTail = task
+            } else {
+                shortTail = task
+            }
             return task
         }
     }

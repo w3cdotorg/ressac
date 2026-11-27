@@ -120,10 +120,15 @@ struct RunRequest: Sendable, Equatable {
         RunRequest(arguments: ["feed", "theme", String(feedId), key ?? "none"], kind: .short)
     }
 
-    /// One chart edit (a `ChartEdit` as JSON) in one transaction; prints the `chart_edit` event. No network: a short run.
+    /// One chart edit (a `ChartEdit` as JSON) in one transaction; prints the `chart_edit` event. No network: a short run,
+    /// on a serial tail of its own (`isChartEdit`).
     static func chartEdit(json: String) -> RunRequest {
         RunRequest(arguments: ["chart", "apply", json], kind: .short)
     }
+
+    /// A chart edit never waits behind another short run: an extraction can take the 30 s fetch timeout, and the page
+    /// gives up on an edit after 15 s. Edits still run one at a time, in order, among themselves.
+    var isChartEdit: Bool { arguments.starts(with: ["chart", "apply"]) }
 
     /// Moves a feed into a folder, or to the top level with `nil` ("root"). No network: a short run.
     static func moveFeed(id: Int64, folder: Int64?) -> RunRequest {
@@ -144,7 +149,7 @@ struct RunRequest: Sendable, Equatable {
     /// never as a banner (spec §8; add-feed spec §7).
     /// A chart edit's failure goes back to the page's status line, never to a banner.
     var showsFailureBanner: Bool {
-        !["extract", "add"].contains(arguments.first) && !arguments.starts(with: ["chart", "apply"])
+        !["extract", "add"].contains(arguments.first) && !isChartEdit
     }
 
     /// True when `failure` is the store refusing something the app cannot foresee (exit 2): an address that announces
