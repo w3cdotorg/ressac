@@ -15,19 +15,23 @@ Item {
     property int inset: 0
     // The scene graph stopped since the last redraw.
     property bool stopped: false
+    // The window is exposed: false from a stop of its scene graph (minimised, or hidden) until the next
+    // frame. Qt on Wayland reports no Window.Minimized visibility, so this is what tells "not on screen".
+    property bool exposed: true
     // Redraws done (the `redraw` walk reads it).
     property int redraws: 0
 
     // Emitted on the render thread; QML runs the handler on the window's thread.
     Connections {
         target: redraw.Window.window
-        function onSceneGraphAboutToStop() { redraw.stopped = true }
+        function onSceneGraphAboutToStop() { redraw.stopped = true; redraw.exposed = false }
     }
 
     Connections {
         target: redraw.Window.window
-        enabled: redraw.stopped || redraw.inset > 0
+        enabled: redraw.stopped || redraw.inset > 0 || !redraw.exposed
         function onFrameSwapped() {
+            redraw.exposed = true
             if (redraw.inset > 0) {
                 redraw.inset = 0
                 redraw.redraws += 1

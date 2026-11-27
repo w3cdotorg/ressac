@@ -45,6 +45,7 @@ Kirigami.ApplicationWindow {
         target: Chart
         function onOpenFeed(key) {
             SourcesModel.selectKey(key)
+            // Dead on Wayland (no Window.Minimized there, the raise below is what brings it back); harmless on X11.
             if (root.visibility === Window.Minimized) root.showNormal()
             root.show(); root.raise(); root.requestActivate()
         }
@@ -331,12 +332,12 @@ Kirigami.ApplicationWindow {
             root.chartRedrawsBefore = r.redraws
             root.watchRedraw(w, root.chartHeights)
             w.sceneGraphAboutToStop(); w.requestUpdate()
-            console.warn("walk: 09-chart-stop idle " + idle + " then stopped=" + r.stopped) } },
+            console.warn("walk: 09-chart-stop idle " + idle + " then stopped=" + r.stopped + " onScreen=" + Live.chartOnScreen) } },
         { name: "10-wait", enter: function () { chartLoader.item.requestUpdate() } },
         { name: "11-wait", enter: function () { chartLoader.item.requestUpdate() } },
         { name: "12-chart-redrawn", enter: function () { const r = chartLoader.item.redraw
             console.warn("walk: 12-chart-redrawn added=" + (r.redraws - root.chartRedrawsBefore) + " inset=" + r.inset + " stopped=" + r.stopped
-                + " heights=" + root.chartHeights.join(">")) } }
+                + " onScreen=" + Live.chartOnScreen + " heights=" + root.chartHeights.join(">")) } }
     ]
     // The `settings-size` walk (recette fix 2): the Text size row stays where it is whatever the size, Native and Antiope.
     function sizeRow(tag) {
@@ -399,8 +400,9 @@ Kirigami.ApplicationWindow {
     // The `chart` and `chart-live` walks: the Sea Chart window (B7c).
     readonly property var chartSteps: [
         { name: "02-open", enter: function () { root.openChart()
-            console.warn("walk: 02-open open=" + Chart.open + " reduce=" + Chart.reduceMotion + " onScreen=" + Live.chartOnScreen) } },
-        { name: "03-wait", enter: function () {} }, { name: "04-wait", enter: function () {} }, { name: "05-wait", enter: function () {} },
+            console.warn("walk: 02-open open=" + Chart.open + " reduce=" + Chart.reduceMotion) } },
+        // The chart is on screen once its window has drawn (its scene graph may stop once while it opens).
+        { name: "03-wait", enter: function () { console.warn("walk: 03-wait onScreen=" + Live.chartOnScreen) } }, { name: "04-wait", enter: function () {} }, { name: "05-wait", enter: function () {} },
         { name: "06-wait", enter: function () {} }, { name: "07-wait", enter: function () {} }, { name: "08-wait", enter: function () {} },
         { name: "09-wait", enter: function () {} },
         { name: "10-first", enter: function () { chartLoader.item.probe("10-first") } },
