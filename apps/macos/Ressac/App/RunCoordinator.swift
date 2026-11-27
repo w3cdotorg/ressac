@@ -144,7 +144,7 @@ enum RunOutcome: Equatable, Sendable {
                 message: "The network looks unreachable: \(failed) of \(attempted) feeds could not connect.",
                 showLog: false)
             bannerSetDuringRun = true
-        case .waybackDone, .finished, .decided, .undone, .edition, .cadence, .added, .unknown:
+        case .waybackDone, .finished, .decided, .undone, .edition, .cadence, .added, .chartEdit, .unknown:
             break
         }
     }

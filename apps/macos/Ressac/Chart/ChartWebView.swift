@@ -114,7 +114,8 @@ struct ChartBridge {
             else { return nil }
             return .prefs(ChartPrefs(view: view, ink: ink, animate: animate))
         case "edit":
-            guard let seq = Self.integer(message["seq"]), let text = message["edit"] as? String,
+            // The page counts from 1.
+            guard let seq = Self.integer(message["seq"]), seq >= 1, let text = message["edit"] as? String,
                   text.utf8.count <= Self.maxEdit,
                   let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
                   let op = object["op"] as? String, Self.editOps.contains(op)
@@ -173,7 +174,7 @@ struct ChartBridge {
     private static let log = Logger(subsystem: "org.w3cdotorg.ressac", category: "chart")
 
     init(prefs: @escaping @MainActor () -> [String: Any], onAction: @escaping @MainActor (ChartAction) -> Void,
-         onEdit: @escaping @MainActor (String) async -> ChartEditReply = { _ in .failed("Editing is not available.") }) {
+         onEdit: @escaping @MainActor (String) async -> ChartEditReply) {
         self.prefs = prefs
         self.onAction = onAction
         self.onEdit = onEdit
@@ -320,6 +321,10 @@ struct ChartBridge {
 /// Lets the app reach the page of a `ChartWebView` (undo and redo from the menu).
 @MainActor final class ChartPageLink {
     weak var page: ChartPage?
+
+    /// False when there is no page or it did not take the key (nothing to undo, or a text field is being edited).
+    func undo() async -> Bool { await page?.undo() ?? false }
+    func redo() async -> Bool { await page?.redo() ?? false }
 }
 
 /// The chart page in a SwiftUI view: one `ChartPage` per view, closed when the view goes away.
@@ -332,7 +337,7 @@ struct ChartWebView: NSViewRepresentable {
 
     init(json: String, prefs: @escaping @MainActor () -> [String: Any], link: ChartPageLink? = nil,
          onAction: @escaping @MainActor (ChartAction) -> Void,
-         onEdit: @escaping @MainActor (String) async -> ChartEditReply = { _ in .failed("Editing is not available.") }) {
+         onEdit: @escaping @MainActor (String) async -> ChartEditReply) {
         self.json = json
         self.prefs = prefs
         self.link = link

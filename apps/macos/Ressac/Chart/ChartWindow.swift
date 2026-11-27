@@ -3,7 +3,8 @@ import SwiftUI
 
 /// What the Sea Chart window does with the page's requests (spec §8).
 @MainActor enum ChartActions {
-    static func perform(_ action: ChartAction, state: AppState, defaults: UserDefaults = .standard,
+    static func perform(_ action: ChartAction, state: AppState, model: ChartModel? = nil,
+                        defaults: UserDefaults = .standard,
                         reduceMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion) {
         switch action {
         case let .openFeed(id):
@@ -13,9 +14,31 @@ import SwiftUI
             state.openURL(url)
         case let .prefs(prefs):
             prefs.save(to: defaults, reduceMotion: reduceMotion)
-        case .edit, .survey:
-            break // an edit goes to the page's `onEdit`; a survey request is the window's (`ChartScreen.perform`)
+        case .survey:
+            model?.refresh() // the page got no reply to an edit and asks for a fresh survey
+        case .edit:
+            break // an edit goes to the page's `onEdit` (`edit(json:state:model:)`)
         }
+    }
+
+    /// The page's edit: `ressac chart apply`, then one survey whatever the answer (a refusal means the chart moved).
+    static func edit(json: String, state: AppState, model: ChartModel) async -> ChartEditReply {
+        let reply = await state.chartEdit(json: json)
+        model.refreshAfterEdit()
+        return reply
+    }
+}
+
+/// ⌘Z and ⇧⌘Z in the chart window: the page's own history first; when it declines (Survey is off, nothing to undo,
+/// a text field is being edited) the key goes to the focused text field as native text undo.
+@MainActor enum ChartUndo {
+    static func perform(redo: Bool, link: ChartPageLink, native: @MainActor (String) -> Void = ChartUndo.sendNative) async {
+        let handled = redo ? await link.redo() : await link.undo()
+        if !handled { native(redo ? "redo:" : "undo:") }
+    }
+
+    static func sendNative(_ action: String) {
+        NSApp.sendAction(Selector(action), to: nil, from: nil)
     }
 }
 
@@ -51,6 +74,7 @@ struct ChartWindow: View {
 private struct ChartScreen: View {
     let state: AppState
     @State private var model: ChartModel
+    @State private var link = ChartPageLink()
     @Environment(\.openWindow) private var openWindow
 
     init(state: AppState) {
@@ -64,6 +88,7 @@ private struct ChartScreen: View {
             .task { await model.follow { [state] in state.changeTick } }
             // Keeps the chart live behind another app: the database is polled while it is on screen.
             .background(ChartVisibilityReader { [state] in state.isChartOnScreen = $0 })
+            .background { undoShortcuts }
     }
 
     @ViewBuilder private var content: some View {
@@ -74,7 +99,9 @@ private struct ChartScreen: View {
         case let .failed(message):
             failure(message)
         case let .ready(json):
-            ChartWebView(json: json, prefs: Self.pagePrefs, onAction: perform)
+            ChartWebView(json: json, prefs: Self.pagePrefs, link: link, onAction: perform) { [state, model] edit in
+                await ChartActions.edit(json: edit, state: state, model: model)
+            }
                 .overlay(alignment: .bottom) {
                     // A failed refresh keeps the last chart; the failure stays visible here.
                     if let message = model.lastRefreshError {
@@ -104,9 +131,21 @@ private struct ChartScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// ⌘Z and ⇧⌘Z, like the garden's `undoShortcut`: the page's history, else the focused text field's.
+    private var undoShortcuts: some View {
+        Group {
+            Button("Undo Chart Edit") { Task { await ChartUndo.perform(redo: false, link: link) } }
+                .keyboardShortcut("z", modifiers: .command)
+            Button("Redo Chart Edit") { Task { await ChartUndo.perform(redo: true, link: link) } }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
+    }
+
     private func perform(_ action: ChartAction) {
-        ChartActions.perform(action, state: state)
-        if case .survey = action { model.refresh() }
+        ChartActions.perform(action, state: state, model: model)
         // The main window was closed: open one, which shows the feed just selected.
         if case .openFeed = action, !state.hasReadingWindow {
             openWindow(id: RessacApp.mainWindowID)

@@ -618,6 +618,26 @@ enum PendingSheet: Equatable, Sendable {
         runs.start(.setTheme(feedId: feedId, key: key))
     }
 
+    /// The Sea Chart's edit (spec §8): runs `ressac chart apply` and answers the page. A refusal (exit 2) is the core's
+    /// sentence, shown by the page and never as a banner; any other failure is `.failed`. Exit 0 without a `chart_edit`
+    /// line (which can only be a line that is not JSON) is `.failed` too: the edit cannot be offered for undo without its
+    /// event, and the window surveys after every edit, so the chart shows what became of it.
+    func chartEdit(json: String) async -> ChartEditReply {
+        let request = RunRequest.chartEdit(json: json)
+        var line: String?
+        let outcome = await runs.perform(request) { event in
+            if case let .chartEdit(raw) = event, line == nil { line = raw }
+        }
+        switch outcome {
+        case .succeeded:
+            return line.map(ChartEditReply.done) ?? .failed("ressac printed no edit.")
+        case .refused:
+            return .failed("A refresh is running. Try again when it ends.")
+        case let .failed(failure):
+            return request.isRefusal(failure) ? .refused(failure.message) : .failed(failure.message)
+        }
+    }
+
     /// A drag of a feed onto a folder (nil: the "Feeds" header, the top level). Returns whether the drop was taken.
     @discardableResult
     func dropFeeds(_ items: [String], onto folder: Int64?) -> Bool {

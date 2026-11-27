@@ -50,6 +50,10 @@ private func privateDefaults() throws -> (UserDefaults, String) {
         #expect(bridge.handle(["type": "edit", "seq": seq]) == nil)
         #expect(bridge.handle(["type": "edit", "seq": seq, "edit": "[1,2]"]) == nil)
         #expect(bridge.handle(["type": "edit", "seq": seq, "edit": "not json"]) == nil)
+        // the page counts from 1: zero and below are no sequence number
+        for bad in [0, -1, -9_007_199_254_740_991] {
+            #expect(bridge.handle(["type": "edit", "seq": NSNumber(value: bad), "edit": ok]) == nil, "\(bad)")
+        }
         // one byte over the cap; multi-byte characters count in UTF-8 bytes, not characters
         let over = #"{"op":"new_sea","name":""# + String(repeating: "a", count: 65_537 - #"{"op":"new_sea","name":""}"#.utf8.count) + #""}"#
         #expect(over.utf8.count == 65_537)
@@ -197,6 +201,66 @@ private func privateDefaults() throws -> (UserDefaults, String) {
         ChartActions.perform(.prefs(prefs), state: state, defaults: defaults, reduceMotion: false)
         #expect(ChartPrefs.load(from: defaults) == prefs)
     }
+
+    private static let chartJSON = Result<Data, any Error>.success(Data(#"{"version":1,"feeds":[]}"#.utf8))
+
+    @Test func a_survey_request_refreshes_the_model() async throws {
+        let (state, _, _) = try makeState()
+        let (defaults, suite) = try privateDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let runner = ScriptedChartRunner([Self.chartJSON])
+        let model = ChartModel(runner: runner, debounce: .milliseconds(20))
+        ChartActions.perform(.survey, state: state, model: model, defaults: defaults, reduceMotion: false)
+        #expect(await eventually { runner.runs == 1 })
+        #expect(await eventually { model.phase == .ready(json: #"{"version":1,"feeds":[]}"#) })
+    }
+
+    @Test func an_edit_runs_the_helper_and_leads_to_one_survey() async throws {
+        let line = #"{"event":"chart_edit","label":"New Sea Comics","undo":{"op":"delete_sea","sea":"Comics"}}"#
+        let (state, _, stub) = try makeState(stub: """
+            echo "$*" >> "$(dirname "$0")/calls"
+            echo '\(line)'
+            """)
+        let runner = ScriptedChartRunner([Self.chartJSON])
+        let model = ChartModel(runner: runner, debounce: .milliseconds(30))
+        let reply = await ChartActions.edit(json: #"{"op":"new_sea","name":"Comics"}"#, state: state, model: model)
+        #expect(reply == .done(line))
+        #expect(try calls(stub).last?.hasSuffix(#"chart apply {"op":"new_sea","name":"Comics"}"#) == true)
+        // The write's own change notices (the run's end, the poll) must not draw a second time.
+        model.noteChange()
+        try await Task.sleep(for: .milliseconds(100))
+        model.noteChange()
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(runner.runs == 1)
+    }
+
+    @Test func a_refused_edit_still_surveys_so_the_page_sees_the_truth() async throws {
+        let (state, _, _) = try makeState(stub: "echo 'The chart changed; nothing was done.' >&2; exit 2")
+        let runner = ScriptedChartRunner([Self.chartJSON])
+        let model = ChartModel(runner: runner, debounce: .milliseconds(30))
+        let reply = await ChartActions.edit(json: #"{"op":"new_sea","name":"Comics"}"#, state: state, model: model)
+        #expect(reply == .refused("The chart changed; nothing was done."))
+        #expect(await eventually { runner.runs == 1 })
+    }
+
+    @Test func a_change_long_after_an_edit_is_drawn_again() async throws {
+        let runner = ScriptedChartRunner([Self.chartJSON])
+        let model = ChartModel(runner: runner, debounce: .milliseconds(20), editSettle: .milliseconds(100))
+        model.refreshAfterEdit()
+        #expect(await eventually { runner.runs == 1 })
+        try await Task.sleep(for: .milliseconds(250))
+        model.noteChange()
+        #expect(await eventually { runner.runs == 2 })
+    }
+
+    @Test func undo_goes_to_the_page_and_only_then_to_the_text_field() async {
+        // No page behind the link: the key is the text field's.
+        var native: [String] = []
+        let link = ChartPageLink()
+        await ChartUndo.perform(redo: false, link: link, native: { native.append($0) })
+        await ChartUndo.perform(redo: true, link: link, native: { native.append($0) })
+        #expect(native == ["undo:", "redo:"])
+    }
 }
 
 /// The bundled page in a real WKWebView (offscreen: the window is never shown), not just in a browser.
@@ -322,15 +386,8 @@ private func privateDefaults() throws -> (UserDefaults, String) {
                                        .openURL(URL(string: "https://example.invalid/x")!)])
     }
 
-    @Test(.disabled(if: ProcessInfo.processInfo.environment["RESSAC_HEADLESS"] == "1",
-                    "WebKit cannot draw or load fonts on the headless CI runner"))
-    func an_edit_goes_to_the_app_and_its_reply_comes_back() async throws {
-        let json = try String(contentsOf: Self.fixture, encoding: .utf8)
-        let h = harness(prefs: ChartPrefs(view: .harbour, ink: .bleu, animate: false))
-        defer { h.page.close() }
-        h.recorder.reply = .done(#"{"event":"chart_edit","label":"New Sea Comics","undo":{"op":"delete_sea","sea":"Comics"}}"#)
-        h.page.show(json)
-        _ = try await waitForDrawing(h)
+    /// Turns Survey on, opens the log and submits `New Sea… Comics`, as a person would.
+    func submitNewSea(_ h: Harness) async throws {
         let click = #"(text) => { const b = [...document.querySelectorAll("button")].find(b => b.textContent === text); if (b) b.click(); return !!b; }"#
         _ = await h.js("const click = \(click); return click(\"✒ Survey\")")
         // the log drawer may need opening
@@ -348,6 +405,75 @@ private func privateDefaults() throws -> (UserDefaults, String) {
             input.dispatchEvent(new Event("input", {bubbles: true}));
             input.form.requestSubmit();
             """#)
+    }
+
+    /// The log's status line, after waiting for it to read `text`.
+    func statusReads(_ h: Harness, _ text: String) async throws -> Bool {
+        for _ in 0..<100 {
+            if await h.js(#"return document.querySelector(".log-status")?.textContent ?? """#) as? String == text { return true }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return false
+    }
+
+    @Test(.disabled(if: ProcessInfo.processInfo.environment["RESSAC_HEADLESS"] == "1",
+                    "WebKit cannot draw or load fonts on the headless CI runner"))
+    func a_refused_reply_reaches_the_page() async throws {
+        let json = try String(contentsOf: Self.fixture, encoding: .utf8)
+        let h = harness(prefs: ChartPrefs(view: .harbour, ink: .bleu, animate: false))
+        defer { h.page.close() }
+        h.recorder.reply = .refused("The chart changed; nothing was done.")
+        h.page.show(json)
+        _ = try await waitForDrawing(h)
+        try await submitNewSea(h)
+        #expect(try await statusReads(h, "The chart changed; nothing was done."))
+    }
+
+    @Test(.disabled(if: ProcessInfo.processInfo.environment["RESSAC_HEADLESS"] == "1",
+                    "WebKit cannot draw or load fonts on the headless CI runner"))
+    func a_failed_reply_reaches_the_page() async throws {
+        let json = try String(contentsOf: Self.fixture, encoding: .utf8)
+        let h = harness(prefs: ChartPrefs(view: .harbour, ink: .bleu, animate: false))
+        defer { h.page.close() }
+        h.recorder.reply = .failed("ressac failed with exit code 1.")
+        h.page.show(json)
+        _ = try await waitForDrawing(h)
+        try await submitNewSea(h)
+        #expect(try await statusReads(h, "ressac failed with exit code 1."))
+    }
+
+    @Test(.disabled(if: ProcessInfo.processInfo.environment["RESSAC_HEADLESS"] == "1",
+                    "WebKit cannot draw or load fonts on the headless CI runner"))
+    func undo_asks_the_page_and_falls_back_to_the_text_field_when_it_declines() async throws {
+        let json = try String(contentsOf: Self.fixture, encoding: .utf8)
+        let h = harness(prefs: ChartPrefs(view: .harbour, ink: .bleu, animate: false))
+        defer { h.page.close() }
+        h.page.show(json)
+        _ = try await waitForDrawing(h)
+        let link = ChartPageLink()
+        link.page = h.page
+        var native: [String] = []
+        // Survey is off and nothing was edited: the page declines, so the key reaches the field.
+        await ChartUndo.perform(redo: false, link: link, native: { native.append($0) })
+        await ChartUndo.perform(redo: true, link: link, native: { native.append($0) })
+        #expect(native == ["undo:", "redo:"])
+        // A page that handles the key keeps it to itself.
+        _ = await h.js(#"window.Chart = {undo: () => true, redo: () => true}"#)
+        await ChartUndo.perform(redo: false, link: link, native: { native.append($0) })
+        await ChartUndo.perform(redo: true, link: link, native: { native.append($0) })
+        #expect(native == ["undo:", "redo:"])
+    }
+
+    @Test(.disabled(if: ProcessInfo.processInfo.environment["RESSAC_HEADLESS"] == "1",
+                    "WebKit cannot draw or load fonts on the headless CI runner"))
+    func an_edit_goes_to_the_app_and_its_reply_comes_back() async throws {
+        let json = try String(contentsOf: Self.fixture, encoding: .utf8)
+        let h = harness(prefs: ChartPrefs(view: .harbour, ink: .bleu, animate: false))
+        defer { h.page.close() }
+        h.recorder.reply = .done(#"{"event":"chart_edit","label":"New Sea Comics","undo":{"op":"delete_sea","sea":"Comics"}}"#)
+        h.page.show(json)
+        _ = try await waitForDrawing(h)
+        try await submitNewSea(h)
         #expect(await eventually { h.recorder.edits.count == 1 })
         #expect(h.recorder.edits.first?.contains(#""op":"new_sea""#) == true, "\(h.recorder.edits)")
         var undoText = ""
