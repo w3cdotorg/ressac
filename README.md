@@ -310,3 +310,7 @@ Settings ▸ Reading ▸ Appearance switches the reading window to **Antiope**, 
 - **CRT screen** (Settings, Antiope only): scanlines, a vignette, rounded tube corners and a slight colour bleed. Increase Contrast in the accessibility settings turns the bleed off.
 
 Bedstead (Ben Harris) is dedicated to the public domain (CC0); its licence note ships next to it in `Ressac.app/Contents/Resources/Fonts/`.
+
+## Licence
+
+Ressac is under the MIT licence: see [`LICENSE`](LICENSE). The bundled fonts keep their own licences, noted above.

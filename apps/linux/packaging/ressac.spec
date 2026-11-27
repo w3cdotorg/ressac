@@ -45,7 +45,8 @@ icon) and the terminal app (ressac); both share the database in
 ~/.local/share/ressac, which the package never touches.
 
 %prep
-cp -p "%{ressac_srcdir}"/apps/macos/Ressac/Resources/Fonts/*-OFL.txt \
+cp -p "%{ressac_srcdir}"/LICENSE \
+      "%{ressac_srcdir}"/apps/macos/Ressac/Resources/Fonts/*-OFL.txt \
       "%{ressac_srcdir}"/apps/macos/Ressac/Resources/Fonts/Bedstead-CC0.txt \
       "%{ressac_srcdir}"/apps/macos/Ressac/Resources/Chart/LICENSE-d3.txt \
       "%{ressac_srcdir}"/apps/macos/Ressac/Resources/Chart/fonts/*-OFL.txt \
@@ -63,7 +64,7 @@ install -Dm644 "%{ressac_srcdir}"/apps/macos/Ressac/Resources/AppIcon.svg \
 desktop-file-validate %{buildroot}%{_datadir}/applications/org.w3cdotorg.ressac.desktop
 
 %files
-%license *-OFL.txt Bedstead-CC0.txt LICENSE-d3.txt
+%license LICENSE *-OFL.txt Bedstead-CC0.txt LICENSE-d3.txt
 %{_bindir}/ressac
 %{_bindir}/ressac-kde
 %{_datadir}/applications/org.w3cdotorg.ressac.desktop

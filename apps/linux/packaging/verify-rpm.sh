@@ -47,7 +47,8 @@ dnf install -y --setopt=install_weak_deps=False desktop-file-utils util-linux >"
     /usr/bin/ressac-kde \
     /usr/share/applications/org.w3cdotorg.ressac.desktop \
     /usr/share/icons/hicolor/scalable/apps/org.w3cdotorg.ressac.svg \
-    /usr/share/licenses/ressac
+    /usr/share/licenses/ressac \
+    /usr/share/licenses/ressac/LICENSE
   for licence in \
     "$srcdir"/apps/macos/Ressac/Resources/Fonts/*-OFL.txt \
     "$srcdir"/apps/macos/Ressac/Resources/Fonts/Bedstead-CC0.txt \
