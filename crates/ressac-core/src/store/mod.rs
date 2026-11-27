@@ -8,6 +8,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use crate::error::{Error, Result};
 
 mod chart;
+mod chart_edit;
 mod chart_snapshot;
 mod decisions;
 mod edition;
@@ -20,6 +21,9 @@ mod reading;
 mod ticker;
 
 pub use chart::{ChartExport, ChartImport, ChartImportReport, TerritoryDef, ThemeDef};
+pub use chart_edit::{
+    Change, ChartEdit, ChartEditDone, LandRef, LandRow, MAX_EDIT, SeaRef, SeaRow,
+};
 pub use chart_snapshot::{
     ChartContinent, ChartEntry, ChartFeed, ChartLedger, ChartSnapshot, ChartTerritory, ChartTheme,
     ChartTotals, LedgerLand, LedgerSea,

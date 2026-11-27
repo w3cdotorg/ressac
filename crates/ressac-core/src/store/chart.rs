@@ -62,7 +62,7 @@ pub struct ChartImportReport {
 
 /// A key `ressac feed theme FEED KEY` can name: not empty, not `none` in any letter case (the
 /// word that clears a feed's theme there), and not starting with `-` (it would read as an option).
-fn check_theme_key(key: &str) -> Result<()> {
+pub(super) fn check_theme_key(key: &str) -> Result<()> {
     let problem = if key.is_empty() {
         "is empty"
     } else if key.eq_ignore_ascii_case("none") {
