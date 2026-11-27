@@ -41,14 +41,17 @@ const log = (data, state, on, doc = fakeDocument()) =>
 
 // a session over stubs: posted messages, onChange count, timers to fire by hand
 function stubSession() {
-  const posted = [], timers = [];
+  const posted = [], timers = [], timeouts = [];
   let changes = 0;
   const session = survey.createSession({
     post: m => posted.push(m),
     onChange: () => { changes += 1; },
+    onTimeout: outcome => timeouts.push(outcome),
     setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
   });
-  return {session, posted, timers, changes: () => changes};
+  // the timers of one duration, oldest first (PENDING_MS after a result, REPLY_MS after a send)
+  const after = ms => timers.filter(t => t.ms === ms);
+  return {session, posted, timers, after, timeouts, changes: () => changes};
 }
 const ok = (seq, label, undo) => JSON.stringify({seq, ok: true, done: {event: "chart_edit", label, undo}});
 const refused = (seq, error) => JSON.stringify({seq, ok: false, refused: true, error});
@@ -151,6 +154,7 @@ test("log_buttons_call_their_handlers", () => {
   btn([landRow("APPLE PRESS")], "Rename").dispatch("click", ev());
   let input = tagged([landRow("APPLE PRESS")], "INPUT");
   assert.equal(input.value, "APPLE PRESS");
+  assert.equal(buttons([landRow("APPLE PRESS")]).find(b => b.type === "submit").textContent, "Rename");
   input.value = " gull press group ";
   one([landRow("APPLE PRESS")], "name-form").dispatch("submit", ev());
   assert.equal(on.calls.length, 0);
@@ -168,6 +172,7 @@ test("log_buttons_call_their_handlers", () => {
   on.calls.length = 0;
   btn([seaRow("SEA OF KITES")], "Rename").dispatch("click", ev());
   input = tagged([seaRow("SEA OF KITES")], "INPUT");
+  assert.equal(buttons([seaRow("SEA OF KITES")]).find(b => b.type === "submit").textContent, "Rename");
   input.value = "tidal sea";
   one([seaRow("SEA OF KITES")], "name-form").dispatch("submit", ev());
   assert.equal(one([seaRow("SEA OF KITES")], "name-form-error").textContent, T.seaTaken);
@@ -179,6 +184,7 @@ test("log_buttons_call_their_handlers", () => {
   one([seaRow("TIDAL SEA")], "name-form").dispatch("submit", ev());
   btn(nodes, "New Sea…").dispatch("click", ev());
   input = tagged([one(nodes, "log-new-sea")], "INPUT");
+  assert.equal(buttons([one(nodes, "log-new-sea")]).find(b => b.type === "submit").textContent, "Create");
   input.value = "Comics";
   one([one(nodes, "log-new-sea")], "name-form").dispatch("submit", ev());
   assert.deepEqual(on.calls, [["renameSea", 1, "Sea of Paper"], ["makeContinent", 2, "Tideland"], ["newSea", "Comics"]]);
@@ -212,6 +218,7 @@ test("log_island_block_selects_and_edits_the_island", () => {
   btn(nodes, "New Land…").dispatch("click", ev());
   const form = one(nodes, "name-form"), input = tagged([form], "INPUT");
   const with_ = tagged([form], "SELECT");
+  assert.equal(buttons([form]).find(b => b.type === "submit").textContent, "Create");
   const offered = elements([with_]).filter(o => o.tagName === "OPTION" && o.value !== "").map(o => Number(o.value));
   const expected = data.feeds.filter(f => f.id !== 12 && !["bells", "bread", "knots", "kilns"].includes(f.theme)).map(f => f.id);
   assert.deepEqual(offered, expected);
@@ -317,6 +324,31 @@ test("dragging_the_handle_moves_a_sea", () => {
   fourth.dispatch("pointerdown", ev({clientY: 105, pointerId: 2, button: 0}));
   fourth.dispatch("pointerup", ev({clientY: 0, pointerId: 2}));
   assert.deepEqual(on.calls[1], ["moveSea", data.ledger.seas[3].id, -3]);
+
+  // rows A B C D at 0, 30, 60, 90: a release anywhere on B's lower half lands on B, in both directions
+  on.calls.length = 0;
+  handle.dispatch("pointerdown", ev({clientY: 15, pointerId: 3, button: 0}));
+  handle.dispatch("pointerup", ev({clientY: 50, pointerId: 3})); // A dropped on B: B A C D
+  fourth.dispatch("pointerdown", ev({clientY: 105, pointerId: 4, button: 0}));
+  fourth.dispatch("pointerup", ev({clientY: 50, pointerId: 4})); // D dropped on B: A D B C
+  handle.dispatch("pointerdown", ev({clientY: 15, pointerId: 5, button: 0}));
+  handle.dispatch("pointerup", ev({clientY: 85, pointerId: 5})); // A dropped on C's lower half: B C A D
+  fourth.dispatch("pointerdown", ev({clientY: 105, pointerId: 6, button: 0}));
+  fourth.dispatch("pointerup", ev({clientY: 35, pointerId: 6})); // D dropped on B's upper half: A D B C
+  const [a, d] = [data.ledger.seas[0].id, data.ledger.seas[3].id];
+  assert.deepEqual(on.calls, [["moveSea", a, 1], ["moveSea", d, -2], ["moveSea", a, 2], ["moveSea", d, -2]]);
+
+  // let go off the list, left or right: nothing
+  on.calls.length = 0;
+  one(nodes, "log-seas").childNodes.find(n => n.tagName === "OL").rect = {left: 0, right: 300, top: 0, bottom: 480, width: 300, height: 480, x: 0, y: 0};
+  handle.dispatch("pointerdown", ev({clientY: 15, clientX: 40, pointerId: 7, button: 0}));
+  handle.dispatch("pointerup", ev({clientY: 75, clientX: 640, pointerId: 7}));
+  handle.dispatch("pointerdown", ev({clientY: 15, clientX: 40, pointerId: 8, button: 0}));
+  handle.dispatch("pointerup", ev({clientY: 75, clientX: -20, pointerId: 8}));
+  assert.equal(on.calls.length, 0, "released off the list");
+  handle.dispatch("pointerdown", ev({clientY: 15, clientX: 40, pointerId: 9, button: 0}));
+  handle.dispatch("pointerup", ev({clientY: 75, clientX: 120, pointerId: 9}));
+  assert.deepEqual(on.calls, [["moveSea", a, 2]]);
 });
 
 test("sea_drop_index_follows_the_pointer", () => {
@@ -327,6 +359,12 @@ test("sea_drop_index_follows_the_pointer", () => {
   assert.equal(survey.seaDropIndex(mids, 60), 2, "between the second and third");
   assert.equal(survey.seaDropIndex(mids, 75), 2);
   assert.equal(survey.seaDropIndex(mids, 500), 2, "below the rows: the last");
+  // the row under the pointer, its lower half included (rows 30 px tall: 0-30, 30-60, 60-90)
+  assert.equal(survey.seaDropIndex(mids, 29), 0, "the first row's lower half");
+  assert.equal(survey.seaDropIndex(mids, 50), 1, "the second row's lower half");
+  assert.equal(survey.seaDropIndex(mids, 85), 2, "the third row's lower half");
+  assert.equal(survey.seaDropIndex(mids, 31), 1, "the second row's upper half");
+  assert.equal(survey.seaDropIndex([], 10), -1, "no rows");
 });
 
 // ---------- the name form ----------
@@ -364,6 +402,7 @@ test("name_form_submits_and_shows_errors", () => {
   assert.ok(walk(form.nodes).some(n => n.nodeType === 3 && n.data === "With:"));
   assert.equal(select.value, "", "no default choice");
   const submit = buttons(form.nodes).find(b => b.type === "submit");
+  assert.equal(submit.textContent, "Create", "the submit button is a verb, Create unless told");
   assert.equal(submit.disabled, true, "submit waits for a choice");
   form.nodes[0].dispatch("submit", ev());
   form.nodes[0].dispatch("keydown", ev({key: "Enter", target: tagged(form.nodes, "INPUT")}));
@@ -377,7 +416,7 @@ test("name_form_submits_and_shows_errors", () => {
 
 // ---------- the session ----------
 test("session_sends_one_edit_at_a_time", () => {
-  const {session, posted, timers, changes} = stubSession();
+  const {session, posted, after, changes} = stubSession();
   assert.equal(session.pending(), false);
   assert.equal(session.send(JOIN), true);
   assert.deepEqual(posted, [{type: "edit", seq: 1, edit: JSON.stringify(JOIN)}]);
@@ -388,11 +427,11 @@ test("session_sends_one_edit_at_a_time", () => {
   assert.deepEqual(session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS"))), {kind: "done", message: null});
   assert.equal(session.pending(), true, "an ok result keeps the edit pending");
   assert.equal(session.send(JOIN), false);
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0].ms, core.PENDING_MS);
+  assert.equal(after(core.PENDING_MS).length, 1);
   session.updated();
   assert.equal(session.pending(), false, "the next Chart.update ends it");
-  timers[0].fn();
+  after(core.PENDING_MS)[0].fn();
+  after(survey.REPLY_MS)[0].fn();
   assert.equal(session.pending(), false, "a stale timer does nothing");
 
   assert.equal(session.send(JOIN), true);
@@ -400,7 +439,9 @@ test("session_sends_one_edit_at_a_time", () => {
   session.updated();
   assert.equal(session.pending(), true, "an update before the result does not end it");
   session.edited(ok(2, "Join APPLE PRESS", patch("Join APPLE PRESS")));
-  timers[timers.length - 1].fn();
+  after(survey.REPLY_MS)[1].fn();
+  assert.equal(session.pending(), true, "the reply timer does nothing once the result came");
+  after(core.PENDING_MS)[1].fn();
   assert.equal(session.pending(), false, "PENDING_MS after an ok result ends it");
 
   assert.equal(session.send(JOIN), true);
@@ -497,4 +538,203 @@ test("an_edit_with_nothing_to_undo_is_no_step", () => {
   session.edited(ok(1, "Reorder Seas", core.edits.patch("Reorder Seas", [])));
   session.updated();
   assert.deepEqual(session.titles(), {undo: null, redo: null}, "an empty order_seas is never recorded");
+});
+
+// ---------- fix round 1: no reply, rebuilds that keep forms and focus, verbs, ids ----------
+test("session_ends_an_unanswered_edit", () => {
+  const {session, posted, after, timeouts, changes} = stubSession();
+  assert.equal(survey.REPLY_MS, 15000);
+  assert.equal(survey.NO_REPLY, "The app did not answer; nothing was changed.");
+  session.send(JOIN);
+  assert.equal(after(survey.REPLY_MS).length, 1, "a reply timer per send");
+  const before = changes();
+  after(survey.REPLY_MS)[0].fn();
+  assert.equal(session.pending(), false, "an edit with no reply stops being pending");
+  assert.deepEqual(posted.at(-1), {type: "survey"}, "and the page asks for a fresh snapshot, through post");
+  assert.deepEqual(timeouts, [{kind: "timeout", message: survey.NO_REPLY}]);
+  assert.equal(changes(), before + 1);
+  assert.equal(session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS"))), null, "a late reply is ignored");
+  assert.deepEqual(session.titles(), {undo: null, redo: null});
+  assert.equal(session.send(JOIN), true, "the next edit goes at once");
+
+  // an unanswered undo keeps its record, as a failed one does
+  session.edited(ok(2, "Join APPLE PRESS", patch("Join APPLE PRESS")));
+  session.updated();
+  session.undo();
+  after(survey.REPLY_MS).at(-1).fn();
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null});
+  assert.equal(posted.filter(m => m.type === "survey").length, 2);
+});
+
+test("an_undo_with_nothing_to_redo_leaves_no_step", () => {
+  const {session} = stubSession();
+  session.send(JOIN);
+  session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS")));
+  session.updated();
+  session.undo();
+  session.edited(ok(2, "Join APPLE PRESS", core.edits.patch("Join APPLE PRESS", [])));
+  session.updated();
+  assert.deepEqual(session.titles(), {undo: null, redo: null}, "no empty redo step");
+});
+
+const landRowIn = (nodes, id) => allByClass(nodes, "log-land").find(r => r.getAttribute("data-land") === String(id));
+const seaRowIn = (nodes, id) => allByClass(nodes, "log-sea").find(r => r.getAttribute("data-sea") === String(id));
+// the same chart surveyed again, after another writer renamed a land: what a Chart.update brings
+function resurveyed() {
+  const data = fixture();
+  data.surveyed_at = "2026-11-27T18:00:00Z";
+  data.ledger.lands.find(l => l.name === "GULL PRESS GROUP").name = "GULLS";
+  return data;
+}
+
+test("rows_carry_their_ids", () => {
+  const data = fixture(), nodes = log(data, {});
+  assert.deepEqual(allByClass(nodes, "log-land").map(r => Number(r.getAttribute("data-land"))), data.ledger.lands.map(l => l.id));
+  assert.deepEqual(allByClass(nodes, "log-sea").map(r => Number(r.getAttribute("data-sea"))), data.ledger.seas.map(t => t.id));
+  const row = seaRowIn(nodes, 1);
+  assert.equal(row.getAttribute("aria-label"), null, "no label that hides the count");
+  const parts = row.getAttribute("aria-labelledby").split(" ").map(id => elements([row]).find(e => e.id === id).textContent);
+  assert.deepEqual(parts, ["SEA OF KITES", "22 feeds"]);
+});
+
+test("an_open_form_survives_a_rebuild", () => {
+  const doc = fakeDocument(), memory = survey.logMemory(), on = recorder();
+  const nodes = survey.logContent(doc, fixture(), {}, on, memory);
+  btn([landRowIn(nodes, 11)], "Rename").dispatch("click", ev());
+  const input = tagged([landRowIn(nodes, 11)], "INPUT");
+  assert.equal(doc.activeElement, input, "opening a form focuses its field");
+  input.value = "gulls";
+  input.selectionStart = 2; input.selectionEnd = 4;
+  input.dispatch("input", ev());
+  one([landRowIn(nodes, 11)], "name-form").dispatch("submit", ev()); // clashes with nothing yet: renamed elsewhere next
+  assert.deepEqual(on.calls, [["renameLand", 11, "gulls"]]);
+  on.calls.length = 0;
+
+  // the core refuses the name (GULL PRESS GROUP became GULLS meanwhile): the busy rebuild keeps the form, disabled
+  memory.result(undefined);
+  let again = survey.logContent(doc, resurveyed(), {busy: true}, on, memory);
+  let field = tagged([landRowIn(again, 11)], "INPUT");
+  assert.equal(field.value, "gulls");
+  assert.equal(field.disabled, true, "while busy");
+  assert.equal(memory.restore(), null, "a disabled field takes no focus");
+  doc.activeElement = doc.body; // the old field left the page
+  memory.result({kind: "name", message: T.landTaken});
+  again = survey.logContent(doc, resurveyed(), {message: T.landTaken}, on, memory);
+  field = tagged([landRowIn(again, 11)], "INPUT");
+  assert.equal(field.value, "gulls", "the typed value is kept");
+  assert.ok(!field.disabled);
+  assert.equal(one([landRowIn(again, 11)], "name-form-error").textContent, T.landTaken, "the core's message stays with the field");
+  assert.equal(memory.restore(), field, "the field has the focus again");
+  assert.equal(doc.activeElement, field);
+  assert.deepEqual([field.selectionStart, field.selectionEnd], [2, 4], "and its caret");
+
+  // typing more, then any number of plain updates: value, caret and error are kept
+  field.value = "gulls two";
+  field.selectionStart = field.selectionEnd = 9;
+  field.dispatch("input", ev());
+  one([landRowIn(again, 11)], "name-form").dispatch("submit", ev());
+  on.calls.length = 0;
+  memory.result({kind: "name", message: T.landTaken});
+  for (let i = 0; i < 3; i++) {
+    again = survey.logContent(doc, resurveyed(), {}, on, memory);
+    memory.restore();
+  }
+  field = tagged([landRowIn(again, 11)], "INPUT");
+  assert.equal(field.value, "gulls two");
+  assert.deepEqual([field.selectionStart, field.selectionEnd], [9, 9]);
+  assert.equal(one([landRowIn(again, 11)], "name-form-error").textContent, T.landTaken);
+  assert.equal(doc.activeElement, field);
+
+  // done: the form closes on the next rebuild
+  one([landRowIn(again, 11)], "name-form").dispatch("submit", ev());
+  memory.result({kind: "done", message: null});
+  again = survey.logContent(doc, resurveyed(), {}, on, memory);
+  assert.equal(byClass([landRowIn(again, 11)], "name-form"), undefined);
+  assert.ok(button([landRowIn(again, 11)], "Rename"));
+});
+
+test("forms_survive_rebuilds_until_their_target_goes", () => {
+  const doc = fakeDocument(), memory = survey.logMemory(), on = recorder();
+  // New Land… keeps its name and choice
+  let nodes = survey.logContent(doc, fixture(), {selected: 12}, on, memory);
+  btn(nodes, "New Land…").dispatch("click", ev());
+  let form = one(nodes, "name-form");
+  tagged([form], "INPUT").value = "Trio";
+  tagged([form], "INPUT").dispatch("input", ev());
+  tagged([form], "SELECT").value = "3";
+  tagged([form], "SELECT").dispatch("change", ev());
+  nodes = survey.logContent(doc, resurveyed(), {selected: 12}, on, memory);
+  form = one(nodes, "name-form");
+  assert.equal(tagged([form], "INPUT").value, "Trio");
+  assert.equal(tagged([form], "SELECT").value, "3");
+  assert.equal(buttons([form]).find(b => b.type === "submit").disabled, false, "the kept choice enables submit");
+  form.dispatch("submit", ev());
+  assert.deepEqual(on.calls, [["newLand", "Trio", [3, 12]]]);
+  // another island selected: that form is gone, and forgotten
+  nodes = survey.logContent(doc, resurveyed(), {selected: 1}, on, memory);
+  assert.equal(byClass(nodes, "name-form"), undefined);
+  assert.equal(memory.open, null);
+
+  // a pending Delete confirmation survives; its sea deleted elsewhere, it goes
+  btn([seaRowIn(nodes, 3)], "Delete").dispatch("click", ev());
+  nodes = survey.logContent(doc, resurveyed(), {}, on, memory);
+  assert.ok(walk([seaRowIn(nodes, 3)]).some(n => n.nodeType === 3 && n.data === core.deleteSeaQuestion("GULF OF BELLS", 9, true)));
+  const gone = resurveyed();
+  gone.ledger.seas = gone.ledger.seas.filter(t => t.id !== 3);
+  nodes = survey.logContent(doc, gone, {}, on, memory);
+  assert.equal(memory.open, null);
+  nodes = survey.logContent(doc, resurveyed(), {}, on, memory);
+  assert.ok(button([seaRowIn(nodes, 3)], "Delete") && !walk([seaRowIn(nodes, 3)]).some(n => n.nodeType === 3 && /^Delete the sea/.test(n.data)));
+
+  // Cancel forgets the form and gives the focus back to its button
+  btn([seaRowIn(nodes, 1)], "Rename").dispatch("click", ev());
+  btn([seaRowIn(nodes, 1)], "Cancel").dispatch("click", ev());
+  assert.equal(memory.open, null);
+  assert.equal(doc.activeElement, btn([seaRowIn(nodes, 1)], "Rename"));
+  nodes = survey.logContent(doc, resurveyed(), {}, on, memory);
+  assert.equal(byClass([seaRowIn(nodes, 1)], "name-form"), undefined);
+
+  // a direct nameForm takes its verb
+  const renameForm = survey.nameForm(doc, {title: "Rename", value: "X", action: "Rename"}, recorder());
+  assert.equal(buttons(renameForm.nodes).find(b => b.type === "submit").textContent, "Rename");
+});
+
+test("focus_comes_back_to_the_same_control_after_a_rebuild", () => {
+  const doc = fakeDocument(), memory = survey.logMemory(), on = recorder();
+  // Alt+↑ twice on one sea: the row keeps the focus across the busy rebuild and the update after it
+  let data = fixture();
+  let nodes = survey.logContent(doc, data, {}, on, memory);
+  seaRowIn(nodes, 2).focus();
+  seaRowIn(nodes, 2).dispatch("keydown", ev({key: "ArrowUp", altKey: true}));
+  assert.deepEqual(on.calls, [["moveSea", 2, -1]]);
+  data = fixture();
+  data.ledger.seas = [data.ledger.seas[1], data.ledger.seas[0], ...data.ledger.seas.slice(2)];
+  nodes = survey.logContent(doc, data, {busy: true}, on, memory);
+  assert.equal(memory.restore(), seaRowIn(nodes, 2), "a row is never disabled: it keeps the focus while busy");
+  nodes = survey.logContent(doc, data, {}, on, memory);
+  memory.restore();
+  assert.equal(doc.activeElement, seaRowIn(nodes, 2));
+  assert.equal(allByClass(nodes, "log-sea")[0], doc.activeElement, "at its new place");
+
+  // a button disabled while busy gets the focus back once the edit is over
+  btn([landRowIn(nodes, 11)], "Delete").focus();
+  nodes = survey.logContent(doc, data, {busy: true}, on, memory);
+  assert.equal(memory.restore(), null);
+  doc.activeElement = doc.body; // the old button left the page
+  nodes = survey.logContent(doc, data, {}, on, memory);
+  assert.equal(memory.restore(), btn([landRowIn(nodes, 11)], "Delete"));
+  assert.equal(doc.activeElement.getAttribute("data-key"), "log:land:11:delete");
+
+  // focus that moved out of the log stays where it went
+  doc.activeElement = doc.createElement("canvas");
+  nodes = survey.logContent(doc, data, {}, on, memory);
+  assert.equal(memory.restore(), null);
+  doc.activeElement = doc.body;
+  nodes = survey.logContent(doc, data, {}, on, memory);
+  assert.equal(memory.restore(), null, "nor does it come back later");
+
+  // the island select keeps the focus across a new selection
+  one(nodes, "log-island").focus();
+  nodes = survey.logContent(doc, data, {selected: 5}, on, memory);
+  assert.equal(memory.restore(), one(nodes, "log-island"));
 });

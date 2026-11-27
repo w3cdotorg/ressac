@@ -6,6 +6,7 @@
 const measure = (text, font) => [...text].length * parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)[1]) * 0.55;
 
 function fakeDocument() {
+  const doc = {activeElement: null, body: null}; // focus() sets activeElement; nothing ever leaves it on its own
   const text = data => ({nodeType: 3, data: String(data)});
   const element = tag => {
     const el = {
@@ -18,6 +19,8 @@ function fakeDocument() {
       addEventListener(type, fn) { (el.listeners[type] ||= []).push(fn); },
       dispatch(type, event) { (el.listeners[type] || []).forEach(fn => fn(event)); }, // any event type
       getBoundingClientRect() { return el.rect; },
+      focus() { doc.activeElement = el; },
+      setSelectionRange(start, end) { el.selectionStart = start; el.selectionEnd = end; },
       set textContent(v) { el.childNodes = [text(v)]; },
       get textContent() { return el.childNodes.map(n => (n.nodeType === 3 ? n.data : n.textContent)).join(""); },
       set innerHTML(_) { throw new Error("innerHTML must never be used"); },
@@ -26,7 +29,9 @@ function fakeDocument() {
     };
     return el;
   };
-  return {createElement: element, createTextNode: text};
+  Object.assign(doc, {createElement: element, createTextNode: text});
+  doc.body = element("body");
+  return doc;
 }
 const walk = (nodes, out = []) => { nodes.forEach(n => { out.push(n); if (n.childNodes) walk(n.childNodes, out); }); return out; };
 const elements = nodes => walk(nodes).filter(n => n.nodeType === 1);
