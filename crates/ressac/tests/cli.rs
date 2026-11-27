@@ -1719,6 +1719,107 @@ fn chart_export_needs_a_database_and_creates_nothing() {
     assert!(!home.path().join("db.sqlite").exists());
 }
 
+fn chart_export_text(home: &Path) -> String {
+    let out = ressac(home, &["chart", "export"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    stdout(&out)
+}
+
+#[test]
+fn chart_apply_prints_the_event_and_its_undo_reverts_it() {
+    let home = chart_home();
+    let before = chart_export_text(home.path());
+    let out = ressac(
+        home.path(),
+        &[
+            "--json",
+            "chart",
+            "apply",
+            r#"{"op":"new_sea","name":"Comics"}"#,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    let event: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(event["event"], "chart_edit");
+    assert_eq!(event["label"], "New Sea Comics");
+    assert!(chart_export_text(home.path()).contains("Comics"));
+    let undo = serde_json::to_string(&event["undo"]).unwrap();
+    let out = ressac(home.path(), &["--json", "chart", "apply", &undo]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(chart_export_text(home.path()), before);
+    assert!(!chart_export_text(home.path()).contains("Comics"));
+}
+
+#[test]
+fn chart_apply_prints_the_label_without_json() {
+    let home = chart_home();
+    let out = ressac(
+        home.path(),
+        &["chart", "apply", r#"{"op":"new_sea","name":"Comics"}"#],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "New Sea Comics\n");
+}
+
+#[test]
+fn chart_apply_refuses_a_stale_edit_with_exit_2() {
+    let home = chart_home();
+    let before = chart_export_text(home.path());
+    let snap: Value =
+        serde_json::from_str(&stdout(&ressac(home.path(), &["--json", "chart"]))).unwrap();
+    let land = &snap["ledger"]["lands"][0];
+    let edit = json!({"op": "rename_land", "land": {"id": land["id"], "name": "NOT ITS NAME"}, "name": "Anything"});
+    let out = ressac(home.path(), &["chart", "apply", &edit.to_string()]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(
+        stderr(&out).lines().last(),
+        Some("The chart changed; nothing was done.")
+    );
+    assert_eq!(chart_export_text(home.path()), before);
+}
+
+#[test]
+fn chart_apply_rejects_malformed_and_oversized_edits() {
+    let home = chart_home();
+    let before = chart_export_text(home.path());
+    let out = ressac(home.path(), &["chart", "apply", r#"{"op":"sail"}"#]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("The edit is not a chart edit: "),
+        "{}",
+        stderr(&out)
+    );
+    let big = format!(r#"{{"op":"new_sea","name":"{}"}}"#, "x".repeat(70_000));
+    let out = ressac(home.path(), &["chart", "apply", &big]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert_eq!(stderr(&out).trim_end(), "The edit is too large.");
+    let out = ressac(
+        home.path(),
+        &["chart", "apply", r#"{"op":"new_sea","name":"  "}"#],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).lines().last(),
+        Some("A name has 1 to 40 characters.")
+    );
+    assert_eq!(chart_export_text(home.path()), before);
+}
+
+#[test]
+fn chart_apply_needs_a_database() {
+    let home = tempfile::tempdir().unwrap();
+    let out = ressac(
+        home.path(),
+        &["chart", "apply", r#"{"op":"new_sea","name":"Comics"}"#],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "");
+    assert!(!home.path().join("db.sqlite").exists());
+}
+
 #[test]
 fn chart_export_to_an_unwritable_path_fails_cleanly() {
     let home = chart_home();

@@ -234,6 +234,11 @@ pub enum ChartCommand {
         #[arg(long, short, value_name = "FILE")]
         output: Option<PathBuf>,
     },
+    /// Apply one chart edit, given as JSON (the apps' path); prints its label, or with --json the event
+    Apply {
+        /// One edit as JSON, e.g. {"op":"new_sea","name":"Comics"}
+        edit: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
