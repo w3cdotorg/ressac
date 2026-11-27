@@ -4,7 +4,8 @@
 # Run from the repository root on Fedora 44 with apps/linux/dev/packages.txt plus rpm-build and
 # desktop-file-utils installed, as a regular user. Compiles both binaries in release mode, packages
 # them with ressac.spec and writes OUTDIR/Ressac-VERSION-linux-<arch>.rpm, whose path it prints
-# last. A pre-release VERSION (0.4.0-beta.1) becomes the RPM Version 0.4.0~beta.1, which sorts
+# last. VERSION must equal the workspace version in Cargo.toml (as the release tag does). A
+# pre-release VERSION (0.4.0-beta.1) becomes the RPM Version 0.4.0~beta.1, which sorts
 # before 0.4.0; the file name keeps VERSION as given.
 set -euo pipefail
 
@@ -28,10 +29,11 @@ if [ ! -f "$spec" ] || [ ! -f Cargo.lock ]; then
   die "run me from the repository root"
 fi
 
-# The binaries report the workspace version: VERSION must be it, or a pre-release of it.
+# The binaries report the workspace version (verify-rpm.sh checks `ressac --version`), and the
+# release tag must equal it: VERSION is exactly the workspace version, pre-release suffix included.
 workspace=$(awk -F'"' '/^\[workspace.package\]/ { p = 1 } p && /^version *=/ { print $2; exit }' Cargo.toml)
-[ "${version%%-*}" = "${workspace%%-*}" ] ||
-  die "VERSION $version does not match the workspace version $workspace in Cargo.toml"
+[ "$version" = "$workspace" ] ||
+  die "VERSION $version is not the workspace version $workspace in Cargo.toml"
 
 command -v rpmbuild >/dev/null || die "rpmbuild is missing (dnf install rpm-build)"
 

@@ -23,6 +23,9 @@ Item {
     // The reader the keys and the toolbar act on: Antiope's own while it is shown.
     readonly property Item activeReader: antiope && antiopeLoader.item ? antiopeLoader.item.reader : readerPane
     readonly property alias reader: readerPane
+    // The screenshot walk's proof page has not reported yet (the pane on screen only: an inactive
+    // pane never navigates). The walk holds until it has, so the reader-proof line is never lost.
+    readonly property bool proofPending: readerPane.proofing && readerPane.active
     readonly property alias garden: gardenPane
     // Native's search field or Antiope's prompt: the menus' letters stay off while typing.
     readonly property bool searchFocused: searchField.activeFocus || (antiopeView !== null && antiopeView.promptFocused === true)
