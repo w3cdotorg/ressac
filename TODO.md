@@ -95,7 +95,7 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 
 ### Carte marine (sous-projet 6)
 
-- [ ] Éditeur de territoires dans l'appli (aujourd'hui : `ressac chart import` seulement).
+- [x] Éditeur de territoires dans l'appli (aujourd'hui : `ressac chart import` seulement). Fait le 27/11/2026 sur la branche `territory-editor` (spec et plan du 27/11/2026) ; recette en attente.
 - [x] Proposition de thème à l'« Add feed » : fait au sous-projet 7 (thème hérité du site, liste « Theme » facultative).
 - [ ] Étiquettes courbes le long des côtes.
 - [ ] Positions mémorisées pour la vue du port (elle dérive chaque jour par construction).
@@ -105,8 +105,8 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Appli : `showReadingWindow` prend une fenêtre quelconque ; le bloc de lancement est dupliqué entre `ChartWindow` et `RessacApp` ; aucun test de cycle de références ; « The main window says why » peut ne rien désigner.
 - [ ] Appli : le `WindowGroup` principal a maintenant l'id `main` et peut oublier son cadre une fois (note de version).
 - [ ] CLI : `feed theme` sur une base vide sort en code 0 avant de vérifier la clé (comme `cadence`) ; les messages d'erreur de stderr reprennent tels quels clés, noms et chemins du fichier d'import (à assainir une fois, au puits stderr de `main.rs`).
-- [ ] Cœur : un territoire avec `continent` et `feeds` ignore `feeds` sans avertir ; `unthemed_feeds` compte aussi les flux enterrés ; instantané lu hors d'une transaction unique ; territoires regroupés par nom et non par id.
-- [ ] Un flux présent dans deux territoires ne prend que le placement du dernier.
+- [ ] Cœur : un territoire avec `continent` et `feeds` ignore `feeds` sans avertir ; `unthemed_feeds` compte aussi les flux enterrés ; instantané lu hors d'une transaction unique .
+- [ ] Un flux présent dans deux territoires ne prend que le placement du dernier ; l'éditeur garde un seul territoire par flux ; une importation peut encore en mettre deux.
 - [ ] Vue du port : le rabattement dans le cadre et la poussée hors du quai peuvent faire chevaucher des îles sur les marges.
 - [ ] Animation : la chaleur et la couleur de chaque île sont recalculées à chaque image.
 - [ ] Coût des rafraîchissements pendant une longue collecte : une reconstruction complète toutes les 2 s, à surveiller.
