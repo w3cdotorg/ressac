@@ -38,7 +38,7 @@ import Testing
         let choices = FolderChoice.choices(from: SidebarNode.tree(from: snapshot))
         #expect(choices.map(\.folderId) == [nil, 4, 1, 2, 3])
         #expect(choices.map(\.depth) == [0, 1, 1, 2, 3])
-        #expect(choices.map(\.title) == ["Feeds", "\u{2003}Blogs", "\u{2003}News", "\u{2003}\u{2003}Sub", "\u{2003}\u{2003}\u{2003}Deep"])
+        #expect(choices.map(\.title) == ["Feeds", "Blogs", "News", "Sub", "Deep"], "flat: the name alone, no indent")
         #expect(AddFeedModel().folderId == nil, "the top level is the default")
         #expect(FolderChoice.choices(from: []).map(\.title) == ["Feeds"])
     }

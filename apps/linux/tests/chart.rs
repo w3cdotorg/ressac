@@ -55,10 +55,8 @@ fn the_sea_chart_draws_the_fixture_with_the_stored_prefs_and_answers_the_page() 
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert_clean(&out);
-    assert!(
-        err.contains("walk: 02-open open=true reduce=true onScreen=true"),
-        "{err}"
-    );
+    assert!(err.contains("walk: 02-open open=true reduce=true"), "{err}");
+    assert!(err.contains("walk: 03-wait onScreen=true"), "{err}");
     assert!(err.contains("walk: 11-fixture shown=true"), "{err}");
     let first = probe(&err, "10-first");
     let drawn = probe(&err, "15-drawn");

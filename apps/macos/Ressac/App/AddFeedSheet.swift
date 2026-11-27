@@ -22,8 +22,8 @@ struct FolderChoice: Identifiable, Equatable {
 
     var id: Int64 { folderId ?? 0 }
 
-    /// The menu text: one em space per level under the top.
-    var title: String { String(repeating: "\u{2003}", count: depth) + name }
+    /// The menu text: the name alone, every folder at the same level (as in the KDE app); `depth` only orders the list.
+    var title: String { name }
 
     /// "Feeds" first, then every folder in sidebar order, each under its parent.
     static func choices(from tree: [SidebarNode]) -> [FolderChoice] {
