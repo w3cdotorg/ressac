@@ -1,19 +1,20 @@
 // The sea chart's page: canvas drawing of what chart-core.js computes, the animated overlay, hover, popover,
-// floating toolbar, key, and the bridge to the app. The builders and the drawing take their document and
-// canvas context as arguments, so Node tests them with stand-ins; only createPage touches the real page.
+// floating toolbar, key, Survey mode (chart-survey.js's session, log and mode, wired here), and the bridge to the
+// app. The builders and the drawing take their document and canvas context as arguments, so Node tests them with
+// stand-ins; only createPage touches the page, and Node runs it on a fake window.
 // Feed-supplied strings reach the page through canvas text and textContent only, never as HTML.
 (function (root, factory) {
   "use strict";
   if (typeof module === "object" && module.exports) {
     const d3 = require("./d3.min.js"), core = require("./chart-core.js");
     core.useD3(d3);
-    module.exports = factory(core, d3);
+    module.exports = factory(core, d3, require("./chart-survey.js"));
   } else {
-    const api = factory(root.ChartCore, root.d3);
+    const api = factory(root.ChartCore, root.d3, root.ChartSurvey);
     root.ChartDraw = api;
-    root.Chart = Object.freeze({load: api.load, update: api.update});
+    root.Chart = api.chart; // what the apps call: load, update, edited, undo, redo
   }
-})(typeof globalThis !== "undefined" ? globalThis : this, function (core, d3) {
+})(typeof globalThis !== "undefined" ? globalThis : this, function (core, d3, survey) {
   "use strict";
 
   const {W, H, CELL, GW, GH, PORT, RX, RY, RINGS, ISOBATHS, CARTOUCHE, COMPASS, FONTS, INKS, font, mulberry, fbm, ringFrac} = core;
@@ -21,6 +22,8 @@
   const NOTE = "Click the name to open this feed in Ressac.";
 
   // ---------- data and preferences ----------
+  // reduceMotion is the system's setting as the app reads it (Reduce Motion on the Mac, Plasma's instant
+  // animations): the page follows it and never reports it back, so prefsMessage leaves it out.
   const VIEWS = ["harbour", "themes"], INK_NAMES = Object.keys(INKS);
   function normalisePrefs(raw) {
     const p = raw && typeof raw === "object" ? raw : {};
@@ -28,6 +31,7 @@
       view: VIEWS.includes(p.view) ? p.view : "harbour",
       ink: INK_NAMES.includes(p.ink) ? p.ink : "bleu",
       animate: typeof p.animate === "boolean" ? p.animate : true,
+      reduceMotion: p.reduceMotion === true,
     };
   }
   const prefsMessage = p => ({type: "prefs", view: p.view, ink: p.ink, animate: p.animate});
@@ -409,6 +413,25 @@
     });
   }
 
+  // Survey mode on the overlay: a faint survey grid on the neatline's 80-unit marks, and a dashed ring round the
+  // island selected in the log
+  const SURVEY_GRID = 80;
+  function drawSurveyLayer(ctx, scene, inkName, selectedId) {
+    const ink = INKS[inkName] || INKS.bleu;
+    ctx.save();
+    ctx.strokeStyle = ink.ink; ctx.lineWidth = .5; ctx.globalAlpha = .14; ctx.setLineDash([]);
+    ctx.beginPath();
+    for (let x = 34 + SURVEY_GRID; x < W - 34; x += SURVEY_GRID) { ctx.moveTo(x, 34); ctx.lineTo(x, H - 34); }
+    for (let y = 34 + SURVEY_GRID; y < H - 34; y += SURVEY_GRID) { ctx.moveTo(34, y); ctx.lineTo(W - 34, y); }
+    ctx.stroke();
+    const n = selectedId == null ? null : scene.nodes.find(m => m.id === selectedId);
+    if (n) {
+      ctx.globalAlpha = .9; ctx.lineWidth = 1.2; ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.ellipse(n.x, n.y, n.r + 8, (n.r + 8) * .85, 0, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   // ---------- the key's symbols, on 44 × 30 canvases ----------
   const KEY = [
     ["daily", "Large island", "a daily feed"],
@@ -454,6 +477,7 @@
   const INK_LABELS = {bleu: "Blue ink", nuit: "White on black"};
   const VIEW_LABELS = {harbour: "From the harbour", themes: "By theme"};
   const IDLE_MS = 2500, FRAME_MS = 33; // the toolbar fades after 2.5 s still; the overlay runs at about 30 frames a second
+  const DRAWER = 320; // the Cartographer's Log's width: the chart keeps clear of it (chart.css .drawer)
 
   function createPage(win) {
     const doc = win.document, post = bridge(win);
@@ -479,7 +503,10 @@
     const inkButtons = INK_NAMES.map(n => Object.assign(button(INK_LABELS[n] || n, () => setInk(n)), {value: n}));
     const animButton = button("Animation", toggleAnimation), keyButton = button("Key", () => showKey(keyPanel.hidden));
     keyButton.setAttribute("aria-controls", "chart-key");
-    bar.append(group("View", viewButtons), group("Ink", inkButtons), animButton, keyButton);
+    const surveyButton = button("✒ Survey", () => mode.toggle()), logButton = button("Log", () => mode.toggleLog());
+    surveyButton.hidden = true; logButton.hidden = true;
+    logButton.setAttribute("aria-controls", "chart-log");
+    bar.append(group("View", viewButtons), group("Ink", inkButtons), animButton, keyButton, surveyButton, logButton);
 
     const keyPanel = make(doc, "section", "key"), keyList = make(doc, "ul");
     keyPanel.id = "chart-key"; keyPanel.hidden = true; keyPanel.setAttribute("aria-labelledby", "chart-key-title");
@@ -493,11 +520,15 @@
       return c;
     });
     keyPanel.append(keyTitle, keyList);
-    doc.body.append(plate, bar, keyPanel);
+    const drawer = make(doc, "div", "drawer"), renameBox = make(doc, "div", "rename");
+    drawer.id = "chart-log"; drawer.hidden = true; renameBox.hidden = true;
+    plate.append(renameBox);
+    doc.body.append(plate, bar, keyPanel, drawer);
 
     // --- geometry: the 1920 × 1080 chart scaled to fit the window, letterboxed ---
     function fit() {
-      const w = win.innerWidth, h = win.innerHeight, dpr = Math.min(2, win.devicePixelRatio || 1);
+      const w = Math.max(1, win.innerWidth - (drawerOpen() ? Math.min(DRAWER, win.innerWidth - 1) : 0));
+      const h = win.innerHeight, dpr = Math.min(2, win.devicePixelRatio || 1);
       [base, over].forEach(c => { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); });
       const k = Math.min(w / W, h / H);
       view = {k, ox: (w - W * k) / 2, oy: (h - H * k) / 2, dpr};
@@ -536,6 +567,7 @@
       ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, over.width, over.height);
       chartTransform(ctx);
       gusts = drawOver(ctx, scene, prefs.ink, moving() ? {t, gusts} : null);
+      if (mode.active) drawSurveyLayer(ctx, scene, prefs.ink, selected);
     }
     function paintKey() {
       const dpr = Math.min(2, win.devicePixelRatio || 1);
@@ -552,8 +584,11 @@
       doc.documentElement.dataset.ink = prefs.ink;
     }
 
-    // --- animation: the user's choice, off by default under Reduce Motion unless switched on by hand ---
-    const moving = () => prefs.animate && (!reduced.matches || motionChosen);
+    // --- animation: the user's choice, off by default under Reduce Motion (the system's, or the app's pref) unless
+    // switched on by hand; body.still also stops the page's CSS transitions ---
+    const reducedNow = () => prefs.reduceMotion || reduced.matches;
+    const moving = () => prefs.animate && (!reducedNow() || motionChosen);
+    const applyMotion = () => doc.body.classList.toggle("still", !core.editMotion(prefs, reduced.matches));
     function frame(t) {
       if (t - lastFrame >= FRAME_MS) { paintOver(t); lastFrame = t; }
       raf = moving() ? win.requestAnimationFrame(frame) : 0;
@@ -563,7 +598,7 @@
       if (moving() && !raf) raf = win.requestAnimationFrame(frame);
       if (!moving()) { if (raf) win.cancelAnimationFrame(raf); raf = 0; gusts = []; paintOver(0); }
     }
-    if (reduced.addEventListener) reduced.addEventListener("change", () => { motionChosen = false; syncMotion(); });
+    if (reduced.addEventListener) reduced.addEventListener("change", () => { motionChosen = false; applyMotion(); syncMotion(); });
 
     // --- controls ---
     function savePrefs() { if (post) post(prefsMessage(prefs)); }
@@ -584,7 +619,7 @@
     }
     function toggleAnimation() {
       const on = !moving();
-      prefs = {...prefs, animate: on}; motionChosen = on && reduced.matches; savePrefs();
+      prefs = {...prefs, animate: on}; motionChosen = on && reducedNow(); savePrefs();
       syncMotion();
     }
     function showKey(open) { keyPanel.hidden = !open; pressed(); if (open) paintKey(); }
@@ -602,7 +637,7 @@
     // --- hover and popover ---
     plate.addEventListener("pointermove", e => {
       const n = islandAt(e);
-      plate.style.cursor = n ? "pointer" : "";
+      plate.style.cursor = n ? "pointer" : mode.active && nameTarget(e) ? "text" : ""; // else the quill (chart.css)
       if (!n || !pop.hidden) { tip.hidden = true; return; }
       tip.replaceChildren(...tooltipContent(doc, n));
       tip.hidden = false;
@@ -628,20 +663,189 @@
       if (focus) pop.querySelector(".pop-close").focus({preventScroll: true});
     }
     plate.addEventListener("click", e => {
-      if (pop.contains(e.target)) return;
-      const n = islandAt(e);
-      if (n) openPop(n, e.clientX, e.clientY, true);
-      else { closePop(); showKey(false); }
+      if (pop.contains(e.target) || renameBox.contains(e.target)) return;
+      const target = mode.active ? surveyTarget(e) : null, answer = mode.click(target);
+      if (answer === "popover") { // the chart as it always was
+        const n = islandAt(e);
+        if (n) openPop(n, e.clientX, e.clientY, true);
+        else { closePop(); showKey(false); }
+        return;
+      }
+      closePop();
+      if (answer === "rename") openRename(target);
+      else if (target && target.kind === "island") select(target.id);
     });
     doc.addEventListener("keydown", e => {
       if (e.key !== "Escape") return;
-      if (!pop.hidden) closePop();
+      if (rename) closeRename(); // the form's own Esc stops there; this is Esc from elsewhere on the page
+      else if (!pop.hidden) closePop();
       else if (!keyPanel.hidden) { showKey(false); keyButton.focus(); }
     });
 
+    // --- Survey mode: one session, one log memory and one mode for this window ---
+    // The mode is the state (chart-survey.js, tested without a DOM); drawSurvey() draws it: the toolbar buttons,
+    // body.survey (grid and quill), the drawer with the log (rebuilt on every change, its open form, typed text,
+    // caret and focus carried by `memory`), and the rename form over a label.
+    let selected = null, message = null, rename = null, drawnOpen = false; // rename = {kind, id, p, form, sent}
+    const memory = survey.logMemory();
+    const session = survey.createSession({
+      post: m => { if (post) post(m); },
+      onChange: () => drawSurvey(),
+      onTimeout: outcome => settle(outcome),
+      setTimeout: (fn, ms) => win.setTimeout(fn, ms),
+    });
+    const available = () => !!post && !!(data && data.ledger);
+    const mode = survey.createMode({session, available, onChange: () => drawSurvey()});
+    const drawerOpen = () => mode.active && mode.logOpen;
+    const ledger = () => (data && data.ledger) || {seas: [], lands: []};
+    const index = () => core.ledgerIndex(data);
+    const seaRef = id => { const t = index().seaById(id); return t ? {id: t.id, key: t.key, sea: t.sea} : null; };
+
+    function drawSurvey() {
+      if (mode.active && !available()) { mode.toggle(); return; } // a document without a ledger: Survey ends (and redraws)
+      surveyButton.hidden = !available();
+      surveyButton.setAttribute("aria-pressed", String(mode.active));
+      logButton.hidden = !mode.active;
+      logButton.setAttribute("aria-expanded", String(drawerOpen()));
+      doc.body.classList.toggle("survey", mode.active);
+      doc.body.classList.toggle("log-open", drawerOpen());
+      if (!mode.active) memory.open = null; // a half-typed log form does not outlive Survey mode
+      if (rename && !mode.renaming) closeRename();
+      if (rename) rename.form.input.readOnly = session.pending();
+      if (drawerOpen() && data) {
+        const state = {selected, busy: session.pending(), message, titles: session.titles()};
+        drawer.replaceChildren(...survey.logContent(doc, data, state, logHandlers, memory));
+        memory.restore();
+      } else drawer.replaceChildren();
+      drawer.hidden = !drawerOpen();
+      if (drawerOpen() !== drawnOpen) { drawnOpen = drawerOpen(); relayout(); }
+      else paintOver(win.performance.now());
+    }
+
+    // an edit from the log or a rename; nothing is sent outside Survey mode
+    function send(edit) {
+      if (!mode.active || !edit) return false;
+      message = null;
+      return session.send(edit);
+    }
+    // an edit's outcome (Chart.edited, or no reply): the log's form, the rename form and the status line follow it
+    function settle(outcome) {
+      memory.result(outcome);
+      message = outcome.message ?? null;
+      if (rename && rename.sent) {
+        rename.sent = false;
+        if (outcome.kind === "name" || outcome.kind === "invalid") rename.form.setError(outcome.message); // stays open
+        else closeRename();
+      }
+      drawSurvey();
+    }
+    function select(id) {
+      selected = id;
+      if (!mode.logOpen) mode.toggleLog(); else drawSurvey();
+    }
+    const logHandlers = {
+      select,
+      setSea: (feed, to) => {
+        const f = data.feeds.find(x => x.id === feed), toRef = to == null ? null : seaRef(to);
+        if (f && (to == null || toRef)) send(core.edits.setSea(feed, index().seaRef(f.theme), toRef));
+      },
+      setLand: (feed, land) => { const l = index().landRef(land); if (l) send(core.edits.join(feed, l)); },
+      leave: feed => { const l = index().landOf(feed); if (l) send(core.edits.leave(feed, {id: l.id, name: l.name})); },
+      newLand: (name, ids) => send(core.edits.found(name, ids)),
+      renameLand: (land, name) => { const l = index().landRef(land); if (l) send(core.edits.renameLand(l, name)); },
+      deleteLand: land => { const l = index().landRef(land); if (l) send(core.edits.deleteLand(l)); },
+      makeContinent: (sea, name) => { const t = seaRef(sea); if (t) send(core.edits.makeContinent(t, name)); },
+      renameSea: (sea, name) => { const t = seaRef(sea); if (t) send(core.edits.renameSea(t, name)); },
+      moveSea: (sea, delta) => {
+        const ids = (ledger().seas || []).map(t => t.id), i = ids.indexOf(sea), j = Math.max(0, Math.min(ids.length - 1, i + delta));
+        if (i < 0 || j === i) return;
+        ids.splice(i, 1); ids.splice(j, 0, sea);
+        send(core.edits.orderSeas(ids));
+      },
+      newSea: name => send(core.edits.newSea(name)),
+      deleteSea: sea => { const t = seaRef(sea); if (t) send(core.edits.deleteSea(t)); },
+      undo: () => mode.undo(),
+      redo: () => mode.redo(),
+    };
+
+    // what a click in Survey mode is aimed at: a land's, continent's or sea's name first, then an island
+    function nameTarget(e) {
+      if (!scene) return null;
+      const [x, y] = toChart(e), p = core.nameAt(scene.placements, x, y);
+      return p && entryOf(p) ? p : null;
+    }
+    function surveyTarget(e) {
+      const p = nameTarget(e), n = p ? null : islandAt(e);
+      return p || (n ? {kind: "island", id: n.id} : null);
+    }
+    // the ledger entry a name placement shows: a sea by key, a land or continent by its (unique) name
+    function entryOf(p) {
+      if (p.kind === "sea") { const t = (ledger().seas || []).find(s => s.key === p.key); return t ? {kind: "sea", id: t.id} : null; }
+      const l = (ledger().lands || []).find(x => x.name === p.text && !!x.continent === (p.kind === "continent"));
+      return l ? {kind: "land", id: l.id} : null;
+    }
+    const current = r => (r.kind === "sea" ? index().seaById(r.id) : index().landById(r.id));
+    const currentName = (r, entry) => (r.kind === "sea" ? entry.sea : entry.name);
+
+    // renaming in place: a name form over the label; Enter renames, Esc or an unchanged name cancels
+    function openRename(p) {
+      const target = entryOf(p), entry = target && current(target);
+      if (!entry) { mode.endRename(); return; }
+      if (rename) closeRename(false);
+      const form = survey.nameForm(doc, {title: "Rename", value: currentName(target, entry), action: "Rename"}, {
+        cancel: () => closeRename(),
+        submit: raw => submitRename(raw),
+      });
+      rename = {...target, p, form, sent: false};
+      renameBox.replaceChildren(...form.nodes);
+      renameBox.hidden = false;
+      placeRename();
+      form.input.focus({preventScroll: true});
+      if (typeof form.input.select === "function") form.input.select();
+    }
+    function submitRename(raw) {
+      if (!rename || rename.sent || session.pending()) return;
+      const entry = current(rename);
+      if (!entry) { closeRename(); return; }
+      const checked = core.checkName(raw, rename.kind, ledger(), entry.id);
+      if (checked.error) { rename.form.setError(checked.error); return; }
+      if (checked.name === currentName(rename, entry)) { closeRename(); return; }
+      const r = rename, edit = r.kind === "sea"
+        ? core.edits.renameSea({id: entry.id, key: entry.key, sea: entry.sea}, checked.name)
+        : core.edits.renameLand({id: entry.id, name: entry.name}, checked.name);
+      r.form.setError(null);
+      r.sent = send(edit);
+    }
+    function closeRename(endMode = true) {
+      if (!rename) return;
+      rename = null;
+      renameBox.hidden = true;
+      renameBox.replaceChildren();
+      if (endMode && mode.renaming) mode.endRename();
+    }
+    // over the label (screen px), inside the chart's room; after a new survey, over the label's new place, and gone
+    // with its land or sea
+    function placeRename() {
+      if (!rename) return;
+      if (!current(rename)) { closeRename(); return; }
+      const entry = current(rename);
+      const p = (scene ? scene.placements : []).find(q => (rename.kind === "sea" ? q.kind === "sea" && q.key === entry.key
+        : (q.kind === "territory" || q.kind === "continent") && q.text === entry.name)) || rename.p;
+      rename.p = p;
+      const room = win.innerWidth - (drawerOpen() ? DRAWER : 0), w = renameBox.offsetWidth || 0, h = renameBox.offsetHeight || 0;
+      const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+      renameBox.style.left = `${clamp(view.ox + p.x * view.k, w / 2 + 8, room - w / 2 - 8)}px`;
+      renameBox.style.top = `${clamp(view.oy + p.y * view.k, h / 2 + 8, win.innerHeight - h / 2 - 8)}px`;
+    }
+    // ⌘Z in a name field belongs to the field
+    const typing = () => {
+      const a = doc.activeElement;
+      return !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA") && (drawer.contains(a) || renameBox.contains(a));
+    };
+
     // --- resizing, and moving to a screen of another density ---
     let resizeTimer = 0;
-    function relayout() { fit(); paintBase(); paintOver(win.performance.now()); }
+    function relayout() { fit(); paintBase(); paintOver(win.performance.now()); placeRename(); }
     win.addEventListener("resize", () => { win.clearTimeout(resizeTimer); resizeTimer = win.setTimeout(relayout, 120); });
     (function watchDensity() {
       if (!win.matchMedia) return;
@@ -661,30 +865,45 @@
       paintBase(); paintOver(win.performance.now());
       const n = popFor && scene.nodes.find(m => m.id === popFor.id);
       if (n) openPop(n, popFor.x, popFor.y, false); else closePop();
+      placeRename();
     }
     function show(next, nextPrefs) {
       queue = queue.then(() => {
         data = next;
-        if (nextPrefs) { prefs = nextPrefs; motionChosen = false; applyInk(); pressed(); }
+        if (nextPrefs) { prefs = nextPrefs; motionChosen = false; applyInk(); applyMotion(); pressed(); }
+        if (selected != null && !data.feeds.some(f => f.id === selected)) selected = null;
         rebuild(); syncMotion();
+        if (!nextPrefs) mode.updated(); // a new survey ends an edit that was answered (the one pending rule)
+        drawSurvey();
       }).catch(err => { if (win.console) win.console.error(err); });
     }
 
-    fit(); applyInk(); pressed(); wake();
+    fit(); applyInk(); applyMotion(); pressed(); wake();
     return {
       // parsing is synchronous so the app sees a bad document as an error; nothing is returned (WebKit
       // cannot hand a promise back to evaluateJavaScript)
       load(json, rawPrefs) { show(parseData(json), normalisePrefs(rawPrefs)); },
       update(json) { show(parseData(json), null); },
+      // the app's answer to {type: "edit"}: {"seq", "ok", "done" | "refused", "error"} as text
+      edited(text) { const outcome = session.edited(text); if (outcome) settle(outcome); },
+      // the apps' ⌘Z / ⇧⌘Z (Ctrl+Z / Ctrl+Shift+Z): only in Survey mode, never while a name is being typed
+      undo: () => (typing() ? false : mode.undo()),
+      redo: () => (typing() ? false : mode.redo()),
     };
   }
 
   let page = null;
   const thePage = () => (page ||= createPage(globalThis));
+  const chart = Object.freeze({
+    load(json, prefs) { thePage().load(json, prefs); },
+    update(json) { thePage().update(json); },
+    edited(text) { thePage().edited(text); },
+    undo() { return thePage().undo(); },
+    redo() { return thePage().redo(); },
+  });
 
   return Object.freeze({
     normalisePrefs, prefsMessage, parseData, bridge, formatSurvey, tooltipContent, tooltipPosition, popoverContent, buildScene, drawChart,
-    load(json, prefs) { thePage().load(json, prefs); },
-    update(json) { thePage().update(json); },
+    drawSurveyLayer, createPage, chart, load: chart.load, update: chart.update,
   });
 });

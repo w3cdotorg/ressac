@@ -738,3 +738,129 @@ test("focus_comes_back_to_the_same_control_after_a_rebuild", () => {
   nodes = survey.logContent(doc, data, {selected: 5}, on, memory);
   assert.equal(memory.restore(), one(nodes, "log-island"));
 });
+
+// ---------- Task 10: Survey mode, DOM-free (createPage draws from it) ----------
+// a mode over a stub session; `available` may be a value or a function read at each toggle
+function stubMode(available = true) {
+  const s = stubSession();
+  let changes = 0;
+  const mode = survey.createMode({session: s.session, available, onChange: () => { changes += 1; }});
+  return {...s, mode, modeChanges: () => changes};
+}
+const SEA_LABEL = {kind: "sea", key: "kites", text: "SEA OF KITES", box: [0, 0, 10, 10]};
+const LAND_LABEL = {kind: "territory", text: "APPLE PRESS", box: [0, 0, 10, 10]};
+const ISLAND = {kind: "island", id: 12};
+// one edit done and surveyed: the history has one record to undo
+function withOneEdit(s) {
+  s.session.send(JOIN);
+  s.session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS")));
+  s.session.updated();
+  return s;
+}
+
+test("survey_toggle_opens_and_closes_the_log", () => {
+  const {mode, modeChanges} = stubMode();
+  assert.deepEqual([mode.active, mode.logOpen, mode.renaming], [false, false, false], "Survey mode always starts off");
+  assert.equal(mode.toggleLog(), false, "no log outside Survey mode");
+  assert.equal(mode.logOpen, false);
+  mode.toggle();
+  assert.deepEqual([mode.active, mode.logOpen], [true, true], "turning on opens the log");
+  assert.equal(modeChanges(), 1, "onChange after the toggle");
+  assert.equal(mode.toggleLog(), true);
+  assert.deepEqual([mode.active, mode.logOpen], [true, false], "the Log button closes it");
+  mode.toggleLog();
+  assert.deepEqual([mode.active, mode.logOpen], [true, true], "and opens it again");
+  assert.equal(mode.rename(SEA_LABEL), true);
+  mode.toggle();
+  assert.deepEqual([mode.active, mode.logOpen, mode.renaming], [false, false, false], "turning off closes the log and the rename");
+  assert.equal(modeChanges(), 5);
+
+  for (const unavailable of [false, () => false]) {
+    const off = stubMode(unavailable).mode;
+    off.toggle();
+    assert.deepEqual([off.active, off.logOpen], [false, false], "no bridge or no ledger: Survey stays off");
+  }
+  let ready = false;
+  const later = stubMode(() => ready).mode;
+  later.toggle();
+  assert.equal(later.active, false);
+  ready = true; // the first document with a ledger arrived
+  later.toggle();
+  assert.equal(later.active, true, "available is read at each toggle");
+});
+
+test("clicks_select_or_rename_only_in_survey", () => {
+  const {mode} = stubMode();
+  for (const target of [ISLAND, SEA_LABEL, LAND_LABEL, {...LAND_LABEL, kind: "continent"}, null]) {
+    assert.equal(mode.click(target), "popover", `inactive: ${target && target.kind}`);
+  }
+  assert.equal(mode.rename(SEA_LABEL), false, "no rename outside Survey mode");
+  assert.equal(mode.renaming, false);
+
+  mode.toggle();
+  assert.equal(mode.click(ISLAND), "select");
+  assert.equal(mode.renaming, false);
+  assert.equal(mode.click(SEA_LABEL), "rename");
+  assert.equal(mode.renaming, true, "a name click opens its rename");
+  mode.endRename();
+  assert.equal(mode.renaming, false);
+  for (const kind of ["territory", "continent"]) {
+    assert.equal(mode.click({...LAND_LABEL, kind}), "rename", kind);
+    mode.endRename();
+  }
+  for (const target of [ISLAND, null, {kind: "feed", text: "The Pale Signal"}, {kind: "harbour", text: "today"}]) {
+    assert.notEqual(mode.click(target), "popover", "never the popover in Survey mode");
+    assert.equal(mode.renaming, false, "only lands, continents and seas are renamed");
+  }
+});
+
+test("undo_and_redo_do_nothing_outside_survey", () => {
+  const s = withOneEdit(stubMode()), {mode, posted} = s;
+  const sent = posted.length;
+  assert.equal(mode.undo(), false, "inactive: no undo");
+  assert.equal(mode.redo(), false);
+  assert.equal(posted.length, sent, "nothing posted");
+  assert.equal(s.session.pending(), false);
+
+  mode.toggle();
+  mode.rename(LAND_LABEL);
+  assert.equal(mode.undo(), false, "not while a name is being typed");
+  assert.equal(mode.redo(), false);
+  assert.equal(posted.length, sent);
+
+  mode.endRename();
+  assert.equal(mode.undo(), true);
+  assert.deepEqual(posted.at(-1), {type: "edit", seq: 2, edit: JSON.stringify(patch("Join APPLE PRESS"))}, "the patch is posted");
+  s.session.edited(ok(2, "Join APPLE PRESS", patch("Join APPLE PRESS", 2)));
+  mode.updated();
+  mode.toggle();
+  assert.equal(mode.redo(), false, "inactive: no redo either, with a step to redo");
+  assert.equal(posted.length, sent + 1);
+  mode.toggle();
+  mode.rename(SEA_LABEL);
+  assert.equal(mode.redo(), false, "nor while renaming");
+  mode.endRename();
+  assert.equal(mode.redo(), true, "redo through the mode");
+  assert.deepEqual(posted.at(-1), {type: "edit", seq: 3, edit: JSON.stringify(patch("Join APPLE PRESS", 2))});
+  s.session.edited(ok(3, "Join APPLE PRESS", patch("Join APPLE PRESS")));
+  mode.updated();
+  mode.toggle();
+  assert.equal(mode.undo(), false, "off again: no undo");
+  assert.equal(posted.length, sent + 2);
+});
+
+test("update_ends_a_pending_edit_through_the_mode", () => {
+  const {mode, session} = stubMode();
+  mode.toggle();
+  session.send(JOIN);
+  session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS")));
+  assert.equal(session.pending(), true, "an ok result keeps the edit pending");
+  mode.updated();
+  assert.equal(session.pending(), false, "the next Chart.update ends it, through the mode");
+  // and it forwards even with Survey mode off (an edit sent just before turning it off)
+  session.send(JOIN);
+  session.edited(ok(2, "Join APPLE PRESS", patch("Join APPLE PRESS")));
+  mode.toggle();
+  mode.updated();
+  assert.equal(session.pending(), false);
+});

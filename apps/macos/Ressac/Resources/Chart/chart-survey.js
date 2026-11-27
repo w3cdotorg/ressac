@@ -507,5 +507,58 @@
     return [aside];
   }
 
-  return Object.freeze({createSession, logContent, logMemory, nameForm, seaDropIndex, REPLY_MS, NO_REPLY});
+  // ---------- Survey mode ----------
+  // The DOM-free state the page draws from. Off at first, and whenever the page loads. toggle() turns it on only when
+  // `available` (a value, or a function read at each toggle: a bridge and a document with a ledger); turning on
+  // opens the log, turning off closes the log and any rename (off is always allowed). toggleLog() works only in
+  // Survey mode. click(target), where target is {kind: "island", id}, a label placement or null, answers "popover"
+  // outside Survey mode (the chart as it always was); in it, a territory, continent or sea name opens its rename
+  // ("rename") and anything else is "select", never the popover. undo() and redo() send nothing outside Survey mode
+  // or while a name is being typed in place (the anti-goal: nothing changes unless Survey mode is on).
+  // onChange() follows every change of state.
+  const RENAMABLE = new Set(["territory", "continent", "sea"]);
+  function createMode({session, available, onChange} = {}) {
+    let active = false, logOpen = false, renaming = false;
+    const can = () => !!(typeof available === "function" ? available() : available);
+    const changed = () => { if (onChange) onChange(); };
+    const mode = {
+      get active() { return active; },
+      get logOpen() { return logOpen; },
+      get renaming() { return renaming; },
+      toggle() {
+        if (active) { active = false; logOpen = false; renaming = false; }
+        else if (can()) { active = true; logOpen = true; }
+        else return false;
+        changed();
+        return true;
+      },
+      toggleLog() {
+        if (!active) return false;
+        logOpen = !logOpen;
+        changed();
+        return true;
+      },
+      rename(placement) {
+        if (!active || !placement || !RENAMABLE.has(placement.kind)) return false;
+        renaming = true;
+        changed();
+        return true;
+      },
+      endRename() {
+        if (!renaming) return;
+        renaming = false;
+        changed();
+      },
+      click(target) {
+        if (!active) return "popover";
+        return mode.rename(target) ? "rename" : "select";
+      },
+      undo: () => (active && !renaming ? session.undo() : false),
+      redo: () => (active && !renaming ? session.redo() : false),
+      updated() { session.updated(); },
+    };
+    return Object.freeze(mode);
+  }
+
+  return Object.freeze({createSession, createMode, logContent, logMemory, nameForm, seaDropIndex, REPLY_MS, NO_REPLY});
 });

@@ -20,6 +20,16 @@ function fakeDocument() {
       dispatch(type, event) { (el.listeners[type] || []).forEach(fn => fn(event)); }, // any event type
       getBoundingClientRect() { return el.rect; },
       focus() { doc.activeElement = el; },
+      contains(node) { return node === el || el.childNodes.some(c => c.nodeType === 1 && c.contains(node)); },
+      // ".class" only: the first element below this one carrying that class
+      querySelector(sel) { return elements(el.childNodes).find(e => e.className.split(" ").includes(sel.replace(/^\./, ""))) || null; },
+      classList: {
+        add: (...c) => { el.className = [...new Set([...el.className.split(" ").filter(Boolean), ...c])].join(" "); },
+        remove: (...c) => { el.className = el.className.split(" ").filter(x => x && !c.includes(x)).join(" "); },
+        contains: c => el.className.split(" ").includes(c),
+        toggle: (c, on) => { const want = on ?? !el.classList.contains(c); want ? el.classList.add(c) : el.classList.remove(c); return want; },
+      },
+      dataset: {},
       setSelectionRange(start, end) { el.selectionStart = start; el.selectionEnd = end; },
       set textContent(v) { el.childNodes = [text(v)]; },
       get textContent() { return el.childNodes.map(n => (n.nodeType === 3 ? n.data : n.textContent)).join(""); },
@@ -31,7 +41,39 @@ function fakeDocument() {
   };
   Object.assign(doc, {createElement: element, createTextNode: text});
   doc.body = element("body");
+  doc.documentElement = element("html");
+  doc.documentElement.style.setProperty = (k, v) => { doc.documentElement.style[k] = v; };
+  doc.listeners = {};
+  doc.addEventListener = (type, fn) => { (doc.listeners[type] ||= []).push(fn); };
+  doc.dispatch = (type, event) => { (doc.listeners[type] || []).forEach(fn => fn(event)); };
   return doc;
+}
+
+// A window for createPage: the fake document (canvases draw into recording contexts), a size, timers and
+// animation frames that run only when the test says so, matchMedia answering `reduced` for Reduce Motion, and
+// the app's message handler when `bridge` is true (its messages land in win.posted); the page's logged errors land in
+// win.errors.
+function fakeWindow({width = 1920, height = 1080, bridge = true, reduced = false} = {}) {
+  const document = fakeDocument(), make = document.createElement;
+  document.createElement = tag => {
+    const el = make(tag);
+    if (el.tagName === "CANVAS") { const rec = recordingContext(); el.getContext = () => rec.ctx; el.width = 0; el.height = 0; }
+    return el;
+  };
+  const timers = [], frames = [], posted = [], errors = [], listeners = {};
+  const win = {
+    document, innerWidth: width, innerHeight: height, devicePixelRatio: 1, posted, timers, frames, errors,
+    console: {error: e => errors.push(e)}, // the page logs what a document throws: tests assert none
+    performance: {now: () => 0},
+    matchMedia: query => ({matches: /reduced-motion/.test(query) ? reduced : false, addEventListener() {}}),
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; },
+    cancelAnimationFrame() {},
+    setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
+    clearTimeout() {},
+    addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
+  };
+  if (bridge) win.webkit = {messageHandlers: {ressac: {postMessage: m => posted.push(m)}}};
+  return win;
 }
 const walk = (nodes, out = []) => { nodes.forEach(n => { out.push(n); if (n.childNodes) walk(n.childNodes, out); }); return out; };
 const elements = nodes => walk(nodes).filter(n => n.nodeType === 1);
@@ -55,4 +97,4 @@ function recordingContext() {
   return {ctx, log, texts: () => log.filter(([op]) => op === "fillText").map(([, t]) => t)};
 }
 
-module.exports = {measure, fakeDocument, walk, elements, byClass, recordingContext};
+module.exports = {measure, fakeDocument, fakeWindow, walk, elements, byClass, recordingContext};
