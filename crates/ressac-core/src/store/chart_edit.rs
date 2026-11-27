@@ -413,9 +413,14 @@ fn check_befores(conn: &Connection, changes: &[Change]) -> Result<()> {
     Ok(())
 }
 
-/// Applies `changes` on `conn` (the caller's transaction): every `before` is checked first,
-/// then the rows are written, then the chart rules are checked on what was touched. Any
-/// refusal leaves the caller to roll back.
+/// Applies `changes` on `conn` (the caller's transaction). Every `before` is checked first,
+/// then the rows are written, and any refusal leaves the caller to roll back.
+///
+/// A patch is checked only against its `before`s and the schema, plus one structural guard
+/// the chart relies on (a continent has no members). The name rules and the one-land-per-feed
+/// and one-continent-per-sea rules belong to the op compilers, which build edits from typed
+/// input. A patch is never refused for restoring what was there (spec rule 3), even a name
+/// or a placement that an import allowed and the editor would not.
 pub(super) fn apply_patch(conn: &Connection, changes: &[Change]) -> Result<()> {
     check_befores(conn, changes)?;
 
@@ -438,6 +443,57 @@ pub(super) fn apply_patch(conn: &Connection, changes: &[Change]) -> Result<()> {
             params![row.id, row.key, row.name, row.sea, row.position],
         )
         .map_err(|e| refuse_constraint(e, Error::ChartChanged))?;
+    }
+    // Feeds' seas.
+    for change in changes {
+        let Change::FeedSeas { feeds, after, .. } = change else {
+            continue;
+        };
+        if let Some(theme) = after {
+            ensure(exists(
+                conn,
+                "SELECT count(*) FROM theme WHERE id = ?1",
+                *theme,
+            )?)?;
+        }
+        for feed in feeds {
+            conn.execute(
+                "UPDATE feed SET theme_id = ?1 WHERE id = ?2",
+                params![after, feed],
+            )?;
+        }
+    }
+    // Member removals.
+    for change in changes {
+        if let Change::Member {
+            feed,
+            land,
+            after: None,
+            ..
+        } = change
+        {
+            conn.execute(
+                "DELETE FROM territory_feed WHERE territory_id = ?1 AND feed_id = ?2",
+                params![land, feed],
+            )?;
+        }
+    }
+    // Land deletions, before the upserts so a new land can take a deleted one's exact name.
+    // Never through the schema's cascade: every member must have been removed above.
+    for change in changes {
+        let Change::Land {
+            before: Some(row),
+            after: None,
+        } = change
+        else {
+            continue;
+        };
+        ensure(!exists(
+            conn,
+            "SELECT count(*) FROM territory_feed WHERE territory_id = ?1",
+            row.id,
+        )?)?;
+        conn.execute("DELETE FROM territory WHERE id = ?1", [row.id])?;
     }
     // Land upserts.
     for change in changes {
@@ -468,40 +524,7 @@ pub(super) fn apply_patch(conn: &Connection, changes: &[Change]) -> Result<()> {
         conn.execute(sql, params![row.id, row.name, kind, row.continent])
             .map_err(|e| refuse_constraint(e, Error::LandNameTaken))?;
     }
-    // Feeds' seas.
-    for change in changes {
-        let Change::FeedSeas { feeds, after, .. } = change else {
-            continue;
-        };
-        if let Some(theme) = after {
-            ensure(exists(
-                conn,
-                "SELECT count(*) FROM theme WHERE id = ?1",
-                *theme,
-            )?)?;
-        }
-        for feed in feeds {
-            conn.execute(
-                "UPDATE feed SET theme_id = ?1 WHERE id = ?2",
-                params![after, feed],
-            )?;
-        }
-    }
-    // Member removals, then inserts and moves.
-    for change in changes {
-        if let Change::Member {
-            feed,
-            land,
-            after: None,
-            ..
-        } = change
-        {
-            conn.execute(
-                "DELETE FROM territory_feed WHERE territory_id = ?1 AND feed_id = ?2",
-                params![land, feed],
-            )?;
-        }
-    }
+    // Member inserts and moves: only a plain territory takes members.
     for change in changes {
         let Change::Member {
             feed,
@@ -512,7 +535,6 @@ pub(super) fn apply_patch(conn: &Connection, changes: &[Change]) -> Result<()> {
         else {
             continue;
         };
-        // Only a plain territory takes members.
         ensure(matches!(read_land(conn, *land)?, Some((_, true))))?;
         if before.is_none() {
             conn.execute(
@@ -526,22 +548,6 @@ pub(super) fn apply_patch(conn: &Connection, changes: &[Change]) -> Result<()> {
                 params![land, feed, position],
             )?;
         }
-    }
-    // Land deletions: never through the schema's cascade, so every member must be listed.
-    for change in changes {
-        let Change::Land {
-            before: Some(row),
-            after: None,
-        } = change
-        else {
-            continue;
-        };
-        ensure(!exists(
-            conn,
-            "SELECT count(*) FROM territory_feed WHERE territory_id = ?1",
-            row.id,
-        )?)?;
-        conn.execute("DELETE FROM territory WHERE id = ?1", [row.id])?;
     }
     // Sea deletions: no feed (buried ones included) and no continent may point at it.
     for change in changes {
@@ -564,76 +570,52 @@ pub(super) fn apply_patch(conn: &Connection, changes: &[Change]) -> Result<()> {
         )?)?;
         conn.execute("DELETE FROM theme WHERE id = ?1", [row.id])?;
     }
-
-    check_touched(conn, changes)
-}
-
-/// The chart rules, on the rows `changes` touched.
-fn check_touched(conn: &Connection, changes: &[Change]) -> Result<()> {
+    // The structural guard: a land written as a continent keeps no member rows.
     for change in changes {
-        match change {
-            Change::Land {
-                before,
-                after: Some(row),
-            } => {
-                if before.as_ref().is_none_or(|b| b.name != row.name) {
-                    let others =
-                        column_except(conn, "SELECT name FROM territory WHERE id != ?1", row.id)?;
-                    let name =
-                        checked_name(&row.name, NameKind::Land, others.iter().map(String::as_str))?;
-                    if name != row.name {
-                        return Err(malformed(&format!(
-                            "land name \"{}\" is not trimmed",
-                            row.name
-                        )));
-                    }
-                }
-                if let Some(theme) = row.continent {
-                    ensure(!exists(
-                        conn,
-                        "SELECT count(*) > 1 FROM territory WHERE theme_id = ?1",
-                        theme,
-                    )?)?;
-                }
-            }
-            Change::Sea {
-                before,
-                after: Some(row),
-            } => {
-                check_theme_key(&row.key)?;
-                if before.as_ref().is_none_or(|b| b.sea != row.sea) {
-                    let others = column_except(
-                        conn,
-                        "SELECT name FROM theme WHERE id != ?1 UNION ALL \
-                         SELECT sea_name FROM theme WHERE id != ?1",
-                        row.id,
-                    )?;
-                    let sea =
-                        checked_name(&row.sea, NameKind::Sea, others.iter().map(String::as_str))?;
-                    if sea != row.sea {
-                        return Err(malformed(&format!(
-                            "sea name \"{}\" is not trimmed",
-                            row.sea
-                        )));
-                    }
-                }
-            }
-            Change::Member {
-                feed,
-                after: Some(_),
-                ..
-            } => {
-                ensure(!exists(
-                    conn,
-                    "SELECT count(*) > 1 FROM territory_feed tf JOIN territory t \
-                     ON t.id = tf.territory_id WHERE tf.feed_id = ?1 AND t.kind = 'territory'",
-                    *feed,
-                )?)?;
-            }
-            _ => {}
+        if let Change::Land {
+            after:
+                Some(LandRow {
+                    id,
+                    continent: Some(_),
+                    ..
+                }),
+            ..
+        } = change
+        {
+            ensure(!exists(
+                conn,
+                "SELECT count(*) FROM territory_feed WHERE territory_id = ?1",
+                *id,
+            )?)?;
         }
     }
     Ok(())
+}
+
+/// The name typed for a land (a territory or a continent): cleaned, and refused when another
+/// land has it without case. `me` is the land being renamed (`None` for a new one). For the
+/// op compilers, which build edits from typed input.
+#[allow(dead_code, reason = "the land ops (Task 4) check typed names here")]
+pub(super) fn land_name(conn: &Connection, raw: &str, me: Option<i64>) -> Result<String> {
+    let others = column_except(
+        conn,
+        "SELECT name FROM territory WHERE id != ?1",
+        me.unwrap_or(-1),
+    )?;
+    checked_name(raw, NameKind::Land, others.iter().map(String::as_str))
+}
+
+/// The sea name typed for a theme: cleaned, and refused when another theme has it as its
+/// sea name or its name, without case. `me` is the sea being renamed (`None` for a new one).
+#[allow(dead_code, reason = "the sea ops (Task 3) check typed names here")]
+pub(super) fn sea_name(conn: &Connection, raw: &str, me: Option<i64>) -> Result<String> {
+    let others = column_except(
+        conn,
+        "SELECT name FROM theme WHERE id != ?1 UNION ALL \
+         SELECT sea_name FROM theme WHERE id != ?1",
+        me.unwrap_or(-1),
+    )?;
+    checked_name(raw, NameKind::Sea, others.iter().map(String::as_str))
 }
 
 /// The first column of `sql`, run with `id`.
@@ -816,16 +798,27 @@ mod tests {
         }
     }
 
+    /// Each feed's theme id, by feed id.
+    fn feed_themes(s: &Store) -> Vec<(FeedId, Option<i64>)> {
+        s.conn()
+            .prepare("SELECT id, theme_id FROM feed ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
     /// Applies `changes` and asserts it is refused with `expected` and writes nothing.
     fn assert_refused(s: &Store, changes: Vec<Change>, expected: &str) {
         let before = s.export_chart().unwrap();
-        let members = count(s, "territory_feed");
-        let lands = count(s, "territory");
+        let rows = snapshot_rows(s);
+        let themed = feed_themes(s);
         let err = s.apply_chart_edit(&patch(changes)).unwrap_err();
         assert_eq!(err.to_string(), expected, "{err:?}");
         assert_eq!(s.export_chart().unwrap(), before);
-        assert_eq!(count(s, "territory_feed"), members);
-        assert_eq!(count(s, "territory"), lands);
+        assert_eq!(snapshot_rows(s), rows);
+        assert_eq!(feed_themes(s), themed);
     }
 
     const CHANGED: &str = "The chart changed; nothing was done.";
@@ -1069,73 +1062,101 @@ mod tests {
 
     #[test]
     fn names_clash_without_case() {
+        // The name rules run where an edit is built from typed input (the op compilers),
+        // through `land_name` and `sea_name`; a patch only meets the schema's exact UNIQUE.
         let s = chart_store();
+        let c = s.conn();
+        let land_taken = "A land with that name already exists.";
+        let sea_taken = "A sea with that name already exists.";
+        assert_eq!(
+            land_name(c, "apple press", None).unwrap_err().to_string(),
+            land_taken
+        );
+        // A continent's name is a land name too.
+        assert_eq!(
+            land_name(c, " isles of b ", None).unwrap_err().to_string(),
+            land_taken
+        );
+        assert_eq!(
+            land_name(c, "  Apple Press ", Some(10)).unwrap(),
+            "Apple Press"
+        );
+        assert_eq!(
+            land_name(c, "kite club", Some(10)).unwrap_err().to_string(),
+            land_taken
+        );
+        assert!(matches!(
+            land_name(c, &"x".repeat(41), None),
+            Err(Error::NameLength)
+        ));
+
+        insert_theme(&s, &sea_row(5, "kites", "Kites", "SEA OF KITES", 2));
+        assert_eq!(
+            sea_name(c, "sea of kites", None).unwrap_err().to_string(),
+            sea_taken
+        );
+        // A theme's name counts as a sea name too.
+        c.execute(
+            "UPDATE theme SET name = 'Sea of kites', sea_name = 'SEA OF PAPER' WHERE id = 5",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            sea_name(c, "sea of kites", None).unwrap_err().to_string(),
+            sea_taken
+        );
+        assert_eq!(
+            sea_name(c, "Sea of Paper", Some(5)).unwrap(),
+            "Sea of Paper"
+        );
+        assert_eq!(
+            sea_name(c, "sea a", Some(5)).unwrap_err().to_string(),
+            sea_taken
+        );
+
+        // A patch meets the schema's exact UNIQUE, refused with the land message.
         assert_refused(
             &s,
             vec![Change::Land {
                 before: None,
-                after: Some(land_row(20, "apple press", None)),
+                after: Some(land_row(20, "APPLE PRESS", None)),
             }],
-            "A land with that name already exists.",
+            land_taken,
         );
-
-        let kites = sea_row(5, "kites", "Kites", "SEA OF KITES", 2);
-        insert_theme(&s, &kites);
-        let new_sea = |id: i64, name: &str| Change::Sea {
-            before: None,
-            after: Some(sea_row(id, "sea-of-kites", name, name, 3)),
-        };
-        assert_refused(
-            &s,
-            vec![new_sea(6, "sea of kites")],
-            "A sea with that name already exists.",
-        );
-        // A theme's name counts as a sea name too.
-        s.conn()
-            .execute(
-                "UPDATE theme SET name = 'Sea of kites', sea_name = 'SEA OF PAPER' WHERE id = 5",
-                [],
-            )
-            .unwrap();
-        assert_refused(
-            &s,
-            vec![new_sea(6, "sea of kites")],
-            "A sea with that name already exists.",
-        );
-        // A rename of a sea's name to another case of its own is not a clash.
-        let paper = sea_row(5, "kites", "Sea of kites", "SEA OF PAPER", 2);
-        s.apply_chart_edit(&patch(vec![Change::Sea {
-            before: Some(paper.clone()),
-            after: Some(SeaRow {
-                sea: "Sea of Paper".into(),
-                ..paper
-            }),
-        }]))
-        .unwrap();
-
         // Renaming a land to another case of its own name passes.
         s.apply_chart_edit(&patch(vec![Change::Land {
             before: Some(land_row(10, "APPLE PRESS", None)),
             after: Some(land_row(10, "Apple Press", None)),
         }]))
         .unwrap();
-        let name: String = s
-            .conn()
+        let name: String = c
             .query_row("SELECT name FROM territory WHERE id = 10", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "Apple Press");
-        // ...but not to another land's.
-        assert_refused(
-            &s,
-            vec![Change::Land {
-                before: Some(land_row(10, "Apple Press", None)),
-                after: Some(land_row(10, "kite club", None)),
-            }],
-            "A land with that name already exists.",
+    }
+
+    #[test]
+    fn edit_texts_are_the_global_constraints() {
+        assert_eq!(Error::ChartChanged.to_string(), CHANGED);
+        assert_eq!(
+            Error::LandNameTaken.to_string(),
+            "A land with that name already exists."
         );
         assert_eq!(
             Error::SeaNameTaken.to_string(),
             "A sea with that name already exists."
+        );
+        assert_eq!(
+            Error::NewLandNeedsTwo.to_string(),
+            "A new land needs at least two feeds."
+        );
+        assert_eq!(
+            Error::PartOfContinent {
+                name: "SILICON SHORES".into()
+            }
+            .to_string(),
+            "Part of the continent SILICON SHORES: move it to another sea, or turn the \
+             continent back into open water."
         );
     }
 
@@ -1305,6 +1326,11 @@ mod tests {
                 before: Some(land_row(10, "APPLE PRESS", None)),
                 after: None,
             },
+            // Sea b renamed and moved to the front.
+            Change::Sea {
+                before: Some(sea_b()),
+                after: Some(sea_row(2, "b", "Name b", "SEA OF BEES", -1)),
+            },
             // Land 12 renamed, feed 5 moved to the front.
             Change::Land {
                 before: Some(land_row(12, "KITE CLUB", None)),
@@ -1440,36 +1466,9 @@ mod tests {
     }
 
     #[test]
-    fn a_feed_ends_in_one_territory() {
+    fn a_continent_takes_no_members() {
         let s = chart_store();
-        // Feed 1 would be in APPLE PRESS and KITE CLUB.
-        assert_refused(
-            &s,
-            vec![Change::Member {
-                feed: 1,
-                land: 12,
-                before: None,
-                after: Some(2),
-            }],
-            CHANGED,
-        );
-        // Moving it out of APPLE PRESS at the same time is fine.
-        s.apply_chart_edit(&patch(vec![
-            Change::Member {
-                feed: 1,
-                land: 10,
-                before: Some(0),
-                after: None,
-            },
-            Change::Member {
-                feed: 1,
-                land: 12,
-                before: None,
-                after: Some(2),
-            },
-        ]))
-        .unwrap();
-        // A continent takes no member rows.
+        // No member row into a continent.
         assert_refused(
             &s,
             vec![Change::Member {
@@ -1480,14 +1479,209 @@ mod tests {
             }],
             CHANGED,
         );
-        // A theme gets one continent.
+        // No territory turned into a continent while it keeps its members.
         assert_refused(
             &s,
             vec![Change::Land {
-                before: None,
-                after: Some(land_row(21, "MORE ISLES", Some(2))),
+                before: Some(land_row(10, "APPLE PRESS", None)),
+                after: Some(land_row(10, "APPLE PRESS", Some(1))),
             }],
             CHANGED,
+        );
+        // With its members removed in the same patch, it may become one.
+        s.apply_chart_edit(&patch(vec![
+            Change::Member {
+                feed: 1,
+                land: 10,
+                before: Some(0),
+                after: None,
+            },
+            Change::Member {
+                feed: 2,
+                land: 10,
+                before: Some(1),
+                after: None,
+            },
+            Change::Land {
+                before: Some(land_row(10, "APPLE PRESS", None)),
+                after: Some(land_row(10, "APPLE PRESS", Some(1))),
+            },
+        ]))
+        .unwrap();
+        assert_eq!(snapshot_rows(&s).1[0], "10 APPLE PRESS continent 1 []");
+    }
+
+    #[test]
+    fn a_found_takes_the_exact_name_of_a_land_it_dissolves() {
+        let s = chart_store();
+        // KITE CLUB's islands and feed 6 make a new land under the very same name.
+        s.apply_chart_edit(&patch(vec![
+            Change::Member {
+                feed: 4,
+                land: 12,
+                before: Some(0),
+                after: None,
+            },
+            Change::Member {
+                feed: 5,
+                land: 12,
+                before: Some(1),
+                after: None,
+            },
+            Change::Land {
+                before: Some(land_row(12, "KITE CLUB", None)),
+                after: None,
+            },
+            Change::Land {
+                before: None,
+                after: Some(land_row(20, "KITE CLUB", None)),
+            },
+            Change::Member {
+                feed: 4,
+                land: 20,
+                before: None,
+                after: Some(0),
+            },
+            Change::Member {
+                feed: 5,
+                land: 20,
+                before: None,
+                after: Some(1),
+            },
+            Change::Member {
+                feed: 6,
+                land: 20,
+                before: None,
+                after: Some(2),
+            },
+        ]))
+        .unwrap();
+        assert_eq!(
+            snapshot_rows(&s).1,
+            [
+                "10 APPLE PRESS territory - [1@0,2@1]",
+                "11 ISLES OF B continent 2 []",
+                "20 KITE CLUB territory - [4@0,5@1,6@2]",
+            ]
+        );
+    }
+
+    /// Applies `changes`, then its undo, and asserts every row is back as it was.
+    fn assert_undo_restores(s: &Store, changes: Vec<Change>) {
+        let rows = snapshot_rows(s);
+        let themed = feed_themes(s);
+        let done = s.apply_chart_edit(&patch(changes)).unwrap();
+        assert_ne!(snapshot_rows(s), rows);
+        s.apply_chart_edit(&done.undo).unwrap();
+        assert_eq!(snapshot_rows(s), rows);
+        assert_eq!(feed_themes(s), themed);
+    }
+
+    #[test]
+    fn undo_restores_an_imported_long_name() {
+        let s = chart_store();
+        let long = "THE VERY LONG NAME OF AN IMPORTED LAND, 45 C";
+        assert_eq!(long.chars().count(), 44);
+        let long = format!("{long}H");
+        s.conn()
+            .execute(
+                "UPDATE territory SET name = ?1 WHERE id = 10",
+                [long.as_str()],
+            )
+            .unwrap();
+        assert_undo_restores(
+            &s,
+            vec![Change::Land {
+                before: Some(land_row(10, &long, None)),
+                after: Some(land_row(10, "SHORT", None)),
+            }],
+        );
+        let name: String = s
+            .conn()
+            .query_row("SELECT name FROM territory WHERE id = 10", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, long);
+    }
+
+    #[test]
+    fn undo_restores_a_feed_in_two_territories() {
+        let s = chart_store();
+        // As an import allows: feed 1 in APPLE PRESS and in KITE CLUB.
+        s.conn()
+            .execute(
+                "INSERT INTO territory_feed (territory_id, feed_id, position) VALUES (12, 1, 2)",
+                [],
+            )
+            .unwrap();
+        insert_land(&s, 30, "THIRD LAND", &[3, 6]);
+        // It joins a third land, leaving both.
+        assert_undo_restores(
+            &s,
+            vec![
+                Change::Member {
+                    feed: 1,
+                    land: 10,
+                    before: Some(0),
+                    after: None,
+                },
+                Change::Member {
+                    feed: 1,
+                    land: 12,
+                    before: Some(2),
+                    after: None,
+                },
+                Change::Member {
+                    feed: 1,
+                    land: 30,
+                    before: None,
+                    after: Some(2),
+                },
+            ],
+        );
+        assert_eq!(
+            snapshot_rows(&s).1,
+            [
+                "10 APPLE PRESS territory - [1@0,2@1]",
+                "11 ISLES OF B continent 2 []",
+                "12 KITE CLUB territory - [4@0,5@1,1@2]",
+                "30 THIRD LAND territory - [3@0,6@1]",
+            ]
+        );
+    }
+
+    #[test]
+    fn undo_restores_a_case_twin() {
+        let s = chart_store();
+        // As an import allows: two lands whose names differ only by case.
+        insert_land(&s, 30, "Apple Press", &[3, 6]);
+        assert_undo_restores(
+            &s,
+            vec![Change::Land {
+                before: Some(land_row(30, "Apple Press", None)),
+                after: Some(land_row(30, "CIDER MILL", None)),
+            }],
+        );
+        // And the delete of one, with its members, undoes too.
+        assert_undo_restores(
+            &s,
+            vec![
+                Change::Member {
+                    feed: 3,
+                    land: 30,
+                    before: Some(0),
+                    after: None,
+                },
+                Change::Member {
+                    feed: 6,
+                    land: 30,
+                    before: Some(1),
+                    after: None,
+                },
+                Change::Land {
+                    before: Some(land_row(30, "Apple Press", None)),
+                    after: None,
+                },
+            ],
         );
     }
 }
