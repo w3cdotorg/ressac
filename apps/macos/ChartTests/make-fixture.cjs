@@ -42,7 +42,7 @@ const NOUN = ["Almanac", "Beacon", "Courier", "Dispatch", "Echo", "Gazette", "He
   "Logbook", "Messenger", "Notebook", "Observer", "Pamphlet", "Quarterly", "Record", "Review", "Signal", "Tribune"];
 const FOLDERS = ["Blogs", "Press", "Press / Weekly", "Science", "Science / Space", "Friends", "Letters", "Craft"];
 // a few titles that stress the labels: long ones, accents, markup and quotes (shown as text, never as HTML)
-const SPECIAL = ["The Extraordinarily Long-Winded Harbour Gazette", "Café des Ondes", "<b>Bold</b> & \"Quoted\" Notes",
+const SPECIAL = ["The Extraordinarily Long-Winded Harbour Gazette", "Café des Ondes", "<b>Bold</b> & \"Quoted\" Notes <img src=x onerror=alert(1)> </option>",
   "Notes from the Lighthouse Keeper's Daughter", "Zéphyr"];
 
 const GROUPS = [ // group, share of the feeds, age range in days (all within six months)
@@ -112,16 +112,28 @@ const territories = [
   ["CHIME BROTHERS", ids("bells").slice(0, 2)], // inside a continent
   ["SALTWORKS", ids("salt").slice(0, 2)],
   ["COAST AND CHART", [ids("tides")[5], ids("maps")[4]]], // one publisher across two themes
-].map(([name, members]) => ({ name, feeds: members }));
+  ["APPLE PRESS", ids("kites").slice(9, 11)], // the land the name-clash tests collide with
+].map(([name, members], i) => ({ id: i + 1, name, feeds: members }));
 const continents = [["BELLMARK", "bells"], ["CRUSTLAND", "bread"], ["THE KNOTTED LAND", "knots"], ["KILN COUNTRY", "kilns"]]
-  .map(([name, theme]) => ({ name, theme }));
+  .map(([name, theme], i) => ({ id: territories.length + i + 1, name, theme }));
+const HIDDEN = { id: territories.length + continents.length + 1, name: "OLD MILL PRESS", feeds: [101, 102] }; // members older than six months: off the chart
 
 const doc = {
   version: 1,
   surveyed_at: "2026-10-19T15:40:00Z",
   totals: { feeds: feeds.length, unread_week: feeds.reduce((s, f) => s + f.unread_week, 0) },
-  themes: THEMES.map(([key, name, sea]) => ({ key, name, sea, count: ids(key).length })),
+  themes: THEMES.map(([key, name, sea], i) => ({ id: i + 1, key, name, sea, count: ids(key).length })),
   feeds, territories, continents,
+};
+// the ledger of the Cartographer's Log: every sea (an empty one too) and every land (a hidden one too)
+doc.ledger = {
+  seas: [...THEMES.map(([key, name, sea], i) => ({ id: i + 1, key, name, sea, position: i + 1, feeds: ids(key).length })),
+    { id: THEMES.length + 1, key: "unsailed", name: "Unsailed", sea: "UNSAILED SEA", position: THEMES.length + 1, feeds: 0 }],
+  lands: [
+    ...territories.map(t => ({ id: t.id, name: t.name, continent: null, feeds: t.feeds })),
+    ...continents.map(c => ({ id: c.id, name: c.name, continent: c.theme, feeds: [] })),
+    { id: HIDDEN.id, name: HIDDEN.name, continent: null, feeds: HIDDEN.feeds },
+  ],
 };
 
 // one feed, theme, territory or continent per line: readable diffs, modest size
@@ -140,7 +152,13 @@ ${lines(doc.territories)}
 ],
 "continents": [
 ${lines(doc.continents)}
-]}
+],
+"ledger": {"seas": [
+${lines(doc.ledger.seas)}
+],
+"lands": [
+${lines(doc.ledger.lands)}
+]}}
 `;
 JSON.parse(out); // the hand-made layout must stay valid JSON
 fs.writeFileSync(path.join(__dirname, "fixture.json"), out);

@@ -58,6 +58,7 @@ function recordingContext() {
   return {ctx, log, texts: () => log.filter(([op]) => op === "fillText").map(([, t]) => t)};
 }
 
+const TRICKY_TITLE = '<b>Bold</b> & "Quoted" Notes <img src=x onerror=alert(1)> </option>';
 const tricky = () => fixture().feeds.find(f => f.title.includes("<b>"));
 
 test("feed_text_is_never_html", () => {
@@ -70,12 +71,12 @@ test("feed_text_is_never_html", () => {
   const tip = draw.tooltipContent(doc, node);
   const name = tip[0];
   assert.equal(name.tagName, "B");
-  assert.deepEqual(name.childNodes, [{nodeType: 3, data: '<b>Bold</b> & "Quoted" Notes'}]);
+  assert.deepEqual(name.childNodes, [{nodeType: 3, data: TRICKY_TITLE}]);
   assert.ok(!elements(tip).some(e => e !== name && e.tagName === "B"), "the title's <b> must stay text");
 
   const pop = draw.popoverContent(doc, node, data, {});
   const all = walk(pop);
-  assert.ok(all.some(n => n.nodeType === 3 && n.data === '<b>Bold</b> & "Quoted" Notes'), "title as one text node");
+  assert.ok(all.some(n => n.nodeType === 3 && n.data === TRICKY_TITLE), "title as one text node");
   assert.ok(all.some(n => n.nodeType === 3 && n.data === '<img src=x onerror="alert(1)"> & "more"'), "entry title as one text node");
   assert.ok(!elements(pop).some(e => e.tagName === "IMG"), "no element made from feed text");
 });

@@ -511,10 +511,125 @@
     return ramps.get(name)(heatLevel(activity, maxActivity));
   }
 
+  // ---------- the territory editor: texts, names, wire format and history (pure) ----------
+  // Every refusal text lives once, in crates/ressac-core/src/error.rs; chart-edit.test.cjs checks these copies against it.
+  const EDIT_TEXT = Object.freeze({
+    changed: "The chart changed; nothing was done.",
+    landTaken: "A land with that name already exists.",
+    seaTaken: "A sea with that name already exists.",
+    nameLength: "A name has 1 to 40 characters.",
+    newLandTwo: "A new land needs at least two feeds.",
+    continentHint: name => `Part of the continent ${name}: move it to another sea, or turn the continent back into open water.`,
+    continentRemoved: "Its continent will be removed.", // page copy only (the confirmation), not a core error
+  });
+  const MAX_EDIT = 65536; // the most bytes of edit JSON any path accepts (the core's MAX_EDIT)
+  const PENDING_MS = 5000; // an ok result keeps the edit pending this long, or until the next Chart.update
+  const NAME_MAX = 40;
+
+  // the size of an edit counts UTF-8 bytes, like the CLI's limit, never UTF-16 units
+  const editBytes = text => new TextEncoder().encode(String(text)).length;
+  const editTooBig = text => editBytes(text) > MAX_EDIT;
+
+  // Rust's str::trim: Unicode White_Space at both ends (U+0085 goes, U+FEFF stays)
+  const trimName = raw => String(raw).replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+
+  // the name rules of the core (chart_edit.rs): trimmed, 1 to 40 code points, unique without case.
+  // A land differs from every other land (continents included); a sea from every other sea's name and sea name.
+  function checkName(raw, kind, ledger, selfId) {
+    const name = trimName(raw), n = [...name].length;
+    if (n < 1 || n > NAME_MAX) return {error: EDIT_TEXT.nameLength};
+    const low = name.toLowerCase(), same = text => String(text ?? "").trim() !== "" && trimName(text).toLowerCase() === low;
+    const clash = kind === "land"
+      ? (ledger?.lands || []).some(l => l.id !== selfId && same(l.name))
+      : (ledger?.seas || []).some(t => t.id !== selfId && (same(t.name) || same(t.sea)));
+    return clash ? {error: kind === "land" ? EDIT_TEXT.landTaken : EDIT_TEXT.seaTaken} : {name};
+  }
+
+  function deleteSeaQuestion(sea, count, hasContinent) {
+    const head = `Delete the sea ${sea}?`;
+    if (count > 0) {
+      return `${head} Its ${count} ${count === 1 ? "feed" : "feeds"} will be uncharted${hasContinent ? ", and its continent removed." : "."}`;
+    }
+    return hasContinent ? `${head} ${EDIT_TEXT.continentRemoved}` : head;
+  }
+
+  // lookups over the snapshot's ledger (every sea and every land, empty or hidden ones included)
+  function ledgerIndex(data) {
+    const seas = data?.ledger?.seas || [], lands = data?.ledger?.lands || [];
+    const landByFeed = new Map(), continents = new Map();
+    lands.forEach(l => {
+      if (l.continent) continents.set(l.continent, l);
+      else (l.feeds || []).forEach(id => { if (!landByFeed.has(id)) landByFeed.set(id, l); });
+    });
+    const seaById = id => seas.find(t => t.id === id) || null;
+    const landById = id => lands.find(l => l.id === id) || null;
+    return {
+      landOf: feedId => landByFeed.get(feedId) || null,
+      continentOf: themeKey => continents.get(themeKey) || null,
+      seaById, landById,
+      seaRef: key => { const t = key == null ? null : seas.find(x => x.key === key); return t ? {id: t.id, key: t.key, sea: t.sea} : null; },
+      landRef: id => { const l = landById(id); return l ? {id: l.id, name: l.name} : null; },
+    };
+  }
+
+  // one builder per op: the wire object of « Names decided here » (every Option written out, null included)
+  const edits = Object.freeze({
+    join: (feed, land) => ({op: "join", feed, land}),
+    leave: (feed, land) => ({op: "leave", feed, land}),
+    found: (name, feeds) => ({op: "found", name, feeds}),
+    renameLand: (land, name) => ({op: "rename_land", land, name}),
+    deleteLand: land => ({op: "delete_land", land}),
+    makeContinent: (sea, name) => ({op: "make_continent", sea, name}),
+    setSea: (feed, from, to) => ({op: "set_sea", feed, from: from ?? null, to: to ?? null}),
+    newSea: name => ({op: "new_sea", name}),
+    renameSea: (sea, name) => ({op: "rename_sea", sea, name}),
+    orderSeas: seas => ({op: "order_seas", seas}),
+    deleteSea: sea => ({op: "delete_sea", sea}),
+    patch: (label, changes) => ({op: "patch", label, changes}),
+  });
+
+  // How a refused result reads: "name" (the form stays open with the text), "invalid" (a validation message,
+  // shown as is), "continent" (the hint), "changed" (any other refusal), "failed" (not a refusal: the edit did not run).
+  function editFailure(result) {
+    if (!result || result.refused !== true) return "failed";
+    const text = String(result.error ?? "");
+    if (text === EDIT_TEXT.landTaken || text === EDIT_TEXT.seaTaken || text === EDIT_TEXT.nameLength) return "name";
+    if (text === EDIT_TEXT.newLandTwo) return "invalid";
+    if (text.startsWith("Part of the continent ")) return "continent";
+    return "changed";
+  }
+
+  // The undo and redo stacks: {undo: Record[], redo: Record[]}, Record = {label, edit} where edit is the patch to
+  // send. Pure: every function returns a new object. An edit with nothing to undo (an empty patch) is no step.
+  const history = Object.freeze({
+    empty: () => ({undo: [], redo: []}),
+    record(h, done) {
+      if (!done?.undo || (done.undo.op === "patch" && !(done.undo.changes || []).length)) return h;
+      return {undo: [...h.undo, {label: done.label, edit: done.undo}], redo: []};
+    },
+    // the record `which` ("undo" | "redo") would send, with the history lacking it; null when there is none
+    step(h, which) {
+      const list = h[which];
+      if (!list.length) return null;
+      return {record: list[list.length - 1], rest: {...h, [which]: list.slice(0, -1)}};
+    },
+    // the step succeeded: `record` leaves its stack (if still on top) and its inverse, done.undo, goes on the other
+    land(h, which, record, done) {
+      const other = which === "undo" ? "redo" : "undo", list = h[which];
+      const kept = list.length && list[list.length - 1] === record ? list.slice(0, -1) : list;
+      return {...h, [which]: kept, [other]: [...h[other], {label: record.label, edit: done.undo}]};
+    },
+    titles(h) {
+      const top = list => (list.length ? list[list.length - 1].label : null);
+      return {undo: top(h.undo) === null ? null : `Undo ${top(h.undo)}`, redo: top(h.redo) === null ? null : `Redo ${top(h.redo)}`};
+    },
+  });
+
   return Object.freeze({
     useD3,
     W, H, CELL, GW, GH, PORT, RX, RY, RINGS, RADIUS, ISOBATHS, CARTOUCHE, COMPASS, UNCHARTED, FONTS, INKS,
     font, hash, mulberry, fbm, ringFrac,
     seas, place, territories, field, labels, heatLevel, heat,
+    EDIT_TEXT, MAX_EDIT, PENDING_MS, editBytes, editTooBig, trimName, checkName, deleteSeaQuestion, ledgerIndex, edits, editFailure, history,
   });
 });
