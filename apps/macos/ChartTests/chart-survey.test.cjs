@@ -424,7 +424,8 @@ test("session_sends_one_edit_at_a_time", () => {
   assert.equal(changes(), 1, "onChange after send");
   assert.equal(session.send(JOIN), false, "one edit at a time");
 
-  assert.deepEqual(session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS"))), {kind: "done", message: null});
+  assert.deepEqual(session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS"))), {kind: "done", message: null, edit: JOIN},
+    "done, with the edit that was done");
   assert.equal(session.pending(), true, "an ok result keeps the edit pending");
   assert.equal(session.send(JOIN), false);
   assert.equal(after(core.PENDING_MS).length, 1);
@@ -574,7 +575,7 @@ test("a_late_ok_reply_records_its_undo_step", () => {
   assert.equal(session.pending(), false);
   let before = changes();
   assert.deepEqual(session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS"))),
-    {kind: "late", message: survey.lateReply("Join APPLE PRESS")});
+    {kind: "late", message: survey.lateReply("Join APPLE PRESS"), edit: JOIN});
   assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null}, "the step is in the history after all");
   assert.equal(session.pending(), false, "a late reply makes nothing pending");
   assert.equal(changes(), before + 1, "onChange: the titles changed");
@@ -586,7 +587,7 @@ test("a_late_ok_reply_records_its_undo_step", () => {
   after(survey.REPLY_MS)[1].fn();
   assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null}, "kept while unanswered");
   assert.deepEqual(session.edited(ok(2, "Leave APPLE PRESS", patch("Leave APPLE PRESS"))),
-    {kind: "late", message: survey.lateReply("Undo Join APPLE PRESS")});
+    {kind: "late", message: survey.lateReply("Undo Join APPLE PRESS"), edit: patch("Join APPLE PRESS")}, "an undo's edit is its patch");
   assert.deepEqual(session.titles(), {undo: null, redo: "Redo Join APPLE PRESS"});
 
   // late while another edit is pending: recorded, and the other edit stays pending
@@ -595,7 +596,7 @@ test("a_late_ok_reply_records_its_undo_step", () => {
   assert.equal(session.send(core.edits.newSea("Sea of Tests")), true);
   assert.equal(session.edited(ok(3, "Join APPLE PRESS", patch("Join APPLE PRESS"))).kind, "late");
   assert.equal(session.pending(), true, "the edit in flight is still pending");
-  assert.deepEqual(session.edited(ok(4, "New Sea of Tests", patch("New Sea of Tests"))), {kind: "done", message: null});
+  assert.deepEqual(session.edited(ok(4, "New Sea of Tests", patch("New Sea of Tests"))), {kind: "done", message: null, edit: core.edits.newSea("Sea of Tests")});
   session.updated();
   assert.deepEqual(session.titles(), {undo: "Undo New Sea of Tests", redo: null});
   session.undo();

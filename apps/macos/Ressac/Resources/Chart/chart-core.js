@@ -589,6 +589,21 @@
     patch: (label, changes) => ({op: "patch", label, changes}),
   });
 
+  // The one island an edit moves, or null: a join, a leave or a set_sea, or a patch (an undo or a redo) whose member
+  // and feed-sea changes name a single feed. The page rings that island on the next chart (recette fix 4).
+  function movedFeed(edit) {
+    if (!edit || typeof edit !== "object") return null;
+    if (edit.op === "join" || edit.op === "leave" || edit.op === "set_sea") return Number.isInteger(edit.feed) ? edit.feed : null;
+    if (edit.op !== "patch" || !Array.isArray(edit.changes)) return null;
+    const feeds = new Set();
+    edit.changes.forEach(c => {
+      if (c && c.kind === "member") feeds.add(c.feed);
+      else if (c && c.kind === "feed_seas" && Array.isArray(c.feeds)) c.feeds.forEach(f => feeds.add(f));
+    });
+    const [only] = feeds;
+    return feeds.size === 1 && Number.isInteger(only) ? only : null;
+  }
+
   // How a refused result reads: "name" (the form stays open with the text), "invalid" (a validation message,
   // shown as is), "continent" (the hint), "changed" (any other refusal), "failed" (not a refusal: the edit did not run).
   function editFailure(result) {
@@ -802,6 +817,6 @@
     font, hash, mulberry, fbm, ringFrac,
     seas, place, territories, field, labels, heatLevel, heat,
     classifyPress, closedLoop, loopSelection, nameAt, sceneProblems, dropTarget, cartoucheSpots, cartouchePlace, editMotion,
-    EDIT_TEXT, MAX_EDIT, PENDING_MS, editBytes, editTooBig, trimName, checkName, deleteSeaQuestion, ledgerIndex, edits, editFailure, history,
+    EDIT_TEXT, MAX_EDIT, PENDING_MS, editBytes, editTooBig, trimName, checkName, deleteSeaQuestion, ledgerIndex, edits, movedFeed, editFailure, history,
   });
 });

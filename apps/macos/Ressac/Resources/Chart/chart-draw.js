@@ -450,6 +450,21 @@
     return `url("data:image/svg+xml,${data}") ${at(2)} ${at(30)}, crosshair`;
   }
 
+  // The ring round the island an edit moved (recette fix 4), in the current ink, on the overlay. `phase` in [0, 1) is a
+  // pulse's progress (the ring widens and fades); null draws it still (Reduce Motion). Wider than the selection's
+  // dashed ring (n.r + 8), so both show. `px` is one screen pixel in chart units.
+  const EDIT_RING = Object.freeze({gap: 10, grow: 16, still: 12, pulseMs: 900, pulses: 2, stillMs: 2000});
+  function drawEditRing(ctx, node, inkName, phase, px = 1) {
+    if (!node) return;
+    const ink = INKS[inkName] || INKS.bleu, r = node.r + (phase == null ? EDIT_RING.still : EDIT_RING.gap + EDIT_RING.grow * phase);
+    ctx.save();
+    ctx.strokeStyle = ink.ink; ctx.setLineDash([]);
+    ctx.globalAlpha = phase == null ? .9 : .9 * (1 - phase);
+    ctx.lineWidth = 2.5 * px; // 2.5 screen pixels at any size (`px` is one screen pixel in chart units)
+    ctx.beginPath(); ctx.ellipse(node.x, node.y, r, r * .85, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
   // ---------- gestures: the island in ink, the quill's line, the spring-back and the fade ----------
   // `g` is the page's gesture: {node, ghost: {x, y}} (an island dragged, drawn in ink where it is) or
   // {points, alpha} (the quill's line, fading when alpha drops), in chart units
@@ -673,6 +688,7 @@
       chartTransform(ctx);
       gusts = drawOver(ctx, scene, prefs.ink, moving() ? {t, gusts} : null);
       if (mode.active) drawSurveyLayer(ctx, scene, prefs.ink, selected, 1 / (view.k || 1));
+      if (editRing) drawEditRing(ctx, scene.nodes.find(n => n.id === editRing.id), prefs.ink, ringPhase(t ?? 0), 1 / (view.k || 1));
       if (gesture) drawGesture(ctx, gesture, prefs.ink);
     }
     function paintKey() {
@@ -856,6 +872,7 @@
     // an edit's outcome (Chart.edited, or no reply): the log's form, the rename form and the status line follow it
     function settle(outcome) {
       // a late reply: its forms and gesture ended with its timeout; whatever is in flight now waits for its own reply
+      if ((outcome.kind === "done" || outcome.kind === "late") && outcome.edit) ringFor = core.movedFeed(outcome.edit);
       if (outcome.kind === "late") { message = outcome.message; drawSurvey(); return; }
       memory.result(outcome);
       message = outcome.message ?? null;
@@ -1119,6 +1136,24 @@
       cartBox.style.top = `${view.oy + c.y * k}px`;
     }
 
+    // --- the ring round the island an edit moved: its edit is answered, the next chart shows where the island went; the
+    // log selects it, and the ring pulses twice on the overlay, or stays still for 2 s under Reduce Motion ---
+    let ringFor = null, editRing = null; // ringFor: the feed to ring on the next chart; editRing: {id, t0, still}
+    function startRing(id) {
+      const mine = editRing = {id, t0: win.performance.now(), still: !motionNow()};
+      const done = () => { if (editRing === mine) { editRing = null; repaint(); } };
+      if (mine.still) { win.setTimeout(done, EDIT_RING.stillMs); return; }
+      const step = t => {
+        if (editRing !== mine) return;
+        if (t - mine.t0 >= EDIT_RING.pulseMs * EDIT_RING.pulses) { done(); return; }
+        paintOver(t);
+        win.requestAnimationFrame(step);
+      };
+      win.requestAnimationFrame(step);
+    }
+    // the ring's phase at time t (null when still)
+    const ringPhase = t => (editRing.still ? null : (Math.max(0, t - editRing.t0) % EDIT_RING.pulseMs) / EDIT_RING.pulseMs);
+
     // ⌘Z in a name field belongs to the field
     const typing = () => {
       const a = doc.activeElement;
@@ -1157,6 +1192,9 @@
         if (selected != null && !data.feeds.some(f => f.id === selected)) selected = null;
         rebuild(); syncMotion();
         if (!nextPrefs) mode.updated(); // a new survey ends an edit that was answered (the one pending rule)
+        const ringed = ringFor;
+        ringFor = null;
+        if (ringed != null && !nextPrefs && mode.active && scene.nodes.some(n => n.id === ringed)) { selected = ringed; startRing(ringed); }
         drawSurvey();
       }).catch(err => { if (win.console) win.console.error(err); });
     }
@@ -1191,6 +1229,6 @@
 
   return Object.freeze({
     normalisePrefs, prefsMessage, parseData, bridge, formatSurvey, tooltipContent, tooltipPosition, popoverContent, buildScene, drawChart,
-    drawSurveyLayer, springBack, CARTOUCHE_PX, cartoucheAt, quillCursor, createPage, chart, load: chart.load, update: chart.update,
+    drawSurveyLayer, drawEditRing, EDIT_RING, springBack, CARTOUCHE_PX, cartoucheAt, quillCursor, createPage, chart, load: chart.load, update: chart.update,
   });
 });

@@ -21,7 +21,7 @@
   // PENDING_MS after the result, whichever comes first. Nothing is sent while an edit is pending. An edit with
   // no result REPLY_MS after send ends too: the session posts {type: "survey"} and calls
   // onTimeout({kind: "timeout", message: NO_REPLY}). The app may still apply it (it waited behind other work): a late
-  // ok result is recorded as a send or a step would have been, and edited() answers {kind: "late", message}, so the
+  // ok result is recorded as a send or a step would have been, and edited() answers {kind: "late", message, edit}, so the
   // history stays exact; a late refusal or failure only forgets it. A late result never touches the edit pending now.
   // post(message) carries {type: "edit", seq, edit} to the app; onChange() follows every change of state.
   const hasLand = edit => edit && (edit.op !== "join" && edit.op !== "leave" ||
@@ -31,7 +31,7 @@
   function createSession({post, onChange, onTimeout, setTimeout: later} = {}) {
     const changed = () => { if (onChange) onChange(); };
     const wait = later || ((fn, ms) => globalThis.setTimeout(fn, ms));
-    let h = core.history.empty(), seq = 0, pending = null; // pending = {seq, which, record, landed}
+    let h = core.history.empty(), seq = 0, pending = null; // pending = {seq, which, record, landed, edit}
     const late = new Map(); // seq → the dispatch that timed out, until its result comes
 
     function dispatch(edit, which, record) {
@@ -39,7 +39,7 @@
       const text = JSON.stringify(edit);
       if (typeof text !== "string" || core.editTooBig(text)) return false;
       seq += 1;
-      const mine = pending = {seq, which, record, landed: false};
+      const mine = pending = {seq, which, record, landed: false, edit};
       post({type: "edit", seq, edit: text});
       wait(() => {
         if (pending !== mine || mine.landed) return;
@@ -69,14 +69,14 @@
       else drop(which, record); // nothing to step back to: no empty step on the other stack
     }
     function lateResult(result) {
-      const {which, record} = late.get(result.seq);
+      const {which, record, edit} = late.get(result.seq);
       late.delete(result.seq);
       if (result.ok !== true) return null;
       const done = result.done && typeof result.done === "object" ? result.done : null;
       keep(which, record, done);
       changed();
       const what = which ? `${which === "undo" ? "Undo" : "Redo"} ${record.label}` : String(done?.label ?? "the edit");
-      return {kind: "late", message: lateReply(what)};
+      return {kind: "late", message: lateReply(what), edit};
     }
 
     function edited(text) {
@@ -85,14 +85,14 @@
       if (!result || typeof result !== "object") return null;
       if (late.has(result.seq)) return lateResult(result);
       if (!pending || pending.landed || result.seq !== pending.seq) return null;
-      const {which, record} = pending;
+      const {which, record, edit} = pending;
       if (result.ok === true) {
         keep(which, record, result.done && typeof result.done === "object" ? result.done : null);
         const mine = pending;
         mine.landed = true;
         wait(() => { if (pending === mine) { pending = null; changed(); } }, core.PENDING_MS);
         changed();
-        return {kind: "done", message: null};
+        return {kind: "done", message: null, edit}; // the edit that was done (an undo or redo: its patch)
       }
       pending = null;
       const kind = core.editFailure(result);

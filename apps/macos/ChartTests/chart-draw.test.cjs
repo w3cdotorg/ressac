@@ -991,3 +991,87 @@ test("quill_cursor_at_the_screen_density_for_qt_webengine", async () => {
   assert.equal(await quillOf(true, 1), QUILL, "Qt WebEngine at 1×");
   assert.equal(await quillOf(true, 2), draw.quillCursor(2), "Qt WebEngine at 2×");
 });
+
+// Recette fix 4 (Clément's wish): the island an edit moved gets a ring in the current ink on the next chart, which pulses
+// twice (still for 2 s under Reduce Motion), on the overlay; the log selects it.
+// the ink ring's ellipses on the overlay round island `n` (the selection's dashed ring is n.r + 8: the ink ring is wider)
+const inkRings = (doc, n) => lastOverlay(doc).filter(([op, x, y, rx]) => op === "ellipse" && Math.abs(x - n.x) < .01 && Math.abs(y - n.y) < .01 && rx >= n.r + 10 - 1e-9);
+const islandSelect = doc => byClass([drawerOf(doc)], "log-island");
+function chooseIsland(doc, id) {
+  const s = islandSelect(doc);
+  s.value = String(id);
+  s.dispatch("change", ev());
+}
+test("the_moved_island_gets_an_ink_ring_after_a_leave", async () => {
+  const {win, doc, page, P} = await surveyPage();
+  const n10 = nodeOf(10);
+  chooseIsland(doc, 10);
+  buttonIn(drawerOf(doc), "Leave Land").dispatch("click", ev());
+  assert.deepEqual(JSON.parse(edits(win).at(-1).edit), core.edits.leave(10, {id: 11, name: "APPLE PRESS"}));
+  tap(P, nodeOf(13)); // the user looks elsewhere while the edit goes
+  assert.equal(islandSelect(doc).value, "13");
+  page.edited(JSON.stringify({seq: 1, ok: true, done: {event: "chart_edit", label: "Leave APPLE PRESS",
+    undo: core.edits.patch("Leave APPLE PRESS", [{kind: "member", feed: 10, land: 11, before: null, after: 1}])}}));
+  assert.equal(inkRings(doc, n10).length, 0, "no ring before the new chart shows where the island went");
+  const framesBefore = win.frames.length;
+  page.update(JSON.stringify(resurveyed(1)));
+  await settle();
+  assert.equal(islandSelect(doc).value, "10", "the log selects the island the edit moved");
+  assert.ok(win.frames.length > framesBefore, "the ring animates");
+  // two pulses: the ring grows and fades, starts again once, then is gone
+  const radii = [];
+  let n = 0;
+  while (win.frames.length && n < 1000) {
+    win.frames.shift()(16 * ++n);
+    const r = inkRings(doc, n10);
+    if (r.length) radii.push(r[0][3]);
+  }
+  assert.ok(radii.length > 10, "drawn on many frames");
+  const restarts = radii.filter((r, i) => i > 0 && r < radii[i - 1]).length;
+  assert.equal(restarts, 1, "it pulses twice");
+  assert.equal(inkRings(doc, n10).length, 0, "then it is gone");
+  assert.equal(win.frames.length, 0, "and asks for no more frames");
+  const strokes = canvases(doc)[1].recording.log.filter(([op]) => op === "stroke").length;
+  assert.ok(strokes > 0);
+  assert.deepEqual(win.errors, []);
+});
+
+test("the_moved_island_rings_still_for_two_seconds_under_reduce_motion_after_a_set_sea", async () => {
+  const {win, doc, page, P} = await surveyPage({reduced: true});
+  const n12 = nodeOf(12);
+  chooseIsland(doc, 12);
+  const sea = byClass([drawerOf(doc)], "log-sea-select");
+  sea.value = "2"; // TIDAL SEA
+  sea.dispatch("change", ev());
+  assert.equal(JSON.parse(edits(win).at(-1).edit).op, "set_sea");
+  tap(P, nodeOf(13));
+  assert.equal(islandSelect(doc).value, "13");
+  page.edited(JSON.stringify({seq: 1, ok: true, done: {event: "chart_edit", label: "Move to TIDAL SEA",
+    undo: core.edits.patch("Move to TIDAL SEA", [{kind: "feed_seas", feeds: [12], before: 2, after: 1}])}}));
+  page.update(JSON.stringify(resurveyed(1)));
+  await settle();
+  assert.equal(win.frames.length, 0, "Reduce Motion: no animation frame");
+  assert.equal(islandSelect(doc).value, "12", "the log selects it");
+  const still = inkRings(doc, n12);
+  assert.equal(still.length, 1, "one still ring");
+  const timer = win.timers.filter(t => t.ms === 2000);
+  assert.equal(timer.length, 1, "it stays 2 s");
+  timer[0].fn();
+  assert.equal(inkRings(doc, n12).length, 0, "then it is gone");
+  assert.deepEqual(win.errors, []);
+});
+
+test("only_an_edit_that_moved_one_island_rings_it", () => {
+  assert.equal(core.movedFeed(core.edits.leave(10, {id: 11, name: "APPLE PRESS"})), 10);
+  assert.equal(core.movedFeed(core.edits.join(12, {id: 11, name: "APPLE PRESS"})), 12);
+  assert.equal(core.movedFeed(core.edits.setSea(12, null, {id: 2, key: "tides", sea: "TIDAL SEA"})), 12);
+  // an undo or redo that puts one island back
+  assert.equal(core.movedFeed(core.edits.patch("Leave APPLE PRESS", [{kind: "member", feed: 10, land: 11, before: null, after: 1}])), 10);
+  assert.equal(core.movedFeed(core.edits.patch("Move to TIDAL SEA", [{kind: "feed_seas", feeds: [12], before: 2, after: 1}])), 12);
+  // no island, or several
+  assert.equal(core.movedFeed(core.edits.newSea("SEA OF TESTS")), null);
+  assert.equal(core.movedFeed(core.edits.found("KITE TWINS", [12, 13])), null);
+  assert.equal(core.movedFeed(core.edits.patch("Delete APPLE PRESS", [{kind: "land"}, {kind: "member", feed: 10}, {kind: "member", feed: 11}])), null);
+  assert.equal(core.movedFeed(null), null);
+  assert.equal(core.movedFeed({op: "leave", feed: "10"}), null);
+});
