@@ -967,3 +967,27 @@ test("a_drop_hint_shows_with_the_log_closed", async () => {
   assert.ok(status.hidden, "a new gesture: the old hint goes");
   assert.deepEqual(win.errors, []);
 });
+
+// Recette fix 2: Qt WebEngine shows a cursor's bitmap one pixel per logical pixel, so the KDE app's quill came out twice
+// the Mac's on a 2× screen. The page gives the quill at 32 / density CSS px there (the KDE adapter marks the root).
+test("quill_cursor_at_the_screen_density_for_qt_webengine", async () => {
+  const QUILL = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'%3E%3Cg stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 30 L9 19 C14 12 21 6 30 2 C27 11 21 18 13 23 Z' fill='%23f7f8f6' stroke='%23f7f8f6' stroke-width='4'/%3E%3Cpath d='M2 30 L9 19 C14 12 21 6 30 2 C27 11 21 18 13 23 Z' fill='%23f7f8f6' stroke='%231f3c88' stroke-width='1.4'/%3E%3Cpath d='M2 30 L17 14 M9 19 L13 23' fill='none' stroke='%231f3c88' stroke-width='1.2'/%3E%3C/g%3E%3C/svg%3E\") 2 30, crosshair";
+  assert.equal(draw.quillCursor(1), QUILL, "the Mac's quill, as chart.css drew it before: 32 px, the nib at 2 30");
+  assert.equal(draw.quillCursor(), QUILL);
+  assert.equal(draw.quillCursor(2), QUILL.replace("width='32' height='32'", "width='16' height='16'").replace(" 2 30,", " 1 15,"),
+    "on a 2× screen, 16 CSS px: Chromium rasterises 32 device px, which Qt WebEngine shows at 32 logical px");
+  assert.match(draw.quillCursor(1.5), /width='21' height='21'.*\) 1 20, crosshair$/, "a fractional scale too");
+  assert.equal(draw.quillCursor(0), QUILL, "no density: the plain quill");
+
+  const quillOf = async (qt, dpr) => {
+    const win = fakeWindow();
+    win.devicePixelRatio = dpr;
+    if (qt) win.document.documentElement.classList.add("qt-cursors");
+    draw.createPage(win).load(JSON.stringify(fixture()), {view: "themes", ink: "bleu", animate: false});
+    await settle();
+    return win.document.documentElement.style["--quill"];
+  };
+  assert.equal(await quillOf(false, 2), QUILL, "WebKit scales a cursor itself: the 32 px quill at any density");
+  assert.equal(await quillOf(true, 1), QUILL, "Qt WebEngine at 1×");
+  assert.equal(await quillOf(true, 2), draw.quillCursor(2), "Qt WebEngine at 2×");
+});

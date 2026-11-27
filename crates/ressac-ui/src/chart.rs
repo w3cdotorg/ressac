@@ -121,6 +121,8 @@ pub const ADAPTER_SCRIPT: &str = r#"(function () {
   }
   var ressac = Object.freeze({postMessage: send});
   Object.defineProperty(window, "webkit", {value: Object.freeze({messageHandlers: Object.freeze({ressac: ressac})})});
+  // Qt WebEngine shows a cursor bitmap one pixel per logical pixel: the page draws its quill for that (quillCursor)
+  document.documentElement.classList.add("qt-cursors");
   new QWebChannel(qt.webChannelTransport, function (channel) {
     target = channel.objects.ressac;
     pending.splice(0).forEach(function (text) { target.post(text); });
@@ -1268,6 +1270,7 @@ mod tests {
             "new QWebChannel(qt.webChannelTransport",
             "channel.objects.ressac",
             "JSON.stringify(message)",
+            "classList.add(\"qt-cursors\")",
         ] {
             assert!(ADAPTER_SCRIPT.contains(part), "{part}");
         }

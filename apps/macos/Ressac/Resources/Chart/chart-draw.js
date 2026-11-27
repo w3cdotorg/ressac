@@ -434,6 +434,22 @@
     ctx.restore();
   }
 
+  // ---------- the quill: Survey mode's cursor over the chart (chart.css reads it from --quill) ----------
+  // Its nib, bottom left, is the hot spot. WebKit (the Mac) shows a cursor at its CSS size on any screen. Qt WebEngine
+  // (the KDE app, whose adapter marks the root `qt-cursors`) shows the bitmap Chromium rasterised at the screen's
+  // density one pixel per logical pixel, dropping its scale, so a 32 px quill came out at 64 on a 2× screen: there it is
+  // given at 32 / density CSS px, which comes out at the Mac's 32. `scale` is 1 for WebKit, the density for Qt.
+  const QUILL_SVG = "<g stroke-linecap='round' stroke-linejoin='round'>"
+    + "<path d='M2 30 L9 19 C14 12 21 6 30 2 C27 11 21 18 13 23 Z' fill='#f7f8f6' stroke='#f7f8f6' stroke-width='4'/>"
+    + "<path d='M2 30 L9 19 C14 12 21 6 30 2 C27 11 21 18 13 23 Z' fill='#f7f8f6' stroke='#1f3c88' stroke-width='1.4'/>"
+    + "<path d='M2 30 L17 14 M9 19 L13 23' fill='none' stroke='#1f3c88' stroke-width='1.2'/></g>";
+  function quillCursor(scale = 1) {
+    const size = Math.round(32 / (Number.isFinite(scale) && scale >= 1 ? scale : 1)), at = v => Math.round(v * size / 32);
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}' viewBox='0 0 32 32'>${QUILL_SVG}</svg>`;
+    const data = svg.replace(/</g, "%3C").replace(/>/g, "%3E").replace(/#/g, "%23");
+    return `url("data:image/svg+xml,${data}") ${at(2)} ${at(30)}, crosshair`;
+  }
+
   // ---------- gestures: the island in ink, the quill's line, the spring-back and the fade ----------
   // `g` is the page's gesture: {node, ghost: {x, y}} (an island dragged, drawn in ink where it is) or
   // {points, alpha} (the quill's line, fading when alpha drops), in chart units
@@ -1116,7 +1132,7 @@
     (function watchDensity() {
       if (!win.matchMedia) return;
       const mq = win.matchMedia(`(resolution: ${win.devicePixelRatio || 1}dppx)`);
-      const onChange = () => { relayout(); paintKey(); watchDensity(); };
+      const onChange = () => { relayout(); paintKey(); applyQuill(); watchDensity(); };
       if (mq.addEventListener) mq.addEventListener("change", onChange, {once: true});
     })();
 
@@ -1145,7 +1161,11 @@
       }).catch(err => { if (win.console) win.console.error(err); });
     }
 
-    fit(); applyInk(); applyMotion(); pressed(); wake();
+    // the quill at this screen's density (see quillCursor); again when the window moves to a screen of another density
+    const applyQuill = () => doc.documentElement.style.setProperty("--quill",
+      quillCursor(doc.documentElement.classList.contains("qt-cursors") ? win.devicePixelRatio || 1 : 1));
+
+    fit(); applyInk(); applyMotion(); applyQuill(); pressed(); wake();
     return {
       // parsing is synchronous so the app sees a bad document as an error; nothing is returned (WebKit
       // cannot hand a promise back to evaluateJavaScript)
@@ -1171,6 +1191,6 @@
 
   return Object.freeze({
     normalisePrefs, prefsMessage, parseData, bridge, formatSurvey, tooltipContent, tooltipPosition, popoverContent, buildScene, drawChart,
-    drawSurveyLayer, springBack, CARTOUCHE_PX, cartoucheAt, createPage, chart, load: chart.load, update: chart.update,
+    drawSurveyLayer, springBack, CARTOUCHE_PX, cartoucheAt, quillCursor, createPage, chart, load: chart.load, update: chart.update,
   });
 });
