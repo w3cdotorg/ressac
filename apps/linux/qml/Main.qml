@@ -841,7 +841,7 @@ Kirigami.ApplicationWindow {
                 Recette.prepareDefault(); root.useDefaultDatabase()
                 return
             }
-            if (Reader.isExtracting || Runs.longRunActive) { walkTimer.start(); return }   // a fetch or a build in flight: grab again once it ends, and never quit during one
+            if (Reader.isExtracting || Runs.longRunActive || (readingLoader.item !== null && readingLoader.item.proofPending)) { walkTimer.start(); return }   // a fetch, a build or the reader's proof page in flight: grab again once it ends, and never quit during one
             root.walkIndex += 1
             if (Launcher.phase !== Launcher.Ready || root.walkIndex >= root.steps.length) { Qt.exit(0); return }
             root.steps[root.walkIndex].enter()

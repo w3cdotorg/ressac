@@ -86,7 +86,7 @@ jobs:
           "$app/Contents/Helpers/ressac" --version
           # ditto keeps the bundle's symlinks, extended attributes and ad-hoc signatures.
           ditto -c -k --keepParent "$app" "$out/Ressac-$VERSION-macos-arm64.zip"
-          tar -czf "$out/ressac-$VERSION-macos-arm64.tar.gz" -C "$app/Contents/Helpers" ressac
+          tar -czf "$out/Ressac-cli-$VERSION-macos-arm64.tar.gz" -C "$app/Contents/Helpers" ressac
       - uses: actions/upload-artifact@v7
         with:
           name: macos
@@ -137,16 +137,89 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/dist"
-          tar -czf "$RUNNER_TEMP/dist/ressac-$VERSION-linux-$ARCH.tar.gz" -C target/release ressac
+          tar -czf "$RUNNER_TEMP/dist/Ressac-cli-$VERSION-linux-$ARCH.tar.gz" -C target/release ressac
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: ${{ runner.temp }}/dist/*.tar.gz
           if-no-files-found: error
           retention-days: 7
+  linux-app:
+    name: Linux app RPM (${{ matrix.arch }})
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: fedora:44
+    timeout-minutes: 60
+    steps:
+      # The checkout action needs git inside the container to make a real clone.
+      - name: Install git
+        run: dnf install -y git-core
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the build packages
+        run: |
+          # Word splitting is the point: one argument per package name.
+          # shellcheck disable=SC2046
+          dnf install -y $(sed 's/#.*//' apps/linux/dev/packages.txt) rpm-build desktop-file-utils
+      # Cargo and rpmbuild run as a regular user; it owns the checkout and the output folder.
+      - name: Create the build user
+        run: |
+          useradd --create-home --user-group ressac
+          mkdir -p "$RUNNER_TEMP/dist"
+          chown -R ressac:ressac "$GITHUB_WORKSPACE" "$RUNNER_TEMP/dist"
+      - name: Build the RPM
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: runuser -u ressac -- bash apps/linux/packaging/build-rpm.sh "$VERSION" "$RUNNER_TEMP/dist"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-app-${{ matrix.arch }}
+          path: ${{ runner.temp }}/dist/*.rpm
+          if-no-files-found: error
+          retention-days: 7
+  # A fresh container, so the RPM's own dependencies are proven without the build packages.
+  linux-app-verify:
+    name: Linux app RPM check (${{ matrix.arch }})
+    needs: [version, linux-app]
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: fedora:44
+    timeout-minutes: 30
+    steps:
+      - name: Install git
+        run: dnf install -y git-core
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-app-${{ matrix.arch }}
+          path: ${{ runner.temp }}/rpm
+      # The script creates its own user, who reads the fixture from the checkout.
+      - name: Verify the RPM
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod -R a+rX "$GITHUB_WORKSPACE"
+          rpm=$(ls "$RUNNER_TEMP"/rpm/Ressac-*-linux-*.rpm)
+          bash apps/linux/packaging/verify-rpm.sh "$rpm" "$GITHUB_WORKSPACE"
   publish:
     name: Publish
-    needs: [version, macos, linux]
+    needs: [version, macos, linux, linux-app-verify]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -162,13 +235,21 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          for name in "Ressac-$VERSION-macos-arm64.zip" "ressac-$VERSION-macos-arm64.tar.gz" "ressac-$VERSION-linux-x86_64.tar.gz" "ressac-$VERSION-linux-aarch64.tar.gz"; do
+          expected=(
+            "Ressac-$VERSION-macos-arm64.zip"
+            "Ressac-cli-$VERSION-macos-arm64.tar.gz"
+            "Ressac-cli-$VERSION-linux-x86_64.tar.gz"
+            "Ressac-cli-$VERSION-linux-aarch64.tar.gz"
+            "Ressac-$VERSION-linux-x86_64.rpm"
+            "Ressac-$VERSION-linux-aarch64.rpm"
+          )
+          for name in "${expected[@]}"; do
             if [ ! -f "dist/$name" ]; then
               echo "::error title=Missing artifact::$name"
               exit 1
             fi
           done
-          (cd dist && sha256sum ./*.zip ./*.tar.gz | sed "s|  ./|  |" > SHA256SUMS)
+          (cd dist && sha256sum ./*.zip ./*.tar.gz ./*.rpm | sed "s|  ./|  |" > SHA256SUMS)
           cat dist/SHA256SUMS
       - name: Publish the release
         shell: bash
@@ -178,12 +259,13 @@ jobs:
         run: |
           set -euo pipefail
           cat > "$RUNNER_TEMP/notes.md" <<'EOF'
-          **Unsigned build.** Ressac is signed ad hoc, not with a Developer ID, and not notarized. macOS 27 on Apple silicon only.
+          **Unsigned builds.** The Mac app is signed ad hoc, not with a Developer ID, and not notarized; it needs macOS 27 on Apple silicon. The RPMs are not signed.
 
           - **App:** unzip `Ressac-…-macos-arm64.zip`, move `Ressac.app` to `/Applications/`, then clear the quarantine flag once: `xattr -dr com.apple.quarantine /Applications/Ressac.app` (or open it, then allow it under System Settings ▸ Privacy & Security).
-          - **Terminal:** `ressac-…-macos-arm64.tar.gz` holds the same `ressac` binary the app embeds; `tar -xzf` it somewhere on your `PATH` and run `xattr -d com.apple.quarantine ressac`.
-          - **Linux (terminal only):** `ressac-…-linux-x86_64.tar.gz` and `ressac-…-linux-aarch64.tar.gz` hold the `ressac` binary, built on Ubuntu 22.04 (glibc 2.35 or newer). `tar -xzf` it into a directory on your `PATH`, such as `~/.local/bin`. Links open through `xdg-open`; files live under `~/.local/share/ressac`, `~/.config/ressac` and `~/.local/state/ressac` (see the README's Linux section).
-          - `SHA256SUMS` lists every archive's checksum.
+          - **Terminal:** `Ressac-cli-…-macos-arm64.tar.gz` holds the same `ressac` binary the app embeds; `tar -xzf` it somewhere on your `PATH` and run `xattr -d com.apple.quarantine ressac`.
+          - **Linux, KDE app and terminal (Fedora 44 or newer):** `sudo dnf install ./Ressac-…-linux-x86_64.rpm` (or `-aarch64`) installs `ressac-kde` and `ressac`. If you installed the app with `apps/linux/install.sh`, run `apps/linux/install.sh --uninstall` first. `sudo dnf remove ressac` keeps your database and settings.
+          - **Linux (terminal only):** `Ressac-cli-…-linux-x86_64.tar.gz` and `Ressac-cli-…-linux-aarch64.tar.gz` hold the `ressac` binary, built on Ubuntu 22.04 (glibc 2.35 or newer). `tar -xzf` it into a directory on your `PATH`, such as `~/.local/bin`. Links open through `xdg-open`; files live under `~/.local/share/ressac`, `~/.config/ressac` and `~/.local/state/ressac` (see the README's Linux section).
+          - `SHA256SUMS` lists the checksum of every file above.
           EOF
           prerelease=""
           case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
@@ -194,4 +276,4 @@ jobs:
             --notes-file "$RUNNER_TEMP/notes.md" \
             --generate-notes \
             $prerelease \
-            dist/*.zip dist/*.tar.gz dist/SHA256SUMS
+            dist/*.zip dist/*.tar.gz dist/*.rpm dist/SHA256SUMS
