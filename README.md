@@ -120,7 +120,7 @@ The terminal side and [the KDE app](#the-linux-app-kde) run on Linux: the reader
 
 `--db` and `RESSAC_DB` still win over the default database. If a database exists at the macOS path under your Linux home (`~/Library/Application Support/Ressac/ressac.sqlite`, left by a `ressac` built before Linux support), each run names it in the log (at debug level for `ressac ticker`, which tmux runs every 15 s); Ressac never moves it. Move it to `~/.local/share/ressac/` yourself, or pass it with `--db`.
 
-**Install.** Either download `ressac-X.Y.Z-linux-<arch>.tar.gz` from a release (`x86_64` or `aarch64`, glibc 2.35 or newer) and `tar -xzf` it into `~/.local/bin`, or build it:
+**Install.** Either download `Ressac-cli-X.Y.Z-linux-<arch>.tar.gz` from a release (`x86_64` or `aarch64`, glibc 2.35 or newer) and `tar -xzf` it into `~/.local/bin`, or build it:
 
 ```sh
 sudo dnf install rust cargo gcc gcc-c++ cmake clang   # Fedora; other distributions: a Rust toolchain and a C compiler
@@ -153,7 +153,15 @@ bind -n MouseDown1Status if -F '#{m/r:^rs[0-9]+$,#{mouse_status_range}}' \
 
 A Kirigami and Qt Quick app for Fedora KDE Plasma, built from `apps/linux/` (Rust with cxx-qt, QML, WebEngine) on the same core as the Mac app and the terminal. It reads, tidies and charts a database of its own; nothing is shared with a Mac. Fedora 44 (dev container) and Fedora 45 (aarch64 VM) were tried; x86_64 should build.
 
-**Install.** From a clone, as your user (not root):
+**Install.** On Fedora 44 or newer, download `Ressac-X.Y.Z-linux-<arch>.rpm` from a release (`x86_64` or `aarch64`) and install it, which also installs the terminal `ressac`:
+
+```sh
+sudo dnf install ./Ressac-X.Y.Z-linux-<arch>.rpm
+```
+
+The RPM is not signed; dnf installs a local file without checking a signature, so no `--nogpgcheck` is needed. If you installed Ressac with `apps/linux/install.sh` before, remove that copy first with `apps/linux/install.sh --uninstall`: its launcher entry and its `~/.local/bin` come first and would hide the RPM's. `sudo dnf remove ressac` uninstalls the app and keeps your database and settings.
+
+Or, from a clone, as your user (not root):
 
 ```sh
 apps/linux/install.sh
@@ -218,7 +226,7 @@ cp -R "$TMPDIR/ressac-build/Build/Products/Release/Ressac.app" build/
 open build/Ressac.app
 ```
 
-**Releases.** Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`: it checks that the tag matches both `Cargo.toml` and `MARKETING_VERSION` in `apps/macos/project.yml`, builds the Release app on the `xcode-27` runner and the Linux binaries on `ubuntu-22.04` and `ubuntu-22.04-arm`, and publishes a GitHub Release with `Ressac-X.Y.Z-macos-arm64.zip` (the app), `ressac-X.Y.Z-macos-arm64.tar.gz` (the terminal binary) and `ressac-X.Y.Z-linux-x86_64.tar.gz` / `ressac-X.Y.Z-linux-aarch64.tar.gz` (the terminal binary for Linux, built on Ubuntu 22.04), all listed in `SHA256SUMS`. The builds are signed ad hoc and not notarized: after downloading, clear the quarantine flag (`xattr -dr com.apple.quarantine /Applications/Ressac.app`). A tag with a suffix (`v0.2.0-beta.1`) gives a pre-release.
+**Releases.** Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`: it checks that the tag matches both `Cargo.toml` and `MARKETING_VERSION` in `apps/macos/project.yml`, builds the Release app on the `xcode-27` runner, the Linux binaries on `ubuntu-22.04` and `ubuntu-22.04-arm`, and the KDE app's RPMs in a `fedora:44` container on each architecture (each RPM is installed and started in a fresh container before anything is published), and publishes a GitHub Release with `Ressac-X.Y.Z-macos-arm64.zip` (the app), `Ressac-cli-X.Y.Z-macos-arm64.tar.gz` (the terminal binary), `Ressac-cli-X.Y.Z-linux-x86_64.tar.gz` / `Ressac-cli-X.Y.Z-linux-aarch64.tar.gz` (the terminal binary for Linux, built on Ubuntu 22.04) and `Ressac-X.Y.Z-linux-x86_64.rpm` / `Ressac-X.Y.Z-linux-aarch64.rpm` (the KDE app and the terminal binary for Fedora 44 or newer), all listed in `SHA256SUMS`. The builds are signed ad hoc and not notarized: after downloading, clear the quarantine flag (`xattr -dr com.apple.quarantine /Applications/Ressac.app`). A tag with a suffix (`v0.2.0-beta.1`) gives a pre-release.
 
 ```sh
 git tag -a v0.1.0 -m "Ressac 0.1.0" && git push origin v0.1.0
