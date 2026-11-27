@@ -22,7 +22,8 @@
 - No schema change: the chart tables of `schema/0005_chart.sql` stay as they are. Snapshot `version` stays 1 (fields are only added); the import/export format does not change.
 - Reduce Motion (macOS) and Plasma's instant animations: no animated ink, spring-back or drawing flourish.
 - `chart-core.js` stays pure (no DOM). No new font face (the WebKit test pins 8 faces). No network in tests, never the real database.
-- Copy this plan decides (not in the spec): `Log` (toolbar), `Island:`, `With:`, `Rename`, `Delete`, `Back to Open Water`, `Cancel`, `A name has 1 to 40 characters.`, `A new land needs at least two feeds.`, and the edit labels of the table below.
+- Copy this plan decides (not in the spec): `Log` (toolbar), `Island:`, `With:`, `Rename`, `Delete`, `Back to Open Water`, `Cancel`, `A name has 1 to 40 characters.`, `A new land needs at least two feeds.`, `Its continent will be removed.`, and the edit labels of the table below.
+- Decisions beyond the spec's words: an empty derived key becomes `sea` before numbering (`sea`, `sea-2`): a bare number is not the key shape the spec shows (`comics-2`). Every refusal text the page shows lives once, in `crates/ressac-core/src/error.rs`; the page's copies are checked against it (Task 7). The name rules are pinned by one case table, `tests/fixtures/chart-name-cases.json`, run by the Rust and the Node tests; "trimmed" means Rust's `str::trim` (Unicode `White_Space`) on both sides.
 - Plans and UI in English; `TODO.md` and `notes.md` lines in French, no em dash.
 - Commits end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` and `Claude-Session: https://claude.ai/code/session_01AuT5b6J38qtEBs4rgmJ6rb`. Never push, open a PR, merge or tag.
 - Gates: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `node --test 'apps/macos/ChartTests/*.test.cjs'`; `apps/linux/dev/dev.sh check` ending `check-linux: OK (fmt, clippy, test, chart, layout smoke)`; for Swift tasks `cd apps/macos && xcodegen generate && xcodebuild -project Ressac.xcodeproj -scheme Ressac -destination 'platform=macOS' -derivedDataPath "$TMPDIR/ressac-dd" test` → `** TEST SUCCEEDED **` (about 10 minutes; run it once per Swift task).
@@ -35,14 +36,14 @@
 - `Change`: serde `#[serde(tag = "kind", rename_all = "snake_case")]`: `Sea { before: Option<SeaRow>, after: Option<SeaRow> }`, `Land { before: Option<LandRow>, after: Option<LandRow> }`, `Member { feed: FeedId, land: i64, before: Option<i64>, after: Option<i64> }` (positions), `FeedSeas { feeds: Vec<FeedId>, before: Option<i64>, after: Option<i64> }` (theme ids; grouped so a large sea's undo stays small). `SeaRow { id, key, name, sea, position }`, `LandRow { id, name, continent: Option<i64> }` (a theme id makes it a continent).
 - `ChartEditDone { label: String, undo: ChartEdit }` (always `ChartEdit::Patch`), with `fn event(&self) -> serde_json::Value` = `{"event":"chart_edit","label":…,"undo":…}`, the one shape the CLI prints and both apps hand to the page.
 - `Store::apply_chart_edit(&self, edit: &ChartEdit) -> Result<ChartEditDone>`.
-- `Error` variants: `ChartChanged`, `LandNameTaken`, `SeaNameTaken`, `NameLength`, `PartOfContinent { name: String }`, with the texts of Global Constraints.
+- `Error` variants: `ChartChanged`, `LandNameTaken`, `SeaNameTaken`, `NameLength`, `NewLandNeedsTwo` (`A new land needs at least two feeds.`), `PartOfContinent { name: String }`, with the texts of Global Constraints.
 - `MAX_EDIT: usize = 64 * 1024`: the most bytes of edit JSON any path accepts (page, both bridges, CLI).
 
 | `op` | fields | label | refused with |
 |---|---|---|---|
 | `join` | `feed`, `land: LandRef` | `Join <LAND>` | `ChartChanged` (feed or land gone, land renamed or a continent, feed already in it), `PartOfContinent` |
 | `leave` | `feed`, `land` | `Leave <LAND>` | `ChartChanged` (feed not in it), `PartOfContinent` |
-| `found` | `name`, `feeds: [id]` (chart order) | `New Land <NAME>` | `NameLength`, `LandNameTaken`, `PartOfContinent`, `ChartChanged` (a feed gone), `Invalid("A new land needs at least two feeds.")` |
+| `found` | `name`, `feeds: [id]` (chart order) | `New Land <NAME>` | `NameLength`, `LandNameTaken`, `PartOfContinent`, `ChartChanged` (a feed gone), `NewLandNeedsTwo` |
 | `rename_land` | `land`, `name` | `Rename <NAME>` | `NameLength`, `LandNameTaken`, `ChartChanged` |
 | `delete_land` | `land` | `Delete <NAME>` | `ChartChanged` |
 | `make_continent` | `sea: SeaRef`, `name` | `Make Continent <NAME>` | `NameLength`, `LandNameTaken`, `ChartChanged` (sea gone, renamed, or already has one) |
@@ -53,13 +54,13 @@
 | `delete_sea` | `sea` | `Delete <SEA>` | `ChartChanged` |
 | `patch` | `label`, `changes: [Change]` | its `label` | `ChartChanged` (any `before` differs), the name refusals |
 
-Decisions inside the table: a moved feed leaves every territory it was in, and a territory left with fewer than two member rows is deleted (rule 1, rule 6); `join` appends at the end; `set_sea` never touches memberships (an island dropped in another sea keeps its land); `rename_sea` changes `sea_name` only; `new_sea` stores the trimmed name as both `name` and `sea_name`, at the last position; a sea name clashes with any other theme's `sea_name` or `name`; `make_continent` leaves the sea's territories alone; `delete_sea` unthemes every feed of the sea (buried ones too) and deletes its continent; an empty derived key becomes `sea` before numbering (`sea`, `sea-2`).
+Decisions inside the table: a moved feed leaves every territory it was in, and a territory left with fewer than two member rows is deleted (rule 1, rule 6); `join` appends at the end; `set_sea` never touches memberships (an island dropped in another sea keeps its land); `rename_sea` changes `sea_name` only; `new_sea` stores the trimmed name as both `name` and `sea_name`, at the last position; a sea name clashes with any other theme's `sea_name` or `name`; `make_continent` leaves the sea's territories alone; `delete_sea` unthemes every feed of the sea (buried ones too) and deletes its continent; an empty derived key becomes `sea` before numbering (`sea`, `sea-2`); `<FEED>` on the command line is a feed id.
 
 **Snapshot** (still `version` 1): `themes[].id`, `territories[].id` (grouped by id, no longer by name), `continents[].id`, and `ledger: {seas: [{id, key, name, sea, position, feeds}], lands: [{id, name, continent, feeds}]}`: every theme in position order with its feed count (any state), every territory and continent in id order (`continent` = the theme key or null; `feeds` = member ids in position order).
 
 **CLI:** `ressac chart apply <EDIT>` (one `ChartEdit` as JSON: the apps' path); `ressac chart land new <NAME> <FEED> <FEED>…`, `land rename <LAND> <NAME>`, `land delete <LAND>`, `land add <LAND> <FEED>`, `land remove <LAND> <FEED>`; `ressac chart continent make <THEME> <NAME>`, `continent unmake <THEME>`; `ressac chart theme new <NAME>`, `theme rename <THEME> <NAME>`, `theme move <THEME> <POSITION>` (1-based), `theme delete <THEME>`. `<LAND>` is an id or a name (any case); `<THEME>` a key or name (`resolve_theme`). Each prints the label, or with `--json` the `chart_edit` event; refusals exit 2 with the message.
 
-**Page ↔ app:** the page posts `{type: "edit", seq: <whole number>, edit: "<ChartEdit JSON text>"}`; the app answers `Chart.edited(resultText)` with `{"seq":n,"ok":true,"done":<event>}` or `{"seq":n,"ok":false,"refused":<bool>,"error":"<text>"}`; the apps' shortcuts call `Chart.undo()` / `Chart.redo()`. `Chart.load`'s prefs gain `reduceMotion` (bool). After every edit (done or not) the app surveys at once; the page keeps the edit pending until the next `Chart.update` or `PENDING_MS = 5000`.
+**Page ↔ app:** the page posts `{type: "edit", seq: <whole number>, edit: "<ChartEdit JSON text>"}`; the app answers `Chart.edited(resultText)` with `{"seq":n,"ok":true,"done":<event>}` or `{"seq":n,"ok":false,"refused":<bool>,"error":"<text>"}`; the apps' shortcuts call `Chart.undo()` / `Chart.redo()`. `Chart.load`'s prefs gain `reduceMotion` (bool). After every edit (done or not) the app surveys at once. Pending, one rule: an edit is pending from `send` to its result; a not-ok result ends it at once; an ok result keeps it pending until the next `Chart.update` or `PENDING_MS = 5000` after the result, whichever comes first. No edit is sent while one is pending.
 
 **Page history** (pure, `chart-core.js`): `{undo: Record[], redo: Record[]}`, `Record = {label, edit}` where `edit` is the patch to send.
 
@@ -71,7 +72,7 @@ Decisions inside the table: a moved feed leaves every territory it was in, and a
 4. **A name clash under a case difference**: `apple press` against `APPLE PRESS` (lands), `sea of kites` against `SEA OF KITES` (seas); SQLite's `UNIQUE` is case-sensitive, so only the core's check catches it. Expected: refused with the land or sea message and the field stays open; renaming a land to a case variant of its own name is allowed. Pinned in Task 2 (`names_clash_without_case`) and Task 7 (`check_name_clashes_without_case`).
 5. **A hostile feed title in the log** (`<img src=x onerror=…>`, `</option>`, control characters): expected: shown as text in `Island:` options, the island heading and every label; no element is built from it. Pinned in Task 9 (`log_feed_titles_are_text`), with the fake document that throws on `innerHTML`.
 
-Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_when_motion_is_reduced`, Task 12 `page_argument_carries_reduce_motion`, Task 14 `page_prefs_carry_reduce_motion`); **a loop drawn through overlapping labels** (Task 8 `a_press_that_moves_on_a_name_draws`, `loop_selects_by_centre_only`, `cartouche_falls_back_when_every_spot_is_taken`).
+Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_when_motion_is_reduced`, Task 12 `page_argument_carries_reduce_motion`, Task 14 `page_prefs_carry_reduce_motion`); **a loop drawn through overlapping labels** (Task 8 `a_press_that_moves_on_a_name_draws`, `loop_selects_by_centre_only`, `cartouche_avoids_labels_and_falls_back_when_every_spot_is_taken`, Task 11 `a_reduced_spring_back_lands_home_without_frames`).
 
 ---
 
@@ -102,14 +103,16 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 **Files:**
 - Create: `crates/ressac-core/src/store/chart_edit.rs`
 - Modify: `crates/ressac-core/src/store/mod.rs` (`mod chart_edit;` and re-exports)
-- Modify: `crates/ressac-core/src/error.rs` (five variants)
+- Modify: `crates/ressac-core/src/error.rs` (six variants)
+- Create: `tests/fixtures/chart-name-cases.json` (the shared name cases, D5)
 
 **Interfaces:**
 - Consumes: `chart::check_theme_key` (make it `pub(super)`), `Store::conn`.
-- Produces: the types of Names decided here; `pub(super) fn clean_name(raw: &str) -> Result<String>` (trim, 1 to 40 `char`s, else `NameLength`); `pub(super) fn same_name(a: &str, b: &str) -> bool` (`trim().to_lowercase()` equality); `pub(super) fn derive_key(name: &str, taken: impl Fn(&str) -> bool) -> String`; `pub(super) fn apply_patch(conn: &Connection, changes: &[Change]) -> Result<()>`; `pub(super) fn invert(changes: &[Change]) -> Vec<Change>`; `Store::apply_chart_edit` handling `ChartEdit::Patch` (other ops: Tasks 3 and 4; until then their arms return `Err(Error::Invalid(format!("{op} is not implemented yet")))`).
+- Produces: the types of Names decided here; `pub(super) fn clean_name(raw: &str) -> Result<String>` (trim, 1 to 40 `char`s, else `NameLength`); `pub(super) fn same_name(a: &str, b: &str) -> bool` (`trim().to_lowercase()` equality); `pub(super) fn derive_key(name: &str, taken: impl Fn(&str) -> bool) -> String`; `pub(super) fn apply_patch(conn: &Connection, changes: &[Change]) -> Result<()>`; `pub(super) fn invert(changes: &[Change]) -> Vec<Change>`; `Store::apply_chart_edit` handling `ChartEdit::Patch` only (other ops: Tasks 3 and 4; until then their arms return `Err(Error::Invalid(format!("{op} is not implemented yet")))`). No `compile` function in this task.
 
 - [ ] **Step 1: Tests first** (in `chart_edit.rs`):
   - `edits_round_trip_through_json`: one value per op serializes to the field names of the table (`{"op":"set_sea","feed":3,"from":null,"to":{"id":1,"key":"a","sea":"SEA A"}}`) and back; an unknown `op` or a missing field fails to parse.
+  - `name_cases_from_the_shared_table`: every case of `tests/fixtures/chart-name-cases.json` (`{raw, kind, existing, self, expect: {name} | {error}}`, with at least: plain, padded, empty, blanks only, 40 and 41 astral characters, `U+0085` around a name (trimmed), `U+FEFF` before one (kept and counted), a case-only clash for a land and for a sea, a rename to its own name in another case) gives `expect` through `clean_name` and the clash check.
   - `clean_name_trims_and_counts_characters`: `"  Apple  "` → `"Apple"`; `""`, `"   "` and 41 `é` → `NameLength`; 40 `é` passes; `NameLength.to_string()` = `A name has 1 to 40 characters.`
   - `derive_key_follows_the_spec`: `"Sea of Kites!!"` → `sea-of-kites`; `"Comics"` with `comics` taken → `comics-2` (and `comics-3` when both taken); `"None"` → `none-2`; `"!!!"` → `sea`; `"--Été & Mer--"` → `été-mer`; every result passes `check_theme_key`.
   - `names_clash_without_case` (Review Focus 4): a patch creating land `apple press` beside `APPLE PRESS` → `LandNameTaken`; a sea patch `sea of kites` beside a theme whose `sea_name` is `SEA OF KITES` → `SeaNameTaken`, and beside a theme whose `name` is `Sea of kites` → `SeaNameTaken`; renaming `APPLE PRESS` to `Apple Press` passes; the error texts equal Global Constraints.
@@ -118,7 +121,7 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
   - `deleting_a_land_with_unlisted_members_is_refused`: a `Land` deletion whose member rows are not all removed by the same patch → `ChartChanged` (no silent `ON DELETE CASCADE`); same for a `Sea` deletion with a feed or continent still on it.
   - `a_feed_ends_in_one_territory`: a patch that would leave a touched feed in two territories → `ChartChanged`.
 - [ ] **Step 2:** `cargo test -p ressac-core chart_edit` → fails to compile.
-- [ ] **Step 3: Implement.** `apply_patch` checks every `before` first, then applies in this order: sea upserts, land upserts, `FeedSeas`, member removals, member inserts and moves, land deletions (refuse when members remain), sea deletions (refuse when a feed or a continent still points at it); then checks invariants on what it touched: `clean_name` and case-free uniqueness for changed land and sea names, `check_theme_key` and key uniqueness for sea rows, at most one continent per theme, each touched feed in at most one `kind='territory'` row. Rows are inserted with their explicit ids (an id in use → `ChartChanged`). `apply_chart_edit` runs compile + `apply_patch` in one `unchecked_transaction` and commits only on success. The four `Error` texts and `PartOfContinent`'s go in `error.rs`.
+- [ ] **Step 3: Implement.** `apply_patch` checks every `before` first, then applies in this order: sea upserts, land upserts, `FeedSeas`, member removals, member inserts and moves, land deletions (refuse when members remain), sea deletions (refuse when a feed or a continent still points at it); then checks invariants on what it touched: `clean_name` and case-free uniqueness for changed land and sea names, `check_theme_key` and key uniqueness for sea rows, at most one continent per theme, each touched feed in at most one `kind='territory'` row. Rows are inserted with their explicit ids (an id in use → `ChartChanged`). `apply_chart_edit` applies a `Patch` with `apply_patch` in one `unchecked_transaction` and commits only on success. The six `Error` texts go in `error.rs`.
 - [ ] **Step 4:** `cargo test -p ressac-core chart_edit` → pass; fmt, clippy.
 - [ ] **Step 5:** Commit `Core: chart edits as checked, invertible patches`.
 
@@ -126,7 +129,7 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 
 **Files:**
 - Create: `crates/ressac-core/src/store/chart_ops.rs` (compiling ops into `(label, Vec<Change>)`; `mod chart_ops;` in `store/mod.rs`)
-- Modify: `crates/ressac-core/src/store/chart_edit.rs` (dispatch to `chart_ops`)
+- Modify: `crates/ressac-core/src/store/chart_edit.rs` (`apply_chart_edit` now calls `chart_ops::compile` for every op, `Patch` included, then `apply_patch`)
 
 **Interfaces:**
 - Consumes: Task 2's engine and helpers.
@@ -153,12 +156,12 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 - [ ] **Step 1: Tests first:**
   - `join_moves_a_feed_out_of_its_old_land`: feed 3 in `PAIR` (with feed 4) joins `TRIO` → appended last in `TRIO`, `PAIR` deleted (one member left, its row removed too); label `Join TRIO`; undo restores `PAIR` with its id and both positions.
   - `leave_deletes_a_land_left_with_one_feed`; `leave` of a feed not in the land → `ChartChanged`.
-  - `found_keeps_the_given_order_and_empties_old_lands` (rule 6): `found "NEW" [5, 3, 4]` → positions 0, 1, 2 in that order; old lands left with fewer than two rows deleted; one feed → `A new land needs at least two feeds.`
+  - `found_keeps_the_given_order_and_empties_old_lands` (rule 6): `found "NEW" [5, 3, 4]` → positions 0, 1, 2 in that order; old lands left with fewer than two rows deleted; one feed → `NewLandNeedsTwo`
   - `continental_feeds_cannot_join_or_leave` (rule 2): a feed whose theme has continent `ALL ALPHA` → `join`, `leave` and `found` refused with `Part of the continent ALL ALPHA: move it to another sea, or turn the continent back into open water.`
   - `make_continent_once_per_sea`: creates a `continent` row on the theme, label `Make Continent <NAME>`; a second one on that sea → `ChartChanged`; the sea's territories are untouched.
   - `delete_land_handles_both_kinds`: a territory's member rows go with it; a continent goes back to open water; undo restores either.
   - `undo_keeps_an_unrelated_write` (Review Focus 2): join, then `set_feed_theme` on another feed and a new feed added with `add_feed`; applying the undo restores the membership and keeps both writes.
-  - `undo_after_a_conflicting_write_is_refused` (Review Focus 2): join feed 3 to `TRIO`, then `import_chart` (or a direct `DELETE FROM territory WHERE name='TRIO'`) elsewhere; the undo → `ChartChanged`, and `export_chart()` is unchanged by the attempt.
+  - `undo_after_a_conflicting_write_is_refused` (Review Focus 2): join feed 3 to `TRIO`, then another writer runs `import_chart` with a file that leaves `TRIO` out; the undo → `ChartChanged`, and `export_chart()` is unchanged by the attempt.
   - `rename_land_to_its_own_name_in_another_case_is_allowed`.
 - [ ] **Step 2:** run → fail. **Step 3:** implement. **Step 4:** `cargo test -p ressac-core` → pass.
 - [ ] **Step 5: Phase gate:** fmt, clippy, `cargo test --workspace`. Commit `Core: land edits (join, leave, new land, rename, delete, continents)`.
@@ -174,7 +177,7 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 
 **Interfaces:**
 - Consumes: `Store::apply_chart_edit`, `ChartEditDone::event`, `MAX_EDIT`.
-- Produces: `ressac [--json] chart apply <EDIT>`: prints the label (human) or the event as one JSON line; exit 2 (usage, message as is) for `ChartChanged`, the name errors, `PartOfContinent`, `Invalid`, a JSON that is not a `ChartEdit` (`The edit is not a chart edit: <serde message>`) and an edit over `MAX_EDIT` bytes (`The edit is too large.`); needs an existing database (exit 1 otherwise, nothing created).
+- Produces: `ressac [--json] chart apply <EDIT>`: prints the label (human) or the event as one JSON line; exit 2 (usage, message as is) for `ChartChanged`, the name errors, `NewLandNeedsTwo`, `PartOfContinent`, `Invalid`, a JSON that is not a `ChartEdit` (`The edit is not a chart edit: <serde message>`) and an edit over `MAX_EDIT` bytes (`The edit is too large.`); opens the database with `Store::open_existing(&g.db)` (writable; never creates, migrates or backs up), so a missing database is exit 1 with nothing created.
 
 - [ ] **Step 1: Tests first** (`cli.rs`, on `chart_home()`):
   - `chart_apply_prints_the_event_and_its_undo_reverts_it`: `--json chart apply '{"op":"new_sea","name":"Comics"}'` → one line, `event` = `chart_edit`, `label` = `New Sea Comics`; applying `undo` (re-serialized) with a second `chart apply` removes the theme (`chart export` shows it gone).
@@ -194,9 +197,9 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 
 **Interfaces:**
 - Consumes: Task 5's printing and refusal mapper (`pub(super)`).
-- Produces: the verbs of Names decided here. `<LAND>`: all digits → that id, else a name compared without case; `land add`/`land remove` match territories only. Unknown → exit 2 `No land "<given>".`; `continent unmake` on a sea without one → exit 2 `Theme "<key>" has no continent.`; `theme move` outside `1..=n` → exit 2 `Position <p> is not between 1 and <n>.`
+- Produces: the verbs of Names decided here. `<FEED>`: a feed id (`FeedId`, as `ressac feed theme`). `<LAND>`: all digits → that id, else a name compared without case; `land add`/`land remove` match territories only. Unknown → exit 2 `No land "<given>".`; `continent unmake` on a sea without one → exit 2 `Theme "<key>" has no continent.`; `theme move` outside `1..=n` → exit 2 `Position <p> is not between 1 and <n>.`
 
-- [ ] **Step 1: Tests first:** `chart_land_commands_round_trip` (new with two feed ids, add, remove, rename, delete; each line is the label; `chart export` matches after each); `chart_land_name_clash_ignores_case` (exit 2 `A land with that name already exists.`); `chart_theme_commands_round_trip` (new `Comics` twice → keys `comics`, `comics-2`; rename; move 2 → 1; delete; `--json` prints events); `chart_continent_make_and_unmake`; `chart_land_unknown_name_exits_2`.
+- [ ] **Step 1: Tests first:** `chart_land_commands_round_trip` (new with two feed ids, add, remove, rename, delete; each line is the label; `chart export` matches after each); `chart_land_name_clash_ignores_case` (exit 2 `A land with that name already exists.`); `chart_theme_commands_round_trip` (new `Comics`, then new `Comics!` → keys `comics`, `comics-2`; new `comics` → exit 2 `A sea with that name already exists.`; rename; move 2 → 1; delete; `--json` prints events); `chart_continent_make_and_unmake`; `chart_land_unknown_name_exits_2`.
 - [ ] **Step 2:** run → fail. **Step 3:** implement; each verb builds the `ChartEdit` from the database's current rows (so a CLI edit is never stale) and calls `apply_chart_edit`. Help strings name what each does in the README's words. **Step 4:** pass.
 - [ ] **Step 5: Phase gate:** fmt, clippy, `cargo test --workspace`. Commit `CLI: chart land, continent and theme subcommands`.
 
@@ -210,39 +213,46 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 - Create: `apps/macos/ChartTests/chart-edit.test.cjs`
 
 **Interfaces:**
-- Consumes: the snapshot shape of Task 1, the wire table of Names decided here.
-- Produces on `ChartCore`: `EDIT_TEXT` (`changed`, `landTaken`, `seaTaken`, `nameLength`, `newLandTwo`, `continentHint(name)`), `MAX_EDIT = 65536`, `PENDING_MS = 5000`; `checkName(raw, kind /* "land"|"sea" */, ledger, selfId) → {name} | {error}`; `deleteSeaQuestion(sea, count, hasContinent) → string`; `ledgerIndex(data) → {landOf(feedId), continentOf(themeKey), seaById(id), landById(id), seaRef(key|null), landRef(id)}`; `edits` with one builder per op returning the wire object (`edits.join(feed, landRef)` …); `history: {empty(), record(h, done), step(h, which) → {record, rest} | null, land(h, which, record, done), titles(h) → {undo, redo}}` (pure, return new objects); `editFailure(result) → "name" | "continent" | "changed" | "failed"`.
-- Fixture: every theme, territory and continent gets an id and the document a `ledger` (one empty sea `UNSAILED SEA`, one land hidden off the chart); the tricky title gains `<img src=x onerror=alert(1)>` and `</option>`.
+- Consumes: the snapshot shape of Task 1, the wire table of Names decided here, `tests/fixtures/chart-name-cases.json` (Task 2).
+- Produces on `ChartCore`: `EDIT_TEXT` (`changed`, `landTaken`, `seaTaken`, `nameLength`, `newLandTwo`, `continentHint(name)`), `MAX_EDIT = 65536`, `PENDING_MS = 5000`; `trimName(raw) → string` (Rust `str::trim`: strips `\p{White_Space}` at both ends, so `U+0085` goes and `U+FEFF` stays); `checkName(raw, kind /* "land"|"sea" */, ledger, selfId) → {name} | {error}`; `deleteSeaQuestion(sea, count, hasContinent) → string`; `ledgerIndex(data) → {landOf(feedId), continentOf(themeKey), seaById(id), landById(id), seaRef(key|null), landRef(id)}`; `edits` with one builder per op returning the wire object (`edits.join(feed, landRef)` …); `history: {empty(), record(h, done), step(h, which) → {record, rest} | null, land(h, which, record, done), titles(h) → {undo, redo}}` (pure, return new objects); `editFailure(result) → "name" | "invalid" | "continent" | "changed" | "failed"`.
+- `editFailure`: the three name texts → `name` (the form stays open with it); `newLandTwo` → `invalid` (a validation message shown as is in the form or the status line, never as "changed"); a `Part of the continent …` text → `continent`; any other refused text → `changed`; `refused: false` → `failed`.
+- `deleteSeaQuestion`: `Delete the sea <SEA>?`, then `Its <n> feeds will be uncharted` (`feed` for 1) when n > 0, then `, and its continent removed.` or `.`; with no feeds and a continent: `Delete the sea <SEA>? Its continent will be removed.`; with neither: `Delete the sea <SEA>?`.
+- Fixture: every theme, territory and continent gets an id and the document a `ledger` (one empty sea `UNSAILED SEA`, one land hidden off the chart, and a territory `APPLE PRESS` of two feeds); the tricky title gains `<img src=x onerror=alert(1)>` and `</option>`.
 
 - [ ] **Step 1: Tests first** (`chart-edit.test.cjs`):
-  - `edit_texts_match_the_core`: reads `crates/ressac-core/src/error.rs` and asserts each `EDIT_TEXT` string (and the continent hint with `{name}`) appears there verbatim.
-  - `check_name_clashes_without_case` (Review Focus 4): `" apple press "` against land `APPLE PRESS` → `{error: EDIT_TEXT.landTaken}`; same with `selfId` of that land → `{name: "apple press"}`; `"sea of kites"` → `seaTaken` (fixture sea `SEA OF KITES`); `""` and 41 code points → `nameLength`; 40 astral code points pass.
-  - `delete_sea_question_names_feeds_and_continent` (Review Focus 3): `("SILICON SHORES", 12, true)` → the Global Constraints sentence exactly; `(…, 12, false)` → `Delete the sea SILICON SHORES? Its 12 feeds will be uncharted.`; count 1 → `Its 1 feed will be uncharted`; count 0 → `Delete the sea SILICON SHORES?`.
+  - `edit_texts_match_the_core`: reads `crates/ressac-core/src/error.rs` and asserts each `EDIT_TEXT` string, `newLandTwo` included (and the continent hint with `{name}`), appears there verbatim.
+  - `name_cases_from_the_shared_table`: every case of `tests/fixtures/chart-name-cases.json` gives its `expect` through `checkName` (the same table Task 2 runs in Rust).
+  - `check_name_clashes_without_case` (Review Focus 4): `" apple press "` against the fixture land `APPLE PRESS` → `{error: EDIT_TEXT.landTaken}`; same with `selfId` of that land → `{name: "apple press"}`; `"sea of kites"` → `seaTaken` (fixture sea `SEA OF KITES`).
+  - `delete_sea_question_names_feeds_and_continent` (Review Focus 3): `("SILICON SHORES", 12, true)` → the Global Constraints sentence exactly; `(…, 12, false)` → `Delete the sea SILICON SHORES? Its 12 feeds will be uncharted.`; `(…, 1, false)` → `… Its 1 feed will be uncharted.`; `(…, 0, true)` → `Delete the sea SILICON SHORES? Its continent will be removed.`; `(…, 0, false)` → `Delete the sea SILICON SHORES?`.
   - `history_records_undoes_and_redoes`: record two dones → `titles` = `{undo: "Undo Join TRIO", redo: null}`; `step(h,"undo")` returns the last record; `land(h,"undo",record,done)` puts `{label, edit: done.undo}` on `redo`; a new `record` clears `redo`.
-  - `edit_failure_classifies_results`: the three name texts → `name`; a `Part of the continent …` text → `continent`; refused otherwise → `changed`; `refused: false` → `failed`.
+  - `edit_failure_classifies_results`: the five buckets above, one result each; `newLandTwo` refused → `invalid`, not `changed`.
   - `builders_write_the_wire_format`: each builder's output deep-equals the table's example, and `ledgerIndex` finds the fixture's hidden land for its member.
 - [ ] **Step 2:** `node --test 'apps/macos/ChartTests/*.test.cjs'` → the new file fails; the old ones still pass on the new fixture.
-- [ ] **Step 3:** implement (code points via `[...s].length`; case via `toLowerCase()`). **Step 4:** all Node tests pass.
+- [ ] **Step 3:** implement (code points via `[...s].length`; case via `toLowerCase()`; trimming via `trimName`). **Step 4:** all Node tests pass.
 - [ ] **Step 5:** Commit `Chart page: edit texts, names and history (pure)`.
 
-### Task 8: gesture geometry in `chart-core.js`
+### Task 8: gesture geometry in `chart-core.js`, and one fake DOM for the Node tests
 
 **Files:**
 - Modify: `apps/macos/Ressac/Resources/Chart/chart-core.js`
 - Create: `apps/macos/ChartTests/chart-gestures.test.cjs`
+- Create: `apps/macos/ChartTests/fake-dom.cjs` (`fakeDocument`, `walk`, `elements`, `byClass`, `recordingContext`, moved out of `chart-draw.test.cjs`; elements gain `dispatch(type, event)` for any event and an optional settable `rect` returned by `getBoundingClientRect()`)
+- Modify: `apps/macos/ChartTests/chart-draw.test.cjs` (requires `./fake-dom.cjs` instead of defining them)
 
 **Interfaces:**
 - Consumes: `place`, `territories`, `field`, `labels`, `seas`, Task 7's `ledgerIndex`.
-- Produces: `classifyPress(points /* screen px */) → "click" | "stroke"` (stroke once any point is 4 px or more from the first); `closedLoop(points /* chart units */) → boolean` (path length ≥ 120 and end within 40 of start); `loopSelection(nodes, loop, data) → {islands, continentSea}` (centres inside `d3.polygonContains`, continental islands left out of `islands`; `continentSea` = the sea key when the loop holds every island of exactly one sea, at least two, and that sea has no continent, else null); `nameAt(placements, x, y) → placement | null` (kinds `territory`, `continent`, `sea` only); `dropTarget(scene, data, dragged, x, y)`, where `scene = {view, nodes, territories, ground}` (what `buildScene` returns from Task 11 on; tests build it from `place`, `territories` and `field`), `→ {kind: "join", land} | {kind: "pair", with} | {kind: "sea", key} | {kind: "leave", land} | {kind: "refuse", hint} | {kind: "none"}`; `cartouchePlace(box, placements, size) → {x, y}`; `editMotion(prefs, reducedMatches) → boolean`.
-- `dropTarget` precedence: an island within `r + 12` (a territory's → `join`; a lone non-continental one → `pair`; else `none`); a territory link within 24 → `join`; in `themes` view only, the nearest sea cell other than the island's own → `sea` (`key` null for the uncharted waters); open water (`ground.at < .5`) for an island in a territory → `leave`; else `none`. Then rule 2: a continental dragged island turns `join`, `pair` and `leave` into `refuse` with `EDIT_TEXT.continentHint(name)`. `cartouchePlace` tries right, left, below, above the loop's box (inside the 40-unit margin, meeting no placement box), then falls back to `{x: 40 + size.w / 2, y: 40 + size.h / 2}`.
+- Produces: `fake-dom.cjs` for Tasks 9 to 11 (no copy of it anywhere). On `ChartCore`: `classifyPress(points /* screen px */) → "click" | "stroke"` (stroke once any point is 4 px or more from the first); `closedLoop(points /* chart units */) → boolean` (path length ≥ 120 and end within 40 of start); `loopSelection(nodes, loop, data) → {islands, continentSea}` (centres inside `d3.polygonContains`, continental islands left out of `islands`; `continentSea` = the sea key when the loop holds every island of exactly one sea, at least two, and that sea has no continent, else null); `nameAt(placements, x, y) → placement | null` (kinds `territory`, `continent`, `sea` only); `dropTarget(scene, data, dragged, x, y)`, where `scene = {view, nodes, territories, ground}` (what `buildScene` returns from Task 11 on, pinned there; tests here build it from `place`, `territories` and `field`), `→ {kind: "join", land} | {kind: "pair", with} | {kind: "sea", key} | {kind: "leave", land} | {kind: "refuse", hint} | {kind: "none"}`; `cartouchePlace(box, placements, size) → {x, y}`; `editMotion(prefs, reducedMatches) → boolean`.
+- `dropTarget` precedence: an island within `r + 12` (one of the dragged island's own land → `none`; a territory's → `join`; a lone non-continental one → `pair`; else `none`); a territory link within 24 (its own land's → `none`, another's → `join`); in `themes` view only, the nearest sea cell other than the island's own → `sea` (`key` null for the uncharted waters); open water (`ground.at < .5`) for an island in a territory → `leave`; else `none`. Then rule 2: a continental dragged island turns `join`, `pair` and `leave` into `refuse` with `EDIT_TEXT.continentHint(name)`. `cartouchePlace` tries right, left, below, above the loop's box (inside the 40-unit margin, meeting no placement box), then falls back to `{x: 40 + size.w / 2, y: 40 + size.h / 2}`.
 
+- [ ] **Step 0:** move the helpers into `fake-dom.cjs`; `node --test 'apps/macos/ChartTests/*.test.cjs'` still passes unchanged.
 - [ ] **Step 1: Tests first:**
   - `a_press_that_moves_on_a_name_draws`: 3 px of jitter → `click`; a 5 px move → `stroke` (whatever is under the press).
   - `loop_selects_by_centre_only`: a loop that covers an island's label and edge but not its centre does not select it; a loop round two lone islands selects both, in the order of `data.feeds`.
   - `closed_loop_needs_length_and_closure`; `loop_offers_a_continent_for_one_whole_sea` (all of a sea without a continent → `continentSea`; one island missing, one from another sea, or a sea that has a continent → null).
   - `drop_targets_follow_the_precedence`: on a territory's island → `join`; on a lone island → `pair`; in another sea's cell (themes view) → `sea`; the same spot in harbour view → not `sea`; open water for a territorial island → `leave`; on itself → `none`.
+  - `dropping_on_its_own_land_is_a_no_op`: a territorial island dropped on another island of its land, or on its land's link, → `none` (never `join`).
   - `continental_islands_only_change_sea` (rule 2): a continental island on a territory → `refuse` with the exact hint; into another sea → `sea`.
-  - `cartouche_avoids_labels_and_falls_back_when_every_spot_is_taken`: a free spot never meets a placement box; with placements covering all four spots the fallback is returned (and the function returns in one pass).
+  - `cartouche_avoids_labels_and_falls_back_when_every_spot_is_taken`: with 500 random placements leaving one of the four spots free, the result meets no placement box and lies inside the margin; with 500 placements covering all four spots, the result equals the fallback exactly.
   - `edit_motion_is_off_when_motion_is_reduced`: `({reduceMotion: true}, false)` and `({reduceMotion: false}, true)` → false; both false → true.
 - [ ] **Step 2:** run → fail. **Step 3:** implement. **Step 4:** all Node tests pass.
 - [ ] **Step 5:** Commit `Chart page: hit-testing, loops, drop targets and the cartouche spot (pure)`.
@@ -251,23 +261,27 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 
 **Files:**
 - Create: `apps/macos/Ressac/Resources/Chart/chart-survey.js` (UMD like `chart-draw.js`; builders take the document, as `popoverContent` does)
-- Create: `apps/macos/ChartTests/chart-survey.test.cjs` (with a copy of `chart-draw.test.cjs`'s `fakeDocument`, which throws on `innerHTML`, plus `dispatch` for `keydown`)
+- Create: `apps/macos/ChartTests/chart-survey.test.cjs` (uses `./fake-dom.cjs`)
 - Modify: `apps/macos/Ressac/Resources/Chart/index.html` (script after `chart-core.js`)
 - Modify: `crates/ressac-ui/src/chart.rs` (`FILES` gains `chart-survey.js`, 14 entries; `the_chart_files_are_the_mac_files` checks it is referenced)
 - Modify: `apps/linux/src/chart.rs` (`file_bytes` list)
 
 **Interfaces:**
-- Consumes: Task 7's `history`, `editFailure`, `MAX_EDIT`, `PENDING_MS`, `checkName`, `deleteSeaQuestion`, `ledgerIndex`.
-- Produces: `ChartSurvey.createSession({post, onChange}) → {send(edit) → boolean, edited(text) → {kind, message} | null, undo() → boolean, redo() → boolean, titles(), pending() → boolean, updated()}`: one edit in flight (`send` returns false while pending or when `JSON.stringify(edit).length > MAX_EDIT`); `seq` counts up; a result with another `seq` is ignored (`null`); done → `history.record` (or `land` for undo/redo); a refused undo or redo drops its record, a failed one keeps it; pending ends at `updated()` after an ok result, or `PENDING_MS` after it; `onChange()` after every state change.
-- Produces: `ChartSurvey.logContent(doc, data, state, on) → Node[]` with `state = {selected, busy, message}` and handlers `on.{select, setSea, setLand, leave, newLand, renameLand, deleteLand, makeContinent, renameSea, moveSea, newSea, deleteSea, undo, redo}`; `ChartSurvey.nameForm(doc, {title, value, withChoices}, on) → Node[]` (the cartouche and `New Land…`/`New Sea…`/rename forms: `<form>` with `<input maxlength=40>`, Enter submits, Esc calls `on.cancel`, an error line under it). Classes: `.log`, `.log-island`, `.log-lands`, `.log-seas`, `.log-undo`, `.log-redo`, `.log-status`, `.name-form`.
-- Log layout: `<aside aria-labelledby>` titled `Cartographer's Log`; island block (`Island:` select of every chart feed by title, the title as a heading, `Sea:` select of `ledger.seas` plus `Uncharted waters`, `Land:` select of territories, `Leave Land`, `New Land…`); `Lands` (each: name, feed count, `Rename`, `Delete` or, for a continent, `Back to Open Water`); `Seas` (each: `≡` handle, sea name, count, `Rename`, `Make a continent` when it has none, `Delete`; Alt+↑/↓ on a row calls `on.moveSea(id, ∓1)`); `New Sea…`; `Undo …`/`Redo …` buttons showing `titles()`, disabled when null; a `role="status"` line. `Leave Land` is disabled with `title` = the continent hint on a continental island; every control is disabled while `busy`.
+- Consumes: Task 7's `history`, `editFailure`, `MAX_EDIT`, `PENDING_MS`, `checkName`, `deleteSeaQuestion`, `ledgerIndex`; Task 8's `fake-dom.cjs`.
+- Produces: `ChartSurvey.createSession({post, onChange, setTimeout}) → {send(edit) → boolean, edited(text) → {kind, message} | null, undo() → boolean, redo() → boolean, titles(), pending() → boolean, updated()}`, following the one pending rule of Names decided here: `send` returns false while pending, or when `JSON.stringify(edit).length > MAX_EDIT`; `seq` counts up; a result with another `seq` is ignored (`null`); done → `history.record` (or `land` for undo/redo); a refused undo or redo drops its record, a failed one keeps it; `onChange()` after every state change.
+- Produces: `ChartSurvey.logContent(doc, data, state, on) → Node[]` with `state = {selected, busy, message}` and handlers `on.{select, setSea, setLand, leave, newLand, renameLand, deleteLand, makeContinent, renameSea, moveSea, newSea, deleteSea, undo, redo}`; `on.moveSea(id, delta)` takes a signed number of rows.
+- Produces: `ChartSurvey.nameForm(doc, {title, value, withChoices}, on) → {nodes: Node[], setError(text | null)}`: a `<form class="name-form">` headed by `title`, an `<input maxlength=40>` holding `value`, and, when `withChoices` is an array of `{id, label}`, a `With:` select of them (labels as option text; no default; submit disabled until one is chosen); Enter or the submit button calls `on.submit(value, choice)` (`choice` = the chosen id, or null without `withChoices`); Esc or `Cancel` calls `on.cancel()`; `setError` writes the line under the field (`textContent`), null clears it. It serves the cartouche, `New Land…`, `New Sea…` and every rename.
+- Produces: `ChartSurvey.seaDropIndex(rowMids, y) → index` (the row a dragged `≡` lands on: the first row whose middle is below `y`, else the last).
+- Log layout: `<aside aria-labelledby>` titled `Cartographer's Log`; island block (`Island:` select of every chart feed by title, the title as a heading, `Sea:` select of `ledger.seas` plus `Uncharted waters`, `Land:` select of territories, `Leave Land`, `New Land…` opening a `nameForm` whose `withChoices` lists the other non-continental islands); `Lands` (each: name, feed count, `Rename`, `Delete` or, for a continent, `Back to Open Water`); `Seas` (each: `≡` handle, sea name, count, `Rename`, `Make a continent` when it has none, `Delete`); `New Sea…`; `Undo …`/`Redo …` buttons showing `titles()`, disabled when null; a `role="status"` line. Seas reorder both ways the spec names: Alt+↑/↓ on a focused row calls `on.moveSea(id, ∓1)`; pressing the `≡` handle and releasing over another row calls `on.moveSea(id, seaDropIndex(mids, y) − index)` (nothing when it is 0). `Leave Land` is disabled with `title` = the continent hint on a continental island; every control is disabled while `busy`.
 
 - [ ] **Step 1: Tests first:**
-  - `log_feed_titles_are_text` (Review Focus 5): the island select and heading for the fixture's tricky feed carry its exact title as text nodes; no element under the log has the tag `IMG` or `SCRIPT`; the fake document's `innerHTML` trap never fires.
+  - `log_feed_titles_are_text` (Review Focus 5): the island select and heading for the fixture's tricky feed carry its exact title as text nodes; no element under the log has the tag `IMG` or `SCRIPT`; the fake document's `innerHTML` trap never fires; the same for the tricky title as a `With:` choice in `nameForm`.
   - `log_lists_every_sea_and_land_from_the_ledger`: `Seas` has the empty `UNSAILED SEA`, in ledger order, with counts; `Lands` has the hidden land; continents show `Back to Open Water`.
   - `leave_land_is_disabled_on_a_continental_island` with the hint as `title`.
   - `alt_arrows_move_a_sea`: dispatching `keydown {key: "ArrowUp", altKey: true}` on the second sea row calls `on.moveSea(id, -1)`.
-  - `session_sends_one_edit_at_a_time`: `send` posts `{type: "edit", seq: 1, edit: "<json>"}`, a second `send` returns false until `edited`; an oversized edit is not posted.
+  - `dragging_the_handle_moves_a_sea`: rows given `rect`s 30 px apart; `pointerdown` on the first row's `≡`, `pointerup` at the third row's middle → `on.moveSea(firstId, 2)`; released on its own row → no call. `sea_drop_index_follows_the_pointer` pins `seaDropIndex` above, between and below the rows.
+  - `name_form_submits_and_shows_errors`: Enter calls `on.submit("Apple", null)`; with `withChoices`, submit is disabled until a choice, then `on.submit("Apple", 7)`; Esc calls `on.cancel`; `setError(EDIT_TEXT.landTaken)` shows that text, `setError(null)` clears it.
+  - `session_sends_one_edit_at_a_time`: `send` posts `{type: "edit", seq: 1, edit: "<json>"}`; a second `send` returns false before the result, and still false after an ok result until `updated()` (or the stub timer fires `PENDING_MS`); after a refused result `send` works at once; an oversized edit is not posted.
   - `a_changed_refusal_shows_the_message_and_keeps_history` (Review Focus 1): after one done edit, a refused result with `EDIT_TEXT.changed` → `{kind: "changed", message: EDIT_TEXT.changed}`, history still has its record.
   - `session_undo_redo_round_trip`: undo posts the record's patch; its done result moves it to `redo` with the new patch; a refused undo drops the record; a result with a stale `seq` is ignored.
 - [ ] **Step 2:** `node --test …` → fail. **Step 3:** implement; update `index.html`, `FILES` and `file_bytes`. **Step 4:** Node tests pass; `cargo test -p ressac-ui chart` passes; `apps/linux/dev/dev.sh check` → `check-linux: OK …` (the KDE app serves the new file).
@@ -276,17 +290,25 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 ### Task 10: Survey mode in the page
 
 **Files:**
-- Modify: `apps/macos/Ressac/Resources/Chart/chart-draw.js` (`createPage`, the `Chart` object, `normalisePrefs`)
+- Modify: `apps/macos/Ressac/Resources/Chart/chart-survey.js` (the Survey-mode controller)
+- Modify: `apps/macos/ChartTests/chart-survey.test.cjs`
+- Modify: `apps/macos/Ressac/Resources/Chart/chart-draw.js` (`createPage` wires the controller; the `Chart` object; `normalisePrefs`)
 - Modify: `apps/macos/Ressac/Resources/Chart/chart.css`
 - Modify: `apps/macos/ChartTests/chart-draw.test.cjs`
 
 **Interfaces:**
-- Consumes: Task 9's session and builders, Task 8's `nameAt`, `editMotion`.
-- Produces: `Chart = {load, update, edited, undo, redo}`; `normalisePrefs` keeps a boolean `reduceMotion` (default false); `prefsMessage` unchanged.
-- Behaviour: `✒ Survey` (after `Key`, `aria-pressed`) shows only when a bridge exists and the document has a `ledger`; on, it adds `body.survey` (faint survey grid drawn on the overlay canvas, the quill cursor from `chart.css`), opens the log and shows the `Log` button that toggles it; `fit()` keeps the chart clear of the open drawer (320 px). In Survey mode a click on an island selects it in the log (no popover); a click on a territory, continent or sea name opens the inline rename form over that label (Cormorant SC, `font-variant: small-caps`; Enter confirms, Esc cancels; an unchanged name cancels; a `name` failure keeps it open with its message). `Chart.undo()`/`Chart.redo()` act only in Survey mode with no name form open. `Chart.update` calls `session.updated()`. Survey mode always starts off.
+- Consumes: Task 9's session, `logContent` and `nameForm`; Task 8's `nameAt`, `editMotion`.
+- Produces: `ChartSurvey.createMode({session, available, onChange}) → {active, logOpen, renaming, toggle(), toggleLog(), rename(placement) → boolean, endRename(), click(target) → "select" | "rename" | "popover", undo() → boolean, redo() → boolean, updated()}`, the DOM-free state `createPage` draws from: `toggle()` does nothing unless `available` (a bridge and a document with a `ledger`); turning on opens the log, turning off closes it and any rename; `toggleLog()` only while active; `click(target)` answers `popover` when inactive, `select` for an island and `rename` for a `territory`/`continent`/`sea` placement when active; `rename` only while active; `undo()`/`redo()` return false (and send nothing) when inactive or while `renaming`, else call the session's; `updated()` forwards to `session.updated()`.
+- Produces: `Chart = {load, update, edited, undo, redo}` (`undo`/`redo` call the mode's; `update` calls `mode.updated()`); `normalisePrefs` keeps a boolean `reduceMotion` (default false); `prefsMessage` unchanged.
+- Page: `✒ Survey` (after `Key`, `aria-pressed`) shows only when `available`; on, `body.survey` (faint survey grid drawn on the overlay canvas, the quill cursor from `chart.css`) and the `Log` button; `fit()` keeps the chart clear of the open drawer (320 px). The rename form is a `nameForm` over the label (Cormorant SC, `font-variant: small-caps`); an unchanged name cancels; a `name` or `invalid` failure keeps it open through `setError`. Survey mode always starts off.
 
-- [ ] **Step 1: Tests first:** `chart_exposes_edited_undo_and_redo` (the `Chart` object keys); `prefs_keep_reduce_motion` (`normalisePrefs({reduceMotion: true}).reduceMotion === true`, a string → false); `prefs_message_never_carries_reduce_motion`.
-- [ ] **Step 2:** run → fail. **Step 3:** implement. **Step 4:** Node tests pass; then the preview check of Task 11 Step 4 covers the DOM by eye.
+- [ ] **Step 1: Tests first** (in `chart-survey.test.cjs` unless named):
+  - `survey_toggle_opens_and_closes_the_log`: `toggle()` → `active`, `logOpen`; `toggleLog()` closes and reopens it; `toggle()` again → both false; unavailable → `toggle()` leaves `active` false.
+  - `clicks_select_or_rename_only_in_survey`: inactive → `popover` for an island and for a name; active → `select` for an island, `rename` for a sea placement (and `renaming` true), `popover` never.
+  - `undo_and_redo_do_nothing_outside_survey` (anti-goal): with one recorded edit, inactive `undo()` → false and nothing posted; active with a rename open → false; active → true and the patch posted.
+  - `update_ends_a_pending_edit_through_the_mode`: after an ok result, `mode.updated()` makes `session.pending()` false.
+  - In `chart-draw.test.cjs`: `chart_exposes_edited_undo_and_redo` (the `Chart` keys are exactly `load, update, edited, undo, redo`); `prefs_keep_reduce_motion` (`normalisePrefs({reduceMotion: true}).reduceMotion === true`, a string → false); `prefs_message_never_carries_reduce_motion`.
+- [ ] **Step 2:** run → fail. **Step 3:** implement the controller, then wire it in `createPage`. **Step 4:** Node tests pass; the real DOM is exercised by Task 11's preview check, Task 12's WebKit test and Task 16's walk.
 - [ ] **Step 5:** Commit `Chart page: Survey mode, the log drawer and renaming in place`.
 
 ### Task 11: gestures on the chart
@@ -300,8 +322,11 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 **Interfaces:**
 - Consumes: Task 8's `classifyPress`, `closedLoop`, `loopSelection`, `dropTarget`, `cartouchePlace`, `editMotion`; Task 9's session and `nameForm`.
 - Behaviour: in Survey mode, a press on an island drags it (the island follows in ink on the overlay); the drop runs `dropTarget`: `join` → `edits.join`; `pair` → the cartouche `Name this land` then `found` with both ids in `data.feeds` order (the chart order of rule 6); `sea` → `set_sea`; `leave` → `leave`; `refuse` → spring back and the hint in the log's status line; `none` → spring back. A press elsewhere that becomes a stroke draws ink; on release `closedLoop` + `loopSelection`: fewer than two islands → the line fades; `continentSea` → the cartouche titled `Make a continent` (Enter makes it); else `Name this land` then `found` with `islands` (already in `data.feeds` order). The ink line stays until the new chart arrives (or the cartouche is cancelled), then the invented coastline replaces it. The cartouche sits at `cartouchePlace`. While pending, the moved island stays at its drop point and gestures are ignored. With `editMotion` false: no spring-back tween, no ink fade, the line simply disappears.
+- Produces: `springBack(ghost, node, win, motion, done)` exported on `ChartDraw`: brings `ghost` (`{x, y}`) back to `node`'s place, through `win.requestAnimationFrame` frames when `motion`, at once when not; calls `done()` once at the end.
 
-- [ ] **Step 1: Tests first:** `scene_keeps_the_territories` (`buildScene(...).territories` equals `core.territories` for the fixture); `reduced_motion_schedules_no_frames_for_a_spring_back` (with a stub `win.requestAnimationFrame` counter and `reduceMotion: true`, the exported `springBack(scene, node, win, motion)` helper returns without scheduling).
+- [ ] **Step 1: Tests first** (`chart-draw.test.cjs`):
+  - `the_real_scene_feeds_drop_target`: `buildScene(fixture, "themes", measure)` has `view`, `nodes`, `territories` (equal to `core.territories` on its nodes) and `ground`; `core.dropTarget(scene, fixture, a lone island, at another lone island's centre)` → `pair`, and at the centre of an `APPLE PRESS` island → `join` with that land.
+  - `a_reduced_spring_back_lands_home_without_frames` (Reduce Motion): with a counting stub `requestAnimationFrame`, `springBack(ghost, node, win, false, done)` leaves `ghost` at `node.x, node.y`, calls `done` once and schedules 0 frames; the positive control with `motion: true` schedules at least one frame and, once the stub frames are flushed, also ends at `node.x, node.y` with `done` called once.
 - [ ] **Step 2:** run → fail. **Step 3:** implement. **Step 4:** Node tests pass. Preview check in a browser (Playwright, Firefox): serve the repository, open `apps/macos/ChartTests/preview.html?view=themes&survey=1`, turn on Survey, drag a lone island onto another (cartouche appears clear of labels), name it, check `Undo New Land …` in the log; reload with `&refuse=1`, rename a sea, check the status line shows `The chart changed; nothing was done.`; screenshot both into the scratchpad. Emulate `prefers-reduced-motion: reduce` once and check a refused drop snaps back.
 - [ ] **Step 5: Phase gate:** Node tests, `cargo test --workspace`, `apps/linux/dev/dev.sh check`. Commit `Chart page: drag, freehand coastlines and the cartouche`.
 
@@ -321,6 +346,7 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
   - `bridge_accepts_an_edit_message`: `["type": "edit", "seq": NSNumber(value: 3.0), "edit": #"{"op":"new_sea","name":"Comics"}"#]` → `.edit(seq: 3, json: …)`.
   - `bridge_refuses_malformed_edits`: unknown op, `seq` boolean or 1.5, `edit` not a string, not a JSON object, or over 65 536 UTF-8 bytes → nil.
   - `page_argument_carries_reduce_motion`: `pageArgument(reduceMotion: true)["reduceMotion"] as? Bool == true`, and false when off.
+  - Update `reduce_motion_starts_still_and_keeps_the_stored_choice` (`ChartBridgeTests.swift:78-80`): its pinned `pageArgument` dictionaries gain `"reduceMotion"` (true in the Reduce Motion case, false otherwise).
   - WebKit (same `.disabled(if: RESSAC_HEADLESS)` guard): `an_edit_goes_to_the_app_and_its_reply_comes_back`: the harness's `onEdit` records the JSON and answers `.done(<event line for New Sea Comics>)`; the test clicks `✒ Survey`, then `New Sea…`, sets the field to `Comics` and submits; expects one recorded JSON with `"op":"new_sea"` and the page's `.log-undo` text `Undo New Sea Comics`.
 - [ ] **Step 2:** xcodebuild test → fails to compile. **Step 3:** implement. **Step 4:** xcodebuild test → `** TEST SUCCEEDED **`.
 - [ ] **Step 5:** Commit `Mac: chart edit messages and replies in the page bridge`.
@@ -351,31 +377,46 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 - Modify: `crates/ressac-ui/src/runs.rs`
 
 **Interfaces:**
-- Produces: `ChartAction::Edit { seq: i64, edit: String }` from `handle` (whole-number `seq`; `edit` a string of at most `MAX_EDIT` bytes that parses as `ressac_core::store::ChartEdit`); `pub fn edit_result(seq: i64, end: &RunEnd<ChartEditDone>) -> String` (the result JSON of Names decided here; `Refused` reads as failed with `ressac is busy.`); `pub fn edited_script(result: &str) -> String` = `Chart.edited(<js_string>)`; `page_prefs` writes `"reduceMotion":<bool>`; `RunRequest::ChartEdit(String)`: short, `shows_failure_banner` false, `is_refusal` true for `ChartChanged`, `LandNameTaken`, `SeaNameTaken`, `NameLength`, `PartOfContinent`, `Invalid`.
+- Produces: `ChartAction::Edit { seq: i64, edit: String }` from `handle` (whole-number `seq`; `edit` a string of at most `MAX_EDIT` bytes that parses as `ressac_core::store::ChartEdit`); `pub fn edit_result(seq: i64, end: &RunEnd<ChartEditDone>) -> String` (the result JSON of Names decided here; `Refused` reads as failed with `ressac is busy.`); `pub fn edited_script(result: &str) -> String` = `Chart.edited(<js_string>)`; `page_prefs` writes `"reduceMotion":<bool>`; `RunRequest::ChartEdit(String)`: short, `shows_failure_banner` false, `is_refusal` true for `ChartChanged`, `LandNameTaken`, `SeaNameTaken`, `NameLength`, `NewLandNeedsTwo`, `PartOfContinent`, `Invalid`.
 
 - [ ] **Step 1: Tests first:** `bridge_accepts_an_edit` and `bridge_refuses_malformed_edits` (as the Swift ones); `edit_results_are_the_page_format` (done → `ok:true` and `done.event == "chart_edit"`; a refused failure → `ok:false, refused:true, error` exact); `edited_script_never_splices` (a hostile error text stays inside one `js_string` literal, as `scripts_never_splice_the_document`); `page_prefs_carry_reduce_motion`; `chart_edit_is_short_and_bannerless`.
 - [ ] **Step 2:** `cargo test -p ressac-ui` → fail. **Step 3:** implement (adjust `reduce_motion_starts_still_and_keeps_the_stored_choice` for the new key). **Step 4:** pass.
 - [ ] **Step 5:** Commit `KDE core: chart edit messages, results and Reduce Motion in the prefs`.
 
-### Task 15: the `Chart` object, shortcuts and the `chart-edit` walk
+### Task 15: the `Chart` object and the shortcuts
 
 **Files:**
 - Modify: `apps/linux/src/chart.rs` (`receive` routes `Edit`; `MAX_MESSAGE = 256 * 1024`; `fn start_edit(seq, edit)` and `fn edit_ended(seq, end)`)
 - Modify: `apps/linux/qml/SeaChartWindow.qml` (`Shortcut { sequences: [StandardKey.Undo]; onActivated: web.runJavaScript("Chart.undo()") }`, `Shortcut { sequences: ["Ctrl+Shift+Z"]; onActivated: web.runJavaScript("Chart.redo()") }`)
+
+**Interfaces:**
+- Consumes: Task 14; `submit_short` (`apps/linux/src/runs.rs:510`) as `garden.rs::set_theme` uses it.
+- `start_edit` submits `RunRequest::ChartEdit(edit)` with the job `cx.app.store().apply_chart_edit(&parsed)` and an `end` that queues `edit_ended` on the GUI thread (`qt.queue`, as `run_undo` does); `edit_ended` emits `run_script(edited_script(edit_result(seq, &end)))` and starts a survey through `model.refresh()`, whether the edit was done or refused.
+
+- [ ] **Step 1: Tests first** (in `apps/linux/src/chart.rs`): `an_edit_message_under_the_new_cap_parses` (a 200 KiB message whose `edit` is under `MAX_EDIT` after unescaping parses; one over 256 KiB is ignored before parsing).
+- [ ] **Step 2:** `apps/linux/dev/dev.sh sh 'cargo test -p ressac-kde --lib chart'` → fails. **Step 3:** implement. **Step 4:** passes.
+- [ ] **Step 5:** Commit `KDE: chart edits on the short lane, with Ctrl+Z and Ctrl+Shift+Z`.
+
+### Task 16: keys aimed at the chart window, and the `chart-edit` walk
+
+**Files:**
+- Modify: `apps/linux/cpp/shim.cpp` (`ressac_send_key_to(title, key, modifiers, text)`: as `ressac_send_key`, but to the visible `QQuickWindow` whose `title()` equals `title`; false when there is none)
+- Modify: `apps/linux/src/lib.rs` (the shim declaration beside `ressac_send_key`)
+- Modify: `apps/linux/src/recette.rs` (`#[qinvokable] fn key_to(self: &Recette, title: &QString, key: i32, text: &QString, modifiers: i32) -> bool`, active only under `--screenshot`, like `key`)
 - Modify: `apps/linux/qml/Main.qml` (`RESSAC_RECETTE_WALK=chart-edit` steps)
 - Modify: `apps/linux/tests/chart.rs`
 
 **Interfaces:**
-- Consumes: Task 14; `submit_short` (`apps/linux/src/runs.rs:510`) as `garden.rs::set_theme` uses it.
-- `start_edit` submits `RunRequest::ChartEdit(edit)` with the job `cx.app.store().apply_chart_edit(&parsed)` and an `end` that queues `edit_ended` on the GUI thread (`qt.queue`, as `run_undo` does); `edit_ended` emits `run_script(edited_script(edit_result(seq, &end)))` and starts a survey through `model.refresh()`.
+- Consumes: Task 15; `Chart.windowTitle` (`Sea Chart`).
+- Produces: `Recette.keyTo(Chart.windowTitle, key, text, modifiers)`: the walk's keys reach the chart window explicitly, never the first visible window `Recette.key` picks (`first_quick_window(true)` in `shim.cpp`).
 
-- [ ] **Step 1: Tests first:** in `apps/linux/src/chart.rs` tests, `an_edit_message_under_the_new_cap_parses`; in `apps/linux/tests/chart.rs`, `the_sea_chart_edits_and_undoes_with_ctrl_z`: the walk opens the chart on a copy of the contract fixture, clicks `✒ Survey`, `New Sea…`, submits `Sea of Tests`, waits, prints `walk: 20-made seas=<n> undo=<.log-undo text>`; activates the chart window, sends Ctrl+Z (`Recette.key(Qt.Key_Z, "z", Qt.ControlModifier)`), prints `walk: 24-undone seas=<n> redo=<.log-redo text>`; sends Ctrl+Shift+Z, prints `walk: 28-redone seas=<n>`. Asserts `seas=1 undo=Undo New Sea Sea of Tests`, `seas=0 redo=Redo New Sea Sea of Tests`, `seas=1`, and after exit the database (rusqlite) has one theme, key `sea-of-tests`.
-- [ ] **Step 2:** `apps/linux/dev/dev.sh sh 'cargo test -p ressac-kde --test chart'` → fails. **Step 3:** implement. **Step 4:** passes.
-- [ ] **Step 5: Phase gate:** `apps/linux/dev/dev.sh check` → `check-linux: OK (fmt, clippy, test, chart, layout smoke)`. Commit `KDE: chart edits on the short lane, with Ctrl+Z and Ctrl+Shift+Z`.
+- [ ] **Step 1: Tests first** (`apps/linux/tests/chart.rs`), `the_sea_chart_edits_and_undoes_with_ctrl_z`: the walk opens the chart on a copy of the contract fixture, clicks `✒ Survey`, `New Sea…`, submits `Sea of Tests`, waits, prints `walk: 20-made seas=<n> undo=<.log-undo text>`; sends Ctrl+Z with `Recette.keyTo(Chart.windowTitle, Qt.Key_Z, "z", Qt.ControlModifier)` and prints `walk: 24-undone sent=<bool> seas=<n> redo=<.log-redo text>`; sends Ctrl+Shift+Z the same way and prints `walk: 28-redone sent=<bool> seas=<n>`; sends `Recette.keyTo("No such window", …)` and prints `walk: 29-nowhere sent=<bool>`. Asserts `seas=1 undo=Undo New Sea Sea of Tests`, `sent=true seas=0 redo=Redo New Sea Sea of Tests`, `sent=true seas=1`, `sent=false`, and after exit the database (rusqlite) has one theme, key `sea-of-tests`.
+- [ ] **Step 2:** `apps/linux/dev/dev.sh sh 'cargo test -p ressac-kde --test chart'` → fails. **Step 3:** implement. **Step 4:** passes; the existing `chart` and `chart-live` walks still pass.
+- [ ] **Step 5: Phase gate:** `apps/linux/dev/dev.sh check` → `check-linux: OK (fmt, clippy, test, chart, layout smoke)`. Commit `KDE: the chart-edit walk, with keys aimed at the chart window`.
 
 ## Phase 6: documentation and recette
 
-### Task 16: README and TODO
+### Task 17: README and TODO
 
 **Files:**
 - Modify: `README.md` (Sea Chart section, lines 243-290)
@@ -385,7 +426,7 @@ Also pinned, as the spec implies: **Reduce Motion** (Task 8 `edit_motion_is_off_
 - [ ] **Step 2: TODO.md** (French, no em dash): line 98 ticked with « Fait le <date> sur la branche `territory-editor` (spec et plan du 27/11/2026) ; recette en attente. »; line 108 drops « territoires regroupés par nom et non par id » (the snapshot groups by id now); line 109 adds « l'éditeur garde un seul territoire par flux ; une importation peut encore en mettre deux ».
 - [ ] **Step 3:** Commit `Docs: the territory editor in the README and TODO`.
 
-### Task 17: recette on both apps (stops for Clément)
+### Task 18: recette on both apps (stops for Clément)
 
 **Files:** `notes.md` (a « Recette de l'éditeur de territoires (<date>) » paragraph in French, no em dash), committed alone.
 
