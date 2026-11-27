@@ -58,6 +58,7 @@ pub enum RunRequest {
     SetCadence(FeedId, Option<CadenceGroup>),
     SetTheme(FeedId, Option<String>),
     MoveFeed(FeedId, Option<FolderId>),
+    ChartEdit(String),
 }
 
 impl RunRequest {
@@ -84,7 +85,10 @@ impl RunRequest {
 
     /// An extraction failure is stored on the entry and an add failure shows in its sheet.
     pub fn shows_failure_banner(&self) -> bool {
-        !matches!(self, RunRequest::Extract(_) | RunRequest::Add { .. })
+        !matches!(
+            self,
+            RunRequest::Extract(_) | RunRequest::Add { .. } | RunRequest::ChartEdit(_)
+        )
     }
 
     /// Whether `error` is one of the CLI's exit-2 refusals for this request: its sentence is
@@ -116,6 +120,16 @@ impl RunRequest {
                     | Error::UnknownFolderName(_)
                     | Error::AmbiguousFolder { .. }
                     | Error::UnknownFeed(_)
+                    | Error::Invalid(_)
+            ),
+            RunRequest::ChartEdit(_) => matches!(
+                error,
+                Error::ChartChanged
+                    | Error::LandNameTaken
+                    | Error::SeaNameTaken
+                    | Error::NameLength
+                    | Error::NewLandNeedsTwo
+                    | Error::PartOfContinent { .. }
                     | Error::Invalid(_)
             ),
             _ => false,
@@ -1122,5 +1136,30 @@ mod tests {
             RunEnd::Done(())
         );
         assert_eq!(runs.banner(), None);
+    }
+
+    #[test]
+    fn chart_edit_is_short_and_bannerless() {
+        let request = RunRequest::ChartEdit("{}".into());
+        assert_eq!(request.kind(), RunKind::Short);
+        assert!(!request.shows_failure_banner());
+        for error in [
+            Error::ChartChanged,
+            Error::LandNameTaken,
+            Error::SeaNameTaken,
+            Error::NameLength,
+            Error::NewLandNeedsTwo,
+            Error::PartOfContinent { name: "X".into() },
+            Error::Invalid("x".into()),
+        ] {
+            assert!(request.is_refusal(&error), "{error}");
+        }
+        assert!(!request.is_refusal(&Error::UnknownFeed(1)));
+        let mut runs = RunCoordinator::default();
+        assert_eq!(runs.admit(&request), Admission::Start);
+        let failure = request.failure(&JobFailure::Core(Error::ChartChanged));
+        assert!(failure.refusal);
+        runs.finish(&request, Err(&failure));
+        assert_eq!(runs.banner(), None, "a refused edit shows no banner");
     }
 }

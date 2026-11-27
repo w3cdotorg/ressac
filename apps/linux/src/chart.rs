@@ -410,7 +410,10 @@ impl qobject::Chart {
                 &QString::from(prefs.ink.as_str()),
                 prefs.animate,
             ),
-            None => tracing::debug!("chart: ignored a page message"),
+            // The edit path is wired in the next task.
+            Some(ChartAction::Edit { .. } | ChartAction::Survey) | None => {
+                tracing::debug!("chart: ignored a page message");
+            }
         }
     }
 
