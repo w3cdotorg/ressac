@@ -544,7 +544,7 @@ test("an_edit_with_nothing_to_undo_is_no_step", () => {
 test("session_ends_an_unanswered_edit", () => {
   const {session, posted, after, timeouts, changes} = stubSession();
   assert.equal(survey.REPLY_MS, 15000);
-  assert.equal(survey.NO_REPLY, "The app did not answer; nothing was changed.");
+  assert.equal(survey.NO_REPLY, "The app did not answer; the chart was reloaded.");
   session.send(JOIN);
   assert.equal(after(survey.REPLY_MS).length, 1, "a reply timer per send");
   const before = changes();

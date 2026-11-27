@@ -11,7 +11,7 @@
 
   const T = core.EDIT_TEXT;
   const REPLY_MS = 15000; // an edit the app never answers stops being pending after this long
-  const NO_REPLY = "The app did not answer; nothing was changed.";
+  const NO_REPLY = "The app did not answer; the chart was reloaded.";
   const SURVEY_MESSAGE = Object.freeze({type: "survey"}); // asks the app for a fresh snapshot (Chart.update)
 
   // ---------- the edit session ----------
