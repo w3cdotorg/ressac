@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ressac
+GenericName=Feed Reader
+Comment=Tidy your RSS subscriptions, then read them calmly
+Exec=ressac-kde
+Icon=org.w3cdotorg.ressac
+Terminal=false
+Categories=Network;Feed;News;Qt;KDE;
+StartupWMClass=ressac-kde
