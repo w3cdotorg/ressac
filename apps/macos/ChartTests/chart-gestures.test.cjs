@@ -181,7 +181,8 @@ test("drop_targets_follow_the_precedence", () => {
   // open water for an island in a territory: leave (harbour view has no seas to drop on)
   const open = freePoint(harbour);
   const land = harbour.territories.find(t => !t.continent && t.members.some(m => m.id === 1));
-  assert.deepEqual(core.dropTarget(harbour, data, node(harbour, 1), open.x, open.y), {kind: "leave", land});
+  assert.equal(land.id, core.ledgerIndex(data).landOf(1).id, "the scene's land carries the ledger id");
+  assert.deepEqual(core.dropTarget(harbour, data, node(harbour, 1), open.x, open.y), {kind: "leave", land: core.ledgerIndex(data).landOf(1)});
   // open water for a lone island: nothing
   assert.deepEqual(core.dropTarget(harbour, data, harbour.nodes.find(n => n.id === L.id), open.x, open.y), {kind: "none"});
   // a territory's link: join its land
@@ -204,6 +205,25 @@ test("dropping_on_its_own_land_is_a_no_op", () => {
       const mid = {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2};
       assert.deepEqual(core.dropTarget(scene, data, dragged, mid.x, mid.y), {kind: "none"}, `${view}: its land's link`);
     }
+  }
+});
+
+test("own_land_is_read_from_the_ledger_not_from_linked_members", () => {
+  // feed 3 of GULL PRESS GROUP (feeds 1, 2, 3) lies far from its siblings: its link is too long, so the scene's
+  // members for that land leave it out. The land is still its own: both drags are no-ops.
+  const data = fixture();
+  for (const view of ["themes", "harbour"]) {
+    const nodes = core.place(data, view);
+    const probe = {view, nodes, territories: core.territories(nodes, data), ground: {at: () => 1}};
+    const far = freePoint({...probe, ground: core.field(nodes, view, data, probe.territories)});
+    const three = nodes.find(n => n.id === 3);
+    three.x = far.x; three.y = far.y;
+    const scene = {view, nodes, territories: core.territories(nodes, data), ground: core.field(nodes, view, data, core.territories(nodes, data))};
+    const land = scene.territories.find(t => t.name === "GULL PRESS GROUP");
+    assert.ok(!land || !land.members.some(m => m.id === 3), `${view}: the scene has lost feed 3 from the land's members`);
+    const one = node(scene, 1), three2 = node(scene, 3);
+    assert.deepEqual(core.dropTarget(scene, data, three2, one.x, one.y), {kind: "none"}, `${view}: feed 3 onto its sibling`);
+    assert.deepEqual(core.dropTarget(scene, data, one, three2.x, three2.y), {kind: "none"}, `${view}: a sibling onto feed 3`);
   }
 });
 
@@ -230,7 +250,8 @@ test("the_scene_shape_is_checked", () => {
   assert.ok(core.sceneProblems({...scene, ground: {}}).some(p => /ground/.test(p)));
   assert.ok(core.sceneProblems({...scene, view: "sideways"}).some(p => /view/.test(p)));
   assert.ok(core.sceneProblems({...scene, nodes: scene.nodes.map(n => ({...n, r: undefined}))}).some(p => /node/.test(p)));
-  assert.ok(core.sceneProblems({...scene, territories: [{name: "X", continent: false, links: [[1, 2]], members: []}]}).length > 0);
+  assert.ok(core.sceneProblems({...scene, nodes: scene.nodes.slice(1)}, data).some(p => /no node/.test(p)));
+  assert.ok(core.sceneProblems({...scene, territories: [{id: 1, name: "X", continent: false, links: [[1, 2]], members: []}]}).length > 0);
   assert.ok(core.sceneProblems(null).length > 0);
 });
 

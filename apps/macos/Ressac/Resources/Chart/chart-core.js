@@ -276,9 +276,9 @@
   function territories(nodes, data) {
     const byId = new Map(nodes.map(n => [n.id, n]));
     const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-    const result = (name, links, continent) => {
+    const result = (name, links, continent, id) => {
       if (!links.length) return null;
-      return {name, continent, links, groups: groups(links), members: [...new Set(links.flat())]};
+      return {id, name, continent, links, groups: groups(links), members: [...new Set(links.flat())]};
     };
     const families = data.territories.map(t => {
       const members = t.feeds.map(id => byId.get(id)).filter(Boolean);
@@ -291,7 +291,7 @@
         chain.push(left.splice(bi, 1)[0]);
       }
       const links = chain.slice(1).map((n, i) => [chain[i], n]).filter(([a, b]) => dist(a, b) < MAXLINK * 1.2);
-      return result(t.name, links, false);
+      return result(t.name, links, false, t.id);
     });
     const continents = data.continents.map(c => {
       const members = nodes.filter(n => n.theme === c.theme);
@@ -304,7 +304,7 @@
         if (best[2] < MAXLINK) links.push([best[0], b]);
         inTree.push(b);
       }
-      return result(c.name, links, true);
+      return result(c.name, links, true, c.id);
     });
     return families.concat(continents).filter(Boolean);
   }
@@ -676,16 +676,22 @@
   }
 
   /**
-   * What dropTarget reads: the scene Task 11's buildScene returns (tests there feed the real one to sceneProblems).
+   * What dropTarget reads: the scene Task 11's buildScene returns (its tests feed the real one to sceneProblems).
+   * The scene is GEOMETRY ONLY, in chart units (not screen px): which land an island belongs to is read from the
+   * ledger (`data`), never from the scene, because `members` and `links` hold only the islands that appear in a
+   * link the chart kept (links longer than the land can stretch are dropped), not every island of the land.
+   * `nodes` must be at their home positions (place's x, y), never following the pointer: the dragged island is
+   * itself one of them, and dropping on it is a no-op.
    * @typedef {object} Scene
    * @property {"harbour"|"themes"} view
-   * @property {SceneNode[]} nodes                 every island (place's nodes)
+   * @property {SceneNode[]} nodes                 every island (place's nodes), at home
    * @property {SceneLand[]} territories           territories() of those nodes, continents included
    * @property {{at: function(number, number): number}} ground   field(): at(x, y) < .5 is open water
    * @typedef {object} SceneNode  {id: feed id, theme: sea key or null, x, y, r: finite numbers, r > 0}
-   * @typedef {object} SceneLand  {name: string, continent: boolean, links: [SceneNode, SceneNode][], members: SceneNode[]}
+   * @typedef {object} SceneLand  {id: ledger land id, name, continent: boolean, links: [SceneNode, SceneNode][],
+   *   members: SceneNode[] (linked islands only)}
    */
-  function sceneProblems(scene) {
+  function sceneProblems(scene, data) {
     const out = [];
     if (!scene || typeof scene !== "object") return ["scene: not an object"];
     if (scene.view !== "harbour" && scene.view !== "themes") out.push("view: not harbour or themes");
@@ -700,10 +706,14 @@
     if (!Array.isArray(scene.territories)) out.push("territories: not an array");
     else scene.territories.forEach((t, i) => {
       const known = n => n && ids.has(n.id);
-      if (!t || typeof t.name !== "string" || typeof t.continent !== "boolean") out.push(`territory ${i}: needs a name and a continent flag`);
+      if (!t || !Number.isFinite(t.id) || typeof t.name !== "string" || typeof t.continent !== "boolean") out.push(`territory ${i}: needs an id, a name and a continent flag`);
       else if (!Array.isArray(t.members) || !t.members.every(known)) out.push(`territory ${i}: members must be scene nodes`);
       else if (!Array.isArray(t.links) || !t.links.every(l => Array.isArray(l) && l.length === 2 && l.every(known))) out.push(`territory ${i}: links must be pairs of scene nodes`);
     });
+    if (data && Array.isArray(scene.nodes)) {
+      const missing = data.feeds.filter(f => !ids.has(f.id));
+      if (missing.length) out.push(`nodes: ${missing.length} feed(s) of the data have no node`);
+    }
     if (!scene.ground || typeof scene.ground.at !== "function") out.push("ground: needs an at(x, y) function");
     return out;
   }
@@ -715,44 +725,50 @@
   };
 
   // Where a dragged island lands when dropped at (x, y). Precedence: an island within r + 12; a territory's link
-  // within 24; in the themes view the nearest sea cell if it is not the island's own; open water for an island in a
-  // territory (leave); else none. Rule 2 then turns join, pair and leave into refuse for a continental island.
-  // `land` is the scene's territory entry (it has the name, not the id); `with` is a feed id.
+  // within 24 (the nearest); in the themes view the nearest sea cell if it is not the island's own; open water for
+  // an island in a land (leave); else none. Rule 2 then turns join, pair and leave into refuse for a continental
+  // island. Which land an island belongs to comes from the ledger in `data` (the scene is geometry only: see
+  // Scene). `land` is the ledger's land ({id, name, continent, feeds}); `with` is a feed id.
   function dropTarget(scene, data, dragged, x, y) {
+    const led = ledgerIndex(data), seaLand = theme => (theme == null ? null : led.continentOf(theme));
+    const ownLand = led.landOf(dragged.id), ownContinent = seaLand(dragged.theme);
     const found = (() => {
-      const land = of => scene.territories.find(t => t.members.some(m => m.id === of));
-      const sameLand = id => scene.territories.some(t => t.members.some(m => m.id === dragged.id) && t.members.some(m => m.id === id));
       const hit = scene.nodes.reduce((best, n) => {
         const d = Math.hypot(n.x - x, n.y - y) - n.r;
         return d <= DROP_RING && (!best || d < best.d) ? {n, d} : best;
       }, null);
       if (hit) {
-        const n = hit.n;
-        if (n.id === dragged.id || sameLand(n.id)) return {kind: "none"};
-        const t = scene.territories.find(l => !l.continent && l.members.some(m => m.id === n.id));
-        if (t) return {kind: "join", land: t};
-        if (land(n.id)) return {kind: "none"}; // an island of a continent
+        const n = hit.n, theirs = led.landOf(n.id);
+        if (n.id === dragged.id) return {kind: "none"};
+        if (ownLand && theirs && ownLand.id === theirs.id) return {kind: "none"}; // its own land
+        if (ownContinent && n.theme === dragged.theme) return {kind: "none"}; // its own continent
+        if (theirs) return {kind: "join", land: theirs};
+        if (seaLand(n.theme)) return {kind: "none"}; // an island of a continent
         return {kind: "pair", with: n.id};
       }
-      for (const t of scene.territories) {
-        if (!t.links.some(([a, b]) => segDist(x, y, a, b) <= LINK_REACH)) continue;
-        if (t.members.some(m => m.id === dragged.id)) return {kind: "none"};
-        return t.continent ? {kind: "none"} : {kind: "join", land: t};
+      let near = null;
+      for (const t of scene.territories) for (const [a, b] of t.links) {
+        const d = segDist(x, y, a, b);
+        if (d <= LINK_REACH && (!near || d < near.d)) near = {t, d};
+      }
+      if (near) {
+        const t = near.t, own = t.continent ? ownContinent && ownContinent.id === t.id : ownLand && ownLand.id === t.id;
+        if (own || t.continent) return {kind: "none"};
+        const land = led.landById(t.id);
+        return land ? {kind: "join", land} : {kind: "none"};
       }
       if (scene.view === "themes") {
         const cell = seas(data).reduce((b, s) => (Math.hypot(s.x - x, s.y - y) < Math.hypot(b.x - x, b.y - y) ? s : b));
         if (cell.key !== dragged.theme) return {kind: "sea", key: cell.key};
       }
       if (scene.ground.at(x, y) < .5) {
-        const mine = scene.territories.filter(t => t.members.some(m => m.id === dragged.id));
-        const t = mine.find(l => !l.continent) || mine[0];
-        if (t) return {kind: "leave", land: t};
+        const land = ownLand || ownContinent;
+        if (land) return {kind: "leave", land};
       }
       return {kind: "none"};
     })();
     if (found.kind === "join" || found.kind === "pair" || found.kind === "leave") {
-      const c = dragged.theme === null ? null : (data.continents || []).find(k => k.theme === dragged.theme);
-      if (c) return {kind: "refuse", hint: EDIT_TEXT.continentHint(c.name)};
+      if (ownContinent) return {kind: "refuse", hint: EDIT_TEXT.continentHint(ownContinent.name)};
     }
     return found;
   }
