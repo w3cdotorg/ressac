@@ -14,7 +14,7 @@ use ressac_core::service::{Event, EventSink, RefreshOptions, Ressac, check_subse
 use ressac_core::store::{Source, Store};
 
 use crate::sources::Selection;
-use crate::worker::{JobFailure, JobResult};
+use crate::worker::{JobFailure, JobResult, Lane};
 
 pub const EDITION_LABEL: &str = "Building this morning's edition…";
 pub const FETCHING_FEEDS: &str = "Fetching feeds";
@@ -80,6 +80,16 @@ impl RunRequest {
             | RunRequest::BuildEdition { .. }
             | RunRequest::Add { .. } => RunKind::Long,
             _ => RunKind::Short,
+        }
+    }
+
+    /// The worker lane a short run is queued on. A chart edit takes the direct lane: on the
+    /// short one it could wait behind a network extraction for longer than the page waits for
+    /// its reply, then apply with no undo step. Edits stay one at a time among direct writes.
+    pub fn lane(&self) -> Lane {
+        match self {
+            RunRequest::ChartEdit(_) => Lane::Direct,
+            _ => Lane::Short,
         }
     }
 
@@ -486,6 +496,29 @@ mod tests {
     use ressac_core::store::{ListFilter, ListQuery};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    /// Final review I-1: a chart edit is queued on the direct lane; every other short run stays
+    /// on the short one, in order.
+    #[test]
+    fn a_chart_edit_takes_the_direct_lane() {
+        assert_eq!(RunRequest::ChartEdit("{}".into()).lane(), Lane::Direct);
+        for short in [
+            RunRequest::Export {
+                path: PathBuf::from("/tmp/x.opml"),
+                cemetery: false,
+            },
+            RunRequest::Extract(1),
+            RunRequest::Decide(1, Decision::Keep),
+            RunRequest::Undo,
+            RunRequest::ApplySafe,
+            RunRequest::SetCadence(1, None),
+            RunRequest::SetTheme(1, None),
+            RunRequest::MoveFeed(1, None),
+        ] {
+            assert_eq!(short.kind(), RunKind::Short, "{short:?}");
+            assert_eq!(short.lane(), Lane::Short, "{short:?}");
+        }
+    }
 
     #[test]
     fn log_label_redacts_the_address_add_takes() {

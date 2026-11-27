@@ -31,7 +31,6 @@ pub const WINDOW_TITLE: &str = "Sea Chart";
 pub const NOT_OPEN: &str = "The database is not open. The main window says why.";
 pub const NOT_DRAWN: &str = "The chart could not be drawn";
 pub const RETRY: &str = "Retry";
-pub const EDIT_BUSY: &str = "ressac is busy.";
 pub const UNREADABLE: &str = "ressac printed a chart this app cannot read.";
 
 /// The message for a document of another version.
@@ -184,6 +183,17 @@ impl Phase {
     }
 }
 
+/// Whether two survey documents are the same chart apart from `surveyed_at` (the survey's own
+/// clock, which differs on every survey). Anything that does not parse is not the same.
+fn same_chart(a: &str, b: &str) -> bool {
+    let strip = |text: &str| {
+        let mut value: Value = serde_json::from_str(text).ok()?;
+        value.as_object_mut()?.remove("surveyed_at");
+        Some(value)
+    };
+    matches!((strip(a), strip(b)), (Some(a), Some(b)) if a == b)
+}
+
 /// A running survey's ticket: a result for any other ticket is stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Survey(pub u64);
@@ -261,6 +271,17 @@ impl ChartModel {
         Some(survey)
     }
 
+    /// The app's own edit was just committed: the running survey (it may have read the chart
+    /// before the commit, and would show it after the page's reply), the scheduled one and the
+    /// rerun are dropped, and one fresh survey starts now. A late result of the dropped survey
+    /// is stale: [`ChartModel::finished`] ignores it.
+    pub fn refresh_after_edit(&mut self) -> Option<Survey> {
+        self.running = None;
+        self.scheduled = None;
+        self.rerun = false;
+        self.refresh()
+    }
+
     /// The database changed. Changes within one debounce window share a single survey, run
     /// at the end of the window: a steady trickle of writes still draws once per window.
     pub fn note_change(&mut self, now: Instant) {
@@ -286,8 +307,9 @@ impl ChartModel {
         if due { self.refresh() } else { None }
     }
 
-    /// A survey ended. A stale one is ignored; a failed refresh keeps the last chart. Returns
-    /// the rerun asked for during this survey, if any.
+    /// A survey ended. A stale one is ignored; a failed refresh keeps the last chart; one that
+    /// differs from the shown chart only by its clock keeps the shown document (the page gets no
+    /// `Chart.update`). Returns the rerun asked for during this survey, if any.
     pub fn finished(&mut self, survey: Survey, result: Result<String, String>) -> Option<Survey> {
         if self.running != Some(survey) {
             return None;
@@ -296,7 +318,9 @@ impl ChartModel {
         match result.and_then(|json| check_document(&json).map(|()| json)) {
             Ok(json) => {
                 self.last_error = None;
-                self.phase = Phase::Ready(json);
+                if !matches!(&self.phase, Phase::Ready(shown) if same_chart(shown, &json)) {
+                    self.phase = Phase::Ready(json);
+                }
             }
             Err(message) => {
                 self.last_error = Some(message.clone());
@@ -423,7 +447,8 @@ pub fn allows_navigation(url: &str, main_frame: bool) -> bool {
 }
 
 /// The page's reply to an edit (`Chart.edited`'s argument): `done` carries the core's
-/// `chart_edit` event; a refusal keeps the core's sentence; a turned-away run is a failure.
+/// `chart_edit` event; a refusal keeps the core's sentence; a turned-away run is a failure: it
+/// is turned away when there is no session, the database is not open.
 pub fn edit_result(seq: i64, end: &RunEnd<ChartEditDone>) -> String {
     let text = |t: &str| serde_json::to_string(t).unwrap_or_else(|_| "\"\"".into());
     match end {
@@ -435,7 +460,7 @@ pub fn edit_result(seq: i64, end: &RunEnd<ChartEditDone>) -> String {
         ),
         RunEnd::Refused => format!(
             r#"{{"seq":{seq},"ok":false,"refused":false,"error":{}}}"#,
-            text(EDIT_BUSY)
+            text(NOT_OPEN)
         ),
     }
 }
@@ -609,6 +634,58 @@ mod tests {
         let second = model.finished(first, Ok(doc(1))).expect("the rerun");
         assert_ne!(second, first);
         assert_eq!(model.finished(second, Ok(doc(1))), None, "only once");
+    }
+
+    /// Final review I-2: a survey that began before the edit's commit never shows after it,
+    /// and an edit is one survey, not two or three.
+    #[test]
+    fn a_survey_from_before_an_edit_never_publishes_after_it() {
+        let t0 = Instant::now();
+        let mut model = ChartModel::with_timing(ms(20), RESURVEY);
+        let s = model.open(t0).unwrap();
+        model.finished(s, Ok(doc(1)));
+        let stale = model.refresh().expect("a survey begins before the commit");
+        model.note_change(t0 + ms(5)); // and a notice schedules another
+        let fresh = model
+            .refresh_after_edit()
+            .expect("the edit surveys afresh at once");
+        assert_ne!(fresh, stale);
+        let before = r#"{"version":1,"feeds":[],"seas":"before"}"#;
+        let after = r#"{"version":1,"feeds":[],"seas":"after"}"#;
+        assert_eq!(model.finished(stale, Ok(before.into())), None, "stale");
+        assert_eq!(model.phase(), &Phase::Ready(doc(1)), "never shown");
+        assert_eq!(model.finished(fresh, Ok(after.into())), None, "no rerun");
+        assert_eq!(model.phase(), &Phase::Ready(after.into()));
+        assert_eq!(model.tick(t0 + ms(100)), None, "the scheduled one went");
+        model.close();
+        assert_eq!(model.refresh_after_edit(), None, "closed: nothing");
+    }
+
+    /// A survey that differs only by its clock (`surveyed_at`) keeps the shown document, so the
+    /// page gets no `Chart.update` for it (moved from the KDE glue, T15 Minor 3).
+    #[test]
+    fn a_survey_that_differs_only_by_its_clock_keeps_the_shown_document() {
+        let a = r#"{"version":1,"surveyed_at":"2026-11-27T10:00:00Z","seas":[{"id":1}]}"#;
+        let b = r#"{"seas":[{"id":1}],"version":1,"surveyed_at":"2026-11-27T10:05:00Z"}"#;
+        let c = r#"{"version":1,"surveyed_at":"2026-11-27T10:05:00Z","seas":[{"id":2}]}"#;
+        let mut model = ChartModel::default();
+        let s = model.open(Instant::now()).unwrap();
+        model.finished(s, Ok(a.into()));
+        let s = model.refresh().unwrap();
+        model.finished(s, Ok(b.into()));
+        assert_eq!(
+            model.phase(),
+            &Phase::Ready(a.into()),
+            "the shown one stays"
+        );
+        let s = model.refresh().unwrap();
+        model.finished(s, Ok(c.into()));
+        assert_eq!(
+            model.phase(),
+            &Phase::Ready(c.into()),
+            "a real change shows"
+        );
+        assert!(!same_chart(a, "{"), "what does not parse is not the same");
     }
 
     #[test]
@@ -1060,9 +1137,10 @@ mod tests {
             edit_result(6, &failed),
             format!(r#"{{"seq":6,"ok":false,"refused":false,"error":"{BUSY}"}}"#)
         );
+        // Turned away: there is no session (final review Minor 7: not "busy").
         assert_eq!(
             edit_result(8, &RunEnd::<ChartEditDone>::Refused),
-            r#"{"seq":8,"ok":false,"refused":false,"error":"ressac is busy."}"#
+            format!(r#"{{"seq":8,"ok":false,"refused":false,"error":"{NOT_OPEN}"}}"#)
         );
     }
 

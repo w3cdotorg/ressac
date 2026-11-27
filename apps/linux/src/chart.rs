@@ -60,18 +60,6 @@ pub(crate) fn file_bytes(path: &str) -> Option<&'static [u8]> {
 }
 
 /// What a page message asks of the app; `None` for anything oversized, malformed or unknown.
-/// Whether two survey documents are the same chart apart from `surveyed_at` (the survey's own
-/// clock, which differs on every survey): the one that is already shown then stays. Anything
-/// that does not parse is not the same.
-fn same_chart(a: &str, b: &str) -> bool {
-    let strip = |text: &str| {
-        let mut value: serde_json::Value = serde_json::from_str(text).ok()?;
-        value.as_object_mut()?.remove("surveyed_at");
-        Some(value)
-    };
-    matches!((strip(a), strip(b)), (Some(a), Some(b)) if a == b)
-}
-
 fn parse_message(text: &str) -> Option<ChartAction> {
     if text.len() > MAX_MESSAGE {
         return None;
@@ -363,12 +351,8 @@ impl qobject::Chart {
             tracing::warn!("chart survey failed: {}", redact_text(message));
         }
         let ok = result.is_ok();
-        // A survey that differs only by its clock is not a new chart: the shown one stays, so
-        // the page gets no `Chart.update` for it.
-        let result = match (&result, this.model.phase()) {
-            (Ok(json), Phase::Ready(shown)) if same_chart(shown, json) => Ok(shown.clone()),
-            _ => result,
-        };
+        // A survey that differs only by its clock keeps the shown document (`finished`), so the
+        // page gets no `Chart.update` for it.
         let next = this.model.finished(survey, result);
         if ok && matches!(this.model.phase(), Phase::Ready(_)) {
             this.surveys = this.surveys.saturating_add(1);
@@ -438,8 +422,8 @@ impl qobject::Chart {
         }
     }
 
-    /// An edit from the page, written through the core on the short lane (never on the GUI
-    /// thread); its end comes back to `edit_ended`.
+    /// An edit from the page, written through the core on the direct lane (never on the GUI
+    /// thread, never behind a network extraction); its end comes back to `edit_ended`.
     fn start_edit(self: Pin<&mut Self>, seq: i64, edit: &str) {
         let Ok(parsed) = serde_json::from_str::<ChartEdit>(edit) else {
             tracing::debug!("chart: ignored an edit that does not parse");
@@ -458,11 +442,21 @@ impl qobject::Chart {
     }
 
     /// An edit ended, on the GUI thread, done or refused: the page gets its answer, then one
-    /// survey (an edit's own database notices find the chart unchanged and publish nothing).
+    /// fresh survey; a survey already running or scheduled is dropped, since it may have read
+    /// the chart before the commit (an edit's own database notices find the chart unchanged
+    /// and publish nothing).
     fn edit_ended(mut self: Pin<&mut Self>, seq: i64, end: RunEnd<ChartEditDone>) {
         let script = chart::edited_script(&chart::edit_result(seq, &end));
         self.as_mut().run_script(&QString::from(script.as_str()));
-        self.retry();
+        let survey = self
+            .as_mut()
+            .rust_mut()
+            .get_mut()
+            .model
+            .refresh_after_edit();
+        if let Some(survey) = survey {
+            self.start(survey);
+        }
     }
 
     fn show_file(mut self: Pin<&mut Self>, url: &QString) -> bool {
@@ -541,16 +535,6 @@ mod tests {
     #[test]
     fn the_message_cap_follows_the_edit_cap() {
         assert_eq!(MAX_MESSAGE, 2 * MAX_EDIT + 1024);
-    }
-
-    #[test]
-    fn a_survey_that_differs_only_by_its_clock_is_the_same_chart() {
-        let a = r#"{"surveyed_at":"2026-11-27T10:00:00Z","seas":[{"id":1}]}"#;
-        let b = r#"{"seas":[{"id":1}],"surveyed_at":"2026-11-27T10:05:00Z"}"#;
-        let c = r#"{"surveyed_at":"2026-11-27T10:05:00Z","seas":[{"id":2}]}"#;
-        assert!(same_chart(a, b));
-        assert!(!same_chart(a, c));
-        assert!(!same_chart(a, "{"));
     }
 
     #[test]

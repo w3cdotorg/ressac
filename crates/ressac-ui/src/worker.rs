@@ -14,6 +14,16 @@ use ressac_core::Error;
 use ressac_core::service::{Event, EventSink, Ressac};
 use tokio::runtime::{Builder, Runtime};
 
+/// The FIFO thread a short job is queued on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// The short-run thread: extractions, exports, garden runs, overrides.
+    Short,
+    /// The direct-write thread: reads, stars and chart edits, which must never wait behind a
+    /// network extraction.
+    Direct,
+}
+
 /// Why a job did not produce its value.
 #[derive(Debug)]
 pub enum JobFailure {
@@ -177,6 +187,19 @@ impl Worker {
         done: impl FnOnce(JobResult<T>) + Send + 'static,
     ) {
         let _ = self.direct.send(lane_job(job, done));
+    }
+
+    /// Queues a job on `lane` ([`Worker::short`] or [`Worker::direct`]).
+    pub fn on<T: Send + 'static>(
+        &self,
+        lane: Lane,
+        job: impl FnOnce(&JobContext<'_>) -> ressac_core::Result<T> + Send + 'static,
+        done: impl FnOnce(JobResult<T>) + Send + 'static,
+    ) {
+        match lane {
+            Lane::Short => self.short(job, done),
+            Lane::Direct => self.direct(job, done),
+        }
     }
 
     /// Runs a job on a new thread with its own connection and runtime. `events` receives the
@@ -467,6 +490,43 @@ mod tests {
             !rx.recv_timeout(WAIT).unwrap(),
             "the new run starts with a fresh flag"
         );
+    }
+
+    /// Final review I-1: a chart edit goes where its request says, and never waits behind a
+    /// short job such as a network extraction (up to the 30 s fetch timeout, longer than the
+    /// page's 15 s wait).
+    #[test]
+    fn a_chart_edit_does_not_wait_behind_a_blocked_extraction() {
+        use crate::runs::RunRequest;
+        use ressac_core::store::ChartEdit;
+        let db = TestDb::new();
+        let worker = Worker::new(&db.path);
+        let (release, wait) = mpsc::channel::<()>();
+        let (tx, rx) = mpsc::channel();
+        let extraction_tx = tx.clone();
+        worker.on(
+            RunRequest::Extract(1).lane(),
+            move |_| {
+                wait.recv_timeout(WAIT).unwrap();
+                Ok("extraction")
+            },
+            move |r| extraction_tx.send(r.unwrap()).unwrap(),
+        );
+        let edit = ChartEdit::NewSea {
+            name: "Sea of Tests".into(),
+        };
+        worker.on(
+            RunRequest::ChartEdit(String::new()).lane(),
+            move |cx| cx.app.store().apply_chart_edit(&edit).map(|_| "edit"),
+            move |r| tx.send(r.unwrap()).unwrap(),
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(3)).ok(),
+            Some("edit"),
+            "the extraction is still blocked"
+        );
+        release.send(()).unwrap();
+        assert_eq!(rx.recv_timeout(WAIT).unwrap(), "extraction");
     }
 
     #[test]
