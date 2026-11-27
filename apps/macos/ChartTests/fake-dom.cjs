@@ -49,7 +49,7 @@ function fakeDocument() {
   return doc;
 }
 
-// A window for createPage: the fake document (canvases draw into recording contexts), a size, timers and
+// A window for createPage: the fake document (canvases draw into recording contexts, kept as canvas.recording), a size, timers and
 // animation frames that run only when the test says so, matchMedia answering `reduced` for Reduce Motion, and
 // the app's message handler when `bridge` is true (its messages land in win.posted); the page's logged errors land in
 // win.errors.
@@ -57,7 +57,7 @@ function fakeWindow({width = 1920, height = 1080, bridge = true, reduced = false
   const document = fakeDocument(), make = document.createElement;
   document.createElement = tag => {
     const el = make(tag);
-    if (el.tagName === "CANVAS") { const rec = recordingContext(); el.getContext = () => rec.ctx; el.width = 0; el.height = 0; }
+    if (el.tagName === "CANVAS") { const rec = recordingContext(); el.getContext = () => rec.ctx; el.recording = rec; el.width = 0; el.height = 0; }
     return el;
   };
   const timers = [], frames = [], posted = [], errors = [], listeners = {};

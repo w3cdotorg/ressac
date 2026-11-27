@@ -1,7 +1,9 @@
 <!doctype html>
 <html lang="en">
 <!-- The chart page on the test fixture, for checking by eye (not bundled). Serve the repository and open
-     /apps/macos/ChartTests/preview.html?view=themes&ink=nuit&animate=0, or &empty=1 for a sea with no feed. -->
+     /apps/macos/ChartTests/preview.html?view=themes&ink=nuit&animate=0, or &empty=1 for a sea with no feed.
+     &survey=1 adds a stub app: Survey mode shows, and each edit is answered after 300 ms as done (nothing is
+     written: the chart is surveyed again unchanged); with &refuse=1 each edit is refused as stale instead. -->
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -16,8 +18,35 @@
 <script>
   "use strict";
   const q = new URLSearchParams(location.search);
+  // the label the core gives each edit (« Names decided here »)
+  const labelOf = e => ({
+    join: () => `Join ${e.land.name}`, leave: () => `Leave ${e.land.name}`, found: () => `New Land ${e.name}`,
+    rename_land: () => `Rename ${e.name}`, delete_land: () => `Delete ${e.land.name}`, make_continent: () => `Make Continent ${e.name}`,
+    set_sea: () => `Move to ${e.to ? e.to.sea : "UNCHARTED WATERS"}`, new_sea: () => `New Sea ${e.name}`, rename_sea: () => `Rename ${e.name}`,
+    order_seas: () => "Reorder Seas", delete_sea: () => `Delete ${e.sea.sea}`, patch: () => e.label,
+  }[e.op] || (() => e.op))();
+  function stubApp(data) {
+    let surveys = 0;
+    const survey = () => {
+      surveys += 1;
+      Chart.update(JSON.stringify({...data, surveyed_at: new Date(Date.parse(data.surveyed_at) + surveys * 60000).toISOString()}));
+    };
+    window.webkit = {messageHandlers: {ressac: {postMessage(m) {
+      if (m.type === "survey") setTimeout(survey, 50);
+      if (m.type !== "edit") return;
+      const edit = JSON.parse(m.edit), label = labelOf(edit);
+      setTimeout(() => {
+        // a done result's undo is a patch; one placeholder change, since an empty patch is no step to undo
+        Chart.edited(JSON.stringify(q.has("refuse")
+          ? {seq: m.seq, ok: false, refused: true, error: ChartCore.EDIT_TEXT.changed}
+          : {seq: m.seq, ok: true, done: {event: "chart_edit", label, undo: {op: "patch", label, changes: [{kind: "preview"}]}}}));
+        setTimeout(survey, 50); // the apps survey after every edit
+      }, 300);
+    }}}};
+  }
   fetch("fixture.json").then(r => r.json()).then(data => {
     if (q.has("empty")) Object.assign(data, {feeds: [], territories: [], totals: {feeds: 0, unread_week: 0}});
+    if (q.has("survey")) stubApp(data);
     Chart.load(JSON.stringify(data), {view: q.get("view") || "harbour", ink: q.get("ink") || "bleu", animate: q.get("animate") !== "0"});
   });
 </script>

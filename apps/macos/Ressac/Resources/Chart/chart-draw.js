@@ -135,13 +135,14 @@
   }
 
   // ---------- the scene: everything the drawing needs, computed once per document and view ----------
+  // It is also the Scene that chart-core.js's dropTarget reads (view, nodes at home, territories, ground).
   function buildScene(data, view, measure) {
     const v = data.feeds.length ? view : "harbour"; // an empty sea still has its harbour
     const nodes = core.place(data, v), terr = core.territories(nodes, data), ground = core.field(nodes, v, data, terr);
     const placements = core.labels(nodes, data, v, measure, {field: ground, territories: terr});
     const {strokes, currents} = seaStrokes(ground.at);
     return {
-      data, view: v, empty: !nodes.length, nodes, ground, placements, strokes, currents,
+      data, view: v, empty: !nodes.length, nodes, territories: terr, ground, placements, strokes, currents,
       contours: d3.contours().size([GW, GH]).thresholds(ISOBATHS)(ground.grid),
       seas: core.seas(data).filter(s => s.count > 0),
       maxActivity: nodes.reduce((m, n) => Math.max(m, n.activity), 0),
@@ -432,6 +433,76 @@
     ctx.restore();
   }
 
+  // ---------- gestures: the island in ink, the quill's line, the spring-back and the fade ----------
+  // `g` is the page's gesture: {node, ghost: {x, y}} (an island dragged, drawn in ink where it is) or
+  // {points, alpha} (the quill's line, fading when alpha drops), in chart units
+  function drawGesture(ctx, g, inkName) {
+    const ink = INKS[inkName] || INKS.bleu;
+    ctx.save();
+    ctx.setLineDash([]); ctx.lineCap = "round"; ctx.lineJoin = "round";
+    if (g.ghost) {
+      ctx.globalAlpha = .92; ctx.fillStyle = ink.land; ctx.strokeStyle = ink.ink; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.ellipse(g.ghost.x, g.ghost.y, g.node.r, g.node.r * .85, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+    if (g.points && g.points.length > 1 && g.alpha > 0) {
+      ctx.globalAlpha = g.alpha; ctx.strokeStyle = ink.ink; ctx.lineWidth = 2.2;
+      ctx.beginPath(); ctx.moveTo(g.points[0].x, g.points[0].y);
+      for (let i = 1; i < g.points.length; i++) ctx.lineTo(g.points[i].x, g.points[i].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  // step(u) for u in (0, 1) on successive animation frames of `win`, then done() once; with no motion, done() at
+  // once and no frame at all (Reduce Motion, Plasma's instant animations)
+  const SPRING_FRAMES = 18, FADE_FRAMES = 12;
+  function tween(win, motion, frames, step, done) {
+    if (!motion || !win || typeof win.requestAnimationFrame !== "function") { done(); return; }
+    let i = 0;
+    const next = () => {
+      i += 1;
+      if (i >= frames) { done(); return; }
+      step(i / frames);
+      win.requestAnimationFrame(next);
+    };
+    win.requestAnimationFrame(next);
+  }
+  // brings `ghost` ({x, y}) back to `node`'s place, overshooting a little like a spring, through win's animation
+  // frames when `motion`, at once when not; ends exactly at node.x, node.y and calls done() once
+  function springBack(ghost, node, win, motion, done) {
+    const from = {x: ghost.x, y: ghost.y}, s = 1.70158;
+    const back = u => { const v = u - 1; return 1 + (s + 1) * v * v * v + s * v * v; }; // ease-out-back
+    tween(win, motion, SPRING_FRAMES, u => {
+      const e = back(u);
+      ghost.x = from.x + (node.x - from.x) * e; ghost.y = from.y + (node.y - from.y) * e;
+    }, () => { ghost.x = node.x; ghost.y = node.y; done(); });
+  }
+  // the cartouche's size on screen (chart.css .cartouche): what cartouchePlace keeps clear of the labels before the
+  // page has measured it
+  const CARTOUCHE_PX = Object.freeze({w: 250, h: 124});
+  // Where the cartouche goes, in chart units: cartouchePlace's spot when one beside the new land's box is clear of
+  // every label. On a crowded coast cartouchePlace falls back to the chart's corner, far from the land; the page
+  // instead weighs the same four spots stepped out by 40 units at a time (up to 240), each moved inside the chart's
+  // margin, by the labels it would cover plus one per step out, and takes the lightest (nearest first on a tie),
+  // never one that covers the land itself. The corner stays the answer only when every spot covers the land.
+  const CARTOUCHE_STEP = 40, CARTOUCHE_REACH = 240, CARTOUCHE_MARGIN = 40; // the margin is cartouchePlace's
+  function cartoucheAt(box, placements, size) {
+    const corner = core.cartouchePlace(box, [{box: [-Infinity, -Infinity, Infinity, Infinity]}], size); // its fallback
+    const free = core.cartouchePlace(box, placements, size);
+    if (free.x !== corner.x || free.y !== corner.y) return free;
+    const meets = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    const shift = (lo, hi, max) => Math.max(CARTOUCHE_MARGIN - lo, 0) - Math.max(hi - (max - CARTOUCHE_MARGIN), 0);
+    let best = null;
+    for (let grow = 0, step = 0; grow <= CARTOUCHE_REACH; grow += CARTOUCHE_STEP, step += 1) {
+      for (const s of core.cartoucheSpots([box[0] - grow, box[1] - grow, box[2] + grow, box[3] + grow], size)) {
+        const dx = shift(s[0], s[2], W), dy = shift(s[1], s[3], H), spot = [s[0] + dx, s[1] + dy, s[2] + dx, s[3] + dy];
+        if (meets(spot, box)) continue;
+        const weight = placements.filter(p => meets(spot, p.box)).length + step;
+        if (!best || weight < best.weight) best = {weight, spot};
+      }
+    }
+    return best ? {x: (best.spot[0] + best.spot[2]) / 2, y: (best.spot[1] + best.spot[3]) / 2} : corner;
+  }
+
   // ---------- the key's symbols, on 44 × 30 canvases ----------
   const KEY = [
     ["daily", "Large island", "a daily feed"],
@@ -520,9 +591,10 @@
       return c;
     });
     keyPanel.append(keyTitle, keyList);
-    const drawer = make(doc, "div", "drawer"), renameBox = make(doc, "div", "rename");
-    drawer.id = "chart-log"; drawer.hidden = true; renameBox.hidden = true;
-    plate.append(renameBox);
+    const drawer = make(doc, "div", "drawer"), renameBox = make(doc, "div", "rename"), cartBox = make(doc, "div", "cartouche");
+    drawer.id = "chart-log"; drawer.hidden = true; renameBox.hidden = true; cartBox.hidden = true;
+    cartBox.setAttribute("role", "dialog");
+    plate.append(renameBox, cartBox);
     doc.body.append(plate, bar, keyPanel, drawer);
 
     // --- geometry: the 1920 × 1080 chart scaled to fit the window, letterboxed ---
@@ -568,6 +640,7 @@
       chartTransform(ctx);
       gusts = drawOver(ctx, scene, prefs.ink, moving() ? {t, gusts} : null);
       if (mode.active) drawSurveyLayer(ctx, scene, prefs.ink, selected);
+      if (gesture) drawGesture(ctx, gesture, prefs.ink);
     }
     function paintKey() {
       const dpr = Math.min(2, win.devicePixelRatio || 1);
@@ -636,8 +709,9 @@
 
     // --- hover and popover ---
     plate.addEventListener("pointermove", e => {
+      if (press && press.kind) { tip.hidden = true; plate.style.cursor = press.kind === "drag" ? "grabbing" : ""; return; }
       const n = islandAt(e);
-      plate.style.cursor = n ? "pointer" : mode.active && nameTarget(e) ? "text" : ""; // else the quill (chart.css)
+      plate.style.cursor = n ? (mode.active ? "grab" : "pointer") : mode.active && nameTarget(e) ? "text" : ""; // else the quill (chart.css)
       if (!n || !pop.hidden) { tip.hidden = true; return; }
       tip.replaceChildren(...tooltipContent(doc, n));
       tip.hidden = false;
@@ -662,8 +736,10 @@
       pop.style.top = Math.max(12, Math.min(vh - h - 12, y - 20)) + "px";
       if (focus) pop.querySelector(".pop-close").focus({preventScroll: true});
     }
+    const onChart = t => t === base || t === over; // not the popover, the rename or the cartouche (even once emptied)
     plate.addEventListener("click", e => {
-      if (pop.contains(e.target) || renameBox.contains(e.target)) return;
+      if (!onChart(e.target)) return;
+      if (swallowClick) { swallowClick = false; return; } // the click a browser sends after a drag or a stroke
       const target = mode.active ? surveyTarget(e) : null, answer = mode.click(target);
       if (answer === "popover") { // the chart as it always was
         const n = islandAt(e);
@@ -677,7 +753,8 @@
     });
     doc.addEventListener("keydown", e => {
       if (e.key !== "Escape") return;
-      if (rename) closeRename(); // the form's own Esc stops there; this is Esc from elsewhere on the page
+      if (naming) closeNaming(); // the forms' own Esc stops there; this is Esc from elsewhere on the page
+      else if (rename) closeRename();
       else if (!pop.hidden) closePop();
       else if (!keyPanel.hidden) { showKey(false); keyButton.focus(); }
     });
@@ -687,6 +764,11 @@
     // body.survey (grid and quill), the drawer with the log (rebuilt on every change, its open form, typed text,
     // caret and focus carried by `memory`), and the rename form over a label.
     let selected = null, message = null, rename = null, drawnOpen = false; // rename = {kind, id, p, form, sent}
+    // press: the pointer while it is down ({pointer, node, offset, screen, points, kind: null | "drag" | "ink",
+    // idle: a press that may not edit}); gesture: what the overlay shows (see drawGesture), with `sent` (an edit
+    // carries it) and `landed` (its edit was done: it stays until the new chart); naming: the open cartouche
+    // ({form, box, edit(name), gesture, sent}); swallowClick: the click after a drag or a stroke is not a click
+    let press = null, gesture = null, naming = null, swallowClick = false;
     const memory = survey.logMemory();
     const session = survey.createSession({
       post: m => { if (post) post(m); },
@@ -712,6 +794,9 @@
       if (!mode.active) memory.open = null; // a half-typed log form does not outlive Survey mode
       if (rename && !mode.renaming) closeRename();
       if (rename) rename.form.input.readOnly = session.pending();
+      if (!mode.active) { press = null; closeNaming(false); gesture = null; } // gestures do not outlive Survey mode
+      if (naming) naming.form.input.readOnly = session.pending();
+      if (gesture && gesture.landed && !session.pending()) gesture = null; // the new chart draws it where it went
       if (drawerOpen() && data) {
         const state = {selected, busy: session.pending(), message, titles: session.titles()};
         drawer.replaceChildren(...survey.logContent(doc, data, state, logHandlers, memory));
@@ -736,6 +821,16 @@
         rename.sent = false;
         if (outcome.kind === "name" || outcome.kind === "invalid") rename.form.setError(outcome.message); // stays open
         else closeRename();
+      }
+      const g = gesture && gesture.sent ? gesture : null, nameRefused = outcome.kind === "name" || outcome.kind === "invalid";
+      if (naming && naming.sent) {
+        naming.sent = false;
+        if (nameRefused) { naming.form.setError(outcome.message); if (g) g.sent = false; } // stays open, ink and all
+        else closeNaming(false);
+      }
+      if (g && g.sent) {
+        if (outcome.kind === "done") g.landed = true; // stays where it was dropped until the new chart
+        else release(g); // refused, failed or unanswered: back home, or the line fades
       }
       drawSurvey();
     }
@@ -768,15 +863,16 @@
       redo: () => mode.redo(),
     };
 
-    // what a click in Survey mode is aimed at: a land's, continent's or sea's name first, then an island
+    // what a click in Survey mode is aimed at: an island first (a continent's name sits among its islands, and a
+    // territory's along them), then a land's, continent's or sea's name
     function nameTarget(e) {
       if (!scene) return null;
       const [x, y] = toChart(e), p = core.nameAt(scene.placements, x, y);
       return p && entryOf(p) ? p : null;
     }
     function surveyTarget(e) {
-      const p = nameTarget(e), n = p ? null : islandAt(e);
-      return p || (n ? {kind: "island", id: n.id} : null);
+      const n = islandAt(e);
+      return n ? {kind: "island", id: n.id} : nameTarget(e);
     }
     // the ledger entry a name placement shows: a sea by key, a land or continent by its (unique) name
     function entryOf(p) {
@@ -790,7 +886,7 @@
     // renaming in place: a name form over the label; Enter renames, Esc or an unchanged name cancels
     function openRename(p) {
       const target = entryOf(p), entry = target && current(target);
-      if (!entry) { mode.endRename(); return; }
+      if (!entry || naming) { mode.endRename(); return; } // the cartouche asks one name at a time
       if (rename) closeRename(false);
       const form = survey.nameForm(doc, {title: "Rename", value: currentName(target, entry), action: "Rename"}, {
         cancel: () => closeRename(),
@@ -837,15 +933,143 @@
       renameBox.style.left = `${clamp(view.ox + p.x * view.k, w / 2 + 8, room - w / 2 - 8)}px`;
       renameBox.style.top = `${clamp(view.oy + p.y * view.k, h / 2 + 8, win.innerHeight - h / 2 - 8)}px`;
     }
+    // --- gestures (Survey mode): a press on an island drags it; a press elsewhere that moves draws ink ---
+    const motionNow = () => core.editMotion(prefs, reduced.matches);
+    // the window's animation frames, repainting the overlay after each step of a spring or a fade
+    const frames = {requestAnimationFrame: fn => win.requestAnimationFrame(t => { fn(t); paintOver(t ?? win.performance.now()); })};
+    const repaint = () => paintOver(win.performance.now());
+    plate.addEventListener("pointerdown", e => {
+      if (!mode.active || (e.button ?? 0) !== 0 || !onChart(e.target) || !scene || !data) return;
+      swallowClick = false;
+      const n = islandAt(e), [x, y] = toChart(e);
+      // one edit at a time, and the cartouche waits for its name: such a press may still swallow its click
+      const idle = session.pending() || !!naming;
+      press = {pointer: e.pointerId, node: n, offset: n ? {x: n.x - x, y: n.y - y} : null, screen: [{x: e.clientX, y: e.clientY}],
+        points: [{x, y}], kind: null, idle};
+      if (typeof plate.setPointerCapture === "function" && e.pointerId != null) { try { plate.setPointerCapture(e.pointerId); } catch (_) { /* gone */ } }
+    });
+    plate.addEventListener("pointermove", e => {
+      if (!press || (press.pointer != null && e.pointerId != null && e.pointerId !== press.pointer)) return;
+      const [x, y] = toChart(e);
+      press.screen.push({x: e.clientX, y: e.clientY});
+      press.points.push({x, y});
+      if (!press.kind && core.classifyPress(press.screen) === "stroke") {
+        swallowClick = true;
+        if (press.idle) { press = null; return; }
+        press.kind = press.node ? "drag" : "ink";
+        tip.hidden = true;
+        gesture = press.node ? {node: press.node, ghost: {x: press.node.x, y: press.node.y}} : {points: press.points, alpha: 1};
+      }
+      if (press.kind === "drag") { gesture.ghost.x = x + press.offset.x; gesture.ghost.y = y + press.offset.y; }
+      if (press.kind) repaint();
+    });
+    const letGo = e => {
+      const p = press;
+      press = null;
+      if (!p || !p.kind || (e && e.type === "pointercancel")) { if (p && p.kind) release(gesture); return; }
+      if (p.kind === "drag") drop(p.node, gesture); else loopDone(p.points, gesture);
+    };
+    plate.addEventListener("pointerup", letGo);
+    plate.addEventListener("pointercancel", letGo);
+
+    // sends a gesture's edit; the gesture stays on the chart while it is pending
+    function sendFor(g, edit) {
+      if (!send(edit)) return false;
+      g.sent = true;
+      repaint();
+      return true;
+    }
+    // back home (spring) or faded (ink); the overlay forgets it at the end, unless another gesture took its place
+    function release(g) {
+      if (!g) return;
+      g.sent = false;
+      const gone = () => { if (gesture === g) { gesture = null; repaint(); } };
+      if (g.ghost) springBack(g.ghost, (scene && scene.nodes.find(n => n.id === g.node.id)) || g.node, frames, motionNow(), gone);
+      else tween(frames, motionNow(), FADE_FRAMES, u => { g.alpha = 1 - u; }, gone);
+    }
+    const landRef = l => (l && Number.isInteger(l.id) ? {id: l.id, name: l.name} : null); // never a join or leave without one
+    function drop(node, g) {
+      if (!g || !g.ghost || !scene || !data) return;
+      const found = core.dropTarget(scene, data, node, g.ghost.x, g.ghost.y), led = index();
+      if (found.kind === "join" || found.kind === "leave") {
+        const land = landRef(found.land);
+        if (land && sendFor(g, core.edits[found.kind](node.id, land))) return;
+      } else if (found.kind === "sea") {
+        const to = found.key == null ? null : led.seaRef(found.key);
+        if ((found.key == null || to) && sendFor(g, core.edits.setSea(node.id, led.seaRef(node.theme), to))) return;
+      } else if (found.kind === "pair") {
+        const other = scene.nodes.find(n => n.id === found.with);
+        if (other) {
+          const ids = data.feeds.map(f => f.id).filter(id => id === node.id || id === other.id); // the chart's order
+          const box = [Math.min(g.ghost.x - node.r, other.x - other.r), Math.min(g.ghost.y - node.r, other.y - other.r),
+            Math.max(g.ghost.x + node.r, other.x + other.r), Math.max(g.ghost.y + node.r, other.y + other.r)];
+          askName({title: "Name this land", value: "", box, gesture: g, edit: name => core.edits.found(name, ids)});
+          return;
+        }
+      } else if (found.kind === "refuse") {
+        message = found.hint; // the log's status line
+        drawSurvey();
+      }
+      release(g); // none, refused, or nothing could be sent
+    }
+    function loopDone(points, g) {
+      if (!g || !scene || !data) return;
+      const sel = core.closedLoop(points) ? core.loopSelection(scene.nodes, points, data) : {islands: [], continentSea: null};
+      const xs = points.map(p => p.x), ys = points.map(p => p.y);
+      const box = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+      const sea = sel.continentSea ? index().seaRef(sel.continentSea) : null;
+      if (sea) askName({title: "Make a continent", value: sea.sea, box, gesture: g, edit: name => core.edits.makeContinent(sea, name)});
+      else if (sel.islands.length >= 2) askName({title: "Name this land", value: "", box, gesture: g, edit: name => core.edits.found(name, sel.islands)});
+      else release(g); // fewer than two islands: the line fades
+    }
+
+    // the cartouche: a name form beside the new land, clear of the labels (cartouchePlace)
+    function askName({title, value, box, gesture: g, edit}) {
+      closeNaming(false);
+      const form = survey.nameForm(doc, {title, value, action: "Create"}, {cancel: () => closeNaming(), submit: raw => submitNaming(raw)});
+      naming = {form, box, edit, gesture: g, sent: false};
+      cartBox.setAttribute("aria-label", title);
+      cartBox.replaceChildren(...form.nodes);
+      cartBox.hidden = false;
+      placeNaming();
+      repaint();
+      form.input.focus({preventScroll: true});
+      if (typeof form.input.select === "function") form.input.select();
+    }
+    function submitNaming(raw) {
+      const n = naming;
+      if (!n || n.sent || session.pending()) return;
+      const checked = core.checkName(raw, "land", ledger());
+      if (checked.error) { n.form.setError(checked.error); return; }
+      n.form.setError(null);
+      if (sendFor(n.gesture, n.edit(checked.name))) { n.sent = true; n.form.input.readOnly = true; }
+    }
+    // closes the cartouche; cancelled (`back`), its island springs back or its line fades
+    function closeNaming(back = true) {
+      if (!naming) return;
+      const n = naming;
+      naming = null;
+      cartBox.hidden = true;
+      cartBox.replaceChildren();
+      if (back && !n.gesture.landed) release(n.gesture);
+    }
+    function placeNaming() {
+      if (!naming) return;
+      const k = view.k || 1, w = cartBox.offsetWidth || CARTOUCHE_PX.w, h = cartBox.offsetHeight || CARTOUCHE_PX.h;
+      const c = cartoucheAt(naming.box, scene ? scene.placements : [], {w: w / k, h: h / k});
+      cartBox.style.left = `${view.ox + c.x * k}px`;
+      cartBox.style.top = `${view.oy + c.y * k}px`;
+    }
+
     // ⌘Z in a name field belongs to the field
     const typing = () => {
       const a = doc.activeElement;
-      return !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA") && (drawer.contains(a) || renameBox.contains(a));
+      return !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA") && (drawer.contains(a) || renameBox.contains(a) || cartBox.contains(a));
     };
 
     // --- resizing, and moving to a screen of another density ---
     let resizeTimer = 0;
-    function relayout() { fit(); paintBase(); paintOver(win.performance.now()); placeRename(); }
+    function relayout() { fit(); paintBase(); paintOver(win.performance.now()); placeRename(); placeNaming(); }
     win.addEventListener("resize", () => { win.clearTimeout(resizeTimer); resizeTimer = win.setTimeout(relayout, 120); });
     (function watchDensity() {
       if (!win.matchMedia) return;
@@ -866,6 +1090,7 @@
       const n = popFor && scene.nodes.find(m => m.id === popFor.id);
       if (n) openPop(n, popFor.x, popFor.y, false); else closePop();
       placeRename();
+      placeNaming();
     }
     function show(next, nextPrefs) {
       queue = queue.then(() => {
@@ -904,6 +1129,6 @@
 
   return Object.freeze({
     normalisePrefs, prefsMessage, parseData, bridge, formatSurvey, tooltipContent, tooltipPosition, popoverContent, buildScene, drawChart,
-    drawSurveyLayer, createPage, chart, load: chart.load, update: chart.update,
+    drawSurveyLayer, springBack, CARTOUCHE_PX, cartoucheAt, createPage, chart, load: chart.load, update: chart.update,
   });
 });

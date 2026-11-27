@@ -157,6 +157,25 @@ body.log-open .bar, body.log-open .key { right: 332px; }
 .rename .name-form { margin: 0; }
 .rename .name-form input { text-align: center; }
 
+/* gestures in Survey mode: the canvases take the pointer (no scrolling or text selection while dragging or drawing) */
+body.survey .plate canvas { touch-action: none; user-select: none; -webkit-user-select: none; }
+/* the cartouche that names a new land: a double rule like the chart's own; chart-draw.js places its centre beside
+   the land (CARTOUCHE_PX is its size before it is measured: keep the width equal) */
+.cartouche {
+  position: absolute; z-index: 3; transform: translate(-50%, -50%); width: 250px; max-width: calc(100% - 16px); box-sizing: border-box;
+  padding: 9px 12px 10px; background: var(--paper); color: var(--label);
+  border: 3px double var(--ink); box-shadow: 4px 4px 0 var(--shadow);
+}
+.cartouche .name-form { margin: 0; }
+.cartouche .name-form-title { font: italic 600 16px/1.2 var(--body); color: var(--label); text-align: center; letter-spacing: .02em; }
+.cartouche .name-form input { text-align: center; }
+.cartouche button {
+  font: 500 11px/1 var(--mono); letter-spacing: .02em; color: var(--label); background: var(--paper);
+  border: 1px solid var(--rule); border-radius: 3px; padding: 5px 8px; cursor: pointer;
+}
+.cartouche button:hover:not(:disabled) { border-color: var(--ink); }
+.cartouche button:disabled { opacity: .45; cursor: default; }
+
 /* Reduce Motion, from the system or from the app's pref (body.still, set by chart-draw.js) */
 body.still .bar { transition: none; }
 @media (prefers-reduced-motion: reduce) {
