@@ -21,8 +21,9 @@ fn current(g: &Globals) -> anyhow::Result<(Store, ChartSnapshot)> {
     Ok((store, snap))
 }
 
-/// The land `given` names: all digits is an id, anything else a name compared without
-/// case. With `territories_only`, a continent is not a match.
+/// The land `given` names: all digits is first an id, then a name (a land may be called
+/// `1984`); anything else a name compared without case. With `territories_only`, a
+/// continent is not a match.
 fn find_land<'a>(
     snap: &'a ChartSnapshot,
     given: &str,
@@ -33,23 +34,55 @@ fn find_land<'a>(
         .then(|| wanted.parse::<i64>().ok())
         .flatten();
     let lowered = wanted.to_lowercase();
-    snap.ledger
-        .lands
-        .iter()
-        .filter(|l| !territories_only || l.continent.is_none())
-        .find(|l| match id {
-            Some(id) => l.id == id,
-            None => l.name.trim().to_lowercase() == lowered,
-        })
+    let lands = || {
+        snap.ledger
+            .lands
+            .iter()
+            .filter(|l| !territories_only || l.continent.is_none())
+    };
+    id.and_then(|id| lands().find(|l| l.id == id))
+        .or_else(|| lands().find(|l| l.name.trim().to_lowercase() == lowered))
         .ok_or_else(|| usage(output::printable(&format!("No land \"{given}\".")).into_owned()))
 }
 
 /// A feed id that names no feed (any state) is said so, not "the chart changed".
 fn known_feed(store: &Store, feed: FeedId) -> anyhow::Result<()> {
-    store
-        .feed(feed)
-        .map(|_| ())
-        .map_err(|_| usage(format!("No feed #{feed}.")))
+    no_feed(store.feed(feed).map(|_| ()), feed)
+}
+
+/// What a feed lookup's result means here: a missing row is a usage error (exit 2); any
+/// other error (I/O, a corrupt file) is the database's own and propagates (exit 1).
+fn no_feed(found: ressac_core::Result<()>, feed: FeedId) -> anyhow::Result<()> {
+    match found {
+        Err(e) if e.is_no_row() => Err(usage(format!("No feed #{feed}."))),
+        other => Ok(other?),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::UsageError;
+
+    /// T6 Minor: only a missing row is "No feed #n." (exit 2); any other error is the
+    /// database's own, propagated (exit 1).
+    #[test]
+    fn only_a_missing_row_is_no_feed() {
+        let missing = no_feed(Err(rusqlite::Error::QueryReturnedNoRows.into()), 7).unwrap_err();
+        assert_eq!(
+            missing
+                .downcast_ref::<UsageError>()
+                .map(ToString::to_string),
+            Some("No feed #7.".to_owned())
+        );
+        let io = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+            None,
+        );
+        let other = no_feed(Err(io.into()), 7).unwrap_err();
+        assert!(other.downcast_ref::<UsageError>().is_none(), "{other}");
+        assert!(no_feed(Ok(()), 7).is_ok());
+    }
 }
 
 fn land_ref(land: &LedgerLand) -> LandRef {

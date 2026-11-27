@@ -272,8 +272,9 @@ fn scrolling_two_thousand_entries_is_logged() {
     });
     for (line, counts) in holds {
         assert!(line.contains(" presses=60 moved=60 "), "{line}");
-        // `settled` counts the 60 presses' marks; the previous hold's last mark may land in this
-        // hold's window under load (seen: 61), so one more is allowed, never fewer.
+        // `settled` counts the 60 presses' marks; under load, the 1 s auto-read of the row where
+        // the hold stops (AUTO_READ_DELAY) can settle inside this hold's window too (seen: 61),
+        // so one more is allowed, never fewer.
         let settled: u32 = field(counts, "settled");
         assert!(
             counts.contains(" wrote=0 ") && (60..=61).contains(&settled),

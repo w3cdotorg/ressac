@@ -96,6 +96,11 @@ pub enum Error {
 }
 
 impl Error {
+    /// True when a lookup of one row found none (`rusqlite::Error::QueryReturnedNoRows`).
+    pub fn is_no_row(&self) -> bool {
+        matches!(self, Error::Db(rusqlite::Error::QueryReturnedNoRows))
+    }
+
     /// True when SQLite refused because another connection holds the database (busy or locked).
     pub fn is_lock_contention(&self) -> bool {
         matches!(

@@ -1969,6 +1969,21 @@ fn chart_land_commands_round_trip() {
     assert!(!lands.iter().any(|l| l.starts_with("Strips")), "{lands:?}");
 }
 
+/// Final review Minor 9: an all-digit name that is no land's id is a name.
+#[test]
+fn chart_land_with_an_all_digit_name_is_found_by_name() {
+    let home = land_home();
+    let h = home.path();
+    let xkcd = feed_id_of(h, "xkcd.com");
+    let girl = feed_id_of(h, "Girl on the Couch");
+    chart_verb(h, &["land", "new", "1984", &xkcd, &girl]);
+    assert_eq!(
+        chart_verb(h, &["land", "rename", "1984", "Orwell"]),
+        "Rename Orwell"
+    );
+    chart_refused(h, &["land", "delete", "1984"], "No land \"1984\".");
+}
+
 #[test]
 fn chart_land_name_clash_ignores_case() {
     let home = land_home();
