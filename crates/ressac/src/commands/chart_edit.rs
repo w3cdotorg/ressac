@@ -59,32 +59,6 @@ fn no_feed(found: ressac_core::Result<()>, feed: FeedId) -> anyhow::Result<()> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::commands::UsageError;
-
-    /// T6 Minor: only a missing row is "No feed #n." (exit 2); any other error is the
-    /// database's own, propagated (exit 1).
-    #[test]
-    fn only_a_missing_row_is_no_feed() {
-        let missing = no_feed(Err(rusqlite::Error::QueryReturnedNoRows.into()), 7).unwrap_err();
-        assert_eq!(
-            missing
-                .downcast_ref::<UsageError>()
-                .map(ToString::to_string),
-            Some("No feed #7.".to_owned())
-        );
-        let io = rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
-            None,
-        );
-        let other = no_feed(Err(io.into()), 7).unwrap_err();
-        assert!(other.downcast_ref::<UsageError>().is_none(), "{other}");
-        assert!(no_feed(Ok(()), 7).is_ok());
-    }
-}
-
 fn land_ref(land: &LedgerLand) -> LandRef {
     LandRef {
         id: land.id,
@@ -236,4 +210,30 @@ pub(super) fn theme(
         }
     };
     commit(g, &store, &edit, out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::UsageError;
+
+    /// T6 Minor: only a missing row is "No feed #n." (exit 2); any other error is the
+    /// database's own, propagated (exit 1).
+    #[test]
+    fn only_a_missing_row_is_no_feed() {
+        let missing = no_feed(Err(rusqlite::Error::QueryReturnedNoRows.into()), 7).unwrap_err();
+        assert_eq!(
+            missing
+                .downcast_ref::<UsageError>()
+                .map(ToString::to_string),
+            Some("No feed #7.".to_owned())
+        );
+        let io = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+            None,
+        );
+        let other = no_feed(Err(io.into()), 7).unwrap_err();
+        assert!(other.downcast_ref::<UsageError>().is_none(), "{other}");
+        assert!(no_feed(Ok(()), 7).is_ok());
+    }
 }
