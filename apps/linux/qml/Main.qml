@@ -39,7 +39,7 @@ Kirigami.ApplicationWindow {
         else
             Qt.openUrlExternally(url)
     }
-    Binding { target: mainMenu.seaChart; property: "enabled"; value: true }
+    Binding { target: mainMenu.seaChart; property: "enabled"; value: Launcher.phase === Launcher.Ready }
     Connections { target: mainMenu.seaChart; function onTriggered() { root.openChart() } }
     Connections {
         target: Chart
@@ -838,6 +838,7 @@ Kirigami.ApplicationWindow {
             if (root.walkPaused) { walkTimer.start(); return }
             const name = root.walkIndex < 0 ? (root.pressedDefault ? "02-" : "01-") + root.slug() : root.steps[root.walkIndex].name
             if (!Recette.grab(name)) { Qt.exit(1); return }
+            if (root.walkIndex === -1) console.warn("walk: " + name + " seaChart=" + mainMenu.seaChart.enabled)
             if (root.walkIndex === -1 && !root.pressedDefault && Recette.pressDefault !== "" && root.settled() && Launcher.phase !== Launcher.Ready) {
                 root.pressedDefault = true; root.walkIndex = -2
                 Recette.prepareDefault(); root.useDefaultDatabase()

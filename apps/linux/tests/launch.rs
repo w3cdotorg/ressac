@@ -20,6 +20,12 @@ fn a_current_database_opens_ready() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_clean(&out);
+    // The Sea Chart entry acts only on an open session: enabled once the database is ready.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("walk: 01-ready seaChart=true"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(shots(&run)[0], "01-ready.png");
     assert!(shots(&run).len() >= 6); // the walk grows with the sub-phases
     assert_drawn(&run.shots.join("01-ready.png"));
@@ -65,6 +71,12 @@ fn a_newer_database_is_refused_and_left_alone() {
     let out = run.launch(Some(&db));
     assert_eq!(out.status.code(), Some(0));
     assert_clean(&out);
+    // No open session: the Sea Chart entry is greyed.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("walk: 01-too-new seaChart=false"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(shots(&run), ["01-too-new.png"]);
     assert_drawn(&run.shots.join("01-too-new.png"));
     assert_eq!(Store::probe(&db).unwrap(), SchemaState::Newer(99));
