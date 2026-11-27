@@ -259,13 +259,13 @@ jobs:
         run: |
           set -euo pipefail
           cat > "$RUNNER_TEMP/notes.md" <<'EOF'
-          **Unsigned build.** Ressac is signed ad hoc, not with a Developer ID, and not notarized. macOS 27 on Apple silicon only.
+          **Unsigned builds.** The Mac app is signed ad hoc, not with a Developer ID, and not notarized; it needs macOS 27 on Apple silicon. The RPMs are not signed.
 
           - **App:** unzip `Ressac-…-macos-arm64.zip`, move `Ressac.app` to `/Applications/`, then clear the quarantine flag once: `xattr -dr com.apple.quarantine /Applications/Ressac.app` (or open it, then allow it under System Settings ▸ Privacy & Security).
           - **Terminal:** `Ressac-cli-…-macos-arm64.tar.gz` holds the same `ressac` binary the app embeds; `tar -xzf` it somewhere on your `PATH` and run `xattr -d com.apple.quarantine ressac`.
-          - **Linux, KDE app and terminal (Fedora 44 or newer):** `sudo dnf install ./Ressac-…-linux-x86_64.rpm` (or `-aarch64`) installs `ressac-kde` and `ressac`. The RPM is not signed. If you installed the app with `apps/linux/install.sh`, run `apps/linux/install.sh --uninstall` first. `sudo dnf remove ressac` keeps your database and settings.
+          - **Linux, KDE app and terminal (Fedora 44 or newer):** `sudo dnf install ./Ressac-…-linux-x86_64.rpm` (or `-aarch64`) installs `ressac-kde` and `ressac`. If you installed the app with `apps/linux/install.sh`, run `apps/linux/install.sh --uninstall` first. `sudo dnf remove ressac` keeps your database and settings.
           - **Linux (terminal only):** `Ressac-cli-…-linux-x86_64.tar.gz` and `Ressac-cli-…-linux-aarch64.tar.gz` hold the `ressac` binary, built on Ubuntu 22.04 (glibc 2.35 or newer). `tar -xzf` it into a directory on your `PATH`, such as `~/.local/bin`. Links open through `xdg-open`; files live under `~/.local/share/ressac`, `~/.config/ressac` and `~/.local/state/ressac` (see the README's Linux section).
-          - `SHA256SUMS` lists every archive's checksum.
+          - `SHA256SUMS` lists the checksum of every file above.
           EOF
           prerelease=""
           case "$VERSION" in *-*) prerelease="--prerelease" ;; esac

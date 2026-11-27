@@ -34,8 +34,9 @@ dnf install -y "$rpm_file" >"$work/install.log" 2>&1 || {
 }
 ok install
 
-# The checks' own tools (not the app's), with no weak dependencies: runuser is in util-linux.
-dnf install -y --setopt=install_weak_deps=False desktop-file-utils util-linux >"$work/tools.log" 2>&1 || {
+# The checks' own tools (not the app's), with no weak dependencies: runuser is in util-linux, diff
+# in diffutils, find and xargs in findutils (fedora:44 does not guarantee them).
+dnf install -y --setopt=install_weak_deps=False desktop-file-utils util-linux diffutils findutils >"$work/tools.log" 2>&1 || {
   cat "$work/tools.log" >&2
   fail setup "dnf install of the checks' tools"
 }

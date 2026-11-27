@@ -20,6 +20,10 @@ ExclusiveArch:  x86_64 aarch64
 
 BuildRequires:  desktop-file-utils
 
+# Built against Qt 6.11: its symbols are all versioned Qt_6, so rpm records no minor-version
+# floor; this one keeps the RPM off a Fedora whose Qt is older (Fedora ships the Qt modules in
+# lockstep, so qtbase stands for all of them).
+Requires:       qt6-qtbase%{?_isa} >= 6.11
 # rpm derives the shared-library dependencies (Qt, KDE Frameworks' libraries, WebEngine) from the
 # binaries. It cannot see what the app loads at run time through QML imports and the style, so:
 # org.kde.kirigami (every page)
