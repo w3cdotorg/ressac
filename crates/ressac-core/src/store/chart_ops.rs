@@ -274,17 +274,28 @@ fn make_continent(conn: &Connection, sea: &SeaRef, name: &str) -> Result<(String
     }
     let name = land_name(conn, name, None)?;
     let id = next_land_id(conn)?;
-    Ok((
-        format!("Make Continent {name}"),
-        vec![Change::Land {
-            before: None,
-            after: Some(LandRow {
-                id,
-                name,
-                continent: Some(sea.id),
-            }),
-        }],
-    ))
+    // A continental island never stays in a plain territory (rules 1 and 2): every feed of
+    // the sea, buried ones too, leaves its territories, and a land left under two is deleted.
+    let feeds: Vec<FeedId> = conn
+        .prepare("SELECT id FROM feed WHERE theme_id = ?1 ORDER BY id")?
+        .query_map([sea.id], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut old = Vec::new();
+    for feed in feeds {
+        for land in lands_of(conn, feed)? {
+            old.push((feed, land));
+        }
+    }
+    let mut changes = release(conn, &old)?;
+    changes.push(Change::Land {
+        before: None,
+        after: Some(LandRow {
+            id,
+            name: name.clone(),
+            continent: Some(sea.id),
+        }),
+    });
+    Ok((format!("Make Continent {name}"), changes))
 }
 
 /// The `theme` row `sea` names, or `ChartChanged` when it is gone or differs in any field.
@@ -1178,10 +1189,7 @@ mod tests {
     #[test]
     fn make_continent_once_per_sea() {
         let s = land_store();
-        let territories: Vec<_> = land_rows(&s)
-            .into_iter()
-            .filter(|r| !r.contains("ALL ALPHA"))
-            .collect();
+        let before = rows(&s);
         let zeta = sea_ref(&s, "zeta");
         let done = s
             .apply_chart_edit(&ChartEdit::MakeContinent {
@@ -1191,11 +1199,12 @@ mod tests {
             .unwrap();
         assert_eq!(done.label, "Make Continent Zeta Land");
         assert!(land_rows(&s).contains(&"land 13 Zeta Land continent 1".to_owned()));
-        let now: Vec<_> = land_rows(&s)
-            .into_iter()
-            .filter(|r| !r.contains("ALL ALPHA") && !r.contains("Zeta Land"))
-            .collect();
-        assert_eq!(now, territories, "the territories are untouched");
+        assert!(
+            !land_rows(&s)
+                .iter()
+                .any(|r| r.contains("PAIR") || r.contains("TRIO") || r.starts_with("member")),
+            "the sea's feeds left their territories, which were dissolved"
+        );
         assert_refused(
             &s,
             &ChartEdit::MakeContinent {
@@ -1213,7 +1222,7 @@ mod tests {
             CHANGED,
         );
         s.apply_chart_edit(&done.undo).unwrap();
-        assert!(!land_rows(&s).iter().any(|r| r.contains("Zeta Land")));
+        assert_eq!(rows(&s), before, "undo restores every land and position");
         for (name, err) in [
             ("", "A name has 1 to 40 characters."),
             ("pair", "A land with that name already exists."),
@@ -1399,6 +1408,89 @@ mod tests {
         };
         s.apply_chart_edit(&uncharted).unwrap();
         assert!(land_rows(&s).contains(&"member 10 3 0".to_owned()));
+    }
+
+    #[test]
+    fn make_continent_releases_the_seas_feeds_into_islands() {
+        let s = land_store();
+        // Feed 6 (of TRIO) lives in alpha, so TRIO is left with 1 and 2 when zeta is
+        // charted, and then dissolves with them; PAIR (3 and buried 4) dissolves too.
+        s.conn()
+            .execute("UPDATE feed SET theme_id = 2 WHERE id = 6", [])
+            .unwrap();
+        // OTHER, a plain land of two unthemed feeds, is not the sea's and must stay.
+        add_feed(&s, 10, None, 10, None, "active", "daily");
+        s.conn()
+            .execute(
+                "INSERT INTO territory (id, name, kind) VALUES (20, 'OTHER', 'territory')",
+                [],
+            )
+            .unwrap();
+        for (f, p) in [(9, 0), (10, 1)] {
+            s.conn()
+                .execute(
+                    "INSERT INTO territory_feed (territory_id, feed_id, position) VALUES (20, ?1, ?2)",
+                    params![f, p],
+                )
+                .unwrap();
+        }
+        let before = rows(&s);
+        let done = s
+            .apply_chart_edit(&ChartEdit::MakeContinent {
+                sea: sea_ref(&s, "zeta"),
+                name: "Zeta Land".into(),
+            })
+            .unwrap();
+        let after = land_rows(&s);
+        let members: Vec<_> = after.iter().filter(|r| r.starts_with("member")).collect();
+        assert_eq!(members, ["member 20 10 1", "member 20 9 0"], "{after:?}");
+        assert!(after.contains(&"land 21 Zeta Land continent 1".to_owned()));
+        let hint = "Part of the continent Zeta Land: move it to another sea, or turn the continent back into open water.";
+        // The feeds are continental islands now: join, leave and found name the continent.
+        let other = land_ref(&s, "OTHER");
+        for edit in [
+            ChartEdit::Join {
+                feed: 1,
+                land: other.clone(),
+            },
+            ChartEdit::Leave {
+                feed: 1,
+                land: other,
+            },
+            ChartEdit::Found {
+                name: "NEW".into(),
+                feeds: vec![1, 9],
+            },
+        ] {
+            assert_refused(&s, &edit, hint);
+        }
+        s.apply_chart_edit(&done.undo).unwrap();
+        assert_eq!(rows(&s), before, "territories, ids and positions all back");
+    }
+
+    #[test]
+    fn a_land_kept_by_a_buried_feed_survives_a_leave() {
+        let s = land_store();
+        s.conn()
+            .execute("UPDATE feed SET state = 'buried' WHERE id = 6", [])
+            .unwrap();
+        let before = rows(&s);
+        // TRIO = 1, 2 and buried 6: feed 1 leaves, one visible feed and one buried remain.
+        let done = s
+            .apply_chart_edit(&ChartEdit::Leave {
+                feed: 1,
+                land: land_ref(&s, "TRIO"),
+            })
+            .unwrap();
+        let after = land_rows(&s);
+        assert!(
+            after.contains(&"land 11 TRIO territory -".to_owned()),
+            "{after:?}"
+        );
+        assert!(after.contains(&"member 11 2 1".to_owned()));
+        assert!(after.contains(&"member 11 6 2".to_owned()));
+        s.apply_chart_edit(&done.undo).unwrap();
+        assert_eq!(rows(&s), before);
     }
 
     #[test]
