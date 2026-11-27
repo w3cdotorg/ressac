@@ -480,12 +480,13 @@
   // the cartouche's size on screen (chart.css .cartouche): what cartouchePlace keeps clear of the labels before the
   // page has measured it
   const CARTOUCHE_PX = Object.freeze({w: 250, h: 124});
-  // Where the cartouche goes, in chart units (its centre). It never covers an island (`scene.nodes`, and `keep`: the
-  // dragged island where it lies), the compass rose, the title cartouche or the new land's own box; it covers labels
-  // (`scene.placements`) only when no spot is free of them. cartouchePlace's spot beside the land is taken when it
-  // meets none of these; otherwise every spot inside the margin, on a 12-unit lattice, is weighed: the fewest
-  // obstacles, then the fewest labels, then the nearest to the land.
-  const CARTOUCHE_MARGIN = 40, CARTOUCHE_LATTICE = 12, ISLAND_CLEAR = 6;
+  // Where the cartouche goes, in chart units (its centre): beside its land, never over an island (`scene.nodes`, and
+  // `keep`: the dragged island where it lies), the compass rose, the title cartouche or the land's own box. It may
+  // cover labels: it is a passing form. cartouchePlace's spot is taken when it is clear of all that and of labels;
+  // otherwise every spot inside the margin, on a 12-unit lattice, is weighed: the fewest of those obstacles, then the
+  // nearest to the land by 12-unit bands, then the fewest labels within a band, then the nearest. So it never lands
+  // more than one band farther than the nearest spot clear of the obstacles.
+  const CARTOUCHE_MARGIN = 40, CARTOUCHE_LATTICE = 12, CARTOUCHE_BAND = 12, ISLAND_CLEAR = 6;
   function cartoucheAt(box, scene, size, keep = []) {
     const discs = [...(scene.nodes || []), ...keep].map(n => ({x: n.x, y: n.y, r: n.r + ISLAND_CLEAR}))
       .concat([{x: COMPASS.x, y: COMPASS.y, r: COMPASS.r + 12}]);
@@ -499,15 +500,17 @@
     const placed = core.cartouchePlace(box, scene.placements || [], size), first = rectAt(placed);
     const inside = r => r[0] >= CARTOUCHE_MARGIN - 1e-9 && r[1] >= CARTOUCHE_MARGIN - 1e-9 && r[2] <= W - CARTOUCHE_MARGIN + 1e-9 && r[3] <= H - CARTOUCHE_MARGIN + 1e-9;
     if (inside(first) && !hard(first) && !labels.some(b => meets(first, b))) return placed;
+    // [obstacles, band, labels, distance], compared in that order
+    const better = (a, b) => { for (let i = 0; i < 4; i++) if (a[i] !== b[i]) return a[i] < b[i]; return false; };
     let best = null;
     for (let y = CARTOUCHE_MARGIN; y + size.h <= H - CARTOUCHE_MARGIN; y += CARTOUCHE_LATTICE) {
       for (let x = CARTOUCHE_MARGIN; x + size.w <= W - CARTOUCHE_MARGIN; x += CARTOUCHE_LATTICE) {
         const r = [x, y, x + size.w, y + size.h], h = hard(r);
-        if (best && h > best.h) continue;
-        const l = labels.filter(b => meets(r, b)).length;
-        if (best && h === best.h && l > best.l) continue;
-        const d = gap(r);
-        if (!best || h < best.h || l < best.l || d < best.d) best = {h, l, d, r};
+        if (best && h > best.w[0]) continue;
+        const d = gap(r), band = Math.floor(d / CARTOUCHE_BAND);
+        if (best && h === best.w[0] && band > best.w[1]) continue;
+        const w = [h, band, labels.filter(b => meets(r, b)).length, d];
+        if (!best || better(w, best.w)) best = {w, r};
       }
     }
     return best ? {x: (best.r[0] + best.r[2]) / 2, y: (best.r[1] + best.r[3]) / 2} : placed;

@@ -480,6 +480,18 @@ function coveredBy(c, size, scene, box) {
   };
 }
 const clean = (cov, labels = 0) => ({islands: [], compass: false, title: false, land: false, labels, inside: true});
+// how far a cartouche of `size` centred at `c` is from the land's box
+const gapTo = (c, size, box) => Math.hypot(Math.max(box[0] - (c.x + size.w / 2), 0, (c.x - size.w / 2) - box[2]),
+  Math.max(box[1] - (c.y + size.h / 2), 0, (c.y - size.h / 2) - box[3]));
+// the nearest a cartouche can be to the land while clear of islands, the rose, the title and the land (brute force, 4-unit lattice)
+function nearestClear(box, scene, size, keep = []) {
+  let best = Infinity;
+  for (let y = 40; y + size.h <= 1040; y += 4) for (let x = 40; x + size.w <= 1880; x += 4) {
+    const c = {x: x + size.w / 2, y: y + size.h / 2}, cov = coveredBy(c, size, {nodes: [...scene.nodes, ...keep]}, box);
+    if (!cov.islands.length && !cov.compass && !cov.title && !cov.land) best = Math.min(best, gapTo(c, size, box));
+  }
+  return best;
+}
 
 test("the_cartouche_keeps_clear_of_islands_the_rose_and_the_title", () => {
   const size = {w: 200, h: 100}, box = [800, 500, 900, 560];
@@ -500,11 +512,15 @@ test("the_cartouche_keeps_clear_of_islands_the_rose_and_the_title", () => {
     const cov = coveredBy(c, size, {}, near);
     assert.ok(!cov.compass && !cov.title && !cov.land && cov.inside, `near ${near}: ${JSON.stringify(cov)}`);
   }
-  // labels everywhere but one free patch far away: the free patch (labels only as a last resort)
+  // labels everywhere but one free patch far away: it stays beside the land and covers labels (a passing form)
   const lattice = [];
   for (let y = 40; y < 1040; y += 20) for (let x = 40; x < 1880; x += 20) if (!(x > 1500 && y > 100 && y < 400)) lattice.push({kind: "feed", box: [x, y, x + 8, y + 8]});
   c = draw.cartoucheAt(box, {nodes: [], placements: lattice}, size);
-  assert.equal(coveredBy(c, size, {placements: lattice}, box).labels, 0);
+  assert.ok(gapTo(c, size, box) < 12, "beside the land, not in the far free patch");
+  // among spots at the same distance, the one covering fewer labels: labels thinner below the land
+  const thin = lattice.filter(p => !(p.box[1] > 560 && p.box[0] % 40 === 0));
+  c = draw.cartoucheAt(box, {nodes: [], placements: thin}, size);
+  assert.ok(gapTo(c, size, box) < 12 && c.y > 560, "beside the land, on its lighter side");
   // labels everywhere: the fewest, still no island, rose or title
   const full = [];
   for (let y = 40; y < 1040; y += 20) for (let x = 40; x < 1880; x += 20) full.push({kind: "feed", box: [x, y, x + 8, y + 8]});
@@ -681,9 +697,14 @@ test("drawing_a_loop_in_the_page", async () => {
   const cx = parseFloat(box.style.left) / K, cy = (parseFloat(box.style.top) - OY) / K;
   const spot = [cx - size.w / 2, cy - size.h / 2, cx + size.w / 2, cy + size.h / 2];
   const loopBox = [Math.min(...loop.map(p => p.x)), Math.min(...loop.map(p => p.y)), Math.max(...loop.map(p => p.x)), Math.max(...loop.map(p => p.y))];
-  // this coast is crowded (cartouchePlace has no free spot beside it), yet free water exists elsewhere on the chart
+  // this coast is crowded (cartouchePlace's spot meets labels): beside the land all the same, over no island
   assert.ok(coveredBy(core.cartouchePlace(loopBox, scene.placements, size), size, scene, loopBox).labels > 0, "a crowded coast");
-  assert.deepEqual(coveredBy({x: cx, y: cy}, size, scene, loopBox), clean(), "no island, rose, title, land or label covered");
+  const cov = coveredBy({x: cx, y: cy}, size, scene, loopBox);
+  assert.deepEqual([cov.islands, cov.compass, cov.title, cov.land, cov.inside], [[], false, false, false, true], "no island, rose, title or land covered");
+  const near = nearestClear(loopBox, scene, size), gapNow = gapTo({x: cx, y: cy}, size, loopBox);
+  assert.ok(gapNow <= near + 12 + 1e-6, `never farther than the nearest clear spot (${gapNow} vs ${near})`);
+  // the top-left is islands wall to wall: no spot this size clear of them lies nearer than about 425 units
+  assert.ok(near > 400 && gapNow < 450, `the nearest clear spot, not the far corner of the chart (${gapNow} units away)`);
   const xs = loop.map(p => p.x), ys = loop.map(p => p.y);
   const want = draw.cartoucheAt([Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)], scene, size);
   assert.ok(Math.abs(cx - want.x) < 1e-6 && Math.abs(cy - want.y) < 1e-6, `at cartoucheAt's spot (${cx}, ${cy}) vs (${want.x}, ${want.y})`);
