@@ -482,14 +482,11 @@ void ressac_install_key_filter()
     window->installEventFilter(new ReadingKeyFilter(window, window));
 }
 
-bool ressac_send_key(std::int32_t key, std::uint32_t modifiers, rust::Str text)
+namespace
 {
-    QQuickWindow *window = first_quick_window(true);
-    if (window == nullptr) {
-        return false;
-    }
+bool send_key_to(QQuickWindow *window, std::int32_t key, std::uint32_t modifiers, const QString &t)
+{
     const Qt::KeyboardModifiers mods(modifiers);
-    const QString t = from_rust(text);
     QKeyEvent override(QEvent::ShortcutOverride, key, mods, t);
     override.ignore();
     QCoreApplication::sendEvent(window, &override);
@@ -498,6 +495,27 @@ bool ressac_send_key(std::int32_t key, std::uint32_t modifiers, rust::Str text)
     QKeyEvent release(QEvent::KeyRelease, key, mods, t);
     QCoreApplication::sendEvent(window, &release);
     return consumed;
+}
+} // namespace
+
+bool ressac_send_key(std::int32_t key, std::uint32_t modifiers, rust::Str text)
+{
+    QQuickWindow *window = first_quick_window(true);
+    if (window == nullptr) {
+        return false;
+    }
+    return send_key_to(window, key, modifiers, from_rust(text));
+}
+
+bool ressac_send_key_to(rust::Str title, std::int32_t key, std::uint32_t modifiers, rust::Str text)
+{
+    const QString wanted = from_rust(title);
+    for (QWindow *w : QGuiApplication::topLevelWindows()) {
+        if (auto *qw = qobject_cast<QQuickWindow *>(w); qw != nullptr && qw->isVisible() && qw->title() == wanted) {
+            return send_key_to(qw, key, modifiers, from_rust(text));
+        }
+    }
+    return false;
 }
 
 rust::String ressac_settings_default_file()

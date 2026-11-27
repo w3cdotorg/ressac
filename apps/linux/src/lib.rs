@@ -48,6 +48,7 @@ mod shim {
         pub fn ressac_install_key_filter();
         pub fn ressac_clipboard_text() -> String;
         pub fn ressac_send_key(key: i32, modifiers: u32, text: &str) -> bool;
+        pub fn ressac_send_key_to(title: &str, key: i32, modifiers: u32, text: &str) -> bool;
 
         /// The family Qt gave the registered `bedstead.otf` (empty when registration failed).
         pub fn ressac_bedstead_family() -> String;

@@ -47,7 +47,7 @@ QQC2.ApplicationWindow {
         })
     }
 
-    function runPage(script) { web.runJavaScript(script) }
+    function runPage(script, done) { if (done) web.runJavaScript(script, done); else web.runJavaScript(script) }
 
     QtObject {
         id: relay

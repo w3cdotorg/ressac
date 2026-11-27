@@ -152,3 +152,53 @@ fn the_sea_chart_follows_the_database_and_stops_when_closed() {
     );
     assert!(err.contains("open=false onScreen=false"), "{err}");
 }
+
+#[test]
+fn the_sea_chart_edits_and_undoes_with_ctrl_z() {
+    let _turn = one_app_at_a_time();
+    let run = Run::new();
+    let db = run.copy_fixture();
+    let out = run.launch_with(
+        Some(&db),
+        &[("TZ", "UTC"), ("RESSAC_RECETTE_WALK", "chart-edit")],
+    );
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_clean(&out);
+    // An edit made in the page: written by the core, answered to the page (`replies`), and followed by
+    // exactly one Chart.update (`updates`, counted by a wrapper the walk puts on the page's own entry).
+    assert!(
+        err.contains(
+            "walk: 20-made seas=1 undo=Undo New Sea Sea of Tests replies=1 updates=1 chart=ready"
+        ),
+        "{err}"
+    );
+    // Ctrl+Z and Ctrl+Shift+Z, sent to the Sea Chart window by its title.
+    assert!(
+        err.contains(
+            "walk: 24-undone sent=true seas=0 redo=Redo New Sea Sea of Tests replies=2 updates=2"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "walk: 28-redone sent=true seas=1 undo=Undo New Sea Sea of Tests replies=3 updates=3"
+        ),
+        "{err}"
+    );
+    assert!(err.contains("walk: 29-nowhere sent=false"), "{err}");
+    // A name clash the page cannot see: the core refuses, the page hears it, nothing is drawn again.
+    assert!(
+        err.contains("walk: 30-refused seas=1 replies=4 updates=3 ok=false refused=true error=A sea with that name already exists."),
+        "{err}"
+    );
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let keys: Vec<String> = conn
+        .prepare("SELECT key FROM theme")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(keys, vec!["sea-of-tests".to_string()], "{err}");
+}

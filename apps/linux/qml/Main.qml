@@ -446,6 +446,67 @@ Kirigami.ApplicationWindow {
         { name: "28-after", enter: function () { console.warn("walk: 28-after surveys=" + Chart.surveys + " open=" + Chart.open
             + " onScreen=" + Live.chartOnScreen + " polling=" + Live.polling) } },
     ]
+    // The `chart-edit` walk: an edit made in the Sea Chart's page, undone and redone with Ctrl+Z and Ctrl+Shift+Z sent to the
+    // chart window by its title (`Recette.keyTo`), and a refused edit. The page's `Chart.update` and `Chart.edited` are wrapped
+    // (window.__w, on a stand-in for the frozen window.Chart) to count what reaches it. A step that waits on the page holds the walk (`walkPaused`) and polls.
+    Timer { id: chartTimer; property var next; onTriggered: next() }
+    function chartLater(ms, fn) { chartTimer.interval = ms; chartTimer.next = fn; chartTimer.restart() }
+    // Runs `script` in the chart page, then polls `until` (an expression of the page) every 250 ms, for 20 s at most; `then(result)`.
+    function chartDo(script, until, then) {
+        root.walkPaused = true
+        const win = chartLoader.item
+        const check = "(function () { try { return " + until + " } catch (e) { return null } })()"
+        let tries = 0
+        const poll = function () {
+            win.runPage(check, function (result) {
+                if (result || ++tries >= 80) { root.walkPaused = false; then(result) }
+                else root.chartLater(250, poll)
+            })
+        }
+        win.runPage(script, function () { poll() })
+    }
+    // The page's counters once the writes have settled (2 s: a second Chart.update would show).
+    function chartFacts(then) {
+        root.walkPaused = true
+        root.chartLater(2000, function () {
+            chartLoader.item.runPage("(function () { return 'seas=' + document.querySelectorAll('.log-sea').length"
+                + " + ' undo=' + document.querySelector('.log-undo').textContent + ' redo=' + document.querySelector('.log-redo').textContent"
+                + " + ' replies=' + __w.replies + ' updates=' + __w.updates })()", function (facts) { root.walkPaused = false; then(facts) })
+        })
+    }
+    readonly property string chartSurveyButton: "[...document.querySelectorAll('.bar button')].find(b => b.textContent === '✒ Survey')"
+    readonly property var chartEditSteps: [
+        { name: "02-open", enter: function () { root.openChart() } },
+        { name: "03-ready", enter: function () { root.chartDo("", "!!" + root.chartSurveyButton + " && !" + root.chartSurveyButton + ".hidden && typeof Chart === 'object'", function (ready) {
+            root.chartDo("window.__w = {replies: 0, updates: 0, last: null};"
+                + "const real = Chart; window.Chart = {load: (a, b) => real.load(a, b), undo: () => real.undo(), redo: () => real.redo(),"
+                + " edited: text => { __w.replies++; __w.last = text; return real.edited(text) }, update: json => { __w.updates++; return real.update(json) }};", "typeof __w === 'object'", function () {
+                console.warn("walk: 03-ready ready=" + !!ready + " title=" + Chart.windowTitle) }) }) } },
+        { name: "10-survey", enter: function () { chartLoader.item.requestActivate()
+            root.chartDo(root.chartSurveyButton + ".click()", "!!document.querySelector('.log-new-sea-button')", function (log) {
+                console.warn("walk: 10-survey log=" + !!log) }) } },
+        { name: "18-new-sea", enter: function () {
+            root.chartDo("document.querySelector('.log-new-sea-button').click();"
+                + "const input = document.querySelector('.log-new-sea .name-form-input'); input.value = 'Sea of Tests';"
+                + "input.dispatchEvent(new Event('input', {bubbles: true})); input.form.requestSubmit();",
+                "__w.replies >= 1 && __w.updates >= 1 && document.querySelectorAll('.log-sea').length >= 1", function (done) {
+                root.chartFacts(function (facts) { console.warn("walk: 20-made " + facts.replace(/ redo=.*? (replies=)/, " $1") + " chart=" + (done ? "ready" : "timeout")) }) }) } },
+        { name: "22-undo", enter: function () { chartLoader.item.requestActivate()
+            const sent = Recette.keyTo(Chart.windowTitle, Qt.Key_Z, "z", Qt.ControlModifier)
+            root.chartDo("", "__w.updates >= 2 && document.querySelectorAll('.log-sea').length === 0", function () {
+                root.chartFacts(function (facts) { console.warn("walk: 24-undone sent=" + sent + " " + facts.replace(/^(seas=\d+) undo=.*? (redo=)/, "$1 $2")) }) }) } },
+        { name: "26-redo", enter: function () {
+            const sent = Recette.keyTo(Chart.windowTitle, Qt.Key_Z, "Z", Qt.ControlModifier | Qt.ShiftModifier)
+            root.chartDo("", "__w.updates >= 3 && document.querySelectorAll('.log-sea').length === 1", function () {
+                root.chartFacts(function (facts) { console.warn("walk: 28-redone sent=" + sent + " " + facts.replace(/ redo=.*? (replies=)/, " $1")) }) }) } },
+        { name: "29-nowhere", enter: function () { console.warn("walk: 29-nowhere sent=" + Recette.keyTo("No such window", Qt.Key_Z, "z", Qt.ControlModifier)) } },
+        { name: "30-refused", enter: function () {
+            // The page's own check would stop a clash it can see; this one goes to the core by the bridge, as a stale page's would.
+            root.chartDo("window.webkit.messageHandlers.ressac.postMessage({type: 'edit', seq: 9999, edit: JSON.stringify({op: 'new_sea', name: 'sea of tests'})});",
+                "__w.replies >= 4", function (replied) {
+                root.chartFacts(function (facts) { chartLoader.item.runPage("(function () { const r = JSON.parse(__w.last); return 'ok=' + r.ok + ' refused=' + r.refused + ' error=' + r.error })()",
+                    function (reply) { console.warn("walk: 30-refused " + facts.replace(/^(seas=\d+) .*? (replies=\d+ updates=\d+)$/, "$1 $2") + " " + reply + " answered=" + !!replied) }) }) }) } },
+    ]
     // The `library` walk (B6d): an empty library (the launch creates the file), a dropped OPML, the add dialog.
     // Every address targets a closed loopback port or is refused before any connection.
     readonly property var librarySteps: [
@@ -823,7 +884,7 @@ Kirigami.ApplicationWindow {
         width: 2; height: 2; color: "black"
         Connections { target: root; enabled: frameDriver.visible; function onFrameSwapped() { frameDriver.x = frameDriver.x > 0 ? 0 : 2 } }
     }
-    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : Recette.walk === "redraw" ? redrawSteps : (Recette.walk === "settings-size" || Recette.walk === "settings-size-x2") ? settingsSizeSteps : Recette.walk === "smoke" ? smokeSteps : walkSteps
+    readonly property var steps: Recette.walk === "antiope" ? antiopeSteps : Recette.walk === "antiope-pages" ? antiopePagesSteps : Recette.walk === "antiope-scroll" ? antiopeScrollSteps : Recette.walk === "antiope-bridges" ? bridgeSteps : Recette.walk === "mosaic" ? mosaicSteps : Recette.walk === "grid" ? gridSteps : Recette.walk === "library" ? librarySteps : Recette.walk === "chart" ? chartSteps : Recette.walk === "chart-live" ? chartLiveSteps : Recette.walk === "chart-edit" ? chartEditSteps : Recette.walk === "journal" ? journalSteps : Recette.walk === "garden" ? gardenSteps : Recette.walk === "mark-all" ? markAllSteps : Recette.walk === "redraw" ? redrawSteps : (Recette.walk === "settings-size" || Recette.walk === "settings-size-x2") ? settingsSizeSteps : Recette.walk === "smoke" ? smokeSteps : walkSteps
     property bool pressedDefault: false          // the test hook (Recette.pressDefault) pressed "Use Default Database"
     property int walkIndex: -2                   // -2 not started, -1 launch screen, 0… steps
     function settled() { return Launcher.phase === Launcher.Ready || Launcher.phase === Launcher.TooNew || Launcher.phase === Launcher.Failed }

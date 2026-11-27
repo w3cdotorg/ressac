@@ -50,6 +50,17 @@ pub mod qobject {
         #[qinvokable]
         fn key(self: &Recette, key: i32, text: &QString, modifiers: i32) -> bool;
 
+        /// Test hook of the walk: `key`, aimed at the visible window titled `title` (the Sea Chart's
+        /// `Chart.windowTitle`); false when no visible window has that title.
+        #[qinvokable]
+        fn key_to(
+            self: &Recette,
+            title: &QString,
+            key: i32,
+            text: &QString,
+            modifiers: i32,
+        ) -> bool;
+
         /// Test hook of the walk: with `press_default` set to `drop-db`, forgets `RESSAC_DB` so the
         /// relaunch after "Use Default Database" reaches the default location.
         #[qinvokable]
@@ -222,6 +233,16 @@ impl qobject::Recette {
     fn key(&self, key: i32, text: &QString, modifiers: i32) -> bool {
         self.rust().active
             && shim::ressac_send_key(
+                key,
+                u32::try_from(modifiers).unwrap_or(0),
+                &text.to_string(),
+            )
+    }
+
+    fn key_to(&self, title: &QString, key: i32, text: &QString, modifiers: i32) -> bool {
+        self.rust().active
+            && shim::ressac_send_key_to(
+                &title.to_string(),
                 key,
                 u32::try_from(modifiers).unwrap_or(0),
                 &text.to_string(),
