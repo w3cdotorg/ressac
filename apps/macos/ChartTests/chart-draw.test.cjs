@@ -412,6 +412,65 @@ test("renaming_in_place_over_the_label", async () => {
   assert.deepEqual(win.errors, []);
 });
 
+// final review I-1: a reply that comes after the page gave up becomes an undo step, and leaves the edit in flight alone
+test("a_late_reply_in_the_page_adds_its_step_and_keeps_the_next_edit", async () => {
+  const {win, doc, page} = await openPage();
+  const plate = byClass([doc.body], "plate"), base = canvases(doc)[0];
+  const sea = draw.buildScene(fixture(), "themes", measure).placements.find(p => p.kind === "sea" && p.key === "tides");
+  const k = 1588 / 1920, oy = (1080 - 1080 * k) / 2;
+  const click = p => plate.dispatch("click", ev({target: base, clientX: p.x * k, clientY: oy + p.y * k}));
+  const renameBox = () => byClass([plate], "rename");
+  const rename = name => { click(sea); inputIn(renameBox()).value = name; byClass([renameBox()], "name-form").dispatch("submit", ev()); };
+  toolbarButton(doc, "✒ Survey").dispatch("click", ev());
+
+  rename("Tidal Reach");
+  assert.equal(edits(win).length, 1);
+  const reply = win.timers.filter(t => t.ms === survey.REPLY_MS);
+  assert.equal(reply.length, 1);
+  reply[0].fn(); // the app did not answer in time
+  assert.equal(statusLine(doc), survey.NO_REPLY);
+  assert.ok(renameBox().hidden, "the form went with the timeout");
+
+  rename("Tidal Waters"); // the next edit, in flight
+  assert.equal(edits(win).length, 2);
+  page.edited(JSON.stringify({seq: 1, ok: true, done: {event: "chart_edit", label: "Rename Tidal Reach",
+    undo: core.edits.patch("Rename Tidal Reach", [{kind: "sea"}])}}));
+  assert.equal(statusLine(doc), survey.lateReply("Rename Tidal Reach"), "the status says what happened");
+  assert.ok(!renameBox().hidden, "the rename in flight still waits for its own reply");
+  page.edited(JSON.stringify({seq: 2, ok: true, done: {event: "chart_edit", label: "Rename Tidal Waters",
+    undo: core.edits.patch("Rename Tidal Waters", [{kind: "sea"}])}}));
+  assert.ok(renameBox().hidden, "its own reply closes it");
+  page.update(JSON.stringify(resurveyed()));
+  await settle();
+  assert.equal(page.undo(), true);
+  assert.equal(JSON.parse(edits(win).at(-1).edit).label, "Rename Tidal Waters");
+  page.edited(JSON.stringify({seq: 3, ok: true, done: {event: "chart_edit", label: "Rename Tidal Waters",
+    undo: core.edits.patch("Rename Tidal Waters", [{kind: "sea"}])}}));
+  page.update(JSON.stringify(resurveyed(2)));
+  await settle();
+  assert.equal(page.undo(), true, "the late step is undone next");
+  assert.equal(JSON.parse(edits(win).at(-1).edit).label, "Rename Tidal Reach");
+  assert.deepEqual(win.errors, []);
+});
+
+// final review I-3 (spec rule 5): a sea's name is drawn in capitals, in the small-capitals face lands use
+test("sea_names_are_drawn_in_capitals", () => {
+  const data = fixture();
+  const tides = data.themes.find(t => t.key === "tides");
+  tides.sea = "Tidal Sea of Tests";
+  const placements = draw.buildScene(data, "themes", measure).placements;
+  const sea = placements.find(p => p.kind === "sea" && p.key === "tides");
+  assert.ok(sea, "the sea has its name on the chart");
+  assert.equal(sea.text, "TIDAL SEA OF TESTS");
+  const land = placements.find(p => p.kind === "territory");
+  const face = f => f.replace(/^.*?\d+(\.\d+)?px /, "");
+  assert.equal(face(sea.font), face(land.font), "the lands' small-capitals face");
+  assert.ok(!/italic/.test(sea.font), "Cormorant SC has no italic: never a slanted fake");
+  // seas already in capitals draw as before
+  const kites = placements.find(p => p.kind === "sea" && p.text === "SEA OF KITES");
+  assert.ok(kites, "an imported sea keeps its text");
+});
+
 test("reduce_motion_from_the_app_stills_the_page", async () => {
   let {win, doc} = await openPage({prefs: {animate: true}});
   assert.ok(win.frames.length > 0, "positive control: the overlay animates");

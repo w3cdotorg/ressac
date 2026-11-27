@@ -839,6 +839,8 @@
     }
     // an edit's outcome (Chart.edited, or no reply): the log's form, the rename form and the status line follow it
     function settle(outcome) {
+      // a late reply: its forms and gesture ended with its timeout; whatever is in flight now waits for its own reply
+      if (outcome.kind === "late") { message = outcome.message; drawSurvey(); return; }
       memory.result(outcome);
       message = outcome.message ?? null;
       if (rename && rename.sent) {

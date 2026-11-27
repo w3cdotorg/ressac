@@ -12,6 +12,7 @@
   const T = core.EDIT_TEXT;
   const REPLY_MS = 15000; // an edit the app never answers stops being pending after this long
   const NO_REPLY = "The app did not answer; the chart was reloaded.";
+  const lateReply = what => `The app answered late: ${what} was done.`; // the status after a late ok reply
   const SURVEY_MESSAGE = Object.freeze({type: "survey"}); // asks the app for a fresh snapshot (Chart.update)
 
   // ---------- the edit session ----------
@@ -19,7 +20,9 @@
   // is not ok ends it at once; an ok result keeps it pending until the next Chart.update (updated()) or
   // PENDING_MS after the result, whichever comes first. Nothing is sent while an edit is pending. An edit with
   // no result REPLY_MS after send ends too: the session posts {type: "survey"} and calls
-  // onTimeout({kind: "timeout", message: NO_REPLY}); a late result for it is ignored.
+  // onTimeout({kind: "timeout", message: NO_REPLY}). The app may still apply it (it waited behind other work): a late
+  // ok result is recorded as a send or a step would have been, and edited() answers {kind: "late", message}, so the
+  // history stays exact; a late refusal or failure only forgets it. A late result never touches the edit pending now.
   // post(message) carries {type: "edit", seq, edit} to the app; onChange() follows every change of state.
   const hasLand = edit => edit && (edit.op !== "join" && edit.op !== "leave" ||
     (edit.land != null && typeof edit.land === "object" && Number.isInteger(edit.land.id)));
@@ -29,6 +32,7 @@
     const changed = () => { if (onChange) onChange(); };
     const wait = later || ((fn, ms) => globalThis.setTimeout(fn, ms));
     let h = core.history.empty(), seq = 0, pending = null; // pending = {seq, which, record, landed}
+    const late = new Map(); // seq → the dispatch that timed out, until its result comes
 
     function dispatch(edit, which, record) {
       if (pending || !hasLand(edit)) return false;
@@ -40,6 +44,7 @@
       wait(() => {
         if (pending !== mine || mine.landed) return;
         pending = null; // an unanswered undo or redo keeps its record, as a failed one does
+        late.set(mine.seq, mine);
         post({...SURVEY_MESSAGE});
         if (onTimeout) onTimeout({kind: "timeout", message: NO_REPLY});
         changed();
@@ -57,16 +62,32 @@
       h = {...h, [which]: h[which].filter(r => r !== record)};
     }
 
+    // an ok result's step: a send is recorded, an undo or redo moves its record to the other stack
+    function keep(which, record, done) {
+      if (!which) h = core.history.record(h, done);
+      else if (done && !emptyPatch(done.undo)) h = core.history.land(h, which, record, done);
+      else drop(which, record); // nothing to step back to: no empty step on the other stack
+    }
+    function lateResult(result) {
+      const {which, record} = late.get(result.seq);
+      late.delete(result.seq);
+      if (result.ok !== true) return null;
+      const done = result.done && typeof result.done === "object" ? result.done : null;
+      keep(which, record, done);
+      changed();
+      const what = which ? `${which === "undo" ? "Undo" : "Redo"} ${record.label}` : String(done?.label ?? "the edit");
+      return {kind: "late", message: lateReply(what)};
+    }
+
     function edited(text) {
       let result;
       try { result = typeof text === "string" ? JSON.parse(text) : text; } catch (_) { return null; }
-      if (!result || typeof result !== "object" || !pending || pending.landed || result.seq !== pending.seq) return null;
+      if (!result || typeof result !== "object") return null;
+      if (late.has(result.seq)) return lateResult(result);
+      if (!pending || pending.landed || result.seq !== pending.seq) return null;
       const {which, record} = pending;
       if (result.ok === true) {
-        const done = result.done && typeof result.done === "object" ? result.done : null;
-        if (!which) h = core.history.record(h, done);
-        else if (done && !emptyPatch(done.undo)) h = core.history.land(h, which, record, done);
-        else drop(which, record); // nothing to step back to: no empty step on the other stack
+        keep(which, record, result.done && typeof result.done === "object" ? result.done : null);
         const mine = pending;
         mine.landed = true;
         wait(() => { if (pending === mine) { pending = null; changed(); } }, core.PENDING_MS);
@@ -247,7 +268,7 @@
         m.target = null;
         if (!el) return null;
         if (el.disabled) { m.lost = true; return null; }
-        if (typeof el.focus === "function") el.focus();
+        if (typeof el.focus === "function") el.focus({preventScroll: true}); // a scrolled log stays where it was
         m.lost = false;
         if (m.open && keyOf(el) === `${m.open.key}:input` && m.open.start != null && typeof el.setSelectionRange === "function") {
           el.setSelectionRange(m.open.start, m.open.end ?? m.open.start);
@@ -560,5 +581,5 @@
     return Object.freeze(mode);
   }
 
-  return Object.freeze({createSession, createMode, logContent, logMemory, nameForm, seaDropIndex, REPLY_MS, NO_REPLY});
+  return Object.freeze({createSession, createMode, logContent, logMemory, nameForm, seaDropIndex, REPLY_MS, NO_REPLY, lateReply});
 });

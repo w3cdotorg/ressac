@@ -553,7 +553,6 @@ test("session_ends_an_unanswered_edit", () => {
   assert.deepEqual(posted.at(-1), {type: "survey"}, "and the page asks for a fresh snapshot, through post");
   assert.deepEqual(timeouts, [{kind: "timeout", message: survey.NO_REPLY}]);
   assert.equal(changes(), before + 1);
-  assert.equal(session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS"))), null, "a late reply is ignored");
   assert.deepEqual(session.titles(), {undo: null, redo: null});
   assert.equal(session.send(JOIN), true, "the next edit goes at once");
 
@@ -564,6 +563,53 @@ test("session_ends_an_unanswered_edit", () => {
   after(survey.REPLY_MS).at(-1).fn();
   assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null});
   assert.equal(posted.filter(m => m.type === "survey").length, 2);
+});
+
+// final review I-1: an edit can apply after the page gave up on it; its late ok reply still becomes a history step
+test("a_late_ok_reply_records_its_undo_step", () => {
+  const {session, after, changes} = stubSession();
+  assert.equal(survey.lateReply("Join APPLE PRESS"), "The app answered late: Join APPLE PRESS was done.");
+  session.send(JOIN);
+  after(survey.REPLY_MS)[0].fn();
+  assert.equal(session.pending(), false);
+  let before = changes();
+  assert.deepEqual(session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS"))),
+    {kind: "late", message: survey.lateReply("Join APPLE PRESS")});
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null}, "the step is in the history after all");
+  assert.equal(session.pending(), false, "a late reply makes nothing pending");
+  assert.equal(changes(), before + 1, "onChange: the titles changed");
+  assert.equal(session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS"))), null, "a second copy is ignored");
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null});
+
+  // an undo whose reply comes late moves to the redo stack then
+  assert.equal(session.undo(), true);
+  after(survey.REPLY_MS)[1].fn();
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null}, "kept while unanswered");
+  assert.deepEqual(session.edited(ok(2, "Leave APPLE PRESS", patch("Leave APPLE PRESS"))),
+    {kind: "late", message: survey.lateReply("Undo Join APPLE PRESS")});
+  assert.deepEqual(session.titles(), {undo: null, redo: "Redo Join APPLE PRESS"});
+
+  // late while another edit is pending: recorded, and the other edit stays pending
+  session.send(JOIN);
+  after(survey.REPLY_MS)[2].fn();
+  assert.equal(session.send(core.edits.newSea("Sea of Tests")), true);
+  assert.equal(session.edited(ok(3, "Join APPLE PRESS", patch("Join APPLE PRESS"))).kind, "late");
+  assert.equal(session.pending(), true, "the edit in flight is still pending");
+  assert.deepEqual(session.edited(ok(4, "New Sea of Tests", patch("New Sea of Tests"))), {kind: "done", message: null});
+  session.updated();
+  assert.deepEqual(session.titles(), {undo: "Undo New Sea of Tests", redo: null});
+  session.undo();
+  session.edited(ok(5, "New Sea of Tests", patch("Delete Sea of Tests")));
+  session.updated();
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: "Redo New Sea of Tests"}, "both steps, in order");
+
+  // a late refusal or failure only clears it
+  session.send(JOIN);
+  after(survey.REPLY_MS).at(-1).fn();
+  before = changes();
+  assert.equal(session.edited(refused(6, T.changed)), null);
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: "Redo New Sea of Tests"}, "nothing recorded");
+  assert.equal(changes(), before);
 });
 
 test("an_undo_with_nothing_to_redo_leaves_no_step", () => {
@@ -624,8 +670,11 @@ test("an_open_form_survives_a_rebuild", () => {
   assert.equal(field.value, "gulls", "the typed value is kept");
   assert.ok(!field.disabled);
   assert.equal(one([landRowIn(again, 11)], "name-form-error").textContent, T.landTaken, "the core's message stays with the field");
+  const focusing = [], focus = field.focus;
+  field.focus = options => { focusing.push(options); focus.call(field, options); };
   assert.equal(memory.restore(), field, "the field has the focus again");
   assert.equal(doc.activeElement, field);
+  assert.deepEqual(focusing, [{preventScroll: true}], "without scrolling the log back to it (final review Minor 2)");
   assert.deepEqual([field.selectionStart, field.selectionEnd], [2, 4], "and its caret");
 
   // typing more, then any number of plain updates: value, caret and error are kept

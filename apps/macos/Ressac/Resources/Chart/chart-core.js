@@ -415,10 +415,11 @@
       }
     });
 
-    // seas: on their bearing, or above and below their archipelago, in the most open water found there
+    // seas: on their bearing, or above and below their archipelago, in the most open water found there; in capitals,
+    // in the lands' small-capitals face (spec rule 5: a sea typed in lower case reads like the imported ones)
     seas(data).filter(s => s.count > 0).forEach(s => {
       const n = s.count, track = n > 8 ? 7 : 4, size = n > 20 ? 26 : n > 8 ? 21 : 17, h = n > 20 ? 26 : 21;
-      const f = font(size, FONTS.body, "italic 500"), w = spacedWidth(s.sea, f, track), spots = [];
+      const text = s.sea.toUpperCase(), f = font(size, FONTS.display, "500"), w = spacedWidth(text, f, track), spots = [];
       if (harbour) {
         const mid = s.from + s.span / 2;
         [1.06, 1, .94, 1.12, .88, .82].forEach(k => [0, .05, -.05].forEach(da =>
@@ -427,7 +428,7 @@
       const ok = spots.map(([x, y]) => [Math.max(w / 2 + 50, Math.min(W - w / 2 - 50, x)), y])
         .map(([x, y]) => [x, y, box(x, y, w, h)]).filter(([, , b]) => !hit(b));
       const best = ok.find(([, , b]) => !overIsland(b) && !onLand(b)) || ok.find(([, , b]) => !onLand(b)) || ok[0]; // water names stay on the water
-      if (best) put({kind: "sea", key: s.key, text: s.sea, x: best[0], y: best[1], size, font: f, track, box: best[2]});
+      if (best) put({kind: "sea", key: s.key, text, x: best[0], y: best[1], size, font: f, track, box: best[2]});
     });
 
     // territories: small capitals laid along their land, on the longest link that has room
