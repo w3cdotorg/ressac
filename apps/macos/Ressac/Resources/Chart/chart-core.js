@@ -415,11 +415,11 @@
       }
     });
 
-    // seas: on their bearing, or above and below their archipelago, in the most open water found there; in capitals,
-    // in the lands' small-capitals face (spec rule 5: a sea typed in lower case reads like the imported ones)
+    // seas: on their bearing, or above and below their archipelago, in the most open water found there; in italic
+    // capitals (spec rule 5: a sea typed in lower case reads like the imported ones; water names keep the italic)
     seas(data).filter(s => s.count > 0).forEach(s => {
       const n = s.count, track = n > 8 ? 7 : 4, size = n > 20 ? 26 : n > 8 ? 21 : 17, h = n > 20 ? 26 : 21;
-      const text = s.sea.toUpperCase(), f = font(size, FONTS.display, "500"), w = spacedWidth(text, f, track), spots = [];
+      const text = s.sea.toUpperCase(), f = font(size, FONTS.body, "italic 500"), w = spacedWidth(text, f, track), spots = [];
       if (harbour) {
         const mid = s.from + s.span / 2;
         [1.06, 1, .94, 1.12, .88, .82].forEach(k => [0, .05, -.05].forEach(da =>

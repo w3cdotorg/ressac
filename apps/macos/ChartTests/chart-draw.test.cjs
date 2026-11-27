@@ -453,7 +453,7 @@ test("a_late_reply_in_the_page_adds_its_step_and_keeps_the_next_edit", async () 
   assert.deepEqual(win.errors, []);
 });
 
-// final review I-3 (spec rule 5): a sea's name is drawn in capitals, in the small-capitals face lands use
+// final review I-3 (spec rule 5): a sea's name is drawn in capitals, in the italic face water names keep
 test("sea_names_are_drawn_in_capitals", () => {
   const data = fixture();
   const tides = data.themes.find(t => t.key === "tides");
@@ -462,10 +462,7 @@ test("sea_names_are_drawn_in_capitals", () => {
   const sea = placements.find(p => p.kind === "sea" && p.key === "tides");
   assert.ok(sea, "the sea has its name on the chart");
   assert.equal(sea.text, "TIDAL SEA OF TESTS");
-  const land = placements.find(p => p.kind === "territory");
-  const face = f => f.replace(/^.*?\d+(\.\d+)?px /, "");
-  assert.equal(face(sea.font), face(land.font), "the lands' small-capitals face");
-  assert.ok(!/italic/.test(sea.font), "Cormorant SC has no italic: never a slanted fake");
+  assert.equal(sea.font, `italic 500 ${sea.size}px "Cormorant Garamond", Garamond, serif`, "water names stay italic");
   // seas already in capitals draw as before
   const kites = placements.find(p => p.kind === "sea" && p.text === "SEA OF KITES");
   assert.ok(kites, "an imported sea keeps its text");
