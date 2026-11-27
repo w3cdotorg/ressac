@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The Linux gate: fmt, clippy, tests (hermetic), chart tests, XDG layout smoke
-# test. Run it through apps/linux/dev/dev.sh check.
+# The Linux gate: fmt, clippy, tests (hermetic), Qt public API only, chart tests,
+# XDG layout smoke test. Run it through apps/linux/dev/dev.sh check.
 set -euo pipefail
 
 die() {
@@ -37,6 +37,15 @@ env -u RESSAC_DB -u RUST_LOG \
 leftover=$(find "$scratch/home" "$scratch/xdg" -mindepth 1 2>/dev/null | head -n 20 || true)
 [ -z "$leftover" ] || die "tests wrote outside their temp dirs:
 $leftover"
+
+# Qt's public API only: a Qt_6.<minor>_PRIVATE_API symbol ties ressac-kde, and the RPM, to one Qt
+# minor version. apps/linux/build.rs compiles the QML to bytecode only for this.
+kde="$target/debug/ressac-kde"
+test -x "$kde" || die "public API: $kde missing"
+symbols=$(objdump -T "$kde") || die "public API: objdump -T $kde failed"
+private=$(grep PRIVATE_API <<<"$symbols" || true)
+[ -z "$private" ] || die "public API: ressac-kde imports Qt's private API:
+$private"
 
 # Layout smoke test: a fresh HOME and no XDG_* must give the XDG layout.
 test -x "$target/debug/ressac" || die "layout smoke: $target/debug/ressac missing"
