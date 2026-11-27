@@ -16,6 +16,7 @@
 #include <QtCore/QTimer>
 #include <QtCore/QVariant>
 #include <QtGui/QClipboard>
+#include <QtGui/QFocusEvent>
 #include <QtGui/QFontDatabase>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QIcon>
@@ -38,6 +39,7 @@
 #include <vector>
 
 Q_LOGGING_CATEGORY(lcMosaic, "ressac.mosaic")
+Q_LOGGING_CATEGORY(lcWebPopup, "ressac.webpopup", QtInfoMsg) // debug: QT_LOGGING_RULES=ressac.webpopup.debug=true
 
 namespace {
 
@@ -273,6 +275,37 @@ private:
     QPointer<QQuickItem> m_page;
 };
 
+// Keeps a web page's <select> list open on Wayland (`ressac_ui::webpopup`): drops the FocusOut that
+// KWin's focus move to the list's own Qt::Popup window makes Qt send to the list's web view, which
+// Qt WebEngine would take as "close the list". Installed on the application: the list's window is
+// made by Qt WebEngine, after any filter of ours could be put on it.
+class WebPopupFocusFilter : public QObject
+{
+public:
+    using QObject::QObject;
+
+    bool eventFilter(QObject *obj, QEvent *e) override
+    {
+        if (e->type() != QEvent::FocusOut) {
+            return false;
+        }
+        auto *item = qobject_cast<QQuickItem *>(obj);
+        QQuickWindow *window = item != nullptr ? item->window() : nullptr;
+        if (window == nullptr) {
+            return false;
+        }
+        const QByteArray cls(obj->metaObject()->className());
+        const bool popup = (window->flags() & Qt::WindowType_Mask) == Qt::Popup;
+        const bool drop = ressac_drops_focus_out(rust::Str(cls.constData(), static_cast<std::size_t>(cls.size())),
+                                                 static_cast<std::int32_t>(static_cast<QFocusEvent *>(e)->reason()),
+                                                 popup, QGuiApplication::focusWindow() == window);
+        if (drop) {
+            qCDebug(lcWebPopup, "web popup: kept the list of %s open", cls.constData());
+        }
+        return drop;
+    }
+};
+
 } // namespace
 
 void ressac_init_webengine()
@@ -305,6 +338,7 @@ void ressac_create_application()
     static char arg0[] = "ressac-kde";
     static char *argv[] = {arg0, nullptr};
     g_application = new QApplication(argc, argv);
+    g_application->installEventFilter(new WebPopupFocusFilter(g_application));
 
     QQuickWebEngineProfile *profile = QQuickWebEngineProfile::defaultProfile();
     if (!profile->isOffTheRecord()) {

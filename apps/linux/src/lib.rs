@@ -93,7 +93,26 @@ mod shim {
             look: &str,
             verb: &mut String,
         ) -> bool;
+
+        /// The application filter's question about a `FocusOut` (`ressac_ui::webpopup`): whether
+        /// it is the spurious one that closes a web `<select>`'s list on Wayland.
+        fn ressac_drops_focus_out(
+            item_class: &str,
+            reason: i32,
+            window_is_popup: bool,
+            window_focused: bool,
+        ) -> bool;
     }
+}
+
+/// The application filter's question (`cpp/shim.cpp`), answered by `ressac_ui::webpopup`.
+fn ressac_drops_focus_out(
+    item_class: &str,
+    reason: i32,
+    window_is_popup: bool,
+    window_focused: bool,
+) -> bool {
+    ressac_ui::webpopup::drops_focus_out(item_class, reason, window_is_popup, window_focused)
 }
 
 /// The window key filter's question (`cpp/shim.cpp`), answered by `ressac_ui::keys`: the tokens
