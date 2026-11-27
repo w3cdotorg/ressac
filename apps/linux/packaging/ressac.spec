@@ -39,23 +39,24 @@ Requires:       hicolor-icon-theme
 Recommends:     breeze-icon-theme
 
 %description
-Ressac tidies RSS subscriptions, then lets you read them calmly. This package holds the KDE
-Plasma app (ressac-kde, with its launcher entry and icon) and the terminal app (ressac); both
-share the database in ~/.local/share/ressac, which the package never touches.
+Ressac tidies RSS subscriptions, then lets you read them calmly. This
+package holds the KDE Plasma app (ressac-kde, with its launcher entry and
+icon) and the terminal app (ressac); both share the database in
+~/.local/share/ressac, which the package never touches.
 
 %prep
-cp -p %{ressac_srcdir}/apps/macos/Ressac/Resources/Fonts/*-OFL.txt \
-      %{ressac_srcdir}/apps/macos/Ressac/Resources/Fonts/Bedstead-CC0.txt \
-      %{ressac_srcdir}/apps/macos/Ressac/Resources/Chart/LICENSE-d3.txt \
-      %{ressac_srcdir}/apps/macos/Ressac/Resources/Chart/fonts/*-OFL.txt \
+cp -p "%{ressac_srcdir}"/apps/macos/Ressac/Resources/Fonts/*-OFL.txt \
+      "%{ressac_srcdir}"/apps/macos/Ressac/Resources/Fonts/Bedstead-CC0.txt \
+      "%{ressac_srcdir}"/apps/macos/Ressac/Resources/Chart/LICENSE-d3.txt \
+      "%{ressac_srcdir}"/apps/macos/Ressac/Resources/Chart/fonts/*-OFL.txt \
       .
 
 %install
-install -Dm755 %{ressac_bindir}/ressac %{buildroot}%{_bindir}/ressac
-install -Dm755 %{ressac_bindir}/ressac-kde %{buildroot}%{_bindir}/ressac-kde
-install -Dm644 %{ressac_srcdir}/apps/linux/packaging/org.w3cdotorg.ressac.desktop \
+install -Dm755 "%{ressac_bindir}"/ressac %{buildroot}%{_bindir}/ressac
+install -Dm755 "%{ressac_bindir}"/ressac-kde %{buildroot}%{_bindir}/ressac-kde
+install -Dm644 "%{ressac_srcdir}"/apps/linux/packaging/org.w3cdotorg.ressac.desktop \
     %{buildroot}%{_datadir}/applications/org.w3cdotorg.ressac.desktop
-install -Dm644 %{ressac_srcdir}/apps/macos/Ressac/Resources/AppIcon.svg \
+install -Dm644 "%{ressac_srcdir}"/apps/macos/Ressac/Resources/AppIcon.svg \
     %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/org.w3cdotorg.ressac.svg
 
 %check
@@ -67,3 +68,7 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/org.w3cdotorg.ressac.
 %{_bindir}/ressac-kde
 %{_datadir}/applications/org.w3cdotorg.ressac.desktop
 %{_datadir}/icons/hicolor/scalable/apps/org.w3cdotorg.ressac.svg
+
+%changelog
+* Fri Nov 27 2026 Ressac
+- Packaged from the release build; see the GitHub release notes.

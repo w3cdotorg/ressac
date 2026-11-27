@@ -83,7 +83,10 @@ ok desktop
 
 # 6. A non-root user starts the app offscreen on a copy of the contract fixture: the launch
 # screen loads the reading page (Kirigami, the Breeze controls, QtWebEngine), the `mark-all`
-# walk (the shortest one on a library with feeds) runs, and QML reports no error.
+# walk (the shortest one on a library with feeds) runs, and QML reports no error. The reader's
+# proof line (ReaderPane.qml) is logged only once a web page has loaded and run its script, so
+# it proves QtWebEngine and its helper process work.
+! id verify >/dev/null 2>&1 || fail setup "a user 'verify' already exists: run me in a fresh container"
 useradd --create-home --user-group verify
 home=/home/verify
 db=$home/.local/share/ressac/ressac.sqlite
@@ -107,10 +110,10 @@ for bad in "failed to load component" "is not installed" "ReferenceError" "TypeE
     fail launch "QML error: $bad"
   fi
 done
-for line in "walk: 02-journal rows=4 can=true" "walk: 03-mark-all can=false"; do
+for line in 'reader-proof: {"app":"ran"' "walk: 02-journal rows=4 can=true" "walk: 03-mark-all can=false"; do
   grep -qF "$line" "$work/app.log" || {
     tail -n 60 "$work/app.log" >&2
-    fail launch "missing walk line: $line"
+    fail launch "missing log line: $line"
   }
 done
 [ -s "$home/shots/01-ready.png" ] || fail launch "no $home/shots/01-ready.png (launch screen not ready)"

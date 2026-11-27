@@ -27,6 +27,12 @@ spec=apps/linux/packaging/ressac.spec
 if [ ! -f "$spec" ] || [ ! -f Cargo.lock ]; then
   die "run me from the repository root"
 fi
+
+# The binaries report the workspace version: VERSION must be it, or a pre-release of it.
+workspace=$(awk -F'"' '/^\[workspace.package\]/ { p = 1 } p && /^version *=/ { print $2; exit }' Cargo.toml)
+[ "${version%%-*}" = "${workspace%%-*}" ] ||
+  die "VERSION $version does not match the workspace version $workspace in Cargo.toml"
+
 command -v rpmbuild >/dev/null || die "rpmbuild is missing (dnf install rpm-build)"
 
 rpm_version=$(printf '%s' "$version" | tr - '~')
