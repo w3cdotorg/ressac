@@ -6,9 +6,8 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use chrono::Utc;
-use ressac_core::store::{
-    Change, ChartEdit, ChartSnapshot, LandRef, LandRow, LedgerLand, LedgerSea, SeaRef, Store,
-};
+use ressac_core::model::FeedId;
+use ressac_core::store::{ChartEdit, ChartSnapshot, LandRef, LedgerLand, LedgerSea, SeaRef, Store};
 
 use super::chart::commit;
 use super::{Globals, usage};
@@ -43,6 +42,14 @@ fn find_land<'a>(
             None => l.name.trim().to_lowercase() == lowered,
         })
         .ok_or_else(|| usage(output::printable(&format!("No land \"{given}\".")).into_owned()))
+}
+
+/// A feed id that names no feed (any state) is said so, not "the chart changed".
+fn known_feed(store: &Store, feed: FeedId) -> anyhow::Result<()> {
+    store
+        .feed(feed)
+        .map(|_| ())
+        .map_err(|_| usage(format!("No feed #{feed}.")))
 }
 
 fn land_ref(land: &LedgerLand) -> LandRef {
@@ -83,7 +90,12 @@ pub(super) fn land(
 ) -> anyhow::Result<ExitCode> {
     let (store, snap) = current(g)?;
     let edit = match action {
-        LandCommand::New { name, feeds } => ChartEdit::Found { name, feeds },
+        LandCommand::New { name, feeds } => {
+            for feed in &feeds {
+                known_feed(&store, *feed)?;
+            }
+            ChartEdit::Found { name, feeds }
+        }
         LandCommand::Rename { land, name } => ChartEdit::RenameLand {
             land: land_ref(find_land(&snap, &land, false)?),
             name,
@@ -91,14 +103,20 @@ pub(super) fn land(
         LandCommand::Delete { land } => ChartEdit::DeleteLand {
             land: land_ref(find_land(&snap, &land, false)?),
         },
-        LandCommand::Add { land, feed } => ChartEdit::Join {
-            feed,
-            land: land_ref(find_land(&snap, &land, true)?),
-        },
-        LandCommand::Remove { land, feed } => ChartEdit::Leave {
-            feed,
-            land: land_ref(find_land(&snap, &land, true)?),
-        },
+        LandCommand::Add { land, feed } => {
+            known_feed(&store, feed)?;
+            ChartEdit::Join {
+                feed,
+                land: land_ref(find_land(&snap, &land, true)?),
+            }
+        }
+        LandCommand::Remove { land, feed } => {
+            known_feed(&store, feed)?;
+            ChartEdit::Leave {
+                feed,
+                land: land_ref(find_land(&snap, &land, true)?),
+            }
+        }
     };
     commit(g, &store, &edit, out)
 }
@@ -110,10 +128,24 @@ pub(super) fn continent(
 ) -> anyhow::Result<ExitCode> {
     let (store, snap) = current(g)?;
     let edit = match action {
-        ContinentCommand::Make { theme, name } => ChartEdit::MakeContinent {
-            sea: sea_ref(find_sea(&store, &snap, &theme)?),
-            name,
-        },
+        ContinentCommand::Make { theme, name } => {
+            let sea = find_sea(&store, &snap, &theme)?;
+            if snap
+                .ledger
+                .lands
+                .iter()
+                .any(|l| l.continent.as_deref() == Some(sea.key.as_str()))
+            {
+                return Err(usage(
+                    output::printable(&format!("Theme \"{}\" already has a continent.", sea.key))
+                        .into_owned(),
+                ));
+            }
+            ChartEdit::MakeContinent {
+                sea: sea_ref(sea),
+                name,
+            }
+        }
         ContinentCommand::Unmake { theme } => {
             let sea = find_sea(&store, &snap, &theme)?;
             let continent = snap
@@ -127,16 +159,9 @@ pub(super) fn continent(
                             .into_owned(),
                     )
                 })?;
-            ChartEdit::Patch {
-                label: format!("Unmake Continent {}", continent.name),
-                changes: vec![Change::Land {
-                    before: Some(LandRow {
-                        id: continent.id,
-                        name: continent.name.clone(),
-                        continent: Some(sea.id),
-                    }),
-                    after: None,
-                }],
+            // The page's "Back to Open Water" sends the same op.
+            ChartEdit::DeleteLand {
+                land: land_ref(continent),
             }
         }
     };

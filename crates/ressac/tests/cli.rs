@@ -1868,6 +1868,45 @@ fn land_home() -> tempfile::TempDir {
     home
 }
 
+/// The lands of the ledger as `name: feed ids`, in id order.
+fn land_list(home: &Path) -> Vec<String> {
+    chart_snapshot_json(home)["ledger"]["lands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| format!("{}: {}", l["name"].as_str().unwrap(), l["feeds"]))
+        .collect()
+}
+
+/// Runs one verb with `--json`, checks its label, then applies its undo through
+/// `chart apply`: the export must come back to what it was before the verb. The verb is
+/// then run again, and the lands after it are returned.
+fn verb_and_undo(home: &Path, args: &[&str], label: &str) -> Vec<String> {
+    let before = chart_export_text(home);
+    let lands_before = land_list(home);
+    let mut full = vec!["--json", "chart"];
+    full.extend_from_slice(args);
+    let out = ressac(home, &full);
+    assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+    let event: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(event["label"], label, "{args:?}");
+    assert_ne!(chart_export_text(home), before, "{args:?} changed nothing");
+    let after = land_list(home);
+    let undo = serde_json::to_string(&event["undo"]).unwrap();
+    let out = ressac(home, &["chart", "apply", &undo]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{args:?} undo: {}",
+        stderr(&out)
+    );
+    assert_eq!(chart_export_text(home), before, "{args:?} undo");
+    assert_eq!(land_list(home), lands_before, "{args:?} undo");
+    assert_eq!(chart_verb(home, &args[..]), label, "{args:?} again");
+    assert_eq!(land_list(home), after, "{args:?} again");
+    after
+}
+
 #[test]
 fn chart_land_commands_round_trip() {
     let home = land_home();
@@ -1875,65 +1914,59 @@ fn chart_land_commands_round_trip() {
     let xkcd = feed_id_of(h, "xkcd.com");
     let girl = feed_id_of(h, "Girl on the Couch");
     let orange = feed_id_of(h, "Orange Drenka");
-    let before = chart_export_text(h);
-
+    let drenka = feed_id_of(h, "Orange-Drenka");
     assert_eq!(
-        chart_verb(h, &["land", "new", "Funny Pages", &xkcd, &girl]),
-        "New Land Funny Pages"
+        land_list(h),
+        [
+            format!("ORANGE COAST: [{orange},{drenka}]"),
+            "WEB CONTINENT: []".to_owned()
+        ]
     );
-    let after_new = chart_export_text(h);
-    assert!(after_new.contains("Funny Pages"));
-    assert_ne!(after_new, before);
 
-    // A name, in any case, finds the land; an id does too.
-    assert_eq!(
-        chart_verb(h, &["land", "add", "funny PAGES", &orange]),
-        "Join Funny Pages"
+    let lands = verb_and_undo(
+        h,
+        &["land", "new", "Funny Pages", &xkcd, &girl],
+        "New Land Funny Pages",
     );
-    let after_add = chart_export_text(h);
-    assert_ne!(after_add, after_new);
-    let lands = chart_snapshot_json(h)["ledger"]["lands"].clone();
-    let funny = lands
+    assert_eq!(lands[2], format!("Funny Pages: [{xkcd},{girl}]"));
+
+    // A name in any case finds the land; an id does too. Joining takes a feed out of its
+    // old territory, which the core deletes when it is left with one feed.
+    let lands = verb_and_undo(
+        h,
+        &["land", "add", "funny PAGES", &orange],
+        "Join Funny Pages",
+    );
+    let funny = format!("Funny Pages: [{xkcd},{girl},{orange}]");
+    assert!(lands.contains(&funny), "{lands:?}");
+    let snap = chart_snapshot_json(h);
+    let funny_id = snap["ledger"]["lands"]
         .as_array()
         .unwrap()
         .iter()
         .find(|l| l["name"] == "Funny Pages")
-        .unwrap()
-        .clone();
-    assert_eq!(funny["feeds"].as_array().unwrap().len(), 3);
-    let funny_id = funny["id"].to_string();
-
-    assert_eq!(
-        chart_verb(h, &["land", "remove", &funny_id, &orange]),
-        "Leave Funny Pages"
+        .unwrap()["id"]
+        .to_string();
+    let lands = verb_and_undo(
+        h,
+        &["land", "remove", &funny_id, &xkcd],
+        "Leave Funny Pages",
     );
-    let funny_feeds = |h: &Path| -> usize {
-        chart_snapshot_json(h)["ledger"]["lands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|l| l["name"] == "Funny Pages")
-            .unwrap()["feeds"]
-            .as_array()
-            .unwrap()
-            .len()
-    };
-    assert_eq!(funny_feeds(h), 2);
-    assert_ne!(chart_export_text(h), after_add);
-
-    assert_eq!(
-        chart_verb(h, &["land", "rename", "funny pages", "Strips"]),
-        "Rename Strips"
+    assert!(
+        lands.contains(&format!("Funny Pages: [{girl},{orange}]")),
+        "{lands:?}"
     );
-    assert!(chart_export_text(h).contains("Strips"));
-    assert!(!chart_export_text(h).contains("Funny Pages"));
-
-    assert_eq!(
-        chart_verb(h, &["land", "delete", "STRIPS"]),
-        "Delete Strips"
+    let lands = verb_and_undo(
+        h,
+        &["land", "rename", "funny pages", "Strips"],
+        "Rename Strips",
     );
-    assert!(!chart_export_text(h).contains("Strips"));
-    assert_ne!(chart_export_text(h), before);
+    assert!(
+        lands.contains(&format!("Strips: [{girl},{orange}]")),
+        "{lands:?}"
+    );
+    let lands = verb_and_undo(h, &["land", "delete", "STRIPS"], "Delete Strips");
+    assert!(!lands.iter().any(|l| l.starts_with("Strips")), "{lands:?}");
 }
 
 #[test]
@@ -1954,6 +1987,20 @@ fn chart_land_name_clash_ignores_case() {
         "A land with that name already exists.",
     );
     chart_verb(h, &["land", "rename", "Funny Pages", "FUNNY pages"]);
+}
+
+#[test]
+fn chart_land_unknown_feed_exits_2() {
+    let home = land_home();
+    let h = home.path();
+    let xkcd = feed_id_of(h, "xkcd.com");
+    chart_refused(h, &["land", "new", "Ghosts", &xkcd, "999"], "No feed #999.");
+    chart_refused(h, &["land", "add", "ORANGE COAST", "999"], "No feed #999.");
+    chart_refused(
+        h,
+        &["land", "remove", "ORANGE COAST", "999"],
+        "No feed #999.",
+    );
 }
 
 #[test]
@@ -2051,7 +2098,6 @@ fn chart_continent_make_and_unmake() {
         &["continent", "unmake", "labs"],
         "Theme \"labs\" has no continent.",
     );
-    let before = chart_export_text(h);
     assert_eq!(
         chart_verb(h, &["continent", "make", "labs", "Lab Land"]),
         "Make Continent Lab Land"
@@ -2060,18 +2106,16 @@ fn chart_continent_make_and_unmake() {
     chart_refused(
         h,
         &["continent", "make", "labs", "Again"],
-        "The chart changed; nothing was done.",
+        "Theme \"labs\" already has a continent.",
     );
-    // web already has WEB CONTINENT.
     assert_eq!(
         chart_verb(h, &["continent", "unmake", "AI labs and tools"]),
-        "Unmake Continent Lab Land"
+        "Delete Lab Land"
     );
     assert!(!chart_export_text(h).contains("Lab Land"));
-    let _ = before;
     assert_eq!(
         chart_verb(h, &["continent", "unmake", "web"]),
-        "Unmake Continent WEB CONTINENT"
+        "Delete WEB CONTINENT"
     );
     assert!(!chart_export_text(h).contains("WEB CONTINENT"));
 }
