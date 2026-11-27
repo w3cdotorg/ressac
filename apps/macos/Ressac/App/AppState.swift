@@ -630,7 +630,7 @@ enum PendingSheet: Equatable, Sendable {
         }
         switch outcome {
         case .succeeded:
-            return line.map(ChartEditReply.done) ?? .failed("ressac printed no edit.")
+            return line.map(ChartEditReply.done) ?? .failed("ressac did not report the edit; the chart was reloaded.")
         case .refused:
             return .failed("A refresh is running. Try again when it ends.")
         case let .failed(failure):

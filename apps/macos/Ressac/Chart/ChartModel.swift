@@ -37,9 +37,6 @@ struct CLIChartRunner: ChartRunner {
     @ObservationIgnored private let runner: any ChartRunner
     @ObservationIgnored private let debounce: Duration
     @ObservationIgnored private let resurvey: Duration
-    @ObservationIgnored private let editSettle: Duration
-    /// Until then the change notices of the app's own edit are absorbed (see `refreshAfterEdit`).
-    @ObservationIgnored private var absorbingUntil: ContinuousClock.Instant?
     @ObservationIgnored private var run: Task<Void, Never>?
     /// The periodic survey while the window is open.
     @ObservationIgnored private var resurveys: Task<Void, Never>?
@@ -49,22 +46,18 @@ struct CLIChartRunner: ChartRunner {
 
     private static let log = Logger(subsystem: "org.w3cdotorg.ressac", category: "chart")
 
-    /// `editSettle` outlasts the external poll (3 s), the last notice an edit's write can raise.
-    init(runner: any ChartRunner, debounce: Duration = .seconds(2), resurvey: Duration = .seconds(300),
-         editSettle: Duration = .seconds(4)) {
+    init(runner: any ChartRunner, debounce: Duration = .seconds(2), resurvey: Duration = .seconds(300)) {
         self.runner = runner
         self.debounce = debounce
         self.resurvey = resurvey
-        self.editSettle = editSettle
     }
 
-    /// The app's own edit was just written: surveys at once, and absorbs the change notices that write raises (the
-    /// run's end, then the poll) so that one edit is one survey, not a second one `debounce` later. A real change in
-    /// that short window is drawn by the next notice or the periodic survey.
+    /// The app's own edit was just written: surveys at once and drops a scheduled run, which the edit's own notice
+    /// raised. The notices that come later (the poll) survey again, but `load` publishes nothing when the chart
+    /// is unchanged, so one edit is one `Chart.update`; a real change in between is published as usual.
     func refreshAfterEdit() {
         scheduled?.cancel()
         scheduled = nil
-        absorbingUntil = .now + editSettle
         refresh()
     }
 
@@ -88,10 +81,6 @@ struct CLIChartRunner: ChartRunner {
     /// The database changed. Changes within one `debounce` window share a single run, started
     /// at the end of the window: a steady trickle of writes (a fetch) still draws once per window.
     func noteChange() {
-        if let until = absorbingUntil {
-            if ContinuousClock.now < until { return }
-            absorbingUntil = nil
-        }
         guard scheduled == nil else { return }
         scheduled = Task {
             try? await Task.sleep(for: debounce)
@@ -143,7 +132,10 @@ struct CLIChartRunner: ChartRunner {
                 throw ChartError.unsupportedVersion(version)
             }
             lastRefreshError = nil
-            phase = .ready(json: String(decoding: data, as: UTF8.self))
+            let json = String(decoding: data, as: UTF8.self)
+            // A survey that differs only by its clock (`surveyed_at`) is not a new chart: no redraw.
+            if case let .ready(current) = phase, Self.sameChart(current, json) { return }
+            phase = .ready(json: json)
         } catch {
             guard !Task.isCancelled else { return }
             let message = Self.message(for: error)
@@ -153,6 +145,17 @@ struct CLIChartRunner: ChartRunner {
             if case .ready = phase { return }
             phase = .failed(message)
         }
+    }
+
+    /// True when both documents are equal apart from `surveyed_at`.
+    static func sameChart(_ a: String, _ b: String) -> Bool {
+        func object(_ text: String) -> NSDictionary? {
+            guard var dictionary = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] else { return nil }
+            dictionary["surveyed_at"] = nil
+            return dictionary as NSDictionary
+        }
+        guard let x = object(a), let y = object(b) else { return false }
+        return x.isEqual(y)
     }
 
     private struct Versioned: Decodable {

@@ -290,7 +290,7 @@ func calls(_ stub: Stub) throws -> [String] {
     @Test func chart_edit_without_an_event_is_failed() async throws {
         // Exit 0 and a line that is not JSON: the run is skipped as noise, so there is no event to hand back.
         let (state, _, _) = try makeState(stub: "echo 'New Sea Comics'")
-        #expect(await state.chartEdit(json: Self.newSea) == .failed("ressac printed no edit."))
+        #expect(await state.chartEdit(json: Self.newSea) == .failed("ressac did not report the edit; the chart was reloaded."))
     }
 
     @Test func chart_edit_exit_2_from_another_command_is_not_a_refusal() {

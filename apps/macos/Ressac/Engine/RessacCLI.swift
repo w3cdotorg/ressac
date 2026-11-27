@@ -143,7 +143,9 @@ struct RunRequest: Sendable, Equatable {
     /// Extraction failures are shown inline in the reader and add failures in the Add Feed sheet,
     /// never as a banner (spec §8; add-feed spec §7).
     /// A chart edit's failure goes back to the page's status line, never to a banner.
-    var showsFailureBanner: Bool { !["extract", "add"].contains(arguments.first) && !arguments.starts(with: ["chart", "apply"]) }
+    var showsFailureBanner: Bool {
+        !["extract", "add"].contains(arguments.first) && !arguments.starts(with: ["chart", "apply"])
+    }
 
     /// True when `failure` is the store refusing something the app cannot foresee (exit 2): an address that announces
     /// no feed or is already followed (`add`), a garden decision or an undo (an address another

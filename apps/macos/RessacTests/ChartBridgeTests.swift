@@ -221,17 +221,20 @@ private func privateDefaults() throws -> (UserDefaults, String) {
             echo "$*" >> "$(dirname "$0")/calls"
             echo '\(line)'
             """)
-        let runner = ScriptedChartRunner([Self.chartJSON])
+        // Each survey carries a new clock; only the first one is a new chart.
+        let runner = ScriptedChartRunner((1...5).map { Self.result(Self.survey(at: $0, feeds: "[]")) })
         let model = ChartModel(runner: runner, debounce: .milliseconds(30))
         let reply = await ChartActions.edit(json: #"{"op":"new_sea","name":"Comics"}"#, state: state, model: model)
         #expect(reply == .done(line))
         #expect(try calls(stub).last?.hasSuffix(#"chart apply {"op":"new_sea","name":"Comics"}"#) == true)
-        // The write's own change notices (the run's end, the poll) must not draw a second time.
+        #expect(await eventually { runner.runs == 1 })
+        // The write's own change notices (the run's end, then the poll) survey again but publish nothing.
         model.noteChange()
+        #expect(await eventually { runner.runs == 2 })
+        model.noteChange()
+        #expect(await eventually { runner.runs == 3 })
         try await Task.sleep(for: .milliseconds(100))
-        model.noteChange()
-        try await Task.sleep(for: .milliseconds(400))
-        #expect(runner.runs == 1)
+        #expect(model.phase == .ready(json: Self.survey(at: 1, feeds: "[]")), "one Chart.update, not three")
     }
 
     @Test func a_refused_edit_still_surveys_so_the_page_sees_the_truth() async throws {
@@ -243,14 +246,27 @@ private func privateDefaults() throws -> (UserDefaults, String) {
         #expect(await eventually { runner.runs == 1 })
     }
 
-    @Test func a_change_long_after_an_edit_is_drawn_again() async throws {
-        let runner = ScriptedChartRunner([Self.chartJSON])
-        let model = ChartModel(runner: runner, debounce: .milliseconds(20), editSettle: .milliseconds(100))
+    @Test func a_real_change_right_after_an_edit_is_published() async throws {
+        let runner = ScriptedChartRunner([Self.result(Self.survey(at: 1, feeds: "[]")), Self.result(Self.survey(at: 2, feeds: "[1]"))])
+        let model = ChartModel(runner: runner, debounce: .milliseconds(20))
         model.refreshAfterEdit()
         #expect(await eventually { runner.runs == 1 })
-        try await Task.sleep(for: .milliseconds(250))
-        model.noteChange()
-        #expect(await eventually { runner.runs == 2 })
+        model.noteChange() // a fetch finishing a moment after the edit
+        #expect(await eventually { model.phase == .ready(json: Self.survey(at: 2, feeds: "[1]")) })
+    }
+
+    private static func survey(at second: Int, feeds: String) -> String {
+        #"{"version":1,"surveyed_at":"2026-11-27T12:00:0\#(second).000Z","feeds":\#(feeds)}"#
+    }
+
+    private static func result(_ text: String) -> Result<Data, any Error> { .success(Data(text.utf8)) }
+
+    @Test func the_hidden_buttons_go_to_the_page_first_then_to_the_text_field() async {
+        var native: [String] = []
+        let link = ChartPageLink() // no page: it declines, so the key is the field's
+        await ChartUndoShortcuts.press(redo: false, link: link, native: { native.append($0) }).value
+        await ChartUndoShortcuts.press(redo: true, link: link, native: { native.append($0) }).value
+        #expect(native == ["undo:", "redo:"])
     }
 
     @Test func undo_goes_to_the_page_and_only_then_to_the_text_field() async {

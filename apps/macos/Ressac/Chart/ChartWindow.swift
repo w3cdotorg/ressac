@@ -42,6 +42,30 @@ import SwiftUI
     }
 }
 
+/// The hidden Undo Chart Edit (⌘Z) and Redo Chart Edit (⇧⌘Z) buttons, like the garden's `undoShortcut`.
+struct ChartUndoShortcuts: View {
+    let link: ChartPageLink
+    var native: @MainActor (String) -> Void = ChartUndo.sendNative
+
+    /// What a button does: the page first, else the native text undo.
+    @discardableResult
+    static func press(redo: Bool, link: ChartPageLink, native: @escaping @MainActor (String) -> Void) -> Task<Void, Never> {
+        Task { await ChartUndo.perform(redo: redo, link: link, native: native) }
+    }
+
+    var body: some View {
+        Group {
+            Button("Undo Chart Edit") { Self.press(redo: false, link: link, native: native) }
+                .keyboardShortcut("z", modifiers: .command)
+            Button("Redo Chart Edit") { Self.press(redo: true, link: link, native: native) }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
+    }
+}
+
 /// The Sea Chart window's content (spec §8): the chart of the open database, or why there is none.
 struct ChartWindow: View {
     static let id = "sea-chart"
@@ -132,17 +156,7 @@ private struct ChartScreen: View {
     }
 
     /// ⌘Z and ⇧⌘Z, like the garden's `undoShortcut`: the page's history, else the focused text field's.
-    private var undoShortcuts: some View {
-        Group {
-            Button("Undo Chart Edit") { Task { await ChartUndo.perform(redo: false, link: link) } }
-                .keyboardShortcut("z", modifiers: .command)
-            Button("Redo Chart Edit") { Task { await ChartUndo.perform(redo: true, link: link) } }
-                .keyboardShortcut("z", modifiers: [.command, .shift])
-        }
-        .frame(width: 0, height: 0)
-        .opacity(0)
-        .accessibilityHidden(true)
-    }
+    private var undoShortcuts: some View { ChartUndoShortcuts(link: link) }
 
     private func perform(_ action: ChartAction) {
         ChartActions.perform(action, state: state, model: model)
