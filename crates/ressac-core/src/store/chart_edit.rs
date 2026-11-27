@@ -6,8 +6,8 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use super::Store;
 use super::chart::check_theme_key;
+use super::{Store, chart_ops};
 use crate::error::{Error, Result};
 use crate::model::FeedId;
 
@@ -224,7 +224,6 @@ pub(super) fn checked_name<'a>(
 
 /// A new sea's key: `name` lower-cased, runs of non-alphanumerics turned to `-`, trimmed of
 /// `-`; empty becomes `sea`; a key that is taken (or `none`) gets a number (`comics-2`).
-#[allow(dead_code, reason = "new_sea (Task 3) derives its key here")]
 pub(super) fn derive_key(name: &str, taken: impl Fn(&str) -> bool) -> String {
     let mut key = String::new();
     for c in name.to_lowercase().chars() {
@@ -248,7 +247,7 @@ pub(super) fn derive_key(name: &str, taken: impl Fn(&str) -> bool) -> String {
 }
 
 /// The `theme` row `id`, if any.
-fn read_sea(conn: &Connection, id: i64) -> Result<Option<SeaRow>> {
+pub(super) fn read_sea(conn: &Connection, id: i64) -> Result<Option<SeaRow>> {
     Ok(conn
         .query_row(
             "SELECT id, key, name, sea_name, position FROM theme WHERE id = ?1",
@@ -267,7 +266,7 @@ fn read_sea(conn: &Connection, id: i64) -> Result<Option<SeaRow>> {
 }
 
 /// The `territory` row `id`, if any, and whether it is a plain territory.
-fn read_land(conn: &Connection, id: i64) -> Result<Option<(LandRow, bool)>> {
+pub(super) fn read_land(conn: &Connection, id: i64) -> Result<Option<(LandRow, bool)>> {
     Ok(conn
         .query_row(
             "SELECT id, name, theme_id, kind = 'territory' FROM territory WHERE id = ?1",
@@ -298,7 +297,7 @@ fn read_member(conn: &Connection, feed: FeedId, land: i64) -> Result<Option<i64>
 }
 
 /// `feed`'s theme id; `None` outside, `Some(None)` for an unthemed feed.
-fn read_feed_sea(conn: &Connection, feed: FeedId) -> Result<Option<Option<i64>>> {
+pub(super) fn read_feed_sea(conn: &Connection, feed: FeedId) -> Result<Option<Option<i64>>> {
     Ok(conn
         .query_row("SELECT theme_id FROM feed WHERE id = ?1", [feed], |r| {
             r.get(0)
@@ -607,7 +606,6 @@ pub(super) fn land_name(conn: &Connection, raw: &str, me: Option<i64>) -> Result
 
 /// The sea name typed for a theme: cleaned, and refused when another theme has it as its
 /// sea name or its name, without case. `me` is the sea being renamed (`None` for a new one).
-#[allow(dead_code, reason = "the sea ops (Task 3) check typed names here")]
 pub(super) fn sea_name(conn: &Connection, raw: &str, me: Option<i64>) -> Result<String> {
     let others = column_except(
         conn,
@@ -667,24 +665,17 @@ pub(super) fn invert(changes: &[Change]) -> Vec<Change> {
 impl Store {
     /// Applies one chart edit in one transaction and returns its label and its undo.
     pub fn apply_chart_edit(&self, edit: &ChartEdit) -> Result<ChartEditDone> {
-        match edit {
-            ChartEdit::Patch { label, changes } => {
-                let tx = self.write_tx()?;
-                apply_patch(&tx, changes)?;
-                tx.commit()?;
-                Ok(ChartEditDone {
-                    label: label.clone(),
-                    undo: ChartEdit::Patch {
-                        label: label.clone(),
-                        changes: invert(changes),
-                    },
-                })
-            }
-            other => Err(Error::Invalid(format!(
-                "{} is not implemented yet",
-                other.op()
-            ))),
-        }
+        // Compiled inside the write transaction, so what the checks read is what is written
+        // over; any refusal drops the transaction and writes nothing.
+        let tx = self.write_tx()?;
+        let (label, changes) = chart_ops::compile(&tx, edit)?;
+        apply_patch(&tx, &changes)?;
+        tx.commit()?;
+        let undo = ChartEdit::Patch {
+            label: label.clone(),
+            changes: invert(&changes),
+        };
+        Ok(ChartEditDone { label, undo })
     }
 }
 
@@ -976,11 +967,14 @@ mod tests {
     fn other_ops_wait_for_their_tasks() {
         let s = chart_store();
         let err = s
-            .apply_chart_edit(&ChartEdit::NewSea {
-                name: "Kites".into(),
+            .apply_chart_edit(&ChartEdit::DeleteLand {
+                land: LandRef {
+                    id: 10,
+                    name: "APPLE PRESS".into(),
+                },
             })
             .unwrap_err();
-        assert_eq!(err.to_string(), "new_sea is not implemented yet");
+        assert_eq!(err.to_string(), "delete_land is not implemented yet");
     }
 
     // ---- names and keys -------------------------------------------------------------------

@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 
 mod chart;
 mod chart_edit;
+mod chart_ops;
 mod chart_snapshot;
 mod decisions;
 mod edition;
