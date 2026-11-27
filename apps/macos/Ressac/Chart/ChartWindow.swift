@@ -13,6 +13,8 @@ import SwiftUI
             state.openURL(url)
         case let .prefs(prefs):
             prefs.save(to: defaults, reduceMotion: reduceMotion)
+        case .edit, .survey:
+            break // an edit goes to the page's `onEdit`; a survey request is the window's (`ChartScreen.perform`)
         }
     }
 }
@@ -104,6 +106,7 @@ private struct ChartScreen: View {
 
     private func perform(_ action: ChartAction) {
         ChartActions.perform(action, state: state)
+        if case .survey = action { model.refresh() }
         // The main window was closed: open one, which shows the feed just selected.
         if case .openFeed = action, !state.hasReadingWindow {
             openWindow(id: RessacApp.mainWindowID)
