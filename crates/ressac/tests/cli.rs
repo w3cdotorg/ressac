@@ -1902,7 +1902,7 @@ fn verb_and_undo(home: &Path, args: &[&str], label: &str) -> Vec<String> {
     );
     assert_eq!(chart_export_text(home), before, "{args:?} undo");
     assert_eq!(land_list(home), lands_before, "{args:?} undo");
-    assert_eq!(chart_verb(home, &args[..]), label, "{args:?} again");
+    assert_eq!(chart_verb(home, args), label, "{args:?} again");
     assert_eq!(land_list(home), after, "{args:?} again");
     after
 }
