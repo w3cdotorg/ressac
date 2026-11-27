@@ -45,7 +45,7 @@ Kirigami.ApplicationWindow {
         target: Chart
         function onOpenFeed(key) {
             SourcesModel.selectKey(key)
-            // Dead on Wayland (no Window.Minimized there, the raise below is what brings it back); harmless on X11.
+            // Dead on Wayland (no Window.Minimized there: observed in the recette, not re-verified; the raise below is what brings it back); harmless on X11.
             if (root.visibility === Window.Minimized) root.showNormal()
             root.show(); root.raise(); root.requestActivate()
         }
