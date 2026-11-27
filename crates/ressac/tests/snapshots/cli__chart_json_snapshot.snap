@@ -5,6 +5,7 @@ expression: redacted_chart(&v)
 {
   "continents": [
     {
+      "id": 2,
       "name": "WEB CONTINENT",
       "theme": "web"
     }
@@ -95,6 +96,43 @@ expression: redacted_chart(&v)
       "unread_week": 0
     }
   ],
+  "ledger": {
+    "lands": [
+      {
+        "continent": null,
+        "feeds": [
+          2,
+          3
+        ],
+        "id": 1,
+        "name": "ORANGE COAST"
+      },
+      {
+        "continent": "web",
+        "feeds": [],
+        "id": 2,
+        "name": "WEB CONTINENT"
+      }
+    ],
+    "seas": [
+      {
+        "feeds": 2,
+        "id": 1,
+        "key": "labs",
+        "name": "AI labs and tools",
+        "position": 0,
+        "sea": "SEA OF THE LABS"
+      },
+      {
+        "feeds": 1,
+        "id": 2,
+        "key": "web",
+        "name": "Web and comics",
+        "position": 1,
+        "sea": "WEB SEA"
+      }
+    ]
+  },
   "surveyed_at": "[time]",
   "territories": [
     {
@@ -102,18 +140,21 @@ expression: redacted_chart(&v)
         2,
         3
       ],
+      "id": 1,
       "name": "ORANGE COAST"
     }
   ],
   "themes": [
     {
       "count": 2,
+      "id": 1,
       "key": "labs",
       "name": "AI labs and tools",
       "sea": "SEA OF THE LABS"
     },
     {
       "count": 1,
+      "id": 2,
       "key": "web",
       "name": "Web and comics",
       "sea": "WEB SEA"

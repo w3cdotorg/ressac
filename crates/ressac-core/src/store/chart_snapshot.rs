@@ -28,6 +28,7 @@ pub struct ChartSnapshot {
     pub feeds: Vec<ChartFeed>,
     pub territories: Vec<ChartTerritory>,
     pub continents: Vec<ChartContinent>,
+    pub ledger: ChartLedger,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -38,6 +39,7 @@ pub struct ChartTotals {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChartTheme {
+    pub id: i64,
     pub key: String,
     pub name: String,
     pub sea: String,
@@ -70,14 +72,43 @@ pub struct ChartEntry {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChartTerritory {
+    pub id: i64,
     pub name: String,
     pub feeds: Vec<FeedId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChartContinent {
+    pub id: i64,
     pub name: String,
     pub theme: String,
+}
+
+/// Every sea and every land, empty or hidden ones included: what the Cartographer's Log lists.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ChartLedger {
+    pub seas: Vec<LedgerSea>,
+    pub lands: Vec<LedgerLand>,
+}
+
+/// A theme in position order, with its feed count in any state.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LedgerSea {
+    pub id: i64,
+    pub key: String,
+    pub name: String,
+    pub sea: String,
+    pub position: i64,
+    pub feeds: usize,
+}
+
+/// A territory or a continent in id order; `continent` is the theme key of a continent.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LedgerLand {
+    pub id: i64,
+    pub name: String,
+    pub continent: Option<String>,
+    pub feeds: Vec<FeedId>,
 }
 
 fn round3(x: f64) -> f64 {
@@ -216,59 +247,103 @@ impl Store {
         }
         drop(stmt);
 
-        let themes = self
-            .themes()?
-            .into_iter()
+        let mut stmt = conn.prepare(
+            "SELECT id, key, name, sea_name, position, \
+                    (SELECT count(*) FROM feed WHERE theme_id = theme.id) \
+             FROM theme ORDER BY position, id",
+        )?;
+        let seas = stmt
+            .query_map([], |r| {
+                Ok(LedgerSea {
+                    id: r.get(0)?,
+                    key: r.get(1)?,
+                    name: r.get(2)?,
+                    sea: r.get(3)?,
+                    position: r.get(4)?,
+                    feeds: r.get::<_, i64>(5)? as usize,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let themes = seas
+            .iter()
             .filter_map(|t| {
                 let count = feeds
                     .iter()
                     .filter(|f| f.theme.as_deref() == Some(t.key.as_str()))
                     .count();
-                (count > 0).then_some(ChartTheme {
-                    key: t.key,
-                    name: t.name,
-                    sea: t.sea,
+                (count > 0).then(|| ChartTheme {
+                    id: t.id,
+                    key: t.key.clone(),
+                    name: t.name.clone(),
+                    sea: t.sea.clone(),
                     count,
                 })
             })
             .collect::<Vec<_>>();
 
-        let mut territories: Vec<ChartTerritory> = Vec::new();
+        // Every territory and continent in id order, members (any feed) in position order.
+        let mut lands: Vec<LedgerLand> = Vec::new();
         let mut stmt = conn.prepare(
-            "SELECT t.name, tf.feed_id FROM territory t \
-             JOIN territory_feed tf ON tf.territory_id = t.id \
-             WHERE t.kind = 'territory' ORDER BY t.id, tf.position",
+            "SELECT t.id, t.name, th.key, tf.feed_id FROM territory t \
+             LEFT JOIN theme th ON th.id = t.theme_id \
+             LEFT JOIN territory_feed tf ON tf.territory_id = t.id \
+             ORDER BY t.id, tf.position",
         )?;
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, FeedId>(1)?)))? {
-            let (name, feed_id) = row?;
-            if !index.contains_key(&feed_id) {
-                continue;
-            }
-            match territories.last_mut() {
-                Some(t) if t.name == name => t.feeds.push(feed_id),
-                _ => territories.push(ChartTerritory {
+        for row in stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<FeedId>>(3)?,
+            ))
+        })? {
+            let (id, name, continent, feed) = row?;
+            if lands.last().is_none_or(|l| l.id != id) {
+                lands.push(LedgerLand {
+                    id,
                     name,
-                    feeds: vec![feed_id],
-                }),
+                    continent,
+                    feeds: Vec::new(),
+                });
+            }
+            if let (Some(feed), Some(land)) = (feed, lands.last_mut()) {
+                land.feeds.push(feed);
             }
         }
         drop(stmt);
-        territories.retain(|t| t.feeds.len() >= 2);
 
-        let mut stmt = conn.prepare(
-            "SELECT t.name, th.key FROM territory t JOIN theme th ON th.id = t.theme_id \
-             WHERE t.kind = 'continent' ORDER BY t.id",
-        )?;
-        let continents = stmt
-            .query_map([], |r| {
-                Ok(ChartContinent {
-                    name: r.get(0)?,
-                    theme: r.get(1)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter(|c| themes.iter().any(|t| t.key == c.theme))
+        // The chart's territories: the plain ones, grouped by id, charted members only.
+        let territories: Vec<ChartTerritory> = lands
+            .iter()
+            .filter(|l| l.continent.is_none())
+            .map(|l| ChartTerritory {
+                id: l.id,
+                name: l.name.clone(),
+                feeds: l
+                    .feeds
+                    .iter()
+                    .copied()
+                    .filter(|f| index.contains_key(f))
+                    .collect(),
+            })
+            .filter(|t| t.feeds.len() >= 2)
+            .collect();
+
+        let continents = lands
+            .iter()
+            .filter_map(|l| {
+                let theme = l.continent.as_ref()?;
+                themes
+                    .iter()
+                    .any(|t| &t.key == theme)
+                    .then(|| ChartContinent {
+                        id: l.id,
+                        name: l.name.clone(),
+                        theme: theme.clone(),
+                    })
+            })
             .collect();
 
         Ok(ChartSnapshot {
@@ -282,6 +357,7 @@ impl Store {
             feeds,
             territories,
             continents,
+            ledger: ChartLedger { seas, lands },
         })
     }
 }
@@ -488,6 +564,7 @@ mod tests {
         assert_eq!(
             snap.territories,
             [ChartTerritory {
+                id: 1,
                 name: "KEPT".into(),
                 feeds: vec![3, 1]
             }]
@@ -495,6 +572,7 @@ mod tests {
         assert_eq!(
             snap.continents,
             [ChartContinent {
+                id: 3,
                 name: "CONTINENT".into(),
                 theme: "a".into()
             }]
@@ -558,6 +636,7 @@ mod tests {
             [
                 "continents",
                 "feeds",
+                "ledger",
                 "surveyed_at",
                 "territories",
                 "themes",
@@ -568,7 +647,10 @@ mod tests {
         assert_eq!(value["version"], 1);
         assert_eq!(value["surveyed_at"], "2026-10-19T12:00:00.000Z");
         assert_eq!(keys(&value["totals"]), ["feeds", "unread_week"]);
-        assert_eq!(keys(&value["themes"][0]), ["count", "key", "name", "sea"]);
+        assert_eq!(
+            keys(&value["themes"][0]),
+            ["count", "id", "key", "name", "sea"]
+        );
         assert_eq!(
             keys(&value["feeds"][0]),
             [
@@ -592,6 +674,96 @@ mod tests {
             keys(&value["feeds"][0]["entries"][0]),
             ["day", "id", "read", "title", "url"]
         );
-        assert_eq!(keys(&value["territories"][0]), ["feeds", "name"]);
+        assert_eq!(keys(&value["territories"][0]), ["feeds", "id", "name"]);
+        assert_eq!(keys(&value["ledger"]), ["lands", "seas"]);
+        assert_eq!(
+            keys(&value["ledger"]["seas"][0]),
+            ["feeds", "id", "key", "name", "position", "sea"]
+        );
+        assert_eq!(
+            keys(&value["ledger"]["lands"][0]),
+            ["continent", "feeds", "id", "name"]
+        );
+    }
+
+    #[test]
+    fn ledger_lists_empty_seas_and_hidden_lands() {
+        let s = store_with_feeds(3);
+        entry(&s, 1, 1, 24, false);
+        entry(&s, 2, 2, 24, false);
+        // Feed 3 is buried by age: it stays a member of its land and counts in its sea.
+        entry(&s, 3, 3, 300 * 24, false);
+        let mut import = themed_import(vec![
+            terr("PAIR", &[3, 1]),
+            TerritoryDef {
+                name: "MAINLAND".into(),
+                feeds: vec![],
+                continent: Some("a".into()),
+            },
+        ]);
+        import.themes = vec![
+            ThemeDef {
+                key: "a".into(),
+                name: "Name a".into(),
+                sea: "SEA a".into(),
+            },
+            ThemeDef {
+                key: "empty".into(),
+                name: "Name empty".into(),
+                sea: "SEA empty".into(),
+            },
+        ];
+        s.import_chart(&import, false).unwrap();
+        let snap = s.chart_snapshot(now()).unwrap();
+        let keys: Vec<_> = snap.themes.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(keys, ["a"]);
+        let seas: Vec<_> = snap
+            .ledger
+            .seas
+            .iter()
+            .map(|t| (t.key.as_str(), t.feeds))
+            .collect();
+        assert_eq!(seas, [("a", 3), ("empty", 0)]);
+        assert!(snap.ledger.seas[0].position < snap.ledger.seas[1].position);
+        assert_eq!(snap.ledger.seas[0].id, snap.themes[0].id);
+        let lands: Vec<_> = snap
+            .ledger
+            .lands
+            .iter()
+            .map(|l| (l.name.as_str(), l.continent.as_deref(), l.feeds.clone()))
+            .collect();
+        assert_eq!(
+            lands,
+            [("PAIR", None, vec![3, 1]), ("MAINLAND", Some("a"), vec![])]
+        );
+        // PAIR has a single chart member, so the chart draws no territory.
+        assert!(snap.territories.is_empty());
+        assert_eq!(snap.continents.len(), 1);
+        assert_eq!(snap.continents[0].id, snap.ledger.lands[1].id);
+    }
+
+    #[test]
+    fn territories_are_grouped_by_id() {
+        let s = store_with_feeds(4);
+        for id in 1..=4 {
+            entry(&s, id, id, 24, false);
+        }
+        s.import_chart(&themed_import(vec![]), false).unwrap();
+        {
+            let c = s.conn();
+            c.execute_batch(
+                "INSERT INTO territory (id, name, kind) VALUES (7, 'ONE', 'territory'), \
+                    (9, 'TWO', 'territory'); \
+                 INSERT INTO territory_feed VALUES (7, 1, 0), (9, 2, 0), (7, 3, 1), (9, 4, 1);",
+            )
+            .unwrap();
+        }
+        let snap = s.chart_snapshot(now()).unwrap();
+        let got: Vec<_> = snap
+            .territories
+            .iter()
+            .map(|t| (t.id, t.name.as_str(), t.feeds.clone()))
+            .collect();
+        assert_eq!(got, [(7, "ONE", vec![1, 3]), (9, "TWO", vec![2, 4])]);
     }
 }

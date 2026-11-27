@@ -21,7 +21,8 @@ mod ticker;
 
 pub use chart::{ChartExport, ChartImport, ChartImportReport, TerritoryDef, ThemeDef};
 pub use chart_snapshot::{
-    ChartContinent, ChartEntry, ChartFeed, ChartSnapshot, ChartTerritory, ChartTheme, ChartTotals,
+    ChartContinent, ChartEntry, ChartFeed, ChartLedger, ChartSnapshot, ChartTerritory, ChartTheme,
+    ChartTotals, LedgerLand, LedgerSea,
 };
 pub use decisions::{DecisionRecord, FeedSnapshot};
 pub use edition::{EditionEntryRow, EditionOverflowRow, EditionParams, EditionRecord, EditionView};
