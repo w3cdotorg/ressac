@@ -239,6 +239,101 @@ pub enum ChartCommand {
         /// One edit as JSON, e.g. {"op":"new_sea","name":"Comics"}
         edit: String,
     },
+    /// Edit a land (a territory: a group of feeds drawn as one island)
+    Land {
+        #[command(subcommand)]
+        action: LandCommand,
+    },
+    /// Make or unmake a continent (a land that is the whole of a sea)
+    Continent {
+        #[command(subcommand)]
+        action: ContinentCommand,
+    },
+    /// Edit the seas (themes) of the chart
+    Theme {
+        #[command(subcommand)]
+        action: ThemeCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum LandCommand {
+    /// Found a new land from two or more feeds
+    New {
+        /// The land's name (1 to 40 characters)
+        name: String,
+        /// The feeds' ids (at least two)
+        #[arg(required = true, num_args = 1..)]
+        feeds: Vec<FeedId>,
+    },
+    /// Rename a land
+    Rename {
+        /// A land id or name (any case)
+        land: String,
+        name: String,
+    },
+    /// Delete a land; its feeds stay where they are
+    Delete {
+        /// A land id or name (any case)
+        land: String,
+    },
+    /// Add a feed to a land (at its end)
+    Add {
+        /// A land id or name (any case); a territory, not a continent
+        land: String,
+        /// The feed's id
+        feed: FeedId,
+    },
+    /// Remove a feed from a land
+    Remove {
+        /// A land id or name (any case); a territory, not a continent
+        land: String,
+        /// The feed's id
+        feed: FeedId,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ContinentCommand {
+    /// Make a sea a continent, named NAME
+    Make {
+        /// A theme key or name (see ressac chart)
+        theme: String,
+        /// The continent's name (1 to 40 characters)
+        name: String,
+    },
+    /// Remove a sea's continent; the sea and its feeds stay
+    Unmake {
+        /// A theme key or name (see ressac chart)
+        theme: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ThemeCommand {
+    /// Add a sea, last in the chart
+    New {
+        /// The sea's name (1 to 40 characters)
+        name: String,
+    },
+    /// Rename a sea (its sea name, not its key)
+    Rename {
+        /// A theme key or name (see ressac chart)
+        theme: String,
+        name: String,
+    },
+    /// Move a sea to a position in the chart order
+    Move {
+        /// A theme key or name (see ressac chart)
+        theme: String,
+        /// 1 is first
+        position: usize,
+    },
+    /// Delete a sea; its feeds become uncharted and its continent goes
+    Delete {
+        /// A theme key or name (see ressac chart)
+        theme: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
