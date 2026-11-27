@@ -13,6 +13,7 @@ fn page_of<'a>(err: &'a str, step: &str) -> &'a str {
 
 #[test]
 fn reading_keys_reach_the_router_before_the_lists_the_reader_and_the_menus() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     let out = run.launch(Some(&db));

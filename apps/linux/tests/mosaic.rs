@@ -203,6 +203,7 @@ fn bounds(shot: &image::RgbImage, rect: Rect, colour: [u8; 3]) -> Option<(Rect, 
 
 #[test]
 fn the_mosaic_walk_swaps_marks_and_cancels() {
+    let _turn = one_app_at_a_time();
     let (port, slow) = serve();
     let run = Run::new();
     let db = run.copy_fixture();

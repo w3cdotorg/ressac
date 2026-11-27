@@ -3487,6 +3487,7 @@ dependencies = [
  "ressac-core",
  "ressac-ui",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

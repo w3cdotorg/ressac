@@ -10,20 +10,24 @@ use std::time::Instant;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use ressac_core::logging::redact_text;
+use ressac_core::store::{ChartEdit, ChartEditDone, MAX_EDIT};
 use ressac_ui::chart::{
     self, ADAPTER_SCRIPT, ChartAction, ChartModel, ChartPage, NOT_DRAWN, NOT_OPEN, PAGE_URL,
     PROBE_SCRIPT, PageStep, Phase, RETRY, Survey, TICK_MS, WINDOW_TITLE,
 };
 use ressac_ui::chrono;
 use ressac_ui::library::local_path;
+use ressac_ui::runs::{RunEnd, RunRequest};
 use ressac_ui::settings::Settings;
 
 use crate::launcher::with_session;
+use crate::runs::submit_short;
 use crate::settings::QSettingsStore;
 
-/// The most a page message may weigh before it is parsed: the three real messages are a few
-/// dozen bytes, and the page is not trusted with more.
-const MAX_MESSAGE: usize = 64 * 1024;
+/// The most a page message may weigh before it is parsed. An edit is the one big message: up to
+/// `MAX_EDIT` bytes, which JSON-escaped inside the message may weigh twice that (every quote or
+/// newline gains a backslash), plus a kilobyte for the envelope. The page is not trusted with more.
+const MAX_MESSAGE: usize = 2 * MAX_EDIT + 1024;
 
 /// The bytes of a chart file, the Mac's own (`apps/macos/Ressac/Resources/Chart`), by the exact
 /// path of an `ressac_ui::chart::FILES` entry.
@@ -56,6 +60,18 @@ pub(crate) fn file_bytes(path: &str) -> Option<&'static [u8]> {
 }
 
 /// What a page message asks of the app; `None` for anything oversized, malformed or unknown.
+/// Whether two survey documents are the same chart apart from `surveyed_at` (the survey's own
+/// clock, which differs on every survey): the one that is already shown then stays. Anything
+/// that does not parse is not the same.
+fn same_chart(a: &str, b: &str) -> bool {
+    let strip = |text: &str| {
+        let mut value: serde_json::Value = serde_json::from_str(text).ok()?;
+        value.as_object_mut()?.remove("surveyed_at");
+        Some(value)
+    };
+    matches!((strip(a), strip(b)), (Some(a), Some(b)) if a == b)
+}
+
 fn parse_message(text: &str) -> Option<ChartAction> {
     if text.len() > MAX_MESSAGE {
         return None;
@@ -347,6 +363,12 @@ impl qobject::Chart {
             tracing::warn!("chart survey failed: {}", redact_text(message));
         }
         let ok = result.is_ok();
+        // A survey that differs only by its clock is not a new chart: the shown one stays, so
+        // the page gets no `Chart.update` for it.
+        let result = match (&result, this.model.phase()) {
+            (Ok(json), Phase::Ready(shown)) if same_chart(shown, json) => Ok(shown.clone()),
+            _ => result,
+        };
         let next = this.model.finished(survey, result);
         if ok && matches!(this.model.phase(), Phase::Ready(_)) {
             this.surveys = this.surveys.saturating_add(1);
@@ -410,11 +432,37 @@ impl qobject::Chart {
                 &QString::from(prefs.ink.as_str()),
                 prefs.animate,
             ),
-            // The edit path is wired in the next task.
-            Some(ChartAction::Edit { .. } | ChartAction::Survey) | None => {
-                tracing::debug!("chart: ignored a page message");
-            }
+            Some(ChartAction::Edit { seq, edit }) => self.start_edit(seq, &edit),
+            Some(ChartAction::Survey) => self.retry(),
+            None => tracing::debug!("chart: ignored a page message"),
         }
+    }
+
+    /// An edit from the page, written through the core on the short lane (never on the GUI
+    /// thread); its end comes back to `edit_ended`.
+    fn start_edit(self: Pin<&mut Self>, seq: i64, edit: &str) {
+        let Ok(parsed) = serde_json::from_str::<ChartEdit>(edit) else {
+            tracing::debug!("chart: ignored an edit that does not parse");
+            return;
+        };
+        let qt = self.qt_thread();
+        submit_short(
+            RunRequest::ChartEdit(edit.to_string()),
+            move |cx| cx.app.store().apply_chart_edit(&parsed),
+            move |end| {
+                if qt.queue(move |chart| chart.edit_ended(seq, end)).is_err() {
+                    tracing::debug!("the app quit before a chart edit finished");
+                }
+            },
+        );
+    }
+
+    /// An edit ended, on the GUI thread, done or refused: the page gets its answer, then one
+    /// survey (an edit's own database notices find the chart unchanged and publish nothing).
+    fn edit_ended(mut self: Pin<&mut Self>, seq: i64, end: RunEnd<ChartEditDone>) {
+        let script = chart::edited_script(&chart::edit_result(seq, &end));
+        self.as_mut().run_script(&QString::from(script.as_str()));
+        self.retry();
     }
 
     fn show_file(mut self: Pin<&mut Self>, url: &QString) -> bool {
@@ -450,6 +498,59 @@ mod tests {
         assert!(padded.len() > MAX_MESSAGE);
         assert_eq!(parse_message(&padded), None);
         assert_eq!(parse_message("{"), None);
+    }
+
+    /// An edit page message: the edit travels as a JSON string inside the message's JSON.
+    fn edit_message(seq: i64, edit: &str) -> String {
+        serde_json::json!({"type": "edit", "seq": seq, "edit": edit}).to_string()
+    }
+
+    /// A `new_sea` edit padded with newlines (valid JSON whitespace) to `len` bytes: each
+    /// newline weighs two bytes once escaped inside the message.
+    fn padded_edit(len: usize) -> String {
+        let core = r#"{"op":"new_sea","name":"x"}"#;
+        format!("{core}{}", "\n".repeat(len - core.len()))
+    }
+
+    #[test]
+    fn an_edit_message_under_the_new_cap_parses() {
+        // Over the old 64 KiB cap on the wire, under the new one; its edit is MAX_EDIT bytes once
+        // unescaped.
+        let edit = padded_edit(MAX_EDIT);
+        assert_eq!(edit.len(), MAX_EDIT);
+        let message = edit_message(3, &edit);
+        assert!(message.len() > 64 * 1024 && message.len() <= MAX_MESSAGE);
+        assert_eq!(
+            parse_message(&message),
+            Some(ChartAction::Edit { seq: 3, edit })
+        );
+        // One byte more than MAX_EDIT: the message is under the cap but `handle` refuses it.
+        let over = edit_message(3, &padded_edit(MAX_EDIT + 1));
+        assert!(over.len() <= MAX_MESSAGE);
+        assert_eq!(parse_message(&over), None);
+        // Over the message cap: ignored before parsing, whatever it holds.
+        let huge = format!(
+            "{}{}",
+            edit_message(3, &padded_edit(MAX_EDIT)),
+            " ".repeat(MAX_MESSAGE)
+        );
+        assert!(huge.len() > MAX_MESSAGE);
+        assert_eq!(parse_message(&huge), None);
+    }
+
+    #[test]
+    fn the_message_cap_follows_the_edit_cap() {
+        assert_eq!(MAX_MESSAGE, 2 * MAX_EDIT + 1024);
+    }
+
+    #[test]
+    fn a_survey_that_differs_only_by_its_clock_is_the_same_chart() {
+        let a = r#"{"surveyed_at":"2026-11-27T10:00:00Z","seas":[{"id":1}]}"#;
+        let b = r#"{"seas":[{"id":1}],"surveyed_at":"2026-11-27T10:05:00Z"}"#;
+        let c = r#"{"surveyed_at":"2026-11-27T10:05:00Z","seas":[{"id":2}]}"#;
+        assert!(same_chart(a, b));
+        assert!(!same_chart(a, c));
+        assert!(!same_chart(a, "{"));
     }
 
     #[test]

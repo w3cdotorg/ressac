@@ -10,6 +10,7 @@ use ressac_core::store::{SchemaState, Store};
 
 #[test]
 fn a_current_database_opens_ready() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     let out = run.launch(Some(&db));
@@ -35,6 +36,7 @@ fn a_current_database_opens_ready() {
 
 #[test]
 fn a_missing_or_empty_database_is_created_before_opening() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let missing = run.home.join("data/new/ressac.sqlite");
     let empty = run.home.join("empty.sqlite");
@@ -56,6 +58,7 @@ fn a_missing_or_empty_database_is_created_before_opening() {
 
 #[test]
 fn a_newer_database_is_refused_and_left_alone() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     rusqlite::Connection::open(&db)
@@ -72,6 +75,7 @@ fn a_newer_database_is_refused_and_left_alone() {
 
 #[test]
 fn a_file_that_is_not_a_database_fails_and_is_left_alone() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.home.join("notes.sqlite");
     let words = "not a database, only words, long enough to fill the first page of a SQLite header";
@@ -93,6 +97,7 @@ fn a_file_that_is_not_a_database_fails_and_is_left_alone() {
 
 #[test]
 fn the_screenshot_flag_needs_ressac_db() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let out = run.launch(None);
     assert_eq!(out.status.code(), Some(2));
@@ -130,6 +135,7 @@ fn conf_text(run: &Run) -> String {
 
 #[test]
 fn use_default_database_clears_the_setting_and_relaunches_on_the_default_location() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let bad = seed_bad_setting(&run);
     let default_db = run.home.join("data/ressac/ressac.sqlite");
@@ -155,6 +161,7 @@ fn use_default_database_clears_the_setting_and_relaunches_on_the_default_locatio
 
 #[test]
 fn ressac_db_still_wins_after_use_default_database() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let bad = seed_bad_setting(&run);
     let out = run.launch_with(Some(&bad), &[("RESSAC_RECETTE_PRESS_DEFAULT", "keep-db")]);

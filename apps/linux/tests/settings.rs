@@ -38,6 +38,7 @@ fn the_text_size_row_stays_put_at_scale_two() {
 /// alone leaves them as they are offscreen): the preview still wraps inside the page.
 #[test]
 fn the_text_size_row_stays_put_with_double_grid_unit_widths() {
+    let _turn = one_app_at_a_time();
     size_row_at("2", "settings-size-x2");
 }
 

@@ -25,6 +25,7 @@ fn read_entries(db: &std::path::Path) -> Vec<i64> {
 
 #[test]
 fn the_journal_lists_the_edition_by_section_and_builds_nothing_in_recette() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     let out = run.launch_with(Some(&db), &[("TZ", "UTC")]);
@@ -44,6 +45,7 @@ fn the_journal_lists_the_edition_by_section_and_builds_nothing_in_recette() {
 
 #[test]
 fn mark_all_as_read_in_the_journal_marks_the_edition_and_not_the_overflow() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     assert_eq!(read_entries(&db), [2], "the fixture reads only entry 2");
@@ -66,6 +68,7 @@ fn mark_all_as_read_in_the_journal_marks_the_edition_and_not_the_overflow() {
 
 #[test]
 fn an_offline_build_shows_retry_and_the_banner_and_writes_nothing() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     rusqlite::Connection::open(&db)
