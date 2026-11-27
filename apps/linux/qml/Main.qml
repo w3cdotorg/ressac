@@ -345,7 +345,7 @@ Kirigami.ApplicationWindow {
         const x = s.sizeSlider.visible ? s.sizeSlider : s.antiopeSlider
         console.warn("walk: " + tag + " size=" + Math.round(s.antiope ? AppSettings.readerSizeAntiope : AppSettings.readerSize)
             + " sliderX=" + Math.round(x.mapToItem(null, 0, 0).x) + " sliderW=" + Math.round(x.width)
-            + " previewW=" + Math.round(s.previewLabel.width) + " ticks=" + x.Kirigami.StyleHints.tickMarkStepSize
+            + " windowActive=" + Live.windowActive + " previewW=" + Math.round(s.previewLabel.width) + " ticks=" + x.Kirigami.StyleHints.tickMarkStepSize
             + " truncated=" + s.previewLabel.truncated + " lines=" + s.previewLabel.lineCount
             + " right=" + Math.round(s.previewLabel.mapToItem(null, 0, 0).x + s.previewLabel.width) + " winW=" + Math.round(s.width))
     }
@@ -361,7 +361,13 @@ Kirigami.ApplicationWindow {
         { name: "08-antiope", enter: function () { AppSettings.appearance = "antiope"; AppSettings.readerSizeAntiope = 15 } },
         { name: "09-a15", enter: function () { root.sizeRow("09-a15") } },
         { name: "10-set30", enter: function () { AppSettings.readerSizeAntiope = 30 } },
-        { name: "11-a30", enter: function () { root.sizeRow("11-a30"); AppSettings.appearance = "native" } }
+        { name: "11-a30", enter: function () { root.sizeRow("11-a30"); AppSettings.appearance = "native" } },
+        // Settings in front, the main window not the active one (offscreen keeps both active, so the main window is minimised):
+        // the list keeps polling, `Live.windowActive` follows the application.
+        { name: "12-main-away", enter: function () { root.showMinimized() } },
+        { name: "12b-wait", enter: function () {} },
+        { name: "13-away", enter: function () { console.warn("walk: 13-away mainState=" + root.visibility + " mainActive=" + root.active + " settings=" + settingsWindow.visible
+            + " app=" + (Qt.application.state === Qt.ApplicationActive) + " windowActive=" + Live.windowActive) } }
     ]
     // The `garden` walk (fixture: queue Hijacked 6, Moved 5 (a safe repair), Fossil 2; Unphotographable 7 kept; feed 4 buried;
     // the test adds the themes Literature and Technology, feed 8 on Technology).

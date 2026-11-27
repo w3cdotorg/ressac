@@ -457,7 +457,9 @@ Item {
     Binding {
         target: Live
         property: "windowActive"
-        value: page.Window.window !== null && page.Window.window.active && page.Window.window.visibility !== Window.Minimized
+        // The application, not the main window: with Settings or the Sea Chart in front the list keeps polling, as
+        // the Mac's NSApp.isActive does (Wayland reports no Window.Minimized, so no visibility clause either).
+        value: Qt.application.state === Qt.ApplicationActive
     }
 
     Connections { target: EntriesModel; function onUnreadOnlyChanged() { page.syncFilter() } }
