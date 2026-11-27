@@ -415,12 +415,13 @@
   }
 
   // Survey mode on the overlay: a faint survey grid on the neatline's 80-unit marks, and a dashed ring round the
-  // island selected in the log
-  const SURVEY_GRID = 80;
-  function drawSurveyLayer(ctx, scene, inkName, selectedId) {
+  // island selected in the log. `px` is one screen pixel in chart units: the grid is one pixel wide at any size and
+  // density (in chart units it would vanish on a small window), faint by its alpha.
+  const SURVEY_GRID = 80, SURVEY_GRID_ALPHA = .2;
+  function drawSurveyLayer(ctx, scene, inkName, selectedId, px = 1) {
     const ink = INKS[inkName] || INKS.bleu;
     ctx.save();
-    ctx.strokeStyle = ink.ink; ctx.lineWidth = .5; ctx.globalAlpha = .14; ctx.setLineDash([]);
+    ctx.strokeStyle = ink.ink; ctx.lineWidth = px; ctx.globalAlpha = SURVEY_GRID_ALPHA; ctx.setLineDash([]);
     ctx.beginPath();
     for (let x = 34 + SURVEY_GRID; x < W - 34; x += SURVEY_GRID) { ctx.moveTo(x, 34); ctx.lineTo(x, H - 34); }
     for (let y = 34 + SURVEY_GRID; y < H - 34; y += SURVEY_GRID) { ctx.moveTo(34, y); ctx.lineTo(W - 34, y); }
@@ -479,28 +480,37 @@
   // the cartouche's size on screen (chart.css .cartouche): what cartouchePlace keeps clear of the labels before the
   // page has measured it
   const CARTOUCHE_PX = Object.freeze({w: 250, h: 124});
-  // Where the cartouche goes, in chart units: cartouchePlace's spot when one beside the new land's box is clear of
-  // every label. On a crowded coast cartouchePlace falls back to the chart's corner, far from the land; the page
-  // instead weighs the same four spots stepped out by 40 units at a time (up to 240), each moved inside the chart's
-  // margin, by the labels it would cover plus one per step out, and takes the lightest (nearest first on a tie),
-  // never one that covers the land itself. The corner stays the answer only when every spot covers the land.
-  const CARTOUCHE_STEP = 40, CARTOUCHE_REACH = 240, CARTOUCHE_MARGIN = 40; // the margin is cartouchePlace's
-  function cartoucheAt(box, placements, size) {
-    const corner = core.cartouchePlace(box, [{box: [-Infinity, -Infinity, Infinity, Infinity]}], size); // its fallback
-    const free = core.cartouchePlace(box, placements, size);
-    if (free.x !== corner.x || free.y !== corner.y) return free;
+  // Where the cartouche goes, in chart units (its centre). It never covers an island (`scene.nodes`, and `keep`: the
+  // dragged island where it lies), the compass rose, the title cartouche or the new land's own box; it covers labels
+  // (`scene.placements`) only when no spot is free of them. cartouchePlace's spot beside the land is taken when it
+  // meets none of these; otherwise every spot inside the margin, on a 12-unit lattice, is weighed: the fewest
+  // obstacles, then the fewest labels, then the nearest to the land.
+  const CARTOUCHE_MARGIN = 40, CARTOUCHE_LATTICE = 12, ISLAND_CLEAR = 6;
+  function cartoucheAt(box, scene, size, keep = []) {
+    const discs = [...(scene.nodes || []), ...keep].map(n => ({x: n.x, y: n.y, r: n.r + ISLAND_CLEAR}))
+      .concat([{x: COMPASS.x, y: COMPASS.y, r: COMPASS.r + 12}]);
+    const rects = [[CARTOUCHE.x, CARTOUCHE.y, CARTOUCHE.x + CARTOUCHE.w, CARTOUCHE.y + CARTOUCHE.h], box];
+    const labels = (scene.placements || []).map(p => p.box);
     const meets = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
-    const shift = (lo, hi, max) => Math.max(CARTOUCHE_MARGIN - lo, 0) - Math.max(hi - (max - CARTOUCHE_MARGIN), 0);
+    const touches = (r, d) => Math.hypot(Math.max(r[0] - d.x, 0, d.x - r[2]), Math.max(r[1] - d.y, 0, d.y - r[3])) < d.r;
+    const hard = r => discs.filter(d => touches(r, d)).length + rects.filter(b => meets(r, b)).length;
+    const gap = r => Math.hypot(Math.max(box[0] - r[2], 0, r[0] - box[2]), Math.max(box[1] - r[3], 0, r[1] - box[3]));
+    const rectAt = c => [c.x - size.w / 2, c.y - size.h / 2, c.x + size.w / 2, c.y + size.h / 2];
+    const placed = core.cartouchePlace(box, scene.placements || [], size), first = rectAt(placed);
+    const inside = r => r[0] >= CARTOUCHE_MARGIN - 1e-9 && r[1] >= CARTOUCHE_MARGIN - 1e-9 && r[2] <= W - CARTOUCHE_MARGIN + 1e-9 && r[3] <= H - CARTOUCHE_MARGIN + 1e-9;
+    if (inside(first) && !hard(first) && !labels.some(b => meets(first, b))) return placed;
     let best = null;
-    for (let grow = 0, step = 0; grow <= CARTOUCHE_REACH; grow += CARTOUCHE_STEP, step += 1) {
-      for (const s of core.cartoucheSpots([box[0] - grow, box[1] - grow, box[2] + grow, box[3] + grow], size)) {
-        const dx = shift(s[0], s[2], W), dy = shift(s[1], s[3], H), spot = [s[0] + dx, s[1] + dy, s[2] + dx, s[3] + dy];
-        if (meets(spot, box)) continue;
-        const weight = placements.filter(p => meets(spot, p.box)).length + step;
-        if (!best || weight < best.weight) best = {weight, spot};
+    for (let y = CARTOUCHE_MARGIN; y + size.h <= H - CARTOUCHE_MARGIN; y += CARTOUCHE_LATTICE) {
+      for (let x = CARTOUCHE_MARGIN; x + size.w <= W - CARTOUCHE_MARGIN; x += CARTOUCHE_LATTICE) {
+        const r = [x, y, x + size.w, y + size.h], h = hard(r);
+        if (best && h > best.h) continue;
+        const l = labels.filter(b => meets(r, b)).length;
+        if (best && h === best.h && l > best.l) continue;
+        const d = gap(r);
+        if (!best || h < best.h || l < best.l || d < best.d) best = {h, l, d, r};
       }
     }
-    return best ? {x: (best.spot[0] + best.spot[2]) / 2, y: (best.spot[1] + best.spot[3]) / 2} : corner;
+    return best ? {x: (best.r[0] + best.r[2]) / 2, y: (best.r[1] + best.r[3]) / 2} : placed;
   }
 
   // ---------- the key's symbols, on 44 × 30 canvases ----------
@@ -549,6 +559,7 @@
   const VIEW_LABELS = {harbour: "From the harbour", themes: "By theme"};
   const IDLE_MS = 2500, FRAME_MS = 33; // the toolbar fades after 2.5 s still; the overlay runs at about 30 frames a second
   const DRAWER = 320; // the Cartographer's Log's width: the chart keeps clear of it (chart.css .drawer)
+  const DRAWER_GAP = 12; // and keeps this much paper before it, as the toolbar does (chart.css body.log-open .plate)
 
   function createPage(win) {
     const doc = win.document, post = bridge(win);
@@ -594,12 +605,15 @@
     const drawer = make(doc, "div", "drawer"), renameBox = make(doc, "div", "rename"), cartBox = make(doc, "div", "cartouche");
     drawer.id = "chart-log"; drawer.hidden = true; renameBox.hidden = true; cartBox.hidden = true;
     cartBox.setAttribute("role", "dialog");
-    plate.append(renameBox, cartBox);
+    // the status line when the log is closed: a refused drop's hint, a refusal (the log shows them when open)
+    const statusBox = make(doc, "p", "chart-status");
+    statusBox.setAttribute("role", "status"); statusBox.hidden = true;
+    plate.append(renameBox, cartBox, statusBox);
     doc.body.append(plate, bar, keyPanel, drawer);
 
     // --- geometry: the 1920 × 1080 chart scaled to fit the window, letterboxed ---
     function fit() {
-      const w = Math.max(1, win.innerWidth - (drawerOpen() ? Math.min(DRAWER, win.innerWidth - 1) : 0));
+      const w = Math.max(1, win.innerWidth - (drawerOpen() ? Math.min(DRAWER + DRAWER_GAP, win.innerWidth - 1) : 0));
       const h = win.innerHeight, dpr = Math.min(2, win.devicePixelRatio || 1);
       [base, over].forEach(c => { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); });
       const k = Math.min(w / W, h / H);
@@ -639,7 +653,7 @@
       ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, over.width, over.height);
       chartTransform(ctx);
       gusts = drawOver(ctx, scene, prefs.ink, moving() ? {t, gusts} : null);
-      if (mode.active) drawSurveyLayer(ctx, scene, prefs.ink, selected);
+      if (mode.active) drawSurveyLayer(ctx, scene, prefs.ink, selected, 1 / (view.k || 1));
       if (gesture) drawGesture(ctx, gesture, prefs.ink);
     }
     function paintKey() {
@@ -738,8 +752,9 @@
     }
     const onChart = t => t === base || t === over; // not the popover, the rename or the cartouche (even once emptied)
     plate.addEventListener("click", e => {
+      // the click a browser sends after a drag or a stroke: on the plate (the pointer was captured) or a canvas
+      if (swallowClick) { swallowClick = false; return; }
       if (!onChart(e.target)) return;
-      if (swallowClick) { swallowClick = false; return; } // the click a browser sends after a drag or a stroke
       const target = mode.active ? surveyTarget(e) : null, answer = mode.click(target);
       if (answer === "popover") { // the chart as it always was
         const n = islandAt(e);
@@ -753,7 +768,7 @@
     });
     doc.addEventListener("keydown", e => {
       if (e.key !== "Escape") return;
-      if (naming) closeNaming(); // the forms' own Esc stops there; this is Esc from elsewhere on the page
+      if (naming) cancelNaming(); // the forms' own Esc stops there; this is Esc from elsewhere on the page
       else if (rename) closeRename();
       else if (!pop.hidden) closePop();
       else if (!keyPanel.hidden) { showKey(false); keyButton.focus(); }
@@ -794,8 +809,12 @@
       if (!mode.active) memory.open = null; // a half-typed log form does not outlive Survey mode
       if (rename && !mode.renaming) closeRename();
       if (rename) rename.form.input.readOnly = session.pending();
-      if (!mode.active) { press = null; closeNaming(false); gesture = null; } // gestures do not outlive Survey mode
-      if (naming) naming.form.input.readOnly = session.pending();
+      if (!mode.active) { press = null; swallowClick = false; closeNaming(false); gesture = null; } // gestures end with Survey mode
+      if (naming) {
+        naming.form.input.readOnly = session.pending();
+        const cancel = naming.form.nodes[0].querySelector(".name-form-cancel");
+        if (cancel) cancel.disabled = naming.sent; // its edit is on its way: the reply decides
+      }
       if (gesture && gesture.landed && !session.pending()) gesture = null; // the new chart draws it where it went
       if (drawerOpen() && data) {
         const state = {selected, busy: session.pending(), message, titles: session.titles()};
@@ -803,6 +822,8 @@
         memory.restore();
       } else drawer.replaceChildren();
       drawer.hidden = !drawerOpen();
+      statusBox.textContent = message ?? "";
+      statusBox.hidden = !mode.active || drawerOpen() || !message;
       if (drawerOpen() !== drawnOpen) { drawnOpen = drawerOpen(); relayout(); }
       else paintOver(win.performance.now());
     }
@@ -928,7 +949,7 @@
       const p = (scene ? scene.placements : []).find(q => (rename.kind === "sea" ? q.kind === "sea" && q.key === entry.key
         : (q.kind === "territory" || q.kind === "continent") && q.text === entry.name)) || rename.p;
       rename.p = p;
-      const room = win.innerWidth - (drawerOpen() ? DRAWER : 0), w = renameBox.offsetWidth || 0, h = renameBox.offsetHeight || 0;
+      const room = win.innerWidth - (drawerOpen() ? DRAWER + DRAWER_GAP : 0), w = renameBox.offsetWidth || 0, h = renameBox.offsetHeight || 0;
       const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
       renameBox.style.left = `${clamp(view.ox + p.x * view.k, w / 2 + 8, room - w / 2 - 8)}px`;
       renameBox.style.top = `${clamp(view.oy + p.y * view.k, h / 2 + 8, win.innerHeight - h / 2 - 8)}px`;
@@ -938,15 +959,22 @@
     // the window's animation frames, repainting the overlay after each step of a spring or a fade
     const frames = {requestAnimationFrame: fn => win.requestAnimationFrame(t => { fn(t); paintOver(t ?? win.performance.now()); })};
     const repaint = () => paintOver(win.performance.now());
+    // The pointer is captured only once a press becomes a drag or a stroke: a captured press sends its click to the
+    // plate, so a plain click must stay uncaptured to reach the chart. The click after a gesture is swallowed; the flag
+    // never outlives its gesture (the next press, the end of the input task, or Survey off clears it).
+    const capture = id => { if (id != null && typeof plate.setPointerCapture === "function") { try { plate.setPointerCapture(id); } catch (_) { /* gone */ } } };
+    const uncapture = id => {
+      if (id == null || typeof plate.releasePointerCapture !== "function") return;
+      try { if (typeof plate.hasPointerCapture !== "function" || plate.hasPointerCapture(id)) plate.releasePointerCapture(id); } catch (_) { /* gone */ }
+    };
     plate.addEventListener("pointerdown", e => {
-      if (!mode.active || (e.button ?? 0) !== 0 || !onChart(e.target) || !scene || !data) return;
       swallowClick = false;
+      if (!mode.active || (e.button ?? 0) !== 0 || !onChart(e.target) || !scene || !data) return;
       const n = islandAt(e), [x, y] = toChart(e);
-      // one edit at a time, and the cartouche waits for its name: such a press may still swallow its click
-      const idle = session.pending() || !!naming;
+      // one edit at a time, and one name at a time (the cartouche, or a rename): such a press may still swallow its click
+      const idle = session.pending() || !!naming || !!rename;
       press = {pointer: e.pointerId, node: n, offset: n ? {x: n.x - x, y: n.y - y} : null, screen: [{x: e.clientX, y: e.clientY}],
         points: [{x, y}], kind: null, idle};
-      if (typeof plate.setPointerCapture === "function" && e.pointerId != null) { try { plate.setPointerCapture(e.pointerId); } catch (_) { /* gone */ } }
     });
     plate.addEventListener("pointermove", e => {
       if (!press || (press.pointer != null && e.pointerId != null && e.pointerId !== press.pointer)) return;
@@ -957,7 +985,9 @@
         swallowClick = true;
         if (press.idle) { press = null; return; }
         press.kind = press.node ? "drag" : "ink";
+        capture(press.pointer);
         tip.hidden = true;
+        if (message) { message = null; drawSurvey(); } // a new gesture: the last one's hint is done
         gesture = press.node ? {node: press.node, ghost: {x: press.node.x, y: press.node.y}} : {points: press.points, alpha: 1};
       }
       if (press.kind === "drag") { gesture.ghost.x = x + press.offset.x; gesture.ghost.y = y + press.offset.y; }
@@ -966,6 +996,8 @@
     const letGo = e => {
       const p = press;
       press = null;
+      if (p && p.kind) uncapture(p.pointer);
+      if (swallowClick) win.setTimeout(() => { swallowClick = false; }, 0); // its click, if any, comes before this
       if (!p || !p.kind || (e && e.type === "pointercancel")) { if (p && p.kind) release(gesture); return; }
       if (p.kind === "drag") drop(p.node, gesture); else loopDone(p.points, gesture);
     };
@@ -1026,7 +1058,7 @@
     // the cartouche: a name form beside the new land, clear of the labels (cartouchePlace)
     function askName({title, value, box, gesture: g, edit}) {
       closeNaming(false);
-      const form = survey.nameForm(doc, {title, value, action: "Create"}, {cancel: () => closeNaming(), submit: raw => submitNaming(raw)});
+      const form = survey.nameForm(doc, {title, value, action: "Create"}, {cancel: () => cancelNaming(), submit: raw => submitNaming(raw)});
       naming = {form, box, edit, gesture: g, sent: false};
       cartBox.setAttribute("aria-label", title);
       cartBox.replaceChildren(...form.nodes);
@@ -1042,8 +1074,12 @@
       const checked = core.checkName(raw, "land", ledger());
       if (checked.error) { n.form.setError(checked.error); return; }
       n.form.setError(null);
-      if (sendFor(n.gesture, n.edit(checked.name))) { n.sent = true; n.form.input.readOnly = true; }
+      n.sent = true; // before the send: the session redraws as it sends, and the cartouche must already be waiting
+      if (sendFor(n.gesture, n.edit(checked.name))) n.form.input.readOnly = true;
+      else { n.sent = false; drawSurvey(); }
     }
+    // Cancel or Esc: not while its edit is on its way (the reply closes it, and moves the island or springs it back)
+    function cancelNaming() { if (naming && !naming.sent) closeNaming(); }
     // closes the cartouche; cancelled (`back`), its island springs back or its line fades
     function closeNaming(back = true) {
       if (!naming) return;
@@ -1056,7 +1092,8 @@
     function placeNaming() {
       if (!naming) return;
       const k = view.k || 1, w = cartBox.offsetWidth || CARTOUCHE_PX.w, h = cartBox.offsetHeight || CARTOUCHE_PX.h;
-      const c = cartoucheAt(naming.box, scene ? scene.placements : [], {w: w / k, h: h / k});
+      const g = naming.gesture, ghost = g && g.ghost ? [{x: g.ghost.x, y: g.ghost.y, r: g.node.r}] : [];
+      const c = cartoucheAt(naming.box, scene || {placements: [], nodes: []}, {w: w / k, h: h / k}, ghost);
       cartBox.style.left = `${view.ox + c.x * k}px`;
       cartBox.style.top = `${view.oy + c.y * k}px`;
     }

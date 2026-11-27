@@ -14,7 +14,7 @@ const fixture = () => JSON.parse(JSON.stringify(require("./fixture.json")));
 const empty = () => ({...fixture(), feeds: [], territories: [], totals: {feeds: 0, unread_week: 0}});
 const EMPTY = "No feed has published in six months";
 
-const {measure, fakeDocument, fakeWindow, walk, elements, byClass, recordingContext} = require("./fake-dom.cjs");
+const {measure, fakeDocument, fakeWindow, press, walk, elements, byClass, recordingContext} = require("./fake-dom.cjs");
 
 const TRICKY_TITLE = '<b>Bold</b> & "Quoted" Notes <img src=x onerror=alert(1)> </option>';
 const tricky = () => fixture().feeds.find(f => f.title.includes("<b>"));
@@ -255,7 +255,7 @@ test("survey_mode_in_the_page", async () => {
   assert.equal(logButton.getAttribute("aria-expanded"), "true");
   assert.equal(drawerOf(doc).hidden, false, "the log opens with Survey mode");
   assert.ok(byClass([drawerOf(doc)], "log"), "the Cartographer's Log is in the drawer");
-  assert.equal(canvases(doc)[0].width, 1920 - 320, "the chart keeps clear of the drawer");
+  assert.equal(canvases(doc)[0].width, 1920 - 320 - 12, "the chart keeps clear of the drawer, with a margin before it");
 
   logButton.dispatch("click", ev());
   assert.equal(drawerOf(doc).hidden, true, "the Log button closes it");
@@ -358,7 +358,7 @@ test("renaming_in_place_over_the_label", async () => {
   const plate = byClass([doc.body], "plate"), base = canvases(doc)[0];
   const sea = draw.buildScene(fixture(), "themes", measure).placements.find(p => p.kind === "sea" && p.key === "tides");
   assert.ok(sea, "TIDAL SEA has its name on the chart");
-  // the drawer takes 320 px: the chart is 1600 wide, 900 high, 90 px down
+  // the drawer takes 320 px and the chart keeps 12 px clear of it: 1588 wide
   const click = (p, k, ox, oy) => plate.dispatch("click", ev({target: base, clientX: ox + p.x * k, clientY: oy + p.y * k}));
   const renameBox = () => byClass([plate], "rename");
 
@@ -366,7 +366,7 @@ test("renaming_in_place_over_the_label", async () => {
   assert.ok(!renameBox() || renameBox().hidden, "outside Survey mode a name is not renamed");
 
   toolbarButton(doc, "✒ Survey").dispatch("click", ev());
-  const k = 1600 / 1920, oy = (1080 - 1080 * k) / 2;
+  const k = 1588 / 1920, oy = (1080 - 1080 * k) / 2;
   click(sea, k, 0, oy);
   const box = renameBox();
   assert.ok(box && !box.hidden, "a click on a sea's name opens its rename");
@@ -464,45 +464,68 @@ test("a_reduced_spring_back_lands_home_without_frames", () => {
   assert.equal(done, 1, "done once");
 });
 
-test("the_cartouche_steps_out_of_a_crowded_coast", () => {
-  const size = {w: 200, h: 100}, box = [800, 500, 900, 560], corner = {x: 140, y: 90};
-  const label = b => ({kind: "feed", text: "x", box: b});
+// what a cartouche of `size` centred at `c` would cover: islands (r + 6), the compass rose, the title cartouche, labels
+function coveredBy(c, size, scene, box) {
+  const r = [c.x - size.w / 2, c.y - size.h / 2, c.x + size.w / 2, c.y + size.h / 2];
   const meets = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
-  const spotOf = c => [c.x - size.w / 2, c.y - size.h / 2, c.x + size.w / 2, c.y + size.h / 2];
-  const covered = (c, labels) => labels.filter(p => meets(spotOf(c), p.box)).length;
-  // a clear spot beside the box: exactly cartouchePlace's
-  assert.deepEqual(draw.cartoucheAt(box, [], size), core.cartouchePlace(box, [], size));
-  const one = [label(core.cartoucheSpots(box, size)[0])];
-  assert.deepEqual(draw.cartoucheAt(box, one, size), core.cartouchePlace(box, one, size));
-  // a label on each spot beside it: cartouchePlace alone goes to the far corner. Right beside the land the right
-  // spot meets three (its own, and the corners of those below and above); one step out it meets one: 1 + 1 step
-  // beats 3, and a label covered beats the five steps it would take to clear them all
-  const crowd = core.cartoucheSpots(box, size).map(label);
-  assert.deepEqual(core.cartouchePlace(box, crowd, size), corner, "cartouchePlace alone falls back to the corner");
-  assert.equal(covered({x: 1012, y: 530}, crowd), 3);
-  assert.deepEqual(spotOf(draw.cartoucheAt(box, crowd, size)), core.cartoucheSpots([760, 460, 940, 600], size)[0]);
-  // ten labels in the strip of each spot next to the land: one step out clears them all, on the first side
-  const strips = core.cartoucheSpots(box, size).flatMap(([x0, y0, x1, y1], side) => Array.from({length: 10}, (_, i) => {
-    const t = 2 + i * 2;
-    return label(side === 0 ? [x0 + t, y0 + 5 * i, x0 + t + 1, y0 + 5 * i + 1] : side === 1 ? [x1 - t - 1, y0 + 5 * i, x1 - t, y0 + 5 * i + 1]
-      : side === 2 ? [x0 + 15 * i, y0 + t, x0 + 15 * i + 1, y0 + t + 1] : [x0 + 15 * i, y1 - t - 1, x0 + 15 * i + 1, y1 - t]);
-  }));
-  const c = draw.cartoucheAt(box, strips, size);
-  assert.equal(covered(c, strips), 0, "clear of the labels");
-  assert.deepEqual(spotOf(c), core.cartoucheSpots([760, 460, 940, 600], size)[0], "one step out, right of the land");
-  // labels everywhere (a 20-unit lattice), thinner below: beside the land, on the lighter side, not the corner
+  const touches = d => Math.hypot(Math.max(r[0] - d.x, 0, d.x - r[2]), Math.max(r[1] - d.y, 0, d.y - r[3])) < d.r;
+  const T = core.CARTOUCHE;
+  return {
+    islands: (scene.nodes || []).filter(n => touches({x: n.x, y: n.y, r: n.r + 6})).map(n => n.id),
+    compass: touches({x: core.COMPASS.x, y: core.COMPASS.y, r: core.COMPASS.r + 12}),
+    title: meets(r, [T.x, T.y, T.x + T.w, T.y + T.h]),
+    land: box ? meets(r, box) : false,
+    labels: (scene.placements || []).filter(p => meets(r, p.box)).length,
+    inside: r[0] >= 40 - 1e-6 && r[1] >= 40 - 1e-6 && r[2] <= 1880 + 1e-6 && r[3] <= 1040 + 1e-6,
+  };
+}
+const clean = (cov, labels = 0) => ({islands: [], compass: false, title: false, land: false, labels, inside: true});
+
+test("the_cartouche_keeps_clear_of_islands_the_rose_and_the_title", () => {
+  const size = {w: 200, h: 100}, box = [800, 500, 900, 560];
+  // nothing in the way: exactly cartouchePlace's spot
+  assert.deepEqual(draw.cartoucheAt(box, {nodes: [], placements: []}, size), core.cartouchePlace(box, [], size));
+  // an island where cartouchePlace would put it: elsewhere, covering nothing
+  const right = core.cartouchePlace(box, [], size), island = {id: 1, x: right.x, y: right.y, r: 20};
+  let c = draw.cartoucheAt(box, {nodes: [island], placements: []}, size);
+  assert.deepEqual(coveredBy(c, size, {nodes: [island]}, box), clean());
+  // the dragged island lying where it was dropped (`keep`) counts as an island
+  c = draw.cartoucheAt(box, {nodes: [], placements: []}, size, [island]);
+  assert.ok(!coveredBy(c, size, {nodes: [island]}, box).islands.length);
+  // where cartouchePlace's spot would cover the compass rose or the title cartouche: neither is covered
+  for (const near of [[45, 140, 60, 190], [1480, 920, 1505, 980]]) {
+    const plain = coveredBy(core.cartouchePlace(near, [], size), size, {}, near);
+    assert.ok(plain.compass || plain.title, `cartouchePlace alone would cover one (${near})`);
+    c = draw.cartoucheAt(near, {nodes: [], placements: []}, size);
+    const cov = coveredBy(c, size, {}, near);
+    assert.ok(!cov.compass && !cov.title && !cov.land && cov.inside, `near ${near}: ${JSON.stringify(cov)}`);
+  }
+  // labels everywhere but one free patch far away: the free patch (labels only as a last resort)
   const lattice = [];
-  for (let y = 0; y < 1080; y += 20) for (let x = 0; x < 1920; x += 20) if (!(y > 560 && x % 40)) lattice.push(label([x, y, x + 8, y + 8]));
-  const d = draw.cartoucheAt(box, lattice, size);
-  assert.deepEqual(spotOf(d), core.cartoucheSpots(box, size)[2], "the spot just below the box");
-  assert.ok(covered(d, lattice) < covered(corner, lattice), "fewer labels than the corner would cover");
-  // a spot that would cover the land is never taken, even when it covers no label
-  const nearEdge = [45, 45, 120, 120], d2 = draw.cartoucheAt(nearEdge, crowd.concat(lattice.filter(p => p.box[1] > 200)), size);
-  assert.ok(!meets(spotOf(d2), nearEdge), "the land stays in sight");
+  for (let y = 40; y < 1040; y += 20) for (let x = 40; x < 1880; x += 20) if (!(x > 1500 && y > 100 && y < 400)) lattice.push({kind: "feed", box: [x, y, x + 8, y + 8]});
+  c = draw.cartoucheAt(box, {nodes: [], placements: lattice}, size);
+  assert.equal(coveredBy(c, size, {placements: lattice}, box).labels, 0);
+  // labels everywhere: the fewest, still no island, rose or title
+  const full = [];
+  for (let y = 40; y < 1040; y += 20) for (let x = 40; x < 1880; x += 20) full.push({kind: "feed", box: [x, y, x + 8, y + 8]});
+  c = draw.cartoucheAt(box, {nodes: [island], placements: full}, size);
+  const cov = coveredBy(c, size, {nodes: [island], placements: full}, box);
+  assert.ok(cov.labels > 0 && !cov.islands.length && !cov.compass && !cov.title && !cov.land && cov.inside);
 });
 
-// the page with Survey on and the log open: the chart is 1600 × 900 at 90 px from the top
-const K = 1600 / 1920, OY = (1080 - 1080 * K) / 2;
+test("the_survey_grid_is_one_screen_pixel_wide", () => {
+  const scene = draw.buildScene(fixture(), "themes", measure);
+  for (const px of [1 / (1588 / 1920), 1 / (1110 / 1920)]) {
+    const {ctx, log} = recordingContext();
+    draw.drawSurveyLayer(ctx, scene, "bleu", null, px);
+    assert.equal(ctx.lineWidth, px, "one screen pixel, in chart units");
+    assert.ok(ctx.globalAlpha > 0 && ctx.globalAlpha <= .25, "faint");
+    assert.ok(log.filter(([op]) => op === "lineTo").length > 20, "the grid's lines");
+  }
+});
+
+// the page with Survey on and the log open: the chart is 1588 wide (320 for the drawer, 12 clear of it), centred
+const K = 1588 / 1920, OY = (1080 - 1080 * K) / 2;
 const screen = p => ({clientX: p.x * K, clientY: OY + p.y * K});
 const themesScene = () => draw.buildScene(fixture(), "themes", measure);
 const nodeOf = id => themesScene().nodes.find(n => n.id === id);
@@ -510,24 +533,17 @@ async function surveyPage(options) {
   const opened = await openPage(options);
   toolbarButton(opened.doc, "✒ Survey").dispatch("click", ev());
   const plate = byClass([opened.doc.body], "plate"), base = canvases(opened.doc)[0];
-  return {...opened, plate, base};
+  return {...opened, plate, base, P: {doc: opened.doc, plate, base}};
 }
 // a press at `from` that moves to `to` and lets go, all in chart units, then the click the browser sends after it
-function drag(plate, base, from, to, steps = 6) {
-  plate.dispatch("pointerdown", ev({target: base, button: 0, pointerId: 1, ...screen(from)}));
-  for (let i = 1; i <= steps; i++) {
-    const p = {x: from.x + (to.x - from.x) * i / steps, y: from.y + (to.y - from.y) * i / steps};
-    plate.dispatch("pointermove", ev({target: base, pointerId: 1, ...screen(p)}));
-  }
-  plate.dispatch("pointerup", ev({target: base, button: 0, pointerId: 1, ...screen(to)}));
-  plate.dispatch("click", ev({target: base, ...screen(to)}));
+// a press that moves from `from` to `to` and lets go, in chart units, with the click a browser sends after it
+// (retargeted to whatever captured the pointer, as browsers do)
+function drag(P, from, to, steps = 6) {
+  const points = Array.from({length: steps + 1}, (_, i) => ({x: from.x + (to.x - from.x) * i / steps, y: from.y + (to.y - from.y) * i / steps}));
+  press(P.doc, P.plate, P.base, points, screen);
 }
-function stroke(plate, base, points) {
-  plate.dispatch("pointerdown", ev({target: base, button: 0, pointerId: 1, ...screen(points[0])}));
-  points.slice(1).forEach(p => plate.dispatch("pointermove", ev({target: base, pointerId: 1, ...screen(p)})));
-  plate.dispatch("pointerup", ev({target: base, button: 0, pointerId: 1, ...screen(points.at(-1))}));
-  plate.dispatch("click", ev({target: base, ...screen(points.at(-1))}));
-}
+const stroke = (P, points) => press(P.doc, P.plate, P.base, points, screen);
+const tap = (P, at) => press(P.doc, P.plate, P.base, [at, at], screen); // a click: down and up on one spot
 // a closed ring of n segments, starting where no island would take the press (a press on an island drags it)
 const clearOfIslands = p => !themesScene().nodes.some(n => Math.hypot(n.x - p.x, n.y - p.y) - n.r < 12);
 function ring(cx, cy, r, n = 40) {
@@ -560,15 +576,15 @@ function waterIn(key) {
 }
 
 test("dragging_an_island_in_the_page", async () => {
-  const {win, doc, page, plate, base} = await surveyPage();
+  const {win, doc, page, plate, base, P} = await surveyPage();
   const n10 = nodeOf(10), n12 = nodeOf(12), n13 = nodeOf(13);
 
   // onto a territory's island: join, the land as a LandRef; the island stays at its drop point while pending
-  drag(plate, base, n12, n10);
+  drag(P, n12, n10);
   assert.deepEqual(edits(win).map(m => JSON.parse(m.edit)), [core.edits.join(12, {id: 11, name: "APPLE PRESS"})]);
   assert.equal(byClass([drawerOf(doc)], "log-island").value, "", "a drag is not a click: nothing selected");
   assert.ok(inkIslandAt(doc, n10.x, n10.y, n12.r), "the island stays where it was dropped");
-  drag(plate, base, n13, n12);
+  drag(P, n13, n12);
   assert.equal(edits(win).length, 1, "gestures wait while an edit is pending");
   page.edited(JSON.stringify({seq: 1, ok: true, done: {event: "chart_edit", label: "Join APPLE PRESS", undo: core.edits.patch("Join APPLE PRESS", [{kind: "member"}])}}));
   assert.ok(inkIslandAt(doc, n10.x, n10.y, n12.r), "still there until the new chart");
@@ -577,11 +593,11 @@ test("dragging_an_island_in_the_page", async () => {
   assert.ok(!inkIslandAt(doc, n10.x, n10.y, n12.r), "the new chart replaces it");
 
   // onto its own land: nothing is sent (S3)
-  drag(plate, base, n10, nodeOf(11));
+  drag(P, n10, nodeOf(11));
   assert.equal(edits(win).length, 1, "a drop on its own land is a no-op");
 
   // onto a lone island: the cartouche asks the name, then found with both ids in the chart's order
-  drag(plate, base, n13, n12);
+  drag(P, n13, n12);
   const box = cartoucheOf(doc);
   assert.ok(box && !box.hidden, "the cartouche opens");
   assert.equal(byClass([box], "name-form-title").textContent, "Name this land");
@@ -601,19 +617,19 @@ test("dragging_an_island_in_the_page", async () => {
   assert.ok(!buttonIn(drawerOf(doc), "Undo New Land Kite Twins").disabled, "the log offers its undo");
 
   // cancelled: nothing sent, the island springs back
-  drag(plate, base, n13, n12);
+  drag(P, n13, n12);
   buttonIn(cartoucheOf(doc), "Cancel").dispatch("click", ev());
   assert.ok(cartoucheOf(doc).hidden);
   flushFrames(win);
   assert.ok(!inkIslandAt(doc, n12.x, n12.y, n13.r) && !inkIslandAt(doc, n13.x, n13.y, n13.r), "the ghost is gone");
-  drag(plate, base, n13, n12);
+  drag(P, n13, n12);
   doc.dispatch("keydown", ev({key: "Escape"}));
   assert.ok(cartoucheOf(doc).hidden, "Esc closes the cartouche too");
   flushFrames(win);
   assert.equal(edits(win).length, 2);
 
   // a continental island onto a lone one: springs back with the hint in the log's status line
-  drag(plate, base, nodeOf(89), n12);
+  drag(P, nodeOf(89), n12);
   assert.equal(edits(win).length, 2, "refused by the page: nothing sent");
   assert.equal(statusLine(doc), T.continentHint("KILN COUNTRY"));
   assert.ok(win.frames.length > 0, "with motion, it springs back");
@@ -621,7 +637,7 @@ test("dragging_an_island_in_the_page", async () => {
   assert.ok(!inkIslandAt(doc, n12.x, n12.y, nodeOf(89).r), "home again");
 
   // open water in its own sea: leave (the land as a LandRef)
-  drag(plate, base, n10, waterIn("kites"));
+  drag(P, n10, waterIn("kites"));
   assert.deepEqual(JSON.parse(edits(win).at(-1).edit), core.edits.leave(10, {id: 11, name: "APPLE PRESS"}));
   page.edited(JSON.stringify({seq: 3, ok: false, refused: true, error: T.changed}));
   assert.equal(statusLine(doc), T.changed, "a refusal shows");
@@ -629,19 +645,19 @@ test("dragging_an_island_in_the_page", async () => {
   assert.ok(!inkIslandAt(doc, waterIn("kites").x, waterIn("kites").y, n10.r), "and the island springs back");
 
   // "By theme": into another sea's water, set_sea
-  drag(plate, base, n12, waterIn("comets"));
+  drag(P, n12, waterIn("comets"));
   assert.deepEqual(JSON.parse(edits(win).at(-1).edit),
     core.edits.setSea(12, {id: 1, key: "kites", sea: "SEA OF KITES"}, {id: 15, key: "comets", sea: "COMET DEEP"}));
   assert.deepEqual(win.errors, []);
 });
 
 test("drawing_a_loop_in_the_page", async () => {
-  const {win, doc, page, plate, base} = await surveyPage();
+  const {win, doc, page, plate, base, P} = await surveyPage();
   const scene = themesScene();
 
   // round one island: nothing happens and the line goes
   const small = ring(nodeOf(12).x, nodeOf(12).y, 30);
-  stroke(plate, base, small);
+  stroke(P, small);
   assert.equal(edits(win).length, 0);
   assert.ok(cartoucheOf(doc) === undefined || cartoucheOf(doc).hidden, "no cartouche");
   flushFrames(win);
@@ -650,13 +666,13 @@ test("drawing_a_loop_in_the_page", async () => {
   // an open stroke is not a loop
   const line = Array.from({length: 30}, (_, i) => ({x: 310 + i * 10, y: 120}));
   assert.ok(clearOfIslands(line[0]));
-  stroke(plate, base, line);
+  stroke(P, line);
   assert.ok(cartoucheOf(doc) === undefined || cartoucheOf(doc).hidden);
 
   // round two lone islands: Name this land, clear of the labels, then found in the chart's order
   const loop = ring(355, 165, 50);
   assert.deepEqual(core.loopSelection(scene.nodes, loop, fixture()).islands, [12, 13], "the loop holds 12 and 13");
-  stroke(plate, base, loop);
+  stroke(P, loop);
   const box = cartoucheOf(doc);
   assert.ok(box && !box.hidden, "the cartouche opens");
   assert.equal(byClass([box], "name-form-title").textContent, "Name this land");
@@ -664,13 +680,12 @@ test("drawing_a_loop_in_the_page", async () => {
   const size = {w: draw.CARTOUCHE_PX.w / K, h: draw.CARTOUCHE_PX.h / K};
   const cx = parseFloat(box.style.left) / K, cy = (parseFloat(box.style.top) - OY) / K;
   const spot = [cx - size.w / 2, cy - size.h / 2, cx + size.w / 2, cy + size.h / 2];
-  const meets = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
   const loopBox = [Math.min(...loop.map(p => p.x)), Math.min(...loop.map(p => p.y)), Math.max(...loop.map(p => p.x)), Math.max(...loop.map(p => p.y))];
-  assert.ok(!meets(spot, loopBox), "the new land stays in sight");
-  assert.ok(Math.hypot(cx - 355, cy - 165) < 400, "beside it, not in the chart's far corner");
-  assert.ok(spot[0] >= 40 - 1e-6 && spot[1] >= 40 - 1e-6 && spot[2] <= 1920 - 40 + 1e-6 && spot[3] <= 1080 - 40 + 1e-6, "inside the chart's margin");
+  // this coast is crowded (cartouchePlace has no free spot beside it), yet free water exists elsewhere on the chart
+  assert.ok(coveredBy(core.cartouchePlace(loopBox, scene.placements, size), size, scene, loopBox).labels > 0, "a crowded coast");
+  assert.deepEqual(coveredBy({x: cx, y: cy}, size, scene, loopBox), clean(), "no island, rose, title, land or label covered");
   const xs = loop.map(p => p.x), ys = loop.map(p => p.y);
-  const want = draw.cartoucheAt([Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)], scene.placements, size);
+  const want = draw.cartoucheAt([Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)], scene, size);
   assert.ok(Math.abs(cx - want.x) < 1e-6 && Math.abs(cy - want.y) < 1e-6, `at cartoucheAt's spot (${cx}, ${cy}) vs (${want.x}, ${want.y})`);
   inputIn(box).value = "  Twin Kites ";
   const input = inputIn(box);
@@ -690,7 +705,7 @@ test("drawing_a_loop_in_the_page", async () => {
   // round every island of a sea that has no continent: Make a continent, and Enter makes it
   const quills = ring(240, 835, 110);
   assert.equal(core.loopSelection(scene.nodes, quills, fixture()).continentSea, "quills");
-  stroke(plate, base, quills);
+  stroke(P, quills);
   const c = cartoucheOf(doc);
   assert.ok(!c.hidden);
   assert.equal(byClass([c], "name-form-title").textContent, "Make a continent");
@@ -704,7 +719,7 @@ test("drawing_a_loop_in_the_page", async () => {
   assert.equal(inkLines(doc, quills), 0, "and the line fades");
 
   // cancelled: the line goes; while it is open, a name's click opens no rename beside it
-  stroke(plate, base, loop);
+  stroke(P, loop);
   const tidal = scene.placements.find(p => p.kind === "sea" && p.key === "tides");
   plate.dispatch("click", ev({target: base, ...screen(tidal)}));
   assert.ok(!byClass([plate], "rename") || byClass([plate], "rename").hidden, "no rename while the cartouche is open");
@@ -718,15 +733,15 @@ test("drawing_a_loop_in_the_page", async () => {
 
 test("a_refused_drop_snaps_back_under_reduce_motion", async () => {
   for (const options of [{prefs: {reduceMotion: true}}, {reduced: true}]) {
-    const {win, doc, plate, base} = await surveyPage(options);
+    const {win, doc, plate, base, P} = await surveyPage(options);
     const n89 = nodeOf(89), n12 = nodeOf(12);
     const before = win.frames.length;
-    drag(plate, base, n89, n12);
+    drag(P, n89, n12);
     assert.equal(statusLine(doc), T.continentHint("KILN COUNTRY"));
     assert.equal(win.frames.length, before, "no animation frame");
     assert.ok(!inkIslandAt(doc, n12.x, n12.y, n89.r), "already home");
     const small = ring(nodeOf(12).x, nodeOf(12).y, 30);
-    stroke(plate, base, small);
+    stroke(P, small);
     assert.equal(win.frames.length, before, "no ink fade either");
     assert.equal(inkLines(doc, small), 0, "the line simply disappears");
     assert.deepEqual(win.errors, []);
@@ -734,20 +749,20 @@ test("a_refused_drop_snaps_back_under_reduce_motion", async () => {
 });
 
 test("islands_win_over_label_boxes_in_survey", async () => {
-  const {win, doc, plate, base} = await surveyPage();
+  const {win, doc, plate, base, P} = await surveyPage();
   const scene = themesScene(), kiln = scene.placements.find(p => p.kind === "continent" && p.text === "KILN COUNTRY");
   const n89 = nodeOf(89);
   assert.ok(n89.x >= kiln.box[0] && n89.x <= kiln.box[2] && n89.y >= kiln.box[1] && n89.y <= kiln.box[3], "island 89 sits in KILN COUNTRY's label");
   plate.dispatch("click", ev({target: base, ...screen(n89)}));
   assert.equal(byClass([drawerOf(doc)], "log-island").value, "89", "a click on it selects the island");
   assert.ok(!byClass([plate], "rename") || byClass([plate], "rename").hidden, "and opens no rename");
-  drag(plate, base, n89, nodeOf(12));
+  drag(P, n89, nodeOf(12));
   assert.equal(statusLine(doc), T.continentHint("KILN COUNTRY"), "a press on it drags the island");
   assert.deepEqual(win.errors, []);
 });
 
 test("renaming_a_territory_or_a_continent_over_its_label", async () => {
-  const {win, doc, page, plate, base} = await surveyPage();
+  const {win, doc, page, plate, base, P} = await surveyPage();
   const scene = themesScene();
   // a point of the label's box clear of every island's reach
   const clear = p => {
@@ -769,5 +784,109 @@ test("renaming_a_territory_or_a_continent_over_its_label", async () => {
     page.edited(JSON.stringify({seq: edits(win).length, ok: false, refused: false, error: "x"}));
     assert.ok(byClass([plate], "rename").hidden, `${kind}: closed`);
   }
+  assert.deepEqual(win.errors, []);
+});
+
+// fix round 1: a real click in Survey mode (pointerdown, pointerup, click) still reaches the chart, and the click
+// swallowed after a gesture never outlives that gesture
+test("plain_clicks_in_survey_select_and_rename", async () => {
+  const {win, doc, page, plate, base, P} = await surveyPage();
+  tap(P, nodeOf(12));
+  assert.ok(doc.capturedThisPress === null, "a click captures nothing");
+  assert.equal(byClass([drawerOf(doc)], "log-island").value, "12", "a click on an island selects it");
+  const tidal = themesScene().placements.find(p => p.kind === "sea" && p.key === "tides");
+  tap(P, tidal);
+  const box = byClass([plate], "rename");
+  assert.ok(box && !box.hidden, "a click on a sea's name opens its rename");
+  assert.equal(inputIn(box).value, "TIDAL SEA");
+  doc.dispatch("keydown", ev({key: "Escape"}));
+  assert.ok(box.hidden, "Esc cancels it");
+
+  // a drag captures the pointer and releases it at the end
+  drag(P, nodeOf(10), nodeOf(11));
+  assert.ok(doc.capturedThisPress === plate, "a drag captures the pointer");
+  assert.ok(doc.capture === null, "and lets it go");
+  assert.equal(byClass([drawerOf(doc)], "log-island").value, "12", "the click after the drag selects nothing");
+  tap(P, nodeOf(13));
+  assert.equal(byClass([drawerOf(doc)], "log-island").value, "13", "the next click is a click again");
+
+  // a gesture whose click never comes (released off the chart) leaves nothing behind: not past the end of its
+  // input task, and not past Survey mode (the clicks below come with no press, as a click without one would)
+  const lostClick = () => {
+    plate.dispatch("pointerdown", ev({target: base, button: 0, pointerId: 1, ...screen(nodeOf(10))}));
+    plate.dispatch("pointermove", ev({target: base, pointerId: 1, ...screen({x: nodeOf(10).x + 40, y: nodeOf(10).y})}));
+    plate.dispatch("pointerup", ev({target: plate, button: 0, pointerId: 1, ...screen({x: nodeOf(10).x + 40, y: nodeOf(10).y})}));
+    win.frames.splice(0); // the spring back is not the point here
+  };
+  const endOfTask = () => win.timers.splice(0).forEach(t => { if (t.ms === 0) t.fn(); else win.timers.push(t); });
+  lostClick();
+  endOfTask();
+  plate.dispatch("click", ev({target: base, ...screen(nodeOf(14))}));
+  assert.equal(byClass([drawerOf(doc)], "log-island").value, "14", "after its input task, a click is a click");
+  lostClick();
+  toolbarButton(doc, "✒ Survey").dispatch("click", ev());
+  plate.dispatch("click", ev({target: base, clientX: nodeOf(12).x * 1, clientY: nodeOf(12).y * 1}));
+  const pop = byClass([plate], "pop");
+  assert.ok(pop && !pop.hidden, "Survey off: the first click opens the popover");
+  assert.deepEqual(win.errors, []);
+  assert.equal(page.undo(), false);
+});
+
+test("one_name_at_a_time_and_a_pending_name_waits_for_its_reply", async () => {
+  const {win, doc, page, plate, base, P} = await surveyPage();
+  const n10 = nodeOf(10), n12 = nodeOf(12), n13 = nodeOf(13);
+  // a rename open: no drag and no loop
+  const tidal = themesScene().placements.find(p => p.kind === "sea" && p.key === "tides");
+  tap(P, tidal);
+  assert.ok(!byClass([plate], "rename").hidden);
+  drag(P, n12, n10);
+  stroke(P, ring(355, 165, 50));
+  assert.equal(edits(win).length, 0, "nothing while a rename is open");
+  assert.ok(!cartoucheOf(doc) || cartoucheOf(doc).hidden, "no cartouche beside it");
+  doc.dispatch("keydown", ev({key: "Escape"}));
+
+  // the cartouche open: no other drag or loop
+  drag(P, n13, n12);
+  assert.ok(!cartoucheOf(doc).hidden);
+  drag(P, n10, nodeOf(14));
+  stroke(P, ring(240, 835, 110));
+  assert.equal(edits(win).length, 0, "nothing while the cartouche asks its name");
+  assert.equal(byClass([cartoucheOf(doc)], "name-form-title").textContent, "Name this land", "the same cartouche");
+
+  // named and sent: Cancel and Esc wait for the reply, the island stays where it was dropped
+  inputIn(cartoucheOf(doc)).value = "Kite Twins";
+  byClass([cartoucheOf(doc)], "name-form").dispatch("submit", ev());
+  assert.equal(edits(win).length, 1);
+  const cancel = buttonIn(cartoucheOf(doc), "Cancel");
+  assert.equal(cancel.disabled, true, "Cancel is off while its edit is on its way");
+  cancel.dispatch("click", ev());
+  doc.dispatch("keydown", ev({key: "Escape"}));
+  assert.ok(!cartoucheOf(doc).hidden, "still open");
+  flushFrames(win);
+  assert.ok(inkIslandAt(doc, n12.x, n12.y, n13.r), "the island has not sprung back");
+  page.edited(JSON.stringify({seq: 1, ok: true, done: {event: "chart_edit", label: "New Land Kite Twins", undo: core.edits.patch("New Land Kite Twins", [{kind: "land"}])}}));
+  assert.ok(cartoucheOf(doc).hidden, "the reply closes it");
+  assert.ok(inkIslandAt(doc, n12.x, n12.y, n13.r), "and the island waits for the new chart");
+  assert.deepEqual(win.errors, []);
+});
+
+test("a_drop_hint_shows_with_the_log_closed", async () => {
+  const {win, doc, plate, P} = await surveyPage();
+  toolbarButton(doc, "Log").dispatch("click", ev()); // the chart is now 1920 wide: positions at that scale
+  const wide = p => ({x: p.x, y: p.y});
+  const at1 = p => ({clientX: p.x, clientY: p.y});
+  press(doc, plate, P.base, [nodeOf(89), {x: (nodeOf(89).x + nodeOf(12).x) / 2, y: (nodeOf(89).y + nodeOf(12).y) / 2}, nodeOf(12)].map(wide), at1);
+  const status = byClass([plate], "chart-status");
+  assert.ok(status && !status.hidden, "the status line shows over the chart");
+  assert.equal(status.textContent, T.continentHint("KILN COUNTRY"));
+  assert.equal(status.getAttribute("role"), "status");
+  toolbarButton(doc, "Log").dispatch("click", ev());
+  assert.ok(status.hidden, "the log shows it when open");
+  assert.equal(statusLine(doc), T.continentHint("KILN COUNTRY"));
+  toolbarButton(doc, "Log").dispatch("click", ev());
+  // the next gesture clears it
+  const small = ring(nodeOf(12).x, nodeOf(12).y, 30).map(wide);
+  press(doc, plate, P.base, small, at1);
+  assert.ok(status.hidden, "a new gesture: the old hint goes");
   assert.deepEqual(win.errors, []);
 });
