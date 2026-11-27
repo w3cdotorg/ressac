@@ -594,7 +594,6 @@ pub(super) fn apply_patch(conn: &Connection, changes: &[Change]) -> Result<()> {
 /// The name typed for a land (a territory or a continent): cleaned, and refused when another
 /// land has it without case. `me` is the land being renamed (`None` for a new one). For the
 /// op compilers, which build edits from typed input.
-#[allow(dead_code, reason = "the land ops (Task 4) check typed names here")]
 pub(super) fn land_name(conn: &Connection, raw: &str, me: Option<i64>) -> Result<String> {
     let others = column_except(
         conn,
@@ -961,20 +960,6 @@ mod tests {
             json!({"event": "chart_edit", "label": "Join APPLE PRESS",
                    "undo": {"op": "patch", "label": "Test", "changes": []}})
         );
-    }
-
-    #[test]
-    fn other_ops_wait_for_their_tasks() {
-        let s = chart_store();
-        let err = s
-            .apply_chart_edit(&ChartEdit::DeleteLand {
-                land: LandRef {
-                    id: 10,
-                    name: "APPLE PRESS".into(),
-                },
-            })
-            .unwrap_err();
-        assert_eq!(err.to_string(), "delete_land is not implemented yet");
     }
 
     // ---- names and keys -------------------------------------------------------------------
