@@ -1075,3 +1075,44 @@ test("only_an_edit_that_moved_one_island_rings_it", () => {
   assert.equal(core.movedFeed(null), null);
   assert.equal(core.movedFeed({op: "leave", feed: "10"}), null);
 });
+
+// Fix round 1 of the recette fixes (review I-1): the ring belongs to Survey mode and to the chart it was drawn on. Turning
+// Survey off, a new chart, a view or ink switch, or a new ring stops it at once: no ring left on the overlay, no frame asked.
+async function ringedPage(options) {
+  const opened = await surveyPage(options);
+  const {win, doc, page} = opened;
+  chooseIsland(doc, 10);
+  buttonIn(drawerOf(doc), "Leave Land").dispatch("click", ev());
+  page.edited(JSON.stringify({seq: 1, ok: true, done: {event: "chart_edit", label: "Leave APPLE PRESS",
+    undo: core.edits.patch("Leave APPLE PRESS", [{kind: "member", feed: 10, land: 11, before: null, after: 1}])}}));
+  page.update(JSON.stringify(resurveyed(1)));
+  await settle();
+  if (win.frames.length) win.frames.shift()(16); // one frame of the pulse
+  assert.equal(inkRings(doc, nodeOf(10)).length, 1, "positive control: the ring shows");
+  return opened;
+}
+const runFrames = win => { let n = 0; while (win.frames.length && n < 1000) { win.frames.shift()(16 * ++n + 16); } return n; };
+test("turning_survey_off_stops_the_ink_ring", async () => {
+  for (const reduced of [false, true]) {
+    const {win, doc} = await ringedPage({reduced});
+    toolbarButton(doc, "✒ Survey").dispatch("click", ev());
+    assert.equal(inkRings(doc, nodeOf(10)).length, 0, `Survey off: the ring is gone at once (reduced ${reduced})`);
+    assert.ok(runFrames(win) <= 1, "no frame asked for the ring");
+    assert.equal(inkRings(doc, nodeOf(10)).length, 0, "and it does not come back");
+    if (reduced) assert.ok(win.cleared.includes(win.timers.findIndex(t => t.ms === 2000) + 1), "its 2 s timer is cancelled");
+    assert.deepEqual(win.errors, []);
+  }
+});
+test("a_view_or_ink_switch_or_a_new_chart_stops_the_ink_ring", async () => {
+  for (const act of ["ink", "view", "load"]) {
+    const {win, doc, page} = await ringedPage();
+    if (act === "ink") toolbarButton(doc, "White on black").dispatch("click", ev());
+    if (act === "view") toolbarButton(doc, "From the harbour").dispatch("click", ev());
+    if (act === "load") { page.load(JSON.stringify(fixture()), {view: "themes", ink: "bleu", animate: false}); await settle(); }
+    const island = act === "view" ? draw.buildScene(fixture(), "harbour", measure).nodes.find(n => n.id === 10) : nodeOf(10);
+    assert.equal(inkRings(doc, island).length, 0, `${act}: the ring is gone at once`);
+    assert.ok(runFrames(win) <= 1, `${act}: no frame asked for the ring`);
+    assert.equal(inkRings(doc, island).length, 0, `${act}: and it does not come back`);
+    assert.deepEqual(win.errors, []);
+  }
+});

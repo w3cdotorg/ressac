@@ -65,16 +65,16 @@ function fakeWindow({width = 1920, height = 1080, bridge = true, reduced = false
     if (el.tagName === "CANVAS") { const rec = recordingContext(); el.getContext = () => rec.ctx; el.recording = rec; el.width = 0; el.height = 0; }
     return el;
   };
-  const timers = [], frames = [], posted = [], errors = [], listeners = {};
+  const timers = [], frames = [], posted = [], errors = [], listeners = {}, cleared = [];
   const win = {
-    document, innerWidth: width, innerHeight: height, devicePixelRatio: 1, posted, timers, frames, errors,
+    document, innerWidth: width, innerHeight: height, devicePixelRatio: 1, posted, timers, frames, errors, cleared,
     console: {error: e => errors.push(e)}, // the page logs what a document throws: tests assert none
     performance: {now: () => 0},
     matchMedia: query => ({matches: /reduced-motion/.test(query) ? reduced : false, addEventListener() {}}),
     requestAnimationFrame: fn => { frames.push(fn); return frames.length; },
     cancelAnimationFrame() {},
     setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
-    clearTimeout() {},
+    clearTimeout: id => { cleared.push(id); }, // the ids cleared (an id is the timer's index in `timers` + 1)
     addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
   };
   if (bridge) win.webkit = {messageHandlers: {ressac: {postMessage: m => posted.push(m)}}};

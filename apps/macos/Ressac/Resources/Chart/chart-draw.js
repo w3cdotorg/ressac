@@ -688,7 +688,7 @@
       chartTransform(ctx);
       gusts = drawOver(ctx, scene, prefs.ink, moving() ? {t, gusts} : null);
       if (mode.active) drawSurveyLayer(ctx, scene, prefs.ink, selected, 1 / (view.k || 1));
-      if (editRing) drawEditRing(ctx, scene.nodes.find(n => n.id === editRing.id), prefs.ink, ringPhase(t ?? 0), 1 / (view.k || 1));
+      if (editRing && mode.active) drawEditRing(ctx, scene.nodes.find(n => n.id === editRing.id), prefs.ink, ringPhase(t ?? 0), 1 / (view.k || 1));
       if (gesture) drawGesture(ctx, gesture, prefs.ink);
     }
     function paintKey() {
@@ -737,7 +737,7 @@
     function setInk(n) {
       if (n === prefs.ink) return;
       prefs = {...prefs, ink: n}; pressed(); savePrefs();
-      applyInk(); paintBase(); paintKey(); paintOver(win.performance.now());
+      stopRing(); applyInk(); paintBase(); paintKey(); paintOver(win.performance.now());
     }
     function toggleAnimation() {
       const on = !moving();
@@ -844,7 +844,7 @@
       if (!mode.active) memory.open = null; // a half-typed log form does not outlive Survey mode
       if (rename && !mode.renaming) closeRename();
       if (rename) rename.form.input.readOnly = session.pending();
-      if (!mode.active) { press = null; swallowClick = false; closeNaming(false); gesture = null; } // gestures end with Survey mode
+      if (!mode.active) { press = null; swallowClick = false; closeNaming(false); gesture = null; ringFor = null; stopRing(); } // gestures and the ring end with Survey mode
       if (naming) {
         naming.form.input.readOnly = session.pending();
         const cancel = naming.form.nodes[0].querySelector(".name-form-cancel");
@@ -1138,18 +1138,27 @@
 
     // --- the ring round the island an edit moved: its edit is answered, the next chart shows where the island went; the
     // log selects it, and the ring pulses twice on the overlay, or stays still for 2 s under Reduce Motion ---
-    let ringFor = null, editRing = null; // ringFor: the feed to ring on the next chart; editRing: {id, t0, still}
+    let ringFor = null, editRing = null; // ringFor: the feed to ring on the next chart; editRing: {id, t0, still, timer, frame}
     function startRing(id) {
-      const mine = editRing = {id, t0: win.performance.now(), still: !motionNow()};
-      const done = () => { if (editRing === mine) { editRing = null; repaint(); } };
-      if (mine.still) { win.setTimeout(done, EDIT_RING.stillMs); return; }
+      stopRing();
+      const mine = editRing = {id, t0: win.performance.now(), still: !motionNow(), timer: 0, frame: 0};
+      if (mine.still) { mine.timer = win.setTimeout(() => { if (editRing === mine) { editRing = null; repaint(); } }, EDIT_RING.stillMs); return; }
       const step = t => {
         if (editRing !== mine) return;
-        if (t - mine.t0 >= EDIT_RING.pulseMs * EDIT_RING.pulses) { done(); return; }
-        paintOver(t);
-        win.requestAnimationFrame(step);
+        if (t - mine.t0 >= EDIT_RING.pulseMs * EDIT_RING.pulses) { editRing = null; repaint(); return; }
+        if (!raf) paintOver(t); // the overlay's own loop, when it runs, paints the ring with everything else
+        mine.frame = win.requestAnimationFrame(step);
       };
-      win.requestAnimationFrame(step);
+      mine.frame = win.requestAnimationFrame(step);
+    }
+    // ends the ring at once (Survey off, a new chart, a view or ink switch, a new ring): its timer and frame are cancelled;
+    // the caller repaints the overlay
+    function stopRing() {
+      const r = editRing;
+      if (!r) return;
+      editRing = null;
+      if (r.timer) win.clearTimeout(r.timer);
+      if (r.frame) win.cancelAnimationFrame(r.frame);
     }
     // the ring's phase at time t (null when still)
     const ringPhase = t => (editRing.still ? null : (Math.max(0, t - editRing.t0) % EDIT_RING.pulseMs) / EDIT_RING.pulseMs);
@@ -1178,6 +1187,7 @@
     let queue = fontsReady;
     function rebuild() {
       if (!data) return;
+      stopRing(); // a full redraw (a new chart, a view switch) ends the ring; show() starts the next one after it
       scene = buildScene(data, prefs.view, measure);
       paintBase(); paintOver(win.performance.now());
       const n = popFor && scene.nodes.find(m => m.id === popFor.id);
@@ -1188,7 +1198,7 @@
     function show(next, nextPrefs) {
       queue = queue.then(() => {
         data = next;
-        if (nextPrefs) { prefs = nextPrefs; motionChosen = false; applyInk(); applyMotion(); pressed(); }
+        if (nextPrefs) { prefs = nextPrefs; motionChosen = false; ringFor = null; applyInk(); applyMotion(); pressed(); }
         if (selected != null && !data.feeds.some(f => f.id === selected)) selected = null;
         rebuild(); syncMotion();
         if (!nextPrefs) mode.updated(); // a new survey ends an edit that was answered (the one pending rule)
