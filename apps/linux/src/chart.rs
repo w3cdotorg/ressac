@@ -42,6 +42,7 @@ pub(crate) fn file_bytes(path: &str) -> Option<&'static [u8]> {
         "chart.css",
         "d3.min.js",
         "chart-core.js",
+        "chart-survey.js",
         "chart-draw.js",
         "fonts/CormorantGaramond-Medium.woff2",
         "fonts/CormorantGaramond-SemiBold.woff2",

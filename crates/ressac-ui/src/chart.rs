@@ -47,7 +47,7 @@ pub struct ChartFile {
 }
 
 /// The page, its scripts, style and fonts, as in `apps/macos/Ressac/Resources/Chart`.
-pub const FILES: [ChartFile; 13] = [
+pub const FILES: [ChartFile; 14] = [
     ChartFile {
         path: "index.html",
         mime: "text/html; charset=utf-8",
@@ -62,6 +62,10 @@ pub const FILES: [ChartFile; 13] = [
     },
     ChartFile {
         path: "chart-core.js",
+        mime: "text/javascript",
+    },
+    ChartFile {
+        path: "chart-survey.js",
         mime: "text/javascript",
     },
     ChartFile {
@@ -931,7 +935,13 @@ mod tests {
             assert_eq!(file(f.path), Some(&f));
         }
         let html = std::fs::read_to_string(dir.join("index.html")).unwrap();
-        for referenced in ["chart.css", "d3.min.js", "chart-core.js", "chart-draw.js"] {
+        for referenced in [
+            "chart.css",
+            "d3.min.js",
+            "chart-core.js",
+            "chart-survey.js",
+            "chart-draw.js",
+        ] {
             assert!(
                 html.contains(&format!("\"{referenced}\"")) && file(referenced).is_some(),
                 "{referenced}"

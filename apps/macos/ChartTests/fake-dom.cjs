@@ -12,6 +12,7 @@ function fakeDocument() {
       nodeType: 1, tagName: tag.toUpperCase(), childNodes: [], attributes: {}, listeners: {}, className: "", style: {},
       rect: {left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0}, // settable: what getBoundingClientRect returns
       append(...nodes) { nodes.forEach(n => el.childNodes.push(typeof n === "string" ? text(n) : n)); },
+      replaceChildren(...nodes) { el.childNodes = []; el.append(...nodes); },
       setAttribute(k, v) { el.attributes[k] = String(v); },
       getAttribute(k) { return el.attributes[k] ?? null; },
       addEventListener(type, fn) { (el.listeners[type] ||= []).push(fn); },

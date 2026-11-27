@@ -1,0 +1,500 @@
+// Tests of chart-survey.js: the edit session (one edit at a time, history), the Cartographer's Log and the
+// name form, built on the shared fake document. Run with `node --test 'apps/macos/ChartTests/*.test.cjs'`.
+"use strict";
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const path = require("node:path");
+
+const CHART = path.join(__dirname, "..", "Ressac", "Resources", "Chart");
+const survey = require(path.join(CHART, "chart-survey.js"));
+const core = require(path.join(CHART, "chart-core.js"));
+const {fakeDocument, walk, elements, byClass} = require("./fake-dom.cjs");
+
+const T = core.EDIT_TEXT;
+const fixture = () => JSON.parse(JSON.stringify(require("./fixture.json")));
+const TRICKY_TITLE = '<b>Bold</b> & "Quoted" Notes <img src=x onerror=alert(1)> </option>';
+const tricky = data => data.feeds.find(f => f.title === TRICKY_TITLE);
+
+// ---------- helpers over the fake DOM ----------
+const allByClass = (nodes, cls) => elements(nodes).filter(n => n.className.split(" ").includes(cls));
+const buttons = nodes => elements(nodes).filter(n => n.tagName === "BUTTON");
+const button = (nodes, text) => buttons(nodes).find(b => b.textContent === text);
+// lookups that must find something: a missing element fails as an assertion, not as a TypeError
+const btn = (nodes, text) => { const b = button(nodes, text); assert.ok(b, `a button ${text}`); return b; };
+const one = (nodes, cls) => { const el = byClass(nodes, cls); assert.ok(el, `an element .${cls}`); return el; };
+const tagged = (nodes, tag) => { const el = elements(nodes).find(e => e.tagName === tag); assert.ok(el, `an element ${tag}`); return el; };
+const ev = extra => ({preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...extra});
+const nameOf = row => one([row], "log-name").textContent;
+const countOf = row => one([row], "log-count").textContent;
+
+// handlers that record every call: on.calls = [[name, ...args]]
+function recorder() {
+  const calls = [];
+  const names = ["select", "setSea", "setLand", "leave", "newLand", "renameLand", "deleteLand", "makeContinent",
+    "renameSea", "moveSea", "newSea", "deleteSea", "undo", "redo", "submit", "cancel"];
+  const on = Object.fromEntries(names.map(n => [n, (...args) => calls.push([n, ...args])]));
+  on.calls = calls;
+  return on;
+}
+const log = (data, state, on, doc = fakeDocument()) =>
+  survey.logContent(doc, data, {selected: null, busy: false, message: null, ...state}, on || recorder());
+
+// a session over stubs: posted messages, onChange count, timers to fire by hand
+function stubSession() {
+  const posted = [], timers = [];
+  let changes = 0;
+  const session = survey.createSession({
+    post: m => posted.push(m),
+    onChange: () => { changes += 1; },
+    setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
+  });
+  return {session, posted, timers, changes: () => changes};
+}
+const ok = (seq, label, undo) => JSON.stringify({seq, ok: true, done: {event: "chart_edit", label, undo}});
+const refused = (seq, error) => JSON.stringify({seq, ok: false, refused: true, error});
+const failed = (seq, error) => JSON.stringify({seq, ok: false, refused: false, error});
+const patch = (label, n = 1) => core.edits.patch(label, Array.from({length: n}, (_, i) => ({kind: "member", feed: i + 1, land: 1, before: null, after: i})));
+const JOIN = core.edits.join(12, {id: 11, name: "APPLE PRESS"});
+
+// ---------- the log ----------
+test("log_feed_titles_are_text", () => {
+  const doc = fakeDocument(), data = fixture(), feed = tricky(data);
+  assert.ok(feed, "the fixture has the tricky feed");
+  assert.throws(() => { doc.createElement("div").innerHTML = "<b>x</b>"; }, /innerHTML/, "the trap is armed");
+
+  const nodes = log(data, {selected: feed.id}, recorder(), doc);
+  const island = one(nodes, "log-island");
+  assert.equal(island.tagName, "SELECT");
+  const option = elements([island]).find(o => o.tagName === "OPTION" && o.value === String(feed.id));
+  assert.deepEqual(option.childNodes, [{nodeType: 3, data: TRICKY_TITLE}], "the option's text is the exact title");
+  const heading = one(nodes, "log-island-title");
+  assert.match(heading.tagName, /^H\d$/);
+  assert.deepEqual(heading.childNodes, [{nodeType: 3, data: TRICKY_TITLE}], "the heading is the exact title, as text");
+  assert.ok(!elements(nodes).some(e => e.tagName === "IMG" || e.tagName === "SCRIPT"), "no element made from a title");
+  assert.equal(elements([island]).filter(o => o.tagName === "OPTION").length, data.feeds.length + 1, "every chart feed (and the blank)");
+
+  // the tricky title as a With: choice, through the log's New Land… and in a bare nameForm
+  const other = data.feeds.find(f => f.theme === "maps" && f.id !== feed.id);
+  const nodes2 = log(data, {selected: other.id}, recorder(), doc);
+  btn(nodes2, "New Land…").dispatch("click", ev());
+  const choice = elements(nodes2).find(o => o.tagName === "OPTION" && o.value === String(feed.id));
+  assert.ok(choice, "the tricky feed is offered as a With: choice");
+  assert.deepEqual(choice.childNodes, [{nodeType: 3, data: TRICKY_TITLE}]);
+  assert.ok(!elements(nodes2).some(e => e.tagName === "IMG" || e.tagName === "SCRIPT"));
+
+  const form = survey.nameForm(doc, {title: "Name this land", value: "", withChoices: [{id: feed.id, label: feed.title}]}, recorder());
+  const opt = elements(form.nodes).find(o => o.tagName === "OPTION" && o.value === String(feed.id));
+  assert.deepEqual(opt.childNodes, [{nodeType: 3, data: TRICKY_TITLE}]);
+  assert.ok(!elements(form.nodes).some(e => e.tagName === "IMG" || e.tagName === "SCRIPT"));
+});
+
+test("log_lists_every_sea_and_land_from_the_ledger", () => {
+  const data = fixture(), nodes = log(data, {});
+  const aside = nodes[0];
+  assert.ok(aside, "the log is built");
+  assert.equal(aside.tagName, "ASIDE");
+  const title = elements(nodes).find(e => e.id === aside.getAttribute("aria-labelledby"));
+  assert.equal(title.textContent, "Cartographer's Log");
+
+  const seaRows = allByClass(nodes, "log-sea");
+  assert.deepEqual(seaRows.map(nameOf), data.ledger.seas.map(s => s.sea), "every sea, in ledger order");
+  assert.ok(seaRows.map(nameOf).includes("UNSAILED SEA"), "the empty sea too");
+  assert.deepEqual(seaRows.map(countOf), data.ledger.seas.map(s => `${s.feeds} ${s.feeds === 1 ? "feed" : "feeds"}`));
+  seaRows.forEach(r => assert.equal(one([r], "log-handle").textContent, "≡"));
+  const seaRow = sea => seaRows.find(r => nameOf(r) === sea);
+  assert.ok(button([seaRow("SEA OF KITES")], "Make a continent"), "a sea without a continent offers one");
+  assert.equal(button([seaRow("GULF OF BELLS")], "Make a continent"), undefined, "a sea with a continent does not");
+  for (const r of seaRows) assert.ok(button([r], "Rename") && btn([r], "Delete"));
+
+  const landRows = allByClass(nodes, "log-land");
+  assert.deepEqual(landRows.map(nameOf), data.ledger.lands.map(l => l.name), "every land and continent, in ledger order");
+  assert.ok(landRows.map(nameOf).includes("OLD MILL PRESS"), "the hidden land too");
+  const landRow = name => landRows.find(r => nameOf(r) === name);
+  assert.equal(countOf(landRow("GULL PRESS GROUP")), "3 feeds");
+  assert.equal(countOf(landRow("OLD MILL PRESS")), "2 feeds");
+  assert.equal(countOf(landRow("BELLMARK")), "9 feeds", "a continent counts its sea's feeds");
+  for (const name of ["BELLMARK", "CRUSTLAND", "THE KNOTTED LAND", "KILN COUNTRY"]) {
+    assert.ok(button([landRow(name)], "Back to Open Water"), name);
+    assert.equal(button([landRow(name)], "Delete"), undefined, name);
+  }
+  assert.ok(button([landRow("APPLE PRESS")], "Delete"));
+  assert.equal(button([landRow("APPLE PRESS")], "Back to Open Water"), undefined);
+  for (const r of landRows) assert.ok(button([r], "Rename"));
+
+  assert.ok(button(nodes, "New Sea…"));
+  const sections = elements(nodes).filter(e => /^H\d$/.test(e.tagName)).map(e => e.textContent);
+  for (const heading of ["Lands", "Seas"]) assert.ok(sections.includes(heading), heading);
+  assert.equal(one(nodes, "log-status").getAttribute("role"), "status");
+});
+
+test("log_buttons_call_their_handlers", () => {
+  const data = fixture(), on = recorder(), nodes = log(data, {}, on);
+  const row = (cls, name) => { const r = allByClass(nodes, cls).find(x => nameOf(x) === name); assert.ok(r, `a row ${name}`); return r; };
+  const landRow = name => row("log-land", name), seaRow = sea => row("log-sea", sea);
+  btn([landRow("APPLE PRESS")], "Delete").dispatch("click", ev());
+  btn([landRow("BELLMARK")], "Back to Open Water").dispatch("click", ev());
+  assert.deepEqual(on.calls, [["deleteLand", 11], ["deleteLand", 12]]);
+
+  // deleting a sea asks first, with the core's question; Cancel puts the row back
+  on.calls.length = 0;
+  btn([seaRow("GULF OF BELLS")], "Delete").dispatch("click", ev());
+  assert.equal(on.calls.length, 0, "nothing deleted before the confirmation");
+  assert.ok(walk([seaRow("GULF OF BELLS")]).some(n => n.nodeType === 3 && n.data === core.deleteSeaQuestion("GULF OF BELLS", 9, true)));
+  btn([seaRow("GULF OF BELLS")], "Cancel").dispatch("click", ev());
+  assert.equal(on.calls.length, 0);
+  btn([seaRow("GULF OF BELLS")], "Delete").dispatch("click", ev());
+  btn([seaRow("GULF OF BELLS")], "Delete").dispatch("click", ev());
+  assert.deepEqual(on.calls, [["deleteSea", 3]]);
+
+  // rename: a clash keeps the form open with the text; an unchanged name closes it; a new name is sent trimmed
+  on.calls.length = 0;
+  btn([landRow("APPLE PRESS")], "Rename").dispatch("click", ev());
+  let input = tagged([landRow("APPLE PRESS")], "INPUT");
+  assert.equal(input.value, "APPLE PRESS");
+  input.value = " gull press group ";
+  one([landRow("APPLE PRESS")], "name-form").dispatch("submit", ev());
+  assert.equal(on.calls.length, 0);
+  assert.equal(one([landRow("APPLE PRESS")], "name-form-error").textContent, T.landTaken);
+  input.value = "APPLE PRESS";
+  one([landRow("APPLE PRESS")], "name-form").dispatch("submit", ev());
+  assert.equal(on.calls.length, 0, "an unchanged name sends nothing");
+  assert.equal(byClass([landRow("APPLE PRESS")], "name-form"), undefined, "and closes the form");
+  btn([landRow("APPLE PRESS")], "Rename").dispatch("click", ev());
+  input = tagged([landRow("APPLE PRESS")], "INPUT");
+  input.value = "  Pear Press ";
+  one([landRow("APPLE PRESS")], "name-form").dispatch("submit", ev());
+  assert.deepEqual(on.calls, [["renameLand", 11, "Pear Press"]]);
+
+  on.calls.length = 0;
+  btn([seaRow("SEA OF KITES")], "Rename").dispatch("click", ev());
+  input = tagged([seaRow("SEA OF KITES")], "INPUT");
+  input.value = "tidal sea";
+  one([seaRow("SEA OF KITES")], "name-form").dispatch("submit", ev());
+  assert.equal(one([seaRow("SEA OF KITES")], "name-form-error").textContent, T.seaTaken);
+  input.value = "Sea of Paper";
+  one([seaRow("SEA OF KITES")], "name-form").dispatch("submit", ev());
+  btn([seaRow("TIDAL SEA")], "Make a continent").dispatch("click", ev());
+  input = tagged([seaRow("TIDAL SEA")], "INPUT");
+  input.value = "Tideland";
+  one([seaRow("TIDAL SEA")], "name-form").dispatch("submit", ev());
+  btn(nodes, "New Sea…").dispatch("click", ev());
+  input = tagged([one(nodes, "log-new-sea")], "INPUT");
+  input.value = "Comics";
+  one([one(nodes, "log-new-sea")], "name-form").dispatch("submit", ev());
+  assert.deepEqual(on.calls, [["renameSea", 1, "Sea of Paper"], ["makeContinent", 2, "Tideland"], ["newSea", "Comics"]]);
+});
+
+test("log_island_block_selects_and_edits_the_island", () => {
+  const data = fixture(), on = recorder();
+  let nodes = log(data, {}, on);
+  assert.equal(byClass(nodes, "log-island-title"), undefined, "no island heading without a selection");
+  const island = one(nodes, "log-island");
+  island.value = "12";
+  island.dispatch("change", ev());
+  assert.deepEqual(on.calls, [["select", 12]]);
+
+  on.calls.length = 0;
+  nodes = log(data, {selected: 12}, on); // The Tidal Tribune: kites, no land
+  const sea = one(nodes, "log-sea-select"), land = one(nodes, "log-land-select");
+  assert.equal(sea.value, "1");
+  const seaOptions = elements([sea]).filter(o => o.tagName === "OPTION").map(o => o.textContent);
+  assert.deepEqual(seaOptions, [...data.ledger.seas.map(s => s.sea), "Uncharted waters"]);
+  const landOptions = elements([land]).filter(o => o.tagName === "OPTION" && o.value !== "").map(o => o.textContent);
+  assert.deepEqual(landOptions, data.ledger.lands.filter(l => !l.continent).map(l => l.name), "territories only");
+  assert.equal(btn(nodes, "Leave Land").disabled, true, "nothing to leave");
+  sea.value = "2"; sea.dispatch("change", ev());
+  sea.value = ""; sea.dispatch("change", ev());
+  land.value = "11"; land.dispatch("change", ev());
+  assert.deepEqual(on.calls, [["setSea", 12, 2], ["setSea", 12, null], ["setLand", 12, 11]]);
+
+  // New Land…: With: lists the other non-continental islands; the name is checked; feeds go in chart order
+  on.calls.length = 0;
+  btn(nodes, "New Land…").dispatch("click", ev());
+  const form = one(nodes, "name-form"), input = tagged([form], "INPUT");
+  const with_ = tagged([form], "SELECT");
+  const offered = elements([with_]).filter(o => o.tagName === "OPTION" && o.value !== "").map(o => Number(o.value));
+  const expected = data.feeds.filter(f => f.id !== 12 && !["bells", "bread", "knots", "kilns"].includes(f.theme)).map(f => f.id);
+  assert.deepEqual(offered, expected);
+  with_.value = "3"; with_.dispatch("change", ev());
+  input.value = "apple press";
+  form.dispatch("submit", ev());
+  assert.equal(on.calls.length, 0, "a taken name is caught before sending");
+  assert.equal(one([form], "name-form-error").textContent, T.landTaken);
+  input.value = " Trio ";
+  form.dispatch("submit", ev());
+  assert.deepEqual(on.calls, [["newLand", "Trio", [3, 12]]], "chart order");
+
+  on.calls.length = 0;
+  nodes = log(data, {selected: 1}, on); // GULL PRESS GROUP
+  assert.equal(one(nodes, "log-land-select").value, "1");
+  btn(nodes, "Leave Land").dispatch("click", ev());
+  assert.deepEqual(on.calls, [["leave", 1]]);
+});
+
+test("leave_land_is_disabled_on_a_continental_island", () => {
+  const data = fixture(), on = recorder();
+  const nodes = log(data, {selected: 37}, on); // bells, a continent sea (BELLMARK)
+  const hint = T.continentHint("BELLMARK");
+  const leave = btn(nodes, "Leave Land");
+  assert.equal(leave.disabled, true);
+  assert.equal(leave.title, hint);
+  const land = one(nodes, "log-land-select");
+  assert.equal(land.disabled, true);
+  assert.equal(land.title, hint);
+  assert.equal(btn(nodes, "New Land…").disabled, true);
+  assert.ok(!one(nodes, "log-sea-select").disabled, "a continental island may still change sea");
+  leave.dispatch("click", ev());
+  assert.equal(on.calls.length, 0);
+
+  const plain = log(data, {selected: 1}, recorder());
+  assert.ok(!btn(plain, "Leave Land").disabled);
+  assert.ok(!btn(plain, "Leave Land").title);
+});
+
+test("log_controls_are_disabled_while_busy", () => {
+  const data = fixture(), on = recorder();
+  const nodes = log(data, {selected: 1, busy: true, titles: {undo: "Undo Join APPLE PRESS", redo: null}}, on);
+  const controls = elements(nodes).filter(e => ["BUTTON", "SELECT", "INPUT"].includes(e.tagName));
+  assert.ok(controls.length > 40);
+  for (const c of controls) assert.equal(c.disabled, true, `${c.tagName} ${c.textContent}`);
+  const row = allByClass(nodes, "log-sea")[1];
+  assert.ok(row, "a second sea row");
+  row.dispatch("keydown", ev({key: "ArrowUp", altKey: true}));
+  assert.equal(on.calls.length, 0, "no reorder while busy");
+});
+
+test("log_undo_and_redo_show_the_titles", () => {
+  const on = recorder();
+  let nodes = log(fixture(), {titles: {undo: "Undo Join APPLE PRESS", redo: null}, message: T.changed}, on);
+  const undo = one(nodes, "log-undo"), redo = one(nodes, "log-redo");
+  assert.equal(undo.textContent, "Undo Join APPLE PRESS");
+  assert.ok(!undo.disabled);
+  assert.equal(redo.textContent, "Redo");
+  assert.equal(redo.disabled, true);
+  undo.dispatch("click", ev());
+  assert.deepEqual(on.calls, [["undo"]]);
+  assert.equal(one(nodes, "log-status").textContent, T.changed);
+  nodes = log(fixture(), {}, on);
+  assert.equal(one(nodes, "log-undo").disabled, true);
+  assert.equal(one(nodes, "log-undo").textContent, "Undo");
+});
+
+test("alt_arrows_move_a_sea", () => {
+  const data = fixture(), on = recorder(), nodes = log(data, {}, on);
+  const rows = allByClass(nodes, "log-sea");
+  assert.equal(rows.length, data.ledger.seas.length, "a row per sea");
+  const second = data.ledger.seas[1].id;
+  rows[1].dispatch("keydown", ev({key: "ArrowUp", altKey: true}));
+  assert.deepEqual(on.calls, [["moveSea", second, -1]]);
+  rows[1].dispatch("keydown", ev({key: "ArrowDown", altKey: true}));
+  rows[1].dispatch("keydown", ev({key: "ArrowUp"}));
+  rows[0].dispatch("keydown", ev({key: "ArrowUp", altKey: true}));
+  rows[rows.length - 1].dispatch("keydown", ev({key: "ArrowDown", altKey: true}));
+  assert.deepEqual(on.calls, [["moveSea", second, -1], ["moveSea", second, 1]], "no move without Alt or past either end");
+  btn([rows[2]], "Rename").dispatch("click", ev());
+  rows[2].dispatch("keydown", ev({key: "ArrowUp", altKey: true, target: tagged([rows[2]], "INPUT")}));
+  assert.equal(on.calls.length, 2, "Alt+arrows inside a rename field stay with the field");
+  assert.equal(rows[1].tabIndex, 0, "a sea row takes the focus");
+});
+
+test("dragging_the_handle_moves_a_sea", () => {
+  const data = fixture(), on = recorder(), nodes = log(data, {}, on);
+  const rows = allByClass(nodes, "log-sea");
+  assert.equal(rows.length, data.ledger.seas.length, "a row per sea");
+  rows.forEach((r, i) => { r.rect = {left: 0, right: 300, top: i * 30, bottom: i * 30 + 30, width: 300, height: 30, x: 0, y: i * 30}; });
+  const first = data.ledger.seas[0].id, handle = one([rows[0]], "log-handle");
+  handle.dispatch("pointerdown", ev({clientY: 15, pointerId: 1, button: 0}));
+  handle.dispatch("pointerup", ev({clientY: 75, pointerId: 1}));
+  assert.deepEqual(on.calls, [["moveSea", first, 2]]);
+  handle.dispatch("pointerdown", ev({clientY: 15, pointerId: 1, button: 0}));
+  handle.dispatch("pointerup", ev({clientY: 15, pointerId: 1}));
+  handle.dispatch("pointerdown", ev({clientY: 22, pointerId: 1, button: 0}));
+  handle.dispatch("pointerup", ev({clientY: 29, pointerId: 1})); // the lower half of its own row, below its middle
+  assert.equal(on.calls.length, 1, "released on its own row: nothing");
+  handle.dispatch("pointerup", ev({clientY: 200, pointerId: 1}));
+  assert.equal(on.calls.length, 1, "a release without a press: nothing");
+  const fourth = one([rows[3]], "log-handle");
+  fourth.dispatch("pointerdown", ev({clientY: 105, pointerId: 2, button: 0}));
+  fourth.dispatch("pointerup", ev({clientY: 0, pointerId: 2}));
+  assert.deepEqual(on.calls[1], ["moveSea", data.ledger.seas[3].id, -3]);
+});
+
+test("sea_drop_index_follows_the_pointer", () => {
+  const mids = [15, 45, 75];
+  assert.equal(survey.seaDropIndex(mids, -50), 0, "above the rows");
+  assert.equal(survey.seaDropIndex(mids, 15), 0, "on the first row's middle");
+  assert.equal(survey.seaDropIndex(mids, 30), 1, "between the first and second");
+  assert.equal(survey.seaDropIndex(mids, 60), 2, "between the second and third");
+  assert.equal(survey.seaDropIndex(mids, 75), 2);
+  assert.equal(survey.seaDropIndex(mids, 500), 2, "below the rows: the last");
+});
+
+// ---------- the name form ----------
+test("name_form_submits_and_shows_errors", () => {
+  const doc = fakeDocument();
+  let on = recorder();
+  let form = survey.nameForm(doc, {title: "Name this land", value: "Apple"}, on);
+  const root = form.nodes[0];
+  assert.ok(root, "the form is built");
+  assert.equal(root.tagName, "FORM");
+  assert.equal(root.className, "name-form");
+  assert.ok(walk(form.nodes).some(n => n.nodeType === 3 && n.data === "Name this land"), "headed by its title");
+  const input = tagged(form.nodes, "INPUT");
+  assert.equal(input.getAttribute("maxlength"), "40");
+  assert.equal(input.value, "Apple");
+  const enter = ev({key: "Enter", target: input});
+  root.dispatch("keydown", enter);
+  assert.deepEqual(on.calls, [["submit", "Apple", null]]);
+  assert.equal(enter.defaultPrevented, true);
+  root.dispatch("submit", ev());
+  assert.deepEqual(on.calls[1], ["submit", "Apple", null], "the submit button (a form submit) too");
+  root.dispatch("keydown", ev({key: "Escape", target: input}));
+  btn(form.nodes, "Cancel").dispatch("click", ev());
+  assert.deepEqual(on.calls.slice(2), [["cancel"], ["cancel"]]);
+
+  const error = one(form.nodes, "name-form-error");
+  form.setError(T.landTaken);
+  assert.equal(error.textContent, T.landTaken);
+  form.setError(null);
+  assert.equal(error.textContent, "");
+
+  on = recorder();
+  form = survey.nameForm(doc, {title: "Name this land", value: "Apple", withChoices: [{id: 7, label: "The Northern Courier"}, {id: 9, label: "The Pale Signal"}]}, on);
+  const select = tagged(form.nodes, "SELECT");
+  assert.ok(walk(form.nodes).some(n => n.nodeType === 3 && n.data === "With:"));
+  assert.equal(select.value, "", "no default choice");
+  const submit = buttons(form.nodes).find(b => b.type === "submit");
+  assert.equal(submit.disabled, true, "submit waits for a choice");
+  form.nodes[0].dispatch("submit", ev());
+  form.nodes[0].dispatch("keydown", ev({key: "Enter", target: tagged(form.nodes, "INPUT")}));
+  assert.equal(on.calls.length, 0, "nothing submitted without a choice");
+  select.value = "7";
+  select.dispatch("change", ev());
+  assert.equal(submit.disabled, false);
+  form.nodes[0].dispatch("submit", ev());
+  assert.deepEqual(on.calls, [["submit", "Apple", 7]], "the chosen id, as given");
+});
+
+// ---------- the session ----------
+test("session_sends_one_edit_at_a_time", () => {
+  const {session, posted, timers, changes} = stubSession();
+  assert.equal(session.pending(), false);
+  assert.equal(session.send(JOIN), true);
+  assert.deepEqual(posted, [{type: "edit", seq: 1, edit: JSON.stringify(JOIN)}]);
+  assert.equal(session.pending(), true);
+  assert.equal(changes(), 1, "onChange after send");
+  assert.equal(session.send(JOIN), false, "one edit at a time");
+
+  assert.deepEqual(session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS"))), {kind: "done", message: null});
+  assert.equal(session.pending(), true, "an ok result keeps the edit pending");
+  assert.equal(session.send(JOIN), false);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].ms, core.PENDING_MS);
+  session.updated();
+  assert.equal(session.pending(), false, "the next Chart.update ends it");
+  timers[0].fn();
+  assert.equal(session.pending(), false, "a stale timer does nothing");
+
+  assert.equal(session.send(JOIN), true);
+  assert.equal(posted[1].seq, 2, "seq counts up");
+  session.updated();
+  assert.equal(session.pending(), true, "an update before the result does not end it");
+  session.edited(ok(2, "Join APPLE PRESS", patch("Join APPLE PRESS")));
+  timers[timers.length - 1].fn();
+  assert.equal(session.pending(), false, "PENDING_MS after an ok result ends it");
+
+  assert.equal(session.send(JOIN), true);
+  const before = changes();
+  assert.deepEqual(session.edited(refused(3, T.landTaken)), {kind: "name", message: T.landTaken});
+  assert.equal(session.pending(), false, "a refusal ends it at once");
+  assert.equal(changes(), before + 1);
+  assert.equal(session.send(JOIN), true, "and the next edit goes at once");
+  assert.deepEqual(session.edited(failed(4, "ressac: no database")), {kind: "failed", message: "ressac: no database"});
+  assert.equal(session.pending(), false);
+
+  const big = core.edits.found("é".repeat(core.MAX_EDIT / 2), [1, 2]); // fits in UTF-16 units, not in UTF-8 bytes
+  assert.ok(JSON.stringify(big).length < core.MAX_EDIT);
+  const n = posted.length;
+  assert.equal(session.send(big), false, "an oversized edit is not posted");
+  assert.equal(posted.length, n);
+  assert.equal(session.pending(), false);
+});
+
+test("session_never_sends_a_join_or_leave_without_a_land", () => {
+  const {session, posted} = stubSession();
+  for (const edit of [core.edits.join(12, null), core.edits.leave(1, null), core.edits.join(12, undefined), {op: "leave", feed: 1}]) {
+    assert.equal(session.send(edit), false, JSON.stringify(edit));
+  }
+  assert.equal(posted.length, 0);
+});
+
+test("a_changed_refusal_shows_the_message_and_keeps_history", () => {
+  const {session} = stubSession();
+  session.send(JOIN);
+  session.edited(ok(1, "Join APPLE PRESS", patch("Join APPLE PRESS")));
+  session.updated();
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null});
+  session.send(core.edits.renameLand({id: 11, name: "APPLE PRESS"}, "Pear"));
+  assert.deepEqual(session.edited(refused(2, T.changed)), {kind: "changed", message: T.changed});
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null}, "history keeps its record");
+  // any other refusal text reads as "changed", with the one message
+  session.send(core.edits.deleteLand({id: 11, name: "APPLE PRESS"}));
+  assert.deepEqual(session.edited(refused(3, "No feed #9.")), {kind: "changed", message: T.changed});
+  session.send(core.edits.leave(37, {id: 12, name: "BELLMARK"}));
+  assert.deepEqual(session.edited(refused(4, T.continentHint("BELLMARK"))), {kind: "continent", message: T.continentHint("BELLMARK")});
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null});
+});
+
+test("session_undo_redo_round_trip", () => {
+  const {session, posted} = stubSession();
+  assert.equal(session.undo(), false, "nothing to undo");
+  assert.equal(session.redo(), false);
+  assert.equal(posted.length, 0);
+
+  const undoJoin = patch("Join APPLE PRESS", 1), redoJoin = patch("Join APPLE PRESS", 2);
+  session.send(JOIN);
+  session.edited(ok(1, "Join APPLE PRESS", undoJoin));
+  assert.equal(session.undo(), false, "not while the edit is pending");
+  session.updated();
+  assert.equal(session.undo(), true);
+  assert.deepEqual(posted[1], {type: "edit", seq: 2, edit: JSON.stringify(undoJoin)}, "undo posts the record's patch");
+  assert.equal(session.edited(ok(1, "Join APPLE PRESS", redoJoin)), null, "a result with a stale seq is ignored");
+  assert.equal(session.edited(ok(99, "Join APPLE PRESS", redoJoin)), null);
+  assert.equal(session.edited("not json"), null);
+  assert.equal(session.pending(), true);
+  session.edited(ok(2, "Join APPLE PRESS", redoJoin));
+  session.updated();
+  assert.deepEqual(session.titles(), {undo: null, redo: "Redo Join APPLE PRESS"}, "the undone step moves to redo");
+  assert.equal(session.redo(), true);
+  assert.deepEqual(posted[2], {type: "edit", seq: 3, edit: JSON.stringify(redoJoin)}, "with the new patch");
+  session.edited(ok(3, "Join APPLE PRESS", undoJoin));
+  session.updated();
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null});
+
+  // a failed undo keeps its record; a refused one drops it
+  session.undo();
+  assert.deepEqual(session.edited(failed(4, "ressac: timed out")), {kind: "failed", message: "ressac: timed out"});
+  assert.deepEqual(session.titles(), {undo: "Undo Join APPLE PRESS", redo: null}, "failed: kept");
+  session.undo();
+  assert.deepEqual(session.edited(refused(5, T.changed)), {kind: "changed", message: T.changed});
+  assert.deepEqual(session.titles(), {undo: null, redo: null}, "refused: dropped");
+
+  // a refused redo drops its record too
+  session.send(JOIN);
+  session.edited(ok(6, "Join APPLE PRESS", undoJoin));
+  session.updated();
+  session.undo();
+  session.edited(ok(7, "Join APPLE PRESS", redoJoin));
+  session.updated();
+  session.redo();
+  session.edited(refused(8, T.changed));
+  assert.deepEqual(session.titles(), {undo: null, redo: null});
+});
+
+test("an_edit_with_nothing_to_undo_is_no_step", () => {
+  const {session} = stubSession();
+  session.send(core.edits.orderSeas([1, 2, 3]));
+  session.edited(ok(1, "Reorder Seas", core.edits.patch("Reorder Seas", [])));
+  session.updated();
+  assert.deepEqual(session.titles(), {undo: null, redo: null}, "an empty order_seas is never recorded");
+});
