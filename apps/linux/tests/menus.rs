@@ -95,8 +95,18 @@ fn the_sea_chart_window_has_the_macs_undo_and_redo_in_an_edit_menu() {
     assert!(CHART.contains("menuBar: QQC2.MenuBar {"));
     assert!(CHART.contains(r#"title: "&Edit""#));
     for (title, shortcut, page, native) in [
-        ("Undo Chart Edit", "shortcut: StandardKey.Undo", "Chart.undo()", "WebEngineView.Undo"),
-        ("Redo Chart Edit", r#"shortcut: "Ctrl+Shift+Z""#, "Chart.redo()", "WebEngineView.Redo"),
+        (
+            "Undo Chart Edit",
+            "shortcut: StandardKey.Undo",
+            "Chart.undo()",
+            "WebEngineView.Undo",
+        ),
+        (
+            "Redo Chart Edit",
+            r#"shortcut: "Ctrl+Shift+Z""#,
+            "Chart.redo()",
+            "WebEngineView.Redo",
+        ),
     ] {
         let at = CHART
             .find(&format!("text: \"{title}\""))
@@ -105,7 +115,10 @@ fn the_sea_chart_window_has_the_macs_undo_and_redo_in_an_edit_menu() {
         assert!(action.contains(shortcut), "{title}: {shortcut}");
         // the page first, then the focused text field's own undo
         let (first, then) = (action.find(page), action.find(native));
-        assert!(first.is_some() && then.is_some() && first < then, "{title}: {action}");
+        assert!(
+            first.is_some() && then.is_some() && first < then,
+            "{title}: {action}"
+        );
     }
     let items: Vec<&str> = CHART
         .lines()
