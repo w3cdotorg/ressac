@@ -18,6 +18,7 @@ fn hostile_body() -> String {
 
 #[test]
 fn article_scripts_never_run_and_a_hostile_600_kb_entry_still_loads() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     rusqlite::Connection::open(&db)
@@ -58,6 +59,7 @@ fn article_scripts_never_run_and_a_hostile_600_kb_entry_still_loads() {
 
 #[test]
 fn the_reader_shows_full_articles_sends_links_out_and_reports_a_failed_extraction() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     // `copy_fixture` points entry 6 at a closed loopback port: its extraction fails offline.
@@ -116,6 +118,7 @@ fn redraw_heights(err: &str, tag: &str) -> Vec<f64> {
 /// 1 px shorter for one frame, then back.
 #[test]
 fn the_web_views_are_redrawn_1_px_shorter_after_the_scene_graph_stops_and_only_then() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     let out = run.launch_with(Some(&db), &[("RESSAC_RECETTE_WALK", "redraw")]);

@@ -2,6 +2,7 @@
 //! `main` only parses the command line and dispatches here.
 
 pub mod chart;
+mod chart_edit;
 pub mod edition;
 pub mod feed;
 pub mod garden;

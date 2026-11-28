@@ -6,6 +6,7 @@ use common::*;
 
 #[test]
 fn the_garden_walk_triages_repairs_undoes_and_sets_rhythm_and_theme() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     rusqlite::Connection::open(&db).unwrap().execute_batch(

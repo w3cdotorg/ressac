@@ -9,10 +9,11 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use ressac_core::model::FeedId;
-use ressac_core::store::Store;
+use ressac_core::store::{ChartEdit, ChartEditDone, MAX_EDIT, Store};
 use serde_json::Value;
 
 use crate::article::js_string;
+use crate::runs::RunEnd;
 use crate::sanitize::is_web_url;
 use crate::settings::{ChartInk, ChartPrefs, ChartView, Settings, SettingsStore};
 
@@ -47,7 +48,7 @@ pub struct ChartFile {
 }
 
 /// The page, its scripts, style and fonts, as in `apps/macos/Ressac/Resources/Chart`.
-pub const FILES: [ChartFile; 13] = [
+pub const FILES: [ChartFile; 14] = [
     ChartFile {
         path: "index.html",
         mime: "text/html; charset=utf-8",
@@ -62,6 +63,10 @@ pub const FILES: [ChartFile; 13] = [
     },
     ChartFile {
         path: "chart-core.js",
+        mime: "text/javascript",
+    },
+    ChartFile {
+        path: "chart-survey.js",
         mime: "text/javascript",
     },
     ChartFile {
@@ -116,6 +121,8 @@ pub const ADAPTER_SCRIPT: &str = r#"(function () {
   }
   var ressac = Object.freeze({postMessage: send});
   Object.defineProperty(window, "webkit", {value: Object.freeze({messageHandlers: Object.freeze({ressac: ressac})})});
+  // Qt WebEngine shows a cursor bitmap one pixel per logical pixel: the page draws its quill for that (quillCursor)
+  document.documentElement.classList.add("qt-cursors");
   new QWebChannel(qt.webChannelTransport, function (channel) {
     target = channel.objects.ressac;
     pending.splice(0).forEach(function (text) { target.post(text); });
@@ -176,6 +183,17 @@ impl Phase {
             Phase::Failed(_) => "failed",
         }
     }
+}
+
+/// Whether two survey documents are the same chart apart from `surveyed_at` (the survey's own
+/// clock, which differs on every survey). Anything that does not parse is not the same.
+fn same_chart(a: &str, b: &str) -> bool {
+    let strip = |text: &str| {
+        let mut value: Value = serde_json::from_str(text).ok()?;
+        value.as_object_mut()?.remove("surveyed_at");
+        Some(value)
+    };
+    matches!((strip(a), strip(b)), (Some(a), Some(b)) if a == b)
 }
 
 /// A running survey's ticket: a result for any other ticket is stale.
@@ -255,6 +273,17 @@ impl ChartModel {
         Some(survey)
     }
 
+    /// The app's own edit was just committed: the running survey (it may have read the chart
+    /// before the commit, and would show it after the page's reply), the scheduled one and the
+    /// rerun are dropped, and one fresh survey starts now. A late result of the dropped survey
+    /// is stale: [`ChartModel::finished`] ignores it.
+    pub fn refresh_after_edit(&mut self) -> Option<Survey> {
+        self.running = None;
+        self.scheduled = None;
+        self.rerun = false;
+        self.refresh()
+    }
+
     /// The database changed. Changes within one debounce window share a single survey, run
     /// at the end of the window: a steady trickle of writes still draws once per window.
     pub fn note_change(&mut self, now: Instant) {
@@ -280,8 +309,9 @@ impl ChartModel {
         if due { self.refresh() } else { None }
     }
 
-    /// A survey ended. A stale one is ignored; a failed refresh keeps the last chart. Returns
-    /// the rerun asked for during this survey, if any.
+    /// A survey ended. A stale one is ignored; a failed refresh keeps the last chart; one that
+    /// differs from the shown chart only by its clock keeps the shown document (the page gets no
+    /// `Chart.update`). Returns the rerun asked for during this survey, if any.
     pub fn finished(&mut self, survey: Survey, result: Result<String, String>) -> Option<Survey> {
         if self.running != Some(survey) {
             return None;
@@ -290,7 +320,9 @@ impl ChartModel {
         match result.and_then(|json| check_document(&json).map(|()| json)) {
             Ok(json) => {
                 self.last_error = None;
-                self.phase = Phase::Ready(json);
+                if !matches!(&self.phase, Phase::Ready(shown) if same_chart(shown, &json)) {
+                    self.phase = Phase::Ready(json);
+                }
             }
             Err(message) => {
                 self.last_error = Some(message.clone());
@@ -337,6 +369,8 @@ pub enum ChartAction {
     OpenFeed(FeedId),
     OpenUrl(String),
     Prefs(ChartPrefs),
+    Edit { seq: i64, edit: String },
+    Survey,
 }
 
 /// A whole JSON number as an `i64` (`7` and `7.0`), nothing else.
@@ -367,17 +401,30 @@ pub fn handle(message: &str) -> Option<ChartAction> {
             ink: ChartInk::parse(value.get("ink")?.as_str()?)?,
             animate: value.get("animate")?.as_bool()?,
         })),
+        "edit" => {
+            let seq = feed_id(value.get("seq")?)?;
+            let edit = value.get("edit")?.as_str()?;
+            // The page counts from 1; the cap is in UTF-8 bytes; the text must be an edit.
+            (seq >= 1 && edit.len() <= MAX_EDIT && serde_json::from_str::<ChartEdit>(edit).is_ok())
+                .then(|| ChartAction::Edit {
+                    seq,
+                    edit: edit.to_string(),
+                })
+        }
+        "survey" => Some(ChartAction::Survey),
         _ => None,
     }
 }
 
-/// The prefs argument of `Chart.load`: still under Reduce Motion, whatever is stored.
+/// The prefs argument of `Chart.load`: still under Reduce Motion, whatever is stored; the
+/// page also learns Reduce Motion itself.
 pub fn page_prefs(prefs: &ChartPrefs, reduce_motion: bool) -> String {
     format!(
-        r#"{{"view":"{}","ink":"{}","animate":{}}}"#,
+        r#"{{"view":"{}","ink":"{}","animate":{},"reduceMotion":{}}}"#,
         prefs.view.as_str(),
         prefs.ink.as_str(),
-        prefs.animate && !reduce_motion
+        prefs.animate && !reduce_motion,
+        reduce_motion
     )
 }
 
@@ -399,6 +446,30 @@ pub fn save_prefs(
 /// Only the chart page, in the main frame, is navigable.
 pub fn allows_navigation(url: &str, main_frame: bool) -> bool {
     main_frame && url == PAGE_URL
+}
+
+/// The page's reply to an edit (`Chart.edited`'s argument): `done` carries the core's
+/// `chart_edit` event; a refusal keeps the core's sentence; a turned-away run is a failure: it
+/// is turned away when there is no session, the database is not open.
+pub fn edit_result(seq: i64, end: &RunEnd<ChartEditDone>) -> String {
+    let text = |t: &str| serde_json::to_string(t).unwrap_or_else(|_| "\"\"".into());
+    match end {
+        RunEnd::Done(done) => format!(r#"{{"seq":{seq},"ok":true,"done":{}}}"#, done.event()),
+        RunEnd::Failed(failure) => format!(
+            r#"{{"seq":{seq},"ok":false,"refused":{},"error":{}}}"#,
+            failure.refusal,
+            text(&failure.message)
+        ),
+        RunEnd::Refused => format!(
+            r#"{{"seq":{seq},"ok":false,"refused":false,"error":{}}}"#,
+            text(NOT_OPEN)
+        ),
+    }
+}
+
+/// The script that hands a result to the page: the text is one JavaScript string literal.
+pub fn edited_script(result: &str) -> String {
+    format!("Chart.edited({})", js_string(result))
 }
 
 pub fn load_script(json: &str, prefs: &str) -> String {
@@ -479,6 +550,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::runs::{BUSY, RunFailure};
     use crate::settings::{ChartInk, ChartPrefs, ChartView, Settings};
     use crate::test_db::{TestDb, at};
 
@@ -564,6 +636,58 @@ mod tests {
         let second = model.finished(first, Ok(doc(1))).expect("the rerun");
         assert_ne!(second, first);
         assert_eq!(model.finished(second, Ok(doc(1))), None, "only once");
+    }
+
+    /// Final review I-2: a survey that began before the edit's commit never shows after it,
+    /// and an edit is one survey, not two or three.
+    #[test]
+    fn a_survey_from_before_an_edit_never_publishes_after_it() {
+        let t0 = Instant::now();
+        let mut model = ChartModel::with_timing(ms(20), RESURVEY);
+        let s = model.open(t0).unwrap();
+        model.finished(s, Ok(doc(1)));
+        let stale = model.refresh().expect("a survey begins before the commit");
+        model.note_change(t0 + ms(5)); // and a notice schedules another
+        let fresh = model
+            .refresh_after_edit()
+            .expect("the edit surveys afresh at once");
+        assert_ne!(fresh, stale);
+        let before = r#"{"version":1,"feeds":[],"seas":"before"}"#;
+        let after = r#"{"version":1,"feeds":[],"seas":"after"}"#;
+        assert_eq!(model.finished(stale, Ok(before.into())), None, "stale");
+        assert_eq!(model.phase(), &Phase::Ready(doc(1)), "never shown");
+        assert_eq!(model.finished(fresh, Ok(after.into())), None, "no rerun");
+        assert_eq!(model.phase(), &Phase::Ready(after.into()));
+        assert_eq!(model.tick(t0 + ms(100)), None, "the scheduled one went");
+        model.close();
+        assert_eq!(model.refresh_after_edit(), None, "closed: nothing");
+    }
+
+    /// A survey that differs only by its clock (`surveyed_at`) keeps the shown document, so the
+    /// page gets no `Chart.update` for it (moved from the KDE glue, T15 Minor 3).
+    #[test]
+    fn a_survey_that_differs_only_by_its_clock_keeps_the_shown_document() {
+        let a = r#"{"version":1,"surveyed_at":"2026-11-27T10:00:00Z","seas":[{"id":1}]}"#;
+        let b = r#"{"seas":[{"id":1}],"version":1,"surveyed_at":"2026-11-27T10:05:00Z"}"#;
+        let c = r#"{"version":1,"surveyed_at":"2026-11-27T10:05:00Z","seas":[{"id":2}]}"#;
+        let mut model = ChartModel::default();
+        let s = model.open(Instant::now()).unwrap();
+        model.finished(s, Ok(a.into()));
+        let s = model.refresh().unwrap();
+        model.finished(s, Ok(b.into()));
+        assert_eq!(
+            model.phase(),
+            &Phase::Ready(a.into()),
+            "the shown one stays"
+        );
+        let s = model.refresh().unwrap();
+        model.finished(s, Ok(c.into()));
+        assert_eq!(
+            model.phase(),
+            &Phase::Ready(c.into()),
+            "a real change shows"
+        );
+        assert!(!same_chart(a, "{"), "what does not parse is not the same");
     }
 
     #[test]
@@ -796,11 +920,11 @@ mod tests {
         };
         assert_eq!(
             page_prefs(&prefs, false),
-            r#"{"view":"themes","ink":"nuit","animate":true}"#
+            r#"{"view":"themes","ink":"nuit","animate":true,"reduceMotion":false}"#
         );
         assert_eq!(
             page_prefs(&prefs, true),
-            r#"{"view":"themes","ink":"nuit","animate":false}"#
+            r#"{"view":"themes","ink":"nuit","animate":false,"reduceMotion":true}"#
         );
         let mut store: BTreeMap<String, String> = BTreeMap::new();
         let mut settings = Settings::load(&store);
@@ -906,6 +1030,166 @@ mod tests {
         );
     }
 
+    const JOIN: &str = r#"{"op":"join","feed":3,"land":{"id":1,"name":"Trio"}}"#;
+
+    fn edit_message(seq: serde_json::Value, edit: serde_json::Value) -> String {
+        serde_json::json!({"type": "edit", "seq": seq, "edit": edit}).to_string()
+    }
+
+    fn done() -> ChartEditDone {
+        ChartEditDone {
+            label: "Join Trio".into(),
+            undo: ChartEdit::Patch {
+                label: "Leave Trio".into(),
+                changes: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn bridge_accepts_an_edit() {
+        assert_eq!(
+            handle(&edit_message(7.into(), JOIN.into())),
+            Some(ChartAction::Edit {
+                seq: 7,
+                edit: JOIN.into()
+            })
+        );
+        assert_eq!(
+            handle(r#"{"type":"edit","seq":2.0,"edit":"{\"op\":\"new_sea\",\"name\":\"Kites\"}"}"#),
+            Some(ChartAction::Edit {
+                seq: 2,
+                edit: r#"{"op":"new_sea","name":"Kites"}"#.into()
+            })
+        );
+        assert_eq!(handle(r#"{"type":"survey"}"#), Some(ChartAction::Survey));
+        // The cap is in bytes and inclusive.
+        let name = "a".repeat(MAX_EDIT - r#"{"op":"new_sea","name":""}"#.len());
+        let at_cap = format!(r#"{{"op":"new_sea","name":"{name}"}}"#);
+        assert_eq!(at_cap.len(), MAX_EDIT);
+        assert!(handle(&edit_message(1.into(), at_cap.clone().into())).is_some());
+    }
+
+    #[test]
+    fn bridge_refuses_malformed_edits() {
+        for seq in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(
+                handle(&edit_message(seq.clone(), JOIN.into())),
+                None,
+                "{seq}"
+            );
+        }
+        assert_eq!(handle(r#"{"type":"edit","edit":"{}"}"#), None, "no seq");
+        assert_eq!(handle(r#"{"type":"edit","seq":1}"#), None, "no edit");
+        for edit in [
+            serde_json::json!(5),
+            serde_json::json!({"op": "join"}),
+            serde_json::json!("not json"),
+            serde_json::json!("[]"),
+            serde_json::json!(r#"{"feed":3}"#),
+            serde_json::json!(r#"{"op":"drop_tables"}"#),
+            serde_json::json!(r#"{"op":"join","feed":"x","land":{"id":1,"name":"T"}}"#),
+        ] {
+            assert_eq!(
+                handle(&edit_message(1.into(), edit.clone())),
+                None,
+                "{edit}"
+            );
+        }
+        // One byte over the cap, and multibyte text counted in bytes, not characters.
+        let name = "a".repeat(MAX_EDIT - r#"{"op":"new_sea","name":""}"#.len() + 1);
+        let over = format!(r#"{{"op":"new_sea","name":"{name}"}}"#);
+        assert_eq!(handle(&edit_message(1.into(), over.into())), None);
+        let name = "é".repeat(MAX_EDIT / 2);
+        let wide = format!(r#"{{"op":"new_sea","name":"{name}"}}"#);
+        assert!(wide.chars().count() < MAX_EDIT && wide.len() > MAX_EDIT);
+        assert_eq!(handle(&edit_message(1.into(), wide.into())), None);
+    }
+
+    #[test]
+    fn edit_results_are_the_page_format() {
+        let ok: Value = serde_json::from_str(&edit_result(4, &RunEnd::Done(done()))).unwrap();
+        assert_eq!(ok["seq"], 4);
+        assert_eq!(ok["ok"], true);
+        assert_eq!(ok["done"]["event"], "chart_edit");
+        assert_eq!(ok["done"]["label"], "Join Trio");
+        assert_eq!(ok["done"]["undo"]["op"], "patch");
+        assert!(ok.get("error").is_none());
+
+        let refused = RunEnd::<ChartEditDone>::Failed(RunFailure {
+            message: "The chart changed; nothing was done.".into(),
+            refusal: true,
+        });
+        assert_eq!(
+            edit_result(5, &refused),
+            r#"{"seq":5,"ok":false,"refused":true,"error":"The chart changed; nothing was done."}"#
+        );
+        let failed = RunEnd::<ChartEditDone>::Failed(RunFailure {
+            message: BUSY.into(),
+            refusal: false,
+        });
+        assert_eq!(
+            edit_result(6, &failed),
+            format!(r#"{{"seq":6,"ok":false,"refused":false,"error":"{BUSY}"}}"#)
+        );
+        // Turned away: there is no session (final review Minor 7: not "busy").
+        assert_eq!(
+            edit_result(8, &RunEnd::<ChartEditDone>::Refused),
+            format!(r#"{{"seq":8,"ok":false,"refused":false,"error":"{NOT_OPEN}"}}"#)
+        );
+    }
+
+    #[test]
+    fn edited_script_never_splices() {
+        let hostile = "A \"q\" \\ </script><script>alert(1)</script> \u{2028}\u{2029}\n'";
+        let end = RunEnd::<ChartEditDone>::Failed(RunFailure {
+            message: hostile.into(),
+            refusal: true,
+        });
+        let result = edit_result(1, &end);
+        let script = edited_script(&result);
+        assert_eq!(script, format!("Chart.edited({})", js_string(&result)));
+        assert!(!script.contains("</script>"));
+        assert!(!script.contains('\u{2028}') && !script.contains('\u{2029}'));
+        assert!(!script.contains('\n'));
+        // A hostile label in a done event too.
+        let mut d = done();
+        d.label = hostile.into();
+        let script = edited_script(&edit_result(2, &RunEnd::Done(d)));
+        assert!(!script.contains("</script>"));
+        assert!(!script.contains('\u{2028}') && !script.contains('\u{2029}'));
+        // The literal reads back as the result text.
+        let literal = script
+            .strip_prefix("Chart.edited(")
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap();
+        let back: String = serde_json::from_str(literal).unwrap();
+        let parsed: Value = serde_json::from_str(&back).unwrap();
+        assert_eq!(parsed["done"]["label"], hostile);
+    }
+
+    #[test]
+    fn page_prefs_carry_reduce_motion() {
+        let prefs = ChartPrefs {
+            view: ChartView::Harbour,
+            ink: ChartInk::Bleu,
+            animate: true,
+        };
+        let on: Value = serde_json::from_str(&page_prefs(&prefs, true)).unwrap();
+        assert_eq!(on["reduceMotion"], true);
+        assert_eq!(on["animate"], false);
+        let off: Value = serde_json::from_str(&page_prefs(&prefs, false)).unwrap();
+        assert_eq!(off["reduceMotion"], false);
+        assert_eq!(off["animate"], true);
+    }
+
     #[test]
     fn scripts_never_splice_the_document() {
         let hostile =
@@ -931,7 +1215,13 @@ mod tests {
             assert_eq!(file(f.path), Some(&f));
         }
         let html = std::fs::read_to_string(dir.join("index.html")).unwrap();
-        for referenced in ["chart.css", "d3.min.js", "chart-core.js", "chart-draw.js"] {
+        for referenced in [
+            "chart.css",
+            "d3.min.js",
+            "chart-core.js",
+            "chart-survey.js",
+            "chart-draw.js",
+        ] {
             assert!(
                 html.contains(&format!("\"{referenced}\"")) && file(referenced).is_some(),
                 "{referenced}"
@@ -980,6 +1270,7 @@ mod tests {
             "new QWebChannel(qt.webChannelTransport",
             "channel.objects.ressac",
             "JSON.stringify(message)",
+            "classList.add(\"qt-cursors\")",
         ] {
             assert!(ADAPTER_SCRIPT.contains(part), "{part}");
         }

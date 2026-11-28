@@ -1,0 +1,217 @@
+{
+  "about": "Name rules of the territory editor, run by the Rust core (store/chart_edit.rs) and the page (chart-core.js). raw: the typed name; kind: land or sea; existing: the rows of that kind (lands {id, name}, seas {id, name, sea}); self: the id of the row being renamed, or null for a new one (it is never compared with itself). A name is trimmed (Rust str::trim, Unicode White_Space), has 1 to 40 characters (Unicode scalar values) and must differ, compared without case after trimming, from every other land's name, or from every other sea's name and sea name. expect: the cleaned name, or the refusal text.",
+  "cases": [
+    {
+      "case": "plain",
+      "raw": "Apple Press",
+      "kind": "land",
+      "existing": [],
+      "self": null,
+      "expect": {
+        "name": "Apple Press"
+      }
+    },
+    {
+      "case": "padded",
+      "raw": "  Apple Press \t",
+      "kind": "land",
+      "existing": [],
+      "self": null,
+      "expect": {
+        "name": "Apple Press"
+      }
+    },
+    {
+      "case": "empty",
+      "raw": "",
+      "kind": "land",
+      "existing": [],
+      "self": null,
+      "expect": {
+        "error": "A name has 1 to 40 characters."
+      }
+    },
+    {
+      "case": "blanks only",
+      "raw": " \t\n\u3000 ",
+      "kind": "sea",
+      "existing": [],
+      "self": null,
+      "expect": {
+        "error": "A name has 1 to 40 characters."
+      }
+    },
+    {
+      "case": "40 astral characters",
+      "raw": "🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊",
+      "kind": "land",
+      "existing": [],
+      "self": null,
+      "expect": {
+        "name": "🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊"
+      }
+    },
+    {
+      "case": "41 astral characters",
+      "raw": "🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊",
+      "kind": "sea",
+      "existing": [],
+      "self": null,
+      "expect": {
+        "error": "A name has 1 to 40 characters."
+      }
+    },
+    {
+      "case": "U+0085 around a name is trimmed",
+      "raw": "\u0085Kites\u0085",
+      "kind": "land",
+      "existing": [],
+      "self": null,
+      "expect": {
+        "name": "Kites"
+      }
+    },
+    {
+      "case": "U+FEFF before a name is kept",
+      "raw": "\ufeffKites",
+      "kind": "land",
+      "existing": [],
+      "self": null,
+      "expect": {
+        "name": "\ufeffKites"
+      }
+    },
+    {
+      "case": "U+FEFF counts as a character",
+      "raw": "\ufeffaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "kind": "sea",
+      "existing": [],
+      "self": null,
+      "expect": {
+        "error": "A name has 1 to 40 characters."
+      }
+    },
+    {
+      "case": "U+FEFF and 39 characters fit",
+      "raw": "\ufeffaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "kind": "sea",
+      "existing": [],
+      "self": null,
+      "expect": {
+        "name": "\ufeffaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "case": "a land clashes without case",
+      "raw": "apple press",
+      "kind": "land",
+      "existing": [
+        {
+          "id": 1,
+          "name": "APPLE PRESS"
+        }
+      ],
+      "self": null,
+      "expect": {
+        "error": "A land with that name already exists."
+      }
+    },
+    {
+      "case": "a land clashes after trimming",
+      "raw": "  Apple Press ",
+      "kind": "land",
+      "existing": [
+        {
+          "id": 1,
+          "name": "APPLE PRESS"
+        }
+      ],
+      "self": null,
+      "expect": {
+        "error": "A land with that name already exists."
+      }
+    },
+    {
+      "case": "a sea clashes with a sea name without case",
+      "raw": "sea of kites",
+      "kind": "sea",
+      "existing": [
+        {
+          "id": 1,
+          "name": "Kites",
+          "sea": "SEA OF KITES"
+        }
+      ],
+      "self": null,
+      "expect": {
+        "error": "A sea with that name already exists."
+      }
+    },
+    {
+      "case": "a sea clashes with a theme name without case",
+      "raw": "SEA OF KITES",
+      "kind": "sea",
+      "existing": [
+        {
+          "id": 1,
+          "name": "Sea of kites",
+          "sea": "SEA OF PAPER"
+        }
+      ],
+      "self": null,
+      "expect": {
+        "error": "A sea with that name already exists."
+      }
+    },
+    {
+      "case": "a land renamed to its own name in another case",
+      "raw": "Apple Press",
+      "kind": "land",
+      "existing": [
+        {
+          "id": 1,
+          "name": "APPLE PRESS"
+        }
+      ],
+      "self": 1,
+      "expect": {
+        "name": "Apple Press"
+      }
+    },
+    {
+      "case": "a sea renamed to its own name in another case",
+      "raw": "Sea of Kites",
+      "kind": "sea",
+      "existing": [
+        {
+          "id": 1,
+          "name": "Kites",
+          "sea": "SEA OF KITES"
+        }
+      ],
+      "self": 1,
+      "expect": {
+        "name": "Sea of Kites"
+      }
+    },
+    {
+      "case": "a renamed land still clashes with another",
+      "raw": "kites",
+      "kind": "land",
+      "existing": [
+        {
+          "id": 1,
+          "name": "APPLE PRESS"
+        },
+        {
+          "id": 2,
+          "name": "KITES"
+        }
+      ],
+      "self": 1,
+      "expect": {
+        "error": "A land with that name already exists."
+      }
+    }
+  ]
+}

@@ -33,6 +33,10 @@ void ressac_install_key_filter();
 // QQuickWindow (`modifiers` are Qt::KeyboardModifier bits); the result of the KeyPress's sendEvent (the event was handled by the filter or delivered and accepted), not proof that the filter consumed it.
 bool ressac_send_key(std::int32_t key, std::uint32_t modifiers, rust::Str text);
 
+// The same, to the visible QQuickWindow whose title() equals `title` (the Sea Chart's, not the first
+// visible window's); false when there is none.
+bool ressac_send_key_to(rust::Str title, std::int32_t key, std::uint32_t modifiers, rust::Str text);
+
 // QSettings on an explicit INI file, opened per call. `set` and `remove` sync and report
 // whether the file was written.
 rust::String ressac_settings_default_file();

@@ -34,6 +34,7 @@ fn mean(err: &str, variant: &str, step: u32) -> f64 {
 
 #[test]
 fn the_painted_grid_is_exact_at_every_size_and_scale() {
+    let _turn = one_app_at_a_time();
     for scale in ["1", "2"] {
         for size in ["15", "20", "25", "30"] {
             let run = Run::new();
@@ -132,6 +133,7 @@ fn the_painted_grid_is_exact_at_every_size_and_scale() {
 /// up to three times: one inverted run is the host, three in a row are the code.
 #[test]
 fn the_painted_rows_scroll_faster_than_text_per_span() {
+    let _turn = one_app_at_a_time();
     for scale in ["1", "2"] {
         let mut failures = Vec::new();
         let err = loop {

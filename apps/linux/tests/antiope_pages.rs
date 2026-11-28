@@ -72,6 +72,7 @@ fn tallest_run(shot: &image::RgbImage, rect: Rect, colour: [u8; 3]) -> u32 {
 
 #[test]
 fn the_antiope_pages_walk_reads_every_page() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     prepare(&db);

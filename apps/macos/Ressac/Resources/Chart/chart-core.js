@@ -276,9 +276,9 @@
   function territories(nodes, data) {
     const byId = new Map(nodes.map(n => [n.id, n]));
     const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-    const result = (name, links, continent) => {
+    const result = (name, links, continent, id) => {
       if (!links.length) return null;
-      return {name, continent, links, groups: groups(links), members: [...new Set(links.flat())]};
+      return {id, name, continent, links, groups: groups(links), members: [...new Set(links.flat())]};
     };
     const families = data.territories.map(t => {
       const members = t.feeds.map(id => byId.get(id)).filter(Boolean);
@@ -291,7 +291,7 @@
         chain.push(left.splice(bi, 1)[0]);
       }
       const links = chain.slice(1).map((n, i) => [chain[i], n]).filter(([a, b]) => dist(a, b) < MAXLINK * 1.2);
-      return result(t.name, links, false);
+      return result(t.name, links, false, t.id);
     });
     const continents = data.continents.map(c => {
       const members = nodes.filter(n => n.theme === c.theme);
@@ -304,7 +304,7 @@
         if (best[2] < MAXLINK) links.push([best[0], b]);
         inTree.push(b);
       }
-      return result(c.name, links, true);
+      return result(c.name, links, true, c.id);
     });
     return families.concat(continents).filter(Boolean);
   }
@@ -415,10 +415,11 @@
       }
     });
 
-    // seas: on their bearing, or above and below their archipelago, in the most open water found there
+    // seas: on their bearing, or above and below their archipelago, in the most open water found there; in italic
+    // capitals (spec rule 5: a sea typed in lower case reads like the imported ones; water names keep the italic)
     seas(data).filter(s => s.count > 0).forEach(s => {
       const n = s.count, track = n > 8 ? 7 : 4, size = n > 20 ? 26 : n > 8 ? 21 : 17, h = n > 20 ? 26 : 21;
-      const f = font(size, FONTS.body, "italic 500"), w = spacedWidth(s.sea, f, track), spots = [];
+      const text = s.sea.toUpperCase(), f = font(size, FONTS.body, "italic 500"), w = spacedWidth(text, f, track), spots = [];
       if (harbour) {
         const mid = s.from + s.span / 2;
         [1.06, 1, .94, 1.12, .88, .82].forEach(k => [0, .05, -.05].forEach(da =>
@@ -427,7 +428,7 @@
       const ok = spots.map(([x, y]) => [Math.max(w / 2 + 50, Math.min(W - w / 2 - 50, x)), y])
         .map(([x, y]) => [x, y, box(x, y, w, h)]).filter(([, , b]) => !hit(b));
       const best = ok.find(([, , b]) => !overIsland(b) && !onLand(b)) || ok.find(([, , b]) => !onLand(b)) || ok[0]; // water names stay on the water
-      if (best) put({kind: "sea", key: s.key, text: s.sea, x: best[0], y: best[1], size, font: f, track, box: best[2]});
+      if (best) put({kind: "sea", key: s.key, text, x: best[0], y: best[1], size, font: f, track, box: best[2]});
     });
 
     // territories: small capitals laid along their land, on the longest link that has room
@@ -511,10 +512,311 @@
     return ramps.get(name)(heatLevel(activity, maxActivity));
   }
 
+  // ---------- the territory editor: texts, names, wire format and history (pure) ----------
+  // Every refusal text lives once, in crates/ressac-core/src/error.rs; chart-edit.test.cjs checks these copies against it.
+  const EDIT_TEXT = Object.freeze({
+    changed: "The chart changed; nothing was done.",
+    landTaken: "A land with that name already exists.",
+    seaTaken: "A sea with that name already exists.",
+    nameLength: "A name has 1 to 40 characters.",
+    newLandTwo: "A new land needs at least two feeds.",
+    continentHint: name => `Part of the continent ${name}: move it to another sea, or turn the continent back into open water.`,
+    continentRemoved: "Its continent will be removed.", // page copy only (the confirmation), not a core error
+  });
+  const MAX_EDIT = 65536; // the most bytes of edit JSON any path accepts (the core's MAX_EDIT)
+  const PENDING_MS = 5000; // an ok result keeps the edit pending this long, or until the next Chart.update
+  const NAME_MAX = 40;
+
+  // the size of an edit counts UTF-8 bytes, like the CLI's limit, never UTF-16 units
+  const editBytes = text => new TextEncoder().encode(String(text)).length;
+  const editTooBig = text => editBytes(text) > MAX_EDIT;
+
+  // Rust's str::trim: Unicode White_Space at both ends (U+0085 goes, U+FEFF stays)
+  const trimName = raw => String(raw).replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+
+  // the name rules of the core (chart_edit.rs): trimmed, 1 to 40 code points, unique without case.
+  // A land differs from every other land (continents included); a sea from every other sea's name and sea name.
+  function checkName(raw, kind, ledger, selfId) {
+    const name = trimName(raw), n = [...name].length;
+    if (n < 1 || n > NAME_MAX) return {error: EDIT_TEXT.nameLength};
+    const low = name.toLowerCase(), same = text => String(text ?? "").trim() !== "" && trimName(text).toLowerCase() === low;
+    const clash = kind === "land"
+      ? (ledger?.lands || []).some(l => l.id !== selfId && same(l.name))
+      : (ledger?.seas || []).some(t => t.id !== selfId && (same(t.name) || same(t.sea)));
+    return clash ? {error: kind === "land" ? EDIT_TEXT.landTaken : EDIT_TEXT.seaTaken} : {name};
+  }
+
+  function deleteSeaQuestion(sea, count, hasContinent) {
+    const head = `Delete the sea ${sea}?`;
+    if (count > 0) {
+      return `${head} Its ${count} ${count === 1 ? "feed" : "feeds"} will be uncharted${hasContinent ? ", and its continent removed." : "."}`;
+    }
+    return hasContinent ? `${head} ${EDIT_TEXT.continentRemoved}` : head;
+  }
+
+  // lookups over the snapshot's ledger (every sea and every land, empty or hidden ones included)
+  function ledgerIndex(data) {
+    const seas = data?.ledger?.seas || [], lands = data?.ledger?.lands || [];
+    const landByFeed = new Map(), continents = new Map();
+    lands.forEach(l => {
+      if (l.continent) continents.set(l.continent, l);
+      else (l.feeds || []).forEach(id => { if (!landByFeed.has(id)) landByFeed.set(id, l); });
+    });
+    const seaById = id => seas.find(t => t.id === id) || null;
+    const landById = id => lands.find(l => l.id === id) || null;
+    return {
+      landOf: feedId => landByFeed.get(feedId) || null,
+      continentOf: themeKey => continents.get(themeKey) || null,
+      seaById, landById,
+      seaRef: key => { const t = key == null ? null : seas.find(x => x.key === key); return t ? {id: t.id, key: t.key, sea: t.sea} : null; },
+      landRef: id => { const l = landById(id); return l ? {id: l.id, name: l.name} : null; },
+    };
+  }
+
+  // one builder per op: the wire object of « Names decided here » (every Option written out, null included)
+  const edits = Object.freeze({
+    join: (feed, land) => ({op: "join", feed, land}),
+    leave: (feed, land) => ({op: "leave", feed, land}),
+    found: (name, feeds) => ({op: "found", name, feeds}),
+    renameLand: (land, name) => ({op: "rename_land", land, name}),
+    deleteLand: land => ({op: "delete_land", land}),
+    makeContinent: (sea, name) => ({op: "make_continent", sea, name}),
+    setSea: (feed, from, to) => ({op: "set_sea", feed, from: from ?? null, to: to ?? null}),
+    newSea: name => ({op: "new_sea", name}),
+    renameSea: (sea, name) => ({op: "rename_sea", sea, name}),
+    orderSeas: seas => ({op: "order_seas", seas}),
+    deleteSea: sea => ({op: "delete_sea", sea}),
+    patch: (label, changes) => ({op: "patch", label, changes}),
+  });
+
+  // The one island an edit moves, or null: a join, a leave or a set_sea, or a patch (an undo or a redo) whose member
+  // and feed-sea changes name a single feed. The page rings that island on the next chart (recette fix 4).
+  function movedFeed(edit) {
+    if (!edit || typeof edit !== "object") return null;
+    if (edit.op === "join" || edit.op === "leave" || edit.op === "set_sea") return Number.isInteger(edit.feed) ? edit.feed : null;
+    if (edit.op !== "patch" || !Array.isArray(edit.changes)) return null;
+    const feeds = new Set();
+    edit.changes.forEach(c => {
+      if (c && c.kind === "member") feeds.add(c.feed);
+      else if (c && c.kind === "feed_seas" && Array.isArray(c.feeds)) c.feeds.forEach(f => feeds.add(f));
+    });
+    const [only] = feeds;
+    return feeds.size === 1 && Number.isInteger(only) ? only : null;
+  }
+
+  // How a refused result reads: "name" (the form stays open with the text), "invalid" (a validation message,
+  // shown as is), "continent" (the hint), "changed" (any other refusal), "failed" (not a refusal: the edit did not run).
+  function editFailure(result) {
+    if (!result || result.refused !== true) return "failed";
+    const text = String(result.error ?? "");
+    if (text === EDIT_TEXT.landTaken || text === EDIT_TEXT.seaTaken || text === EDIT_TEXT.nameLength) return "name";
+    if (text === EDIT_TEXT.newLandTwo) return "invalid";
+    if (text.startsWith("Part of the continent ")) return "continent";
+    return "changed";
+  }
+
+  // The undo and redo stacks: {undo: Record[], redo: Record[]}, Record = {label, edit} where edit is the patch to
+  // send. Pure: every function returns a new object. An edit with nothing to undo (an empty patch) is no step.
+  const history = Object.freeze({
+    empty: () => ({undo: [], redo: []}),
+    record(h, done) {
+      if (!done?.undo || (done.undo.op === "patch" && !(done.undo.changes || []).length)) return h;
+      return {undo: [...h.undo, {label: done.label, edit: done.undo}], redo: []};
+    },
+    // the record `which` ("undo" | "redo") would send, with the history lacking it; null when there is none
+    step(h, which) {
+      const list = h[which];
+      if (!list.length) return null;
+      return {record: list[list.length - 1], rest: {...h, [which]: list.slice(0, -1)}};
+    },
+    // the step succeeded: `record` leaves its stack (if still on top) and its inverse, done.undo, goes on the other
+    land(h, which, record, done) {
+      const other = which === "undo" ? "redo" : "undo", list = h[which];
+      const kept = list.length && list[list.length - 1] === record ? list.slice(0, -1) : list;
+      return {...h, [which]: kept, [other]: [...h[other], {label: record.label, edit: done.undo}]};
+    },
+    titles(h) {
+      const top = list => (list.length ? list[list.length - 1].label : null);
+      return {undo: top(h.undo) === null ? null : `Undo ${top(h.undo)}`, redo: top(h.redo) === null ? null : `Redo ${top(h.redo)}`};
+    },
+  });
+
+  // ---------- gestures: presses, loops, drop targets and the cartouche's spot (pure geometry) ----------
+  const STROKE_PX = 4; // a press that strays this far from where it began is a stroke, not a click
+  const LOOP_MIN = 120, LOOP_CLOSE = 40; // chart units: the shortest loop, and how near its end must come to its start
+  const DROP_RING = 12, LINK_REACH = 24; // an island takes a drop within r + 12, a territory's link within 24
+  const MARGIN = 40; // the cartouche keeps this far from the chart's edge
+  const pt = p => (Array.isArray(p) ? {x: p[0], y: p[1]} : p);
+
+  // "click" until any point is STROKE_PX or more from the first, whatever lies under the press (points in screen px)
+  function classifyPress(points) {
+    if (!points || points.length < 2) return "click";
+    const a = pt(points[0]);
+    return points.some(p => Math.hypot(pt(p).x - a.x, pt(p).y - a.y) >= STROKE_PX) ? "stroke" : "click";
+  }
+
+  // a loop is a path of at least LOOP_MIN units whose end comes back within LOOP_CLOSE of its start (chart units)
+  function closedLoop(points) {
+    if (!points || points.length < 3) return false;
+    const ps = points.map(pt);
+    let length = 0;
+    for (let i = 1; i < ps.length; i++) length += Math.hypot(ps[i].x - ps[i - 1].x, ps[i].y - ps[i - 1].y);
+    const a = ps[0], z = ps[ps.length - 1];
+    return length >= LOOP_MIN && Math.hypot(z.x - a.x, z.y - a.y) <= LOOP_CLOSE;
+  }
+
+  // The islands a loop selects: those whose centre lies inside it (d3.polygonContains), in any sea, as feed ids in
+  // the order of data.feeds; continental islands are left out (rule 2). `continentSea` is the sea's key when the
+  // loop holds every island of exactly one sea, at least two, and that sea has no continent; else null.
+  function loopSelection(nodes, loop, data) {
+    const none = {islands: [], continentSea: null};
+    const poly = (loop || []).map(pt).map(p => [p.x, p.y]);
+    if (poly.length < 3) return none;
+    const D = d3(), inside = nodes.filter(n => D.polygonContains(poly, [n.x, n.y]));
+    const continental = new Set((data.continents || []).map(c => c.theme));
+    const picked = new Set(inside.filter(n => !continental.has(n.theme)).map(n => n.id));
+    const islands = data.feeds.map(f => f.id).filter(id => picked.has(id));
+    const seaKeys = new Set(inside.map(n => n.theme));
+    let continentSea = null;
+    if (inside.length >= 2 && seaKeys.size === 1) {
+      const key = inside[0].theme;
+      if (key !== null && !continental.has(key) && nodes.filter(n => n.theme === key).length === inside.length) continentSea = key;
+    }
+    return {islands, continentSea};
+  }
+
+  // the territory, continent or sea name under (x, y): the first placement (by priority) whose box holds the point
+  function nameAt(placements, x, y) {
+    return placements.find(p => (p.kind === "territory" || p.kind === "continent" || p.kind === "sea")
+      && x >= p.box[0] && x <= p.box[2] && y >= p.box[1] && y <= p.box[3]) || null;
+  }
+
+  /**
+   * What dropTarget reads: the scene Task 11's buildScene returns (its tests feed the real one to sceneProblems).
+   * The scene is GEOMETRY ONLY, in chart units (not screen px): which land an island belongs to is read from the
+   * ledger (`data`), never from the scene, because `members` and `links` hold only the islands that appear in a
+   * link the chart kept (links longer than the land can stretch are dropped), not every island of the land.
+   * `nodes` must be at their home positions (place's x, y), never following the pointer: the dragged island is
+   * itself one of them, and dropping on it is a no-op.
+   * @typedef {object} Scene
+   * @property {"harbour"|"themes"} view
+   * @property {SceneNode[]} nodes                 every island (place's nodes), at home
+   * @property {SceneLand[]} territories           territories() of those nodes, continents included
+   * @property {{at: function(number, number): number}} ground   field(): at(x, y) < .5 is open water
+   * @typedef {object} SceneNode  {id: feed id, theme: sea key or null, x, y, r: finite numbers, r > 0}
+   * @typedef {object} SceneLand  {id: ledger land id, name, continent: boolean, links: [SceneNode, SceneNode][],
+   *   members: SceneNode[] (linked islands only)}
+   */
+  function sceneProblems(scene, data) {
+    const out = [];
+    if (!scene || typeof scene !== "object") return ["scene: not an object"];
+    if (scene.view !== "harbour" && scene.view !== "themes") out.push("view: not harbour or themes");
+    const ids = new Set();
+    if (!Array.isArray(scene.nodes)) out.push("nodes: not an array");
+    else scene.nodes.forEach((n, i) => {
+      const ok = n && Number.isFinite(n.id) && Number.isFinite(n.x) && Number.isFinite(n.y) && Number.isFinite(n.r) && n.r > 0
+        && (n.theme === null || typeof n.theme === "string");
+      if (!ok) out.push(`node ${i}: needs a numeric id, x, y, r > 0 and a theme string or null`);
+      else ids.add(n.id);
+    });
+    if (!Array.isArray(scene.territories)) out.push("territories: not an array");
+    else scene.territories.forEach((t, i) => {
+      const known = n => n && ids.has(n.id);
+      if (!t || !Number.isFinite(t.id) || typeof t.name !== "string" || typeof t.continent !== "boolean") out.push(`territory ${i}: needs an id, a name and a continent flag`);
+      else if (!Array.isArray(t.members) || !t.members.every(known)) out.push(`territory ${i}: members must be scene nodes`);
+      else if (!Array.isArray(t.links) || !t.links.every(l => Array.isArray(l) && l.length === 2 && l.every(known))) out.push(`territory ${i}: links must be pairs of scene nodes`);
+    });
+    if (data && Array.isArray(scene.nodes)) {
+      const missing = data.feeds.filter(f => !ids.has(f.id));
+      if (missing.length) out.push(`nodes: ${missing.length} feed(s) of the data have no node`);
+    }
+    if (!scene.ground || typeof scene.ground.at !== "function") out.push("ground: needs an at(x, y) function");
+    return out;
+  }
+
+  const segDist = (x, y, a, b) => {
+    const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy || 1;
+    const u = Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / l2));
+    return Math.hypot(x - a.x - u * dx, y - a.y - u * dy);
+  };
+
+  // Where a dragged island lands when dropped at (x, y). Precedence: an island within r + 12; a territory's link
+  // within 24 (the nearest); in the themes view the nearest sea cell if it is not the island's own; open water for
+  // an island in a land (leave); else none. Rule 2 then turns join, pair and leave into refuse for a continental
+  // island. Which land an island belongs to comes from the ledger in `data` (the scene is geometry only: see
+  // Scene). `land` is the ledger's land ({id, name, continent, feeds}); `with` is a feed id.
+  function dropTarget(scene, data, dragged, x, y) {
+    const led = ledgerIndex(data), seaLand = theme => (theme == null ? null : led.continentOf(theme));
+    const ownLand = led.landOf(dragged.id), ownContinent = seaLand(dragged.theme);
+    const found = (() => {
+      const hit = scene.nodes.reduce((best, n) => {
+        const d = Math.hypot(n.x - x, n.y - y) - n.r;
+        return d <= DROP_RING && (!best || d < best.d) ? {n, d} : best;
+      }, null);
+      if (hit) {
+        const n = hit.n, theirs = led.landOf(n.id);
+        if (n.id === dragged.id) return {kind: "none"};
+        if (ownLand && theirs && ownLand.id === theirs.id) return {kind: "none"}; // its own land
+        if (ownContinent && n.theme === dragged.theme) return {kind: "none"}; // its own continent
+        if (theirs) return {kind: "join", land: theirs};
+        if (seaLand(n.theme)) return {kind: "none"}; // an island of a continent
+        return {kind: "pair", with: n.id};
+      }
+      let near = null;
+      for (const t of scene.territories) for (const [a, b] of t.links) {
+        const d = segDist(x, y, a, b);
+        if (d <= LINK_REACH && (!near || d < near.d)) near = {t, d};
+      }
+      if (near) {
+        const t = near.t, own = t.continent ? ownContinent && ownContinent.id === t.id : ownLand && ownLand.id === t.id;
+        if (own || t.continent) return {kind: "none"};
+        const land = led.landById(t.id);
+        return land ? {kind: "join", land} : {kind: "none"};
+      }
+      if (scene.view === "themes") {
+        const cell = seas(data).reduce((b, s) => (Math.hypot(s.x - x, s.y - y) < Math.hypot(b.x - x, b.y - y) ? s : b));
+        if (cell.key !== dragged.theme) return {kind: "sea", key: cell.key};
+      }
+      if (scene.ground.at(x, y) < .5) {
+        const land = ownLand || ownContinent;
+        if (land) return {kind: "leave", land};
+      }
+      return {kind: "none"};
+    })();
+    if (found.kind === "join" || found.kind === "pair" || found.kind === "leave") {
+      if (ownContinent) return {kind: "refuse", hint: EDIT_TEXT.continentHint(ownContinent.name)};
+    }
+    return found;
+  }
+
+  // The four places a cartouche of `size` ({w, h}) may go beside a loop's box [x0, y0, x1, y1]: right, left,
+  // below, above, as [x0, y0, x1, y1], not yet checked against the margin or the labels.
+  function cartoucheSpots(box, size) {
+    const gap = 12, cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
+    const clampX = x => Math.max(MARGIN, Math.min(W - MARGIN - size.w, x)), clampY = y => Math.max(MARGIN, Math.min(H - MARGIN - size.h, y));
+    const right = [box[2] + gap, clampY(cy - size.h / 2)], left = [box[0] - gap - size.w, clampY(cy - size.h / 2)];
+    const below = [clampX(cx - size.w / 2), box[3] + gap], above = [clampX(cx - size.w / 2), box[1] - gap - size.h];
+    return [right, left, below, above].map(([x, y]) => [x, y, x + size.w, y + size.h]);
+  }
+
+  // The centre of the first spot (right, left, below, above) inside the margin and meeting no placement's box;
+  // when none is free, the chart's top-left corner inside the margin.
+  function cartouchePlace(box, placements, size) {
+    const meets = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    const spot = cartoucheSpots(box, size).find(s => s[0] >= MARGIN && s[1] >= MARGIN && s[2] <= W - MARGIN && s[3] <= H - MARGIN
+      && !placements.some(p => meets(s, p.box)));
+    return spot ? {x: (spot[0] + spot[2]) / 2, y: (spot[1] + spot[3]) / 2} : {x: MARGIN + size.w / 2, y: MARGIN + size.h / 2};
+  }
+
+  // ink, spring-back and the drawing flourish run only when neither the app's preference nor the system asks for none
+  const editMotion = (prefs, reducedMatches) => !(prefs && prefs.reduceMotion) && !reducedMatches;
+
   return Object.freeze({
     useD3,
     W, H, CELL, GW, GH, PORT, RX, RY, RINGS, RADIUS, ISOBATHS, CARTOUCHE, COMPASS, UNCHARTED, FONTS, INKS,
     font, hash, mulberry, fbm, ringFrac,
     seas, place, territories, field, labels, heatLevel, heat,
+    classifyPress, closedLoop, loopSelection, nameAt, sceneProblems, dropTarget, cartoucheSpots, cartouchePlace, editMotion,
+    EDIT_TEXT, MAX_EDIT, PENDING_MS, editBytes, editTooBig, trimName, checkName, deleteSeaQuestion, ledgerIndex, edits, movedFeed, editFailure, history,
   });
 });

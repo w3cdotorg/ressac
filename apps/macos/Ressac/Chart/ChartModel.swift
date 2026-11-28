@@ -52,6 +52,19 @@ struct CLIChartRunner: ChartRunner {
         self.resurvey = resurvey
     }
 
+    /// The app's own edit was just written: drops the scheduled run (the edit's own notice raised it) and the running
+    /// one, which may have read the chart before the edit's commit and would show it after the reply, then surveys
+    /// afresh. The notices that come later (the poll) survey again, but `load` publishes nothing when the chart is
+    /// unchanged, so one edit is one `Chart.update`; a real change in between is published as usual.
+    func refreshAfterEdit() {
+        scheduled?.cancel()
+        scheduled = nil
+        run?.cancel()
+        run = nil
+        rerunAfterRun = false
+        refresh()
+    }
+
     /// Runs now (window open, Retry). Asked during a run, it follows that run.
     func refresh() {
         guard run == nil else {
@@ -123,7 +136,10 @@ struct CLIChartRunner: ChartRunner {
                 throw ChartError.unsupportedVersion(version)
             }
             lastRefreshError = nil
-            phase = .ready(json: String(decoding: data, as: UTF8.self))
+            let json = String(decoding: data, as: UTF8.self)
+            // A survey that differs only by its clock (`surveyed_at`) is not a new chart: no redraw.
+            if case let .ready(current) = phase, Self.sameChart(current, json) { return }
+            phase = .ready(json: json)
         } catch {
             guard !Task.isCancelled else { return }
             let message = Self.message(for: error)
@@ -133,6 +149,17 @@ struct CLIChartRunner: ChartRunner {
             if case .ready = phase { return }
             phase = .failed(message)
         }
+    }
+
+    /// True when both documents are equal apart from `surveyed_at`.
+    static func sameChart(_ a: String, _ b: String) -> Bool {
+        func object(_ text: String) -> NSDictionary? {
+            guard var dictionary = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] else { return nil }
+            dictionary["surveyed_at"] = nil
+            return dictionary as NSDictionary
+        }
+        guard let x = object(a), let y = object(b) else { return false }
+        return x.isEqual(y)
     }
 
     private struct Versioned: Decodable {

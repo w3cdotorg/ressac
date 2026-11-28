@@ -48,7 +48,7 @@ QQC2.ApplicationWindow {
         })
     }
 
-    function runPage(script) { web.runJavaScript(script) }
+    function runPage(script, done) { if (done) web.runJavaScript(script, done); else web.runJavaScript(script) }
 
     QtObject {
         id: relay
@@ -78,11 +78,13 @@ QQC2.ApplicationWindow {
             qwebchannel.sourceUrl = "qrc:/qtwebchannel/qwebchannel.js"
             qwebchannel.injectionPoint = WebEngineScript.DocumentReady
             qwebchannel.worldId = WebEngineScript.MainWorld
+            qwebchannel.runsOnSubFrames = false          // main frame only: a subframe has no way to post
             const adapter = WebEngine.script()
             adapter.name = "ressac-adapter"
             adapter.sourceCode = Chart.adapterScript
             adapter.injectionPoint = WebEngineScript.DocumentReady
             adapter.worldId = WebEngineScript.MainWorld
+            adapter.runsOnSubFrames = false
             web.userScripts.insert([qwebchannel, adapter])
             web.url = Chart.pageUrl
         }
@@ -105,6 +107,18 @@ QQC2.ApplicationWindow {
             if (level === WebEngineView.ErrorMessageLevel)
                 console.warn("chart page: " + message)
         }
+    }
+
+    // Undo and redo go to the page first: when it has nothing to undo (`Chart.undo()` is false) or a text field is
+    // being edited, the keystroke is the focused text field's own, as the Mac's menu does. The page's toolbar has the
+    // same two buttons in Survey mode; the window has no menu bar.
+    Shortcut {
+        sequences: [StandardKey.Undo]
+        onActivated: web.runJavaScript("Chart.undo()", function (undone) { if (!undone) web.triggerWebAction(WebEngineView.Undo) })
+    }
+    Shortcut {
+        sequences: ["Ctrl+Shift+Z"]
+        onActivated: web.runJavaScript("Chart.redo()", function (redone) { if (!redone) web.triggerWebAction(WebEngineView.Redo) })
     }
 
     Connections {

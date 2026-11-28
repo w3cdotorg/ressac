@@ -253,6 +253,57 @@ func calls(_ stub: Stub) throws -> [String] {
             "garden decide 4 bury", "garden undo", "garden apply-safe",
         ])
     }
+
+    // MARK: chart edits (Task 13)
+
+    private static let editLine = #"{"event":"chart_edit","label":"New Sea Comics","undo":{"op":"delete_sea","sea":"Comics"}}"#
+    private static let newSea = #"{"op":"new_sea","name":"Comics"}"#
+
+    @Test func chart_edit_runs_chart_apply() async throws {
+        let (state, _, stub) = try makeState(stub: """
+            echo "$*" >> "$(dirname "$0")/calls"
+            echo '\(Self.editLine)'
+            """)
+        _ = await state.chartEdit(json: Self.newSea)
+        let last = try #require(try calls(stub).last)
+        #expect(last.hasSuffix(#"chart apply {"op":"new_sea","name":"Comics"}"#), "\(last)")
+    }
+
+    @Test func chart_edit_returns_the_event_line() async throws {
+        let (state, _, _) = try makeState(stub: "echo '\(Self.editLine)'")
+        #expect(await state.chartEdit(json: Self.newSea) == .done(Self.editLine))
+    }
+
+    @Test func chart_edit_refusal_is_returned_not_bannered() async throws {
+        let (state, _, _) = try makeState(stub: "echo 'The chart changed; nothing was done.' >&2; exit 2")
+        #expect(await state.chartEdit(json: Self.newSea) == .refused("The chart changed; nothing was done."))
+        #expect(state.runs.banner == nil)
+    }
+
+    @Test func chart_edit_failure_is_failed() async throws {
+        // A missing database exits 1; a failure is no refusal and shows no banner either.
+        let (state, _, _) = try makeState(stub: "echo 'error: no database' >&2; exit 1")
+        #expect(await state.chartEdit(json: Self.newSea) == .failed("error: no database"))
+        #expect(state.runs.banner == nil)
+    }
+
+    @Test func chart_edit_without_an_event_is_failed() async throws {
+        // Exit 0 and a line that is not JSON: the run is skipped as noise, so there is no event to hand back.
+        let (state, _, _) = try makeState(stub: "echo 'New Sea Comics'")
+        #expect(await state.chartEdit(json: Self.newSea) == .failed("ressac did not report the edit; the chart was reloaded."))
+    }
+
+    @Test func chart_edit_exit_2_from_another_command_is_not_a_refusal() {
+        let request = RunRequest.chartEdit(json: Self.newSea)
+        #expect(request.kind == .short && !request.showsFailureBanner)
+        #expect(request.isRefusal(RunFailure(exitCode: 2, lastStderrLine: "x")))
+        #expect(!request.isRefusal(RunFailure(exitCode: 1, lastStderrLine: "x")))
+    }
+
+    @Test func engine_event_decodes_chart_edit() {
+        #expect(EngineEvent.decode(line: "  \(Self.editLine)\n") == .chartEdit(json: Self.editLine))
+        #expect(EngineEvent.decode(line: #"{"event":"chart_edit"}"#) == .chartEdit(json: #"{"event":"chart_edit"}"#))
+    }
 }
 
 /// `AppState.init` wires `runs.onDatabaseChange` to `notifyExternalChanges()`. Rows written by

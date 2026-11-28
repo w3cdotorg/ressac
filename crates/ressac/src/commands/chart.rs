@@ -8,9 +8,9 @@ use anyhow::Context;
 use chrono::Utc;
 use ressac_core::service::{PRODUCTION_WAYBACK, Ressac};
 use ressac_core::source::FetchLimits;
-use ressac_core::store::{ChartImport, ChartImportReport, Store};
+use ressac_core::store::{ChartEdit, ChartImport, ChartImportReport, MAX_EDIT, Store};
 
-use super::{Globals, open, usage};
+use super::{Globals, chart_edit, open, usage};
 use crate::cli::ChartCommand;
 use crate::output;
 
@@ -23,6 +23,10 @@ pub fn chart(
         None => snapshot(g, out),
         Some(ChartCommand::Import { file, dry_run }) => import(g, &file, dry_run, out),
         Some(ChartCommand::Export { output }) => export(g, output.as_deref(), out),
+        Some(ChartCommand::Apply { edit }) => apply(g, &edit, out),
+        Some(ChartCommand::Land { action }) => chart_edit::land(g, action, out),
+        Some(ChartCommand::Continent { action }) => chart_edit::continent(g, action, out),
+        Some(ChartCommand::Theme { action }) => chart_edit::theme(g, action, out),
     }
 }
 
@@ -109,6 +113,53 @@ fn export(g: &Globals, output: Option<&Path>, out: &mut impl Write) -> anyhow::R
         );
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `ressac chart apply EDIT`: one edit, one transaction. The database is opened writable
+/// but never created, migrated or backed up. Refusals exit 2 with the message; the output
+/// is the label, or with `--json` the `chart_edit` event as one line.
+fn apply(g: &Globals, edit: &str, out: &mut impl Write) -> anyhow::Result<ExitCode> {
+    if edit.len() > MAX_EDIT {
+        return Err(usage("The edit is too large."));
+    }
+    let parsed: ChartEdit = serde_json::from_str(edit).map_err(|e| {
+        usage(output::printable(&format!("The edit is not a chart edit: {e}")).into_owned())
+    })?;
+    let store = Store::open_existing(&g.db)?;
+    commit(g, &store, &parsed, out)
+}
+
+/// Applies `edit` and prints its label, or with `--json` the event. Shared by `apply` and
+/// the `land`, `continent` and `theme` subcommands.
+pub(super) fn commit(
+    g: &Globals,
+    store: &Store,
+    edit: &ChartEdit,
+    out: &mut impl Write,
+) -> anyhow::Result<ExitCode> {
+    let done = store.apply_chart_edit(edit).map_err(refusal_error)?;
+    if g.json {
+        writeln!(out, "{}", done.event())?;
+    } else {
+        writeln!(out, "{}", output::printable(&done.label))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A refused edit is a usage error (exit 2); anything else stays fatal (exit 1).
+pub(super) fn refusal_error(e: ressac_core::Error) -> anyhow::Error {
+    use ressac_core::Error;
+    match e {
+        Error::ChartChanged
+        | Error::LandNameTaken
+        | Error::SeaNameTaken
+        | Error::NameLength
+        | Error::NewLandNeedsTwo
+        | Error::PartOfContinent { .. }
+        | Error::UnknownTheme { .. }
+        | Error::Invalid(_) => usage(output::printable(&e.to_string()).into_owned()),
+        other => other.into(),
+    }
 }
 
 /// Writes `text` to a temporary file beside `file`, then renames it over `file`: a failed

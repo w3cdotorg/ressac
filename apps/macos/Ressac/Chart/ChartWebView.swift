@@ -45,7 +45,8 @@ struct ChartPrefs: Equatable, Sendable {
 
     /// The `prefs` argument of `Chart.load`: Reduce Motion starts the page with the animation off.
     func pageArgument(reduceMotion: Bool) -> [String: Any] {
-        ["view": view.rawValue, "ink": ink.rawValue, "animate": animate && !reduceMotion]
+        ["view": view.rawValue, "ink": ink.rawValue, "animate": animate && !reduceMotion,
+         "reduceMotion": reduceMotion]
     }
 }
 
@@ -54,11 +55,51 @@ enum ChartAction: Equatable, Sendable {
     case openFeed(Int64)
     case openURL(URL)
     case prefs(ChartPrefs)
+    /// A `ChartEdit` as the page built it (`json`, one object of a known op), with the page's sequence number.
+    case edit(seq: Int64, json: String)
+    /// The page got no reply and asks for a fresh survey.
+    case survey
 }
 
-/// Reads the page's messages. Only the three known types, with well-formed fields, become actions;
+/// The app's answer to an edit (spec §8), sent back as `Chart.edited`.
+enum ChartEditReply: Equatable, Sendable {
+    /// The `chart_edit` event line the core printed.
+    case done(String)
+    /// The core refused the edit; the text is its message.
+    case refused(String)
+    /// The edit did not run (no helper, no database, a crash).
+    case failed(String)
+
+    /// The page's `{"seq", "ok", ...}` text; nil only if a `done` event line is not JSON.
+    func resultText(seq: Int64) -> String? {
+        var result: [String: Any] = ["seq": seq]
+        switch self {
+        case let .done(line):
+            guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return nil }
+            result["ok"] = true
+            result["done"] = event
+        case let .refused(message):
+            result["ok"] = false
+            result["refused"] = true
+            result["error"] = message
+        case let .failed(message):
+            result["ok"] = false
+            result["refused"] = false
+            result["error"] = message
+        }
+        return (try? JSONSerialization.data(withJSONObject: result)).map { String(decoding: $0, as: UTF8.self) }
+    }
+}
+
+/// Reads the page's messages. Only the known types, with well-formed fields, become actions;
 /// only http and https addresses with a host may be opened. Anything else is ignored.
 struct ChartBridge {
+    /// The twelve edit operations the core compiles (`chart_edit`).
+    static let editOps: Set<String> = ["join", "leave", "found", "rename_land", "delete_land", "make_continent",
+                                       "set_sea", "new_sea", "rename_sea", "order_seas", "delete_sea", "patch"]
+    /// The most UTF-8 bytes of edit JSON accepted (the core's MAX_EDIT).
+    static let maxEdit = 65_536
+
     func handle(_ body: Any) -> ChartAction? {
         guard let message = body as? [String: Any], let type = message["type"] as? String else { return nil }
         switch type {
@@ -72,6 +113,16 @@ struct ChartBridge {
                   let animate = Self.boolean(message["animate"])
             else { return nil }
             return .prefs(ChartPrefs(view: view, ink: ink, animate: animate))
+        case "edit":
+            // The page counts from 1.
+            guard let seq = Self.integer(message["seq"]), seq >= 1, let text = message["edit"] as? String,
+                  text.utf8.count <= Self.maxEdit,
+                  let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+                  let op = object["op"] as? String, Self.editOps.contains(op)
+            else { return nil }
+            return .edit(seq: seq, json: text)
+        case "survey":
+            return .survey
         default:
             return nil
         }
@@ -108,6 +159,8 @@ struct ChartBridge {
 
     let webView: WKWebView
     var onAction: @MainActor (ChartAction) -> Void
+    /// Runs an edit and answers it; the answer goes back to the page as `Chart.edited`.
+    var onEdit: @MainActor (String) async -> ChartEditReply
 
     /// The `prefs` argument of each `Chart.load`, read at each load (a reload follows what the page reported).
     private let prefs: @MainActor () -> [String: Any]
@@ -120,9 +173,11 @@ struct ChartBridge {
 
     private static let log = Logger(subsystem: "org.w3cdotorg.ressac", category: "chart")
 
-    init(prefs: @escaping @MainActor () -> [String: Any], onAction: @escaping @MainActor (ChartAction) -> Void) {
+    init(prefs: @escaping @MainActor () -> [String: Any], onAction: @escaping @MainActor (ChartAction) -> Void,
+         onEdit: @escaping @MainActor (String) async -> ChartEditReply) {
         self.prefs = prefs
         self.onAction = onAction
+        self.onEdit = onEdit
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
@@ -144,6 +199,27 @@ struct ChartBridge {
         latest = json
         guard isLoaded, json != shown else { return }
         send(json)
+    }
+
+    /// Hands an edit's outcome to the page (`Chart.edited`), the result text as a call argument.
+    func edited(seq: Int64, reply: ChartEditReply) {
+        let result = reply.resultText(seq: seq)
+            ?? ChartEditReply.failed("The edit's result could not be read.").resultText(seq: seq) ?? ""
+        webView.callAsyncJavaScript("Chart.edited(result)", arguments: ["result": result], in: nil, in: .page) { outcome in
+            if case let .failure(error) = outcome {
+                Self.log.error("the chart page refused an edit's result: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// The app's Undo and Redo: false when the page has nothing to undo or a text field is being edited,
+    /// so the key can go to the field.
+    func undo() async -> Bool { await step("Chart.undo()") }
+    func redo() async -> Bool { await step("Chart.redo()") }
+
+    private func step(_ script: String) async -> Bool {
+        let value = try? await webView.callAsyncJavaScript("return " + script, arguments: [:], in: nil, contentWorld: .page)
+        return value as? Bool ?? false
     }
 
     /// The window closed: no more messages, navigation or loads.
@@ -217,6 +293,14 @@ struct ChartBridge {
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.frameInfo.isMainFrame, let action = bridge.handle(message.body) else { return }
+        if case let .edit(seq, json) = action {
+            Task { [weak self] in
+                guard let self else { return }
+                let reply = await onEdit(json)
+                edited(seq: seq, reply: reply)
+            }
+            return
+        }
         onAction(action)
     }
 }
@@ -234,14 +318,37 @@ struct ChartBridge {
     }
 }
 
+/// Lets the app reach the page of a `ChartWebView` (undo and redo from the menu).
+@MainActor final class ChartPageLink {
+    weak var page: ChartPage?
+
+    /// False when there is no page or it did not take the key (nothing to undo, or a text field is being edited).
+    func undo() async -> Bool { await page?.undo() ?? false }
+    func redo() async -> Bool { await page?.redo() ?? false }
+}
+
 /// The chart page in a SwiftUI view: one `ChartPage` per view, closed when the view goes away.
 struct ChartWebView: NSViewRepresentable {
     let json: String
     let prefs: @MainActor () -> [String: Any]
+    let link: ChartPageLink?
     let onAction: @MainActor (ChartAction) -> Void
+    let onEdit: @MainActor (String) async -> ChartEditReply
+
+    init(json: String, prefs: @escaping @MainActor () -> [String: Any], link: ChartPageLink? = nil,
+         onAction: @escaping @MainActor (ChartAction) -> Void,
+         onEdit: @escaping @MainActor (String) async -> ChartEditReply) {
+        self.json = json
+        self.prefs = prefs
+        self.link = link
+        self.onAction = onAction
+        self.onEdit = onEdit
+    }
 
     func makeCoordinator() -> ChartPage {
-        ChartPage(prefs: prefs, onAction: onAction)
+        let page = ChartPage(prefs: prefs, onAction: onAction, onEdit: onEdit)
+        link?.page = page
+        return page
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -250,6 +357,7 @@ struct ChartWebView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onAction = onAction
+        context.coordinator.onEdit = onEdit
         context.coordinator.show(json)
     }
 

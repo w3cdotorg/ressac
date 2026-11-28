@@ -28,6 +28,7 @@ fn prepare(run: &Run) -> std::path::PathBuf {
 
 #[test]
 fn first_run_imports_an_opml_then_adds_moves_exports_and_sets_the_database() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = prepare(&run);
     let out = run.launch_with(

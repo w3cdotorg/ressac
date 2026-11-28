@@ -120,6 +120,16 @@ struct RunRequest: Sendable, Equatable {
         RunRequest(arguments: ["feed", "theme", String(feedId), key ?? "none"], kind: .short)
     }
 
+    /// One chart edit (a `ChartEdit` as JSON) in one transaction; prints the `chart_edit` event. No network: a short run,
+    /// on a serial tail of its own (`isChartEdit`).
+    static func chartEdit(json: String) -> RunRequest {
+        RunRequest(arguments: ["chart", "apply", json], kind: .short)
+    }
+
+    /// A chart edit never waits behind another short run: an extraction can take the 30 s fetch timeout, and the page
+    /// gives up on an edit after 15 s. Edits still run one at a time, in order, among themselves.
+    var isChartEdit: Bool { arguments.starts(with: ["chart", "apply"]) }
+
     /// Moves a feed into a folder, or to the top level with `nil` ("root"). No network: a short run.
     static func moveFeed(id: Int64, folder: Int64?) -> RunRequest {
         RunRequest(arguments: ["feed", "move", String(id), folder.map(String.init) ?? "root"], kind: .short)
@@ -137,12 +147,16 @@ struct RunRequest: Sendable, Equatable {
 
     /// Extraction failures are shown inline in the reader and add failures in the Add Feed sheet,
     /// never as a banner (spec §8; add-feed spec §7).
-    var showsFailureBanner: Bool { !["extract", "add"].contains(arguments.first) }
+    /// A chart edit's failure goes back to the page's status line, never to a banner.
+    var showsFailureBanner: Bool {
+        !["extract", "add"].contains(arguments.first) && !isChartEdit
+    }
 
     /// True when `failure` is the store refusing something the app cannot foresee (exit 2): an address that announces
     /// no feed or is already followed (`add`), a garden decision or an undo (an address another
     /// active feed already uses), an edition
-    /// that is not due or cannot be built offline, an override on a feed buried meanwhile, a theme or a folder deleted meanwhile.
+    /// that is not due or cannot be built offline, an override on a feed buried meanwhile, a theme or a folder deleted meanwhile,
+    /// a chart edit the chart moved away from (`chart apply`).
     /// From any other call, exit 2 means the app built a wrong command line (spec §8).
     func isRefusal(_ failure: RunFailure) -> Bool {
         failure.exitCode == 2 && Self.refusable.contains { arguments.starts(with: $0) }
@@ -150,7 +164,7 @@ struct RunRequest: Sendable, Equatable {
 
     private static let refusable: [[String]] = [
         ["garden", "decide"], ["garden", "undo"], ["edition", "build"], ["feed", "cadence"],
-        ["feed", "theme"], ["feed", "move"], ["add"],
+        ["feed", "theme"], ["feed", "move"], ["add"], ["chart", "apply"],
     ]
 }
 

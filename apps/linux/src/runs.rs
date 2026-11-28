@@ -378,8 +378,8 @@ impl qobject::Runs {
         }
     }
 
-    /// Queues a short run on the worker (they overlap a long run and one another's order is
-    /// kept); `end` runs on the GUI thread once the run is concluded.
+    /// Queues a short run on the worker, on its request's lane (they overlap a long run, and
+    /// each lane keeps its order); `end` runs on the GUI thread once the run is concluded.
     fn start_short<T: Send + 'static>(
         mut self: Pin<&mut Self>,
         request: RunRequest,
@@ -397,8 +397,10 @@ impl qobject::Runs {
             .coordinator
             .admit(&request);
         let for_done = self.qt_thread();
+        // On the request's lane: a chart edit never waits behind a network extraction.
+        let lane = request.lane();
         with_session(|session| {
-            session.worker.short(job, move |result| {
+            session.worker.on(lane, job, move |result| {
                 if for_done
                     .queue(move |runs| runs.short_finished(request, result, end))
                     .is_err()

@@ -47,6 +47,8 @@ enum EngineEvent: Decodable, Sendable, Equatable {
     case cadence(feedId: Int64, group: String, isOverride: Bool)
     /// `add`: the feed that was inserted (the fetch events come before it).
     case added(AddedFeed)
+    /// `chart apply --json`: the edit's `chart_edit` event, kept as the raw line (the page reads it, the app only relays it).
+    case chartEdit(json: String)
     /// A JSON object this build does not know (for example the `import --json` report,
     /// which has no `event` key). Holds the raw line.
     case unknown(String)
@@ -116,8 +118,9 @@ enum EngineEvent: Decodable, Sendable, Equatable {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         let data = Data(trimmed.utf8)
         guard trimmed.hasPrefix("{"),
-            (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return nil }
+        if object["event"] as? String == "chart_edit" { return .chartEdit(json: trimmed) }
         return (try? JSONDecoder().decode(EngineEvent.self, from: data)) ?? .unknown(trimmed)
     }
 }

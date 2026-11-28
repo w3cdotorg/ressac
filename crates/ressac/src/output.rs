@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn chart_text_neutralises_controls() {
         use ressac_core::model::CadenceGroup;
-        use ressac_core::store::{ChartFeed, ChartTerritory, ChartTheme, ChartTotals};
+        use ressac_core::store::{ChartFeed, ChartLedger, ChartTerritory, ChartTheme, ChartTotals};
         let evil = "Evil\u{1b}[31m\nTitle";
         let snap = ChartSnapshot {
             version: 1,
@@ -521,6 +521,7 @@ mod tests {
                 unread_week: 0,
             },
             themes: vec![ChartTheme {
+                id: 1,
                 key: "t".into(),
                 name: "T".into(),
                 sea: "SEA\u{1b}[2J".into(),
@@ -542,10 +543,15 @@ mod tests {
                 })
                 .into(),
             territories: vec![ChartTerritory {
+                id: 1,
                 name: "COAST\u{1b}[31m\nX".into(),
                 feeds: vec![1, 2],
             }],
             continents: vec![],
+            ledger: ChartLedger {
+                seas: vec![],
+                lands: vec![],
+            },
         };
         let text = chart_text(&snap);
         assert!(!text.contains('\u{1b}'), "{text:?}");

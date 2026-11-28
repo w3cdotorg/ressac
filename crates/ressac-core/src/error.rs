@@ -76,9 +76,31 @@ pub enum Error {
     /// An image the terminal reader asked for and will show as a placeholder (spec §7).
     #[error("Image refused: {0}")]
     ImageRefused(String),
+    /// A chart edit named a row that no longer matches the database (or would break a chart
+    /// rule): nothing was written. Every refusal text the chart page shows lives here.
+    #[error("The chart changed; nothing was done.")]
+    ChartChanged,
+    #[error("A land with that name already exists.")]
+    LandNameTaken,
+    #[error("A sea with that name already exists.")]
+    SeaNameTaken,
+    #[error("A name has 1 to 40 characters.")]
+    NameLength,
+    #[error("A new land needs at least two feeds.")]
+    NewLandNeedsTwo,
+    /// The feed is an island of the continent `name`: it leaves it only by changing sea.
+    #[error(
+        "Part of the continent {name}: move it to another sea, or turn the continent back into open water."
+    )]
+    PartOfContinent { name: String },
 }
 
 impl Error {
+    /// True when a lookup of one row found none (`rusqlite::Error::QueryReturnedNoRows`).
+    pub fn is_no_row(&self) -> bool {
+        matches!(self, Error::Db(rusqlite::Error::QueryReturnedNoRows))
+    }
+
     /// True when SQLite refused because another connection holds the database (busy or locked).
     pub fn is_lock_contention(&self) -> bool {
         matches!(

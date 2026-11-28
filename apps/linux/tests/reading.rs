@@ -6,6 +6,7 @@ use common::*;
 
 #[test]
 fn the_reading_page_walks_sources_entries_search_banner_and_garden() {
+    let _turn = one_app_at_a_time();
     let run = Run::new();
     let db = run.copy_fixture();
     let out = run.launch(Some(&db));
