@@ -110,6 +110,11 @@ Aucun n'est bloquant ; chacun a été jugé « peut attendre » lors de la relec
 - [ ] Vue du port : le rabattement dans le cadre et la poussée hors du quai peuvent faire chevaucher des îles sur les marges.
 - [ ] Animation : la chaleur et la couleur de chaque île sont recalculées à chaque image.
 - [ ] Coût des rafraîchissements pendant une longue collecte : une reconstruction complète toutes les 2 s, à surveiller.
+- [ ] Éditeur de territoires : une étape d'annulation reste dans l'historique quand la réponse d'une modification est perdue, et l'annuler plus tard est refusé.
+- [ ] Éditeur de territoires : le Log ne défile pas tout seul quand on glisse une mer vers le haut ou le bas d'une longue liste.
+- [ ] Éditeur de territoires : un redessin en trop peut survenir après une modification (`age_days`) ; sans effet visible.
+- [ ] Appli KDE : le filtre des listes `<select>` de Qt WebEngine repose sur le préfixe d'un nom de classe interne (`RenderWidgetHostViewQtDelegateItem`) ; à revérifier après chaque mise à jour de Qt (l'Échap dans une liste n'est pas essayé).
+- [ ] Éditeur de territoires : le pli d'une section peut redonner le focus à un élément masqué (`restore()`), et le glissement d'une mer ignore `pointerId` (un second doigt).
 - [ ] Tests à renforcer (détail dans le registre local `.superpowers/`, hors dépôt) : renommage et réordonnancement à la réimportation, rapport des URL inconnues en essai à blanc, précédence de `xml_url`, thème vide du test de migration v4 vers v5.
 
 ### Ajouter un flux (sous-projet 7)
