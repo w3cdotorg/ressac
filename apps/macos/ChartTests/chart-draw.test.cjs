@@ -288,6 +288,68 @@ test("survey_mode_in_the_page", async () => {
   assert.deepEqual(win.errors, []);
 });
 
+test("undo_and_redo_buttons_in_the_toolbar", async () => {
+  const {win, doc, page} = await openPage();
+  const bar = byClass([doc.body], "bar");
+  const barButton = text => { const b = elements([bar]).find(e => e.tagName === "BUTTON" && e.textContent === text); assert.ok(b, `a bar button ${text}`); return b; };
+  const names = () => elements([bar]).filter(e => e.tagName === "BUTTON").map(b => b.textContent);
+  const undoButton = barButton("Undo"), redoButton = barButton("Redo");
+  assert.equal(names()[names().indexOf("Log") + 1], "Undo", "right after Log");
+  assert.equal(names()[names().indexOf("Log") + 2], "Redo");
+  assert.equal(undoButton.hidden, true, "outside Survey mode: hidden");
+  assert.equal(redoButton.hidden, true);
+
+  toolbarButton(doc, "✒ Survey").dispatch("click", ev());
+  assert.equal(undoButton.hidden, false, "Survey mode shows them");
+  assert.equal(redoButton.hidden, false);
+  assert.equal(undoButton.disabled, true, "nothing to undo");
+  assert.equal(redoButton.disabled, true, "nothing to redo");
+
+  // an edit: pending, both disabled; answered and surveyed, Undo is enabled and titled
+  buttonIn(landRow(doc, 11), "Delete").dispatch("click", ev());
+  assert.equal(undoButton.disabled, true, "disabled while the edit is pending");
+  const undoPatch = core.edits.patch("Delete APPLE PRESS", [{kind: "land", before: null, after: {id: 11, name: "APPLE PRESS", continent: null}}]);
+  page.edited(JSON.stringify({seq: 1, ok: true, done: {event: "chart_edit", label: "Delete APPLE PRESS", undo: undoPatch}}));
+  page.update(JSON.stringify(resurveyed()));
+  await settle();
+  assert.equal(undoButton.disabled, false);
+  assert.equal(undoButton.title, "Undo Delete APPLE PRESS");
+  assert.equal(undoButton.textContent, "Undo");
+  assert.equal(redoButton.disabled, true);
+
+  // a click undoes through the session, and the button waits for the reply
+  undoButton.dispatch("click", ev());
+  assert.deepEqual(JSON.parse(edits(win).at(-1).edit), undoPatch);
+  assert.equal(edits(win).length, 2);
+  assert.equal(undoButton.disabled, true, "pending: disabled");
+  undoButton.dispatch("click", ev());
+  assert.equal(edits(win).length, 2, "a disabled button sends nothing");
+  const redoPatch = core.edits.deleteLand({id: 11, name: "APPLE PRESS"});
+  page.edited(JSON.stringify({seq: 2, ok: true, done: {event: "chart_edit", label: "Delete APPLE PRESS", undo: core.edits.patch("Delete APPLE PRESS", [{kind: "land", before: {id: 11, name: "APPLE PRESS", continent: null}, after: null}])}}));
+  page.update(JSON.stringify(resurveyed(2)));
+  await settle();
+  assert.equal(undoButton.disabled, true);
+  assert.equal(undoButton.title, "Undo", "an empty side has the plain title");
+  assert.equal(redoButton.disabled, false);
+  assert.equal(redoButton.title, "Redo Delete APPLE PRESS");
+
+  redoButton.dispatch("click", ev());
+  assert.equal(edits(win).length, 3, "Redo sends the step");
+  assert.ok(redoPatch);
+  page.edited(JSON.stringify({seq: 3, ok: true, done: {event: "chart_edit", label: "Delete APPLE PRESS", undo: undoPatch}}));
+  page.update(JSON.stringify(resurveyed(3)));
+  await settle();
+  assert.equal(undoButton.disabled, false);
+  assert.equal(undoButton.title, "Undo Delete APPLE PRESS");
+  assert.equal(redoButton.disabled, true);
+
+  // Survey mode off: hidden again
+  toolbarButton(doc, "✒ Survey").dispatch("click", ev());
+  assert.equal(undoButton.hidden, true);
+  assert.equal(redoButton.hidden, true);
+  assert.deepEqual(win.errors, []);
+});
+
 test("an_open_log_form_survives_chart_update", async () => {
   const {win, doc, page} = await openPage();
   toolbarButton(doc, "✒ Survey").dispatch("click", ev());

@@ -620,9 +620,11 @@
     const animButton = button("Animation", toggleAnimation), keyButton = button("Key", () => showKey(keyPanel.hidden));
     keyButton.setAttribute("aria-controls", "chart-key");
     const surveyButton = button("✒ Survey", () => mode.toggle()), logButton = button("Log", () => mode.toggleLog());
-    surveyButton.hidden = true; logButton.hidden = true;
+    // Undo and Redo: the Log's own buttons' path (logHandlers), in the toolbar for Survey mode
+    const undoButton = button("Undo", () => logHandlers.undo()), redoButton = button("Redo", () => logHandlers.redo());
+    surveyButton.hidden = true; logButton.hidden = true; undoButton.hidden = true; redoButton.hidden = true;
     logButton.setAttribute("aria-controls", "chart-log");
-    bar.append(group("View", viewButtons), group("Ink", inkButtons), animButton, keyButton, surveyButton, logButton);
+    bar.append(group("View", viewButtons), group("Ink", inkButtons), animButton, keyButton, surveyButton, logButton, undoButton, redoButton);
 
     const keyPanel = make(doc, "section", "key"), keyList = make(doc, "ul");
     keyPanel.id = "chart-key"; keyPanel.hidden = true; keyPanel.setAttribute("aria-labelledby", "chart-key-title");
@@ -838,6 +840,11 @@
       surveyButton.hidden = !available();
       surveyButton.setAttribute("aria-pressed", String(mode.active));
       logButton.hidden = !mode.active;
+      for (const [b, word, title] of [[undoButton, "Undo", session.titles().undo], [redoButton, "Redo", session.titles().redo]]) {
+        b.hidden = !mode.active;
+        b.disabled = title == null || session.pending();
+        b.title = title ?? word;
+      }
       logButton.setAttribute("aria-expanded", String(drawerOpen()));
       doc.body.classList.toggle("survey", mode.active);
       doc.body.classList.toggle("log-open", drawerOpen());

@@ -90,41 +90,30 @@ fn the_garden_undo_is_ctrl_z_and_its_tooltips_name_kde_keys() {
 }
 
 #[test]
-fn the_sea_chart_window_has_the_macs_undo_and_redo_in_an_edit_menu() {
-    // the Mac's Undo Chart Edit (⌘Z) and Redo Chart Edit (⇧⌘Z), in an Edit menu as MainMenu builds them
-    assert!(CHART.contains("menuBar: QQC2.MenuBar {"));
-    assert!(CHART.contains(r#"title: "&Edit""#));
-    for (title, shortcut, page, native) in [
+fn the_sea_chart_window_has_no_menu_bar_and_keeps_ctrl_z_and_ctrl_shift_z() {
+    // the page's toolbar carries Undo and Redo; the window reserves no menu bar row
+    assert!(!CHART.contains("menuBar"));
+    assert!(!CHART.contains("MenuBar"));
+    assert!(!CHART.contains("QQC2.Action"));
+    for (shortcut, page, native) in [
         (
-            "Undo Chart Edit",
-            "shortcut: StandardKey.Undo",
+            "sequences: [StandardKey.Undo]",
             "Chart.undo()",
             "WebEngineView.Undo",
         ),
         (
-            "Redo Chart Edit",
-            r#"shortcut: "Ctrl+Shift+Z""#,
+            r#"sequences: ["Ctrl+Shift+Z"]"#,
             "Chart.redo()",
             "WebEngineView.Redo",
         ),
     ] {
-        let at = CHART
-            .find(&format!("text: \"{title}\""))
-            .unwrap_or_else(|| panic!("{title}"));
-        let action = &CHART[at..at + CHART[at..].find("\n    }").unwrap()];
-        assert!(action.contains(shortcut), "{title}: {shortcut}");
+        let at = CHART.find(shortcut).unwrap_or_else(|| panic!("{shortcut}"));
+        let shortcut_item = &CHART[at..at + CHART[at..].find("\n    }").unwrap()];
         // the page first, then the focused text field's own undo
-        let (first, then) = (action.find(page), action.find(native));
+        let (first, then) = (shortcut_item.find(page), shortcut_item.find(native));
         assert!(
             first.is_some() && then.is_some() && first < then,
-            "{title}: {action}"
+            "{shortcut}: {shortcut_item}"
         );
     }
-    let items: Vec<&str> = CHART
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("QQC2.MenuItem { action: "))
-        .collect();
-    assert_eq!(items, ["undoChartEdit }", "redoChartEdit }"]);
-    // one path only: no stray Shortcut left beside the actions
-    assert!(!CHART.contains("Shortcut {"));
 }

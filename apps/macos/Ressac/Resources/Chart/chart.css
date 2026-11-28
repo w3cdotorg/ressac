@@ -49,7 +49,8 @@ body.idle .bar:not(:hover):not(:has(:focus-visible)) { opacity: 0; } /* a mouse 
 .bar .group button + button { border-left: 0; }
 .bar .group button:first-child, .bar > button { border-top-left-radius: 3px; border-bottom-left-radius: 3px; }
 .bar .group button:last-child, .bar > button { border-top-right-radius: 3px; border-bottom-right-radius: 3px; }
-.bar button:hover { border-color: var(--ink); }
+.bar button:hover:not(:disabled) { border-color: var(--ink); }
+.bar button:disabled { opacity: .45; cursor: default; }
 .bar button[aria-pressed="true"], .bar button[aria-expanded="true"] { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 button:focus-visible, a:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 

@@ -109,29 +109,16 @@ QQC2.ApplicationWindow {
         }
     }
 
-    // Edit ▸ Undo Chart Edit / Redo Chart Edit (the Mac's ⌘Z and ⇧⌘Z buttons; Ctrl+Z and Ctrl+Shift+Z here), built as
-    // MainMenu.qml builds the main window's menus. They go to the page first: when it has nothing to undo or a text
-    // field is being edited (`Chart.undo()` is false), the keystroke is the focused text field's own, as on the Mac.
-    readonly property alias undoChartEdit: undoChartEdit
-    readonly property alias redoChartEdit: redoChartEdit
-    QQC2.Action {
-        id: undoChartEdit
-        text: "Undo Chart Edit"
-        shortcut: StandardKey.Undo
-        onTriggered: web.runJavaScript("Chart.undo()", function (undone) { if (!undone) web.triggerWebAction(WebEngineView.Undo) })
+    // Undo and redo go to the page first: when it has nothing to undo (`Chart.undo()` is false) or a text field is
+    // being edited, the keystroke is the focused text field's own, as the Mac's menu does. The page's toolbar has the
+    // same two buttons in Survey mode; the window has no menu bar.
+    Shortcut {
+        sequences: [StandardKey.Undo]
+        onActivated: web.runJavaScript("Chart.undo()", function (undone) { if (!undone) web.triggerWebAction(WebEngineView.Undo) })
     }
-    QQC2.Action {
-        id: redoChartEdit
-        text: "Redo Chart Edit"
-        shortcut: "Ctrl+Shift+Z"
-        onTriggered: web.runJavaScript("Chart.redo()", function (redone) { if (!redone) web.triggerWebAction(WebEngineView.Redo) })
-    }
-    menuBar: QQC2.MenuBar {
-        QQC2.Menu {
-            title: "&Edit"
-            QQC2.MenuItem { action: undoChartEdit }
-            QQC2.MenuItem { action: redoChartEdit }
-        }
+    Shortcut {
+        sequences: ["Ctrl+Shift+Z"]
+        onActivated: web.runJavaScript("Chart.redo()", function (redone) { if (!redone) web.triggerWebAction(WebEngineView.Redo) })
     }
 
     Connections {
