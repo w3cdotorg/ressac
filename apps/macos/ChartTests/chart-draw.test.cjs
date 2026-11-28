@@ -909,6 +909,25 @@ test("plain_clicks_in_survey_select_and_rename", async () => {
   assert.equal(page.undo(), false);
 });
 
+test("a_log_rebuilt_mid_drag_leaves_esc_to_the_page", async () => {
+  const {win, doc, page, plate, P} = await surveyPage();
+  const keydowns = () => (doc.listeners.keydown || []).length, before = keydowns();
+  const handle = byClass([drawerOf(doc)], "log-handle");
+  assert.ok(handle, "a sea's handle in the log");
+  handle.dispatch("pointerdown", ev({button: 0, pointerId: 1, clientX: 0, clientY: 0}));
+  assert.equal(keydowns(), before + 1, "the drag listens for Esc");
+  page.update(JSON.stringify(resurveyed())); // a survey lands mid-drag: the log is rebuilt
+  await settle();
+  assert.notEqual(byClass([drawerOf(doc)], "log-handle"), handle, "the log was rebuilt");
+  const tidal = themesScene().placements.find(p => p.kind === "sea" && p.key === "tides");
+  tap(P, tidal);
+  assert.ok(!byClass([plate], "rename").hidden, "a rename open over the chart");
+  doc.dispatch("keydown", ev({key: "Escape"}));
+  assert.ok(byClass([plate], "rename").hidden, "the Esc reached the page: the rename closed");
+  assert.equal(keydowns(), before, "no listener left behind");
+  assert.deepEqual(win.errors, []);
+});
+
 test("one_name_at_a_time_and_a_pending_name_waits_for_its_reply", async () => {
   const {win, doc, page, plate, base, P} = await surveyPage();
   const n10 = nodeOf(10), n12 = nodeOf(12), n13 = nodeOf(13);

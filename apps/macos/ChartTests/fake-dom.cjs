@@ -20,6 +20,7 @@ function fakeDocument() {
       removeEventListener(type, fn) { el.listeners[type] = (el.listeners[type] || []).filter(f => f !== fn); },
       dispatch(type, event) { (el.listeners[type] || []).slice().forEach(fn => fn(event)); }, // any event type
       getBoundingClientRect() { return el.rect; },
+      get isConnected() { return doc.body.contains(el) || doc.documentElement.contains(el); }, // in the page, as browsers say
       focus() { doc.activeElement = el; },
       // pointer capture as browsers do it: while captured, pointer events go to this element, and so does the
       // click that ends the press (Pointer Events 3); see press() below
@@ -49,10 +50,24 @@ function fakeDocument() {
   doc.body = element("body");
   doc.documentElement = element("html");
   doc.documentElement.style.setProperty = (k, v) => { doc.documentElement.style[k] = v; };
-  doc.listeners = {};
-  doc.addEventListener = (type, fn) => { (doc.listeners[type] ||= []).push(fn); };
-  doc.removeEventListener = (type, fn) => { doc.listeners[type] = (doc.listeners[type] || []).filter(f => f !== fn); };
-  doc.dispatch = (type, event) => { (doc.listeners[type] || []).slice().forEach(fn => fn(event)); };
+  // the document's listeners as a browser runs them for an event on an element inside it: the capturing ones first,
+  // then the others; stopPropagation() in a capturing one skips the others, stopImmediatePropagation() stops at once
+  doc.listeners = {}; doc.capturing = new Set();
+  const capture = options => options === true || !!(options && options.capture);
+  doc.addEventListener = (type, fn, options) => { (doc.listeners[type] ||= []).push(fn); if (capture(options)) doc.capturing.add(fn); };
+  doc.removeEventListener = (type, fn) => { doc.listeners[type] = (doc.listeners[type] || []).filter(f => f !== fn); doc.capturing.delete(fn); };
+  doc.dispatch = (type, event) => {
+    const all = (doc.listeners[type] || []).slice();
+    let stopped = false, immediate = false;
+    if (event && typeof event === "object") {
+      const sp = event.stopPropagation, sip = event.stopImmediatePropagation;
+      event.stopPropagation = function () { stopped = true; if (sp) sp.call(this); };
+      event.stopImmediatePropagation = function () { stopped = immediate = true; if (sip) sip.call(this); };
+    }
+    for (const fn of all.filter(f => doc.capturing.has(f))) { fn(event); if (immediate) return; }
+    if (stopped) return;
+    for (const fn of all.filter(f => !doc.capturing.has(f))) { fn(event); if (immediate) return; }
+  };
   return doc;
 }
 

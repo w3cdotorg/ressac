@@ -24,6 +24,7 @@ const btn = (nodes, text) => { const b = button(nodes, text); assert.ok(b, `a bu
 const one = (nodes, cls) => { const el = byClass(nodes, cls); assert.ok(el, `an element .${cls}`); return el; };
 const tagged = (nodes, tag) => { const el = elements(nodes).find(e => e.tagName === tag); assert.ok(el, `an element ${tag}`); return el; };
 const ev = extra => ({preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...extra});
+const inputIn = node => tagged([node], "INPUT");
 const nameOf = row => one([row], "log-name").textContent;
 const countOf = row => one([row], "log-count").textContent;
 
@@ -358,6 +359,7 @@ test("dragging_the_handle_moves_a_sea", () => {
 // rows of 30 px from y = 100, the seas' section body from y = 60: the line's top is the row edge it marks, in the body
 function dragLog() {
   const doc = fakeDocument(), data = fixture(), on = recorder(), nodes = log(data, {}, on, doc);
+  doc.body.append(...nodes); // in the page, as the drawer holds it
   const rows = allByClass(nodes, "log-sea"), seas = one(nodes, "log-seas");
   rows.forEach((r, i) => { r.rect = {left: 0, right: 300, top: 100 + i * 30, bottom: 130 + i * 30, width: 300, height: 30, x: 0, y: 100 + i * 30}; });
   one([seas], "log-section-body").rect = {left: 0, right: 300, top: 60, bottom: 600, width: 300, height: 540, x: 0, y: 60};
@@ -441,6 +443,50 @@ test("the_drop_line_goes_on_escape_and_on_cancel", () => {
   assert.equal((doc.listeners.keydown || []).length, 0, "released: no key listener left behind");
 });
 
+test("a_drag_whose_log_was_rebuilt_leaves_esc_to_the_page", () => {
+  const {doc, on, rows, line, mids} = dragLog();
+  const pageEsc = [];
+  doc.addEventListener("keydown", e => { if (e.key === "Escape") pageEsc.push(e); }); // the page's own Esc
+  const keydowns = () => (doc.listeners.keydown || []).length;
+  const down = (h, id) => h.dispatch("pointerdown", ev({clientX: 40, clientY: mids[1], pointerId: id, button: 0}));
+  const rebuild = () => { const nodes = log(fixture(), {}, recorder(), doc); doc.body.replaceChildren(...nodes); return nodes; };
+  // a live drag keeps its Esc
+  const handle = one([rows[1]], "log-handle");
+  down(handle, 1);
+  doc.dispatch("keydown", ev({key: "Escape"}));
+  assert.equal(pageEsc.length, 0, "a live drag's Esc stops there");
+  assert.equal(keydowns(), 1);
+  // rebuilt mid-drag (a Chart.update): the next Esc goes to the page, and the old drag lets go of it
+  down(handle, 2);
+  assert.equal(keydowns(), 2);
+  rebuild();
+  assert.equal(rows[1].isConnected, false, "the old row left the page");
+  doc.dispatch("keydown", ev({key: "Escape"}));
+  assert.equal(pageEsc.length, 1, "the Esc reached the page");
+  assert.equal(keydowns(), 1, "only the page's listener is left");
+  assert.equal(line.hidden, true);
+  assert.ok(!rows[1].classList.contains("dragging"));
+  // rebuilt mid-drag, then a move: the old drag ends there
+  let nodes = rebuild();
+  let h = one([allByClass(nodes, "log-sea")[1]], "log-handle");
+  down(h, 3);
+  rebuild();
+  h.dispatch("pointermove", ev({clientX: 40, clientY: mids[3], pointerId: 3}));
+  assert.equal(keydowns(), 1, "a move after a rebuild ends the old drag");
+  assert.equal(one(nodes, "log-drop-line").hidden, true, "and shows no line");
+  // the capture lost: the drag ends, and a later release moves nothing
+  nodes = rebuild();
+  h = one([allByClass(nodes, "log-sea")[1]], "log-handle");
+  down(h, 4);
+  h.dispatch("pointermove", ev({clientX: 40, clientY: mids[3], pointerId: 4}));
+  assert.equal(one(nodes, "log-drop-line").hidden, false);
+  h.dispatch("lostpointercapture", ev({pointerId: 4}));
+  assert.equal(one(nodes, "log-drop-line").hidden, true, "capture lost: the line goes");
+  assert.equal(keydowns(), 1, "capture lost: the listener goes");
+  h.dispatch("pointerup", ev({clientX: 40, clientY: mids[3], pointerId: 4}));
+  assert.deepEqual(on.calls, []);
+});
+
 test("log_css_ends_sections_cleanly_and_keeps_still_under_reduce_motion", () => {
   const css = require("node:fs").readFileSync(path.join(CHART, "chart.css"), "utf8");
   assert.ok(/\.log-list > li:last-child\s*\{[^}]*border-bottom:\s*0/.test(css), "no dotted rule after a section's last row");
@@ -515,6 +561,47 @@ test("a_folded_section_stays_folded_across_rebuilds", () => {
   // a fresh memory (a new window): both open
   nodes = survey.logContent(fakeDocument(), next, {}, recorder(), survey.logMemory());
   assert.equal(header(nodes, "log-lands").getAttribute("aria-expanded"), "true");
+});
+
+test("a_folded_section_opens_for_its_form_and_its_refusal", () => {
+  const data = fixture(), memory = survey.logMemory(), doc = fakeDocument(), on = recorder();
+  const land = data.ledger.lands[0], sea = data.ledger.seas[0];
+  let nodes = survey.logContent(doc, data, {}, on, memory);
+  // folding Lands with an unsent rename open in it cancels that rename, as Cancel would
+  btn([allByClass(nodes, "log-land")[0]], "Rename").dispatch("click", ev());
+  assert.equal(memory.open && memory.open.key, `log:land:${land.id}:rename-form`);
+  header(nodes, "log-lands").dispatch("click", ev());
+  assert.equal(memory.open, null, "the unsent rename is cancelled");
+  assert.equal(header(nodes, "log-lands").getAttribute("aria-expanded"), "false");
+  // a form in a folded section, restored from memory: the section opens for it
+  doc.activeElement = null; // the cancelled field's focus went with it
+  memory.open = {key: `log:land:${land.id}:rename-form`, value: "NEW NAME", start: null, end: null, choice: null, error: null, sent: false};
+  nodes = survey.logContent(doc, data, {}, on, memory);
+  assert.equal(header(nodes, "log-lands").getAttribute("aria-expanded"), "true", "Lands opens for its form");
+  assert.ok(!bodyOf(nodes, "log-lands").hidden);
+  assert.equal(inputIn(bodyOf(nodes, "log-lands")).value, "NEW NAME");
+  memory.open = null;
+  // a sent rename: folding keeps it on its way; its refusal opens the section with the message
+  nodes = survey.logContent(doc, data, {}, on, memory);
+  const seaRow = allByClass(nodes, "log-sea")[0];
+  btn([seaRow], "Rename").dispatch("click", ev());
+  inputIn(seaRow).value = "FRESH WATERS";
+  one([seaRow], "name-form").dispatch("submit", ev());
+  assert.deepEqual(on.calls.at(-1), ["renameSea", sea.id, "FRESH WATERS"]);
+  header(nodes, "log-seas").dispatch("click", ev());
+  assert.ok(memory.open && memory.open.sent, "the sent rename waits for its reply");
+  nodes = survey.logContent(doc, data, {busy: true}, on, memory);
+  assert.equal(header(nodes, "log-seas").getAttribute("aria-expanded"), "false", "still folded while it is on its way");
+  memory.result({kind: "refused", message: "That name is taken."});
+  nodes = survey.logContent(doc, data, {}, on, memory);
+  assert.equal(header(nodes, "log-seas").getAttribute("aria-expanded"), "true", "the refusal opens Seas");
+  assert.ok(!bodyOf(nodes, "log-seas").hidden);
+  assert.equal(one([bodyOf(nodes, "log-seas")], "name-form-error").textContent, "That name is taken.");
+  // a done edit closes the form and leaves a folded section folded
+  header(nodes, "log-seas").dispatch("click", ev()); // the refused form is unsent now: folding cancels it
+  assert.equal(memory.open, null);
+  nodes = survey.logContent(doc, data, {}, on, memory);
+  assert.equal(header(nodes, "log-seas").getAttribute("aria-expanded"), "false");
 });
 
 test("enter_and_space_fold_a_section", () => {

@@ -414,7 +414,11 @@
     aside.append(block);
 
     // --- the section headers: "Lands · 12" on a disclosure button folding the section's body (not an edit: it
-    // works while one is on its way); memory.collapsed keeps the fold across rebuilds ---
+    // works while one is on its way); memory.collapsed keeps the fold across rebuilds. A form in a section keeps it
+    // in sight: folding cancels an unsent one (as Cancel would), and a section holding an unsent form or a refused
+    // one opens again (a form on its way waits folded for its reply) ---
+    const sectionOf = key => (/^log:land:/.test(key) ? "lands" : /^log:(sea:|new-sea)/.test(key) ? "seas" : null);
+    const shows = {}; // which → show(): draws the fold
     function section(className, name, which, count) {
       const box = make(doc, "section", className), head = make(doc, "h3", "log-section-head");
       const body = make(doc, "div", "log-section-body");
@@ -431,7 +435,12 @@
         mark.textContent = open ? "\u25BE" : "\u25B8"; // ▾ open, ▸ folded
         body.hidden = !open;
       };
-      toggle.addEventListener("click", () => { memory.collapsed[which] = !memory.collapsed[which]; show(); });
+      toggle.addEventListener("click", () => {
+        memory.collapsed[which] = !memory.collapsed[which];
+        if (memory.collapsed[which] && current && sectionOf(current.key) === which && !(memory.open && memory.open.sent)) current.close(false);
+        show();
+      });
+      shows[which] = show;
       show();
       head.append(toggle);
       box.append(head, body);
@@ -535,7 +544,11 @@
         dropLine.hidden = true;
         doc.removeEventListener("keydown", escape, true);
       };
+      // a log rebuilt mid-drag (a survey landing) leaves this row out of the page: its drag ends without a word,
+      // and an Esc then belongs to the page
+      const gone = () => row.isConnected === false;
       const escape = e => {
+        if (gone()) { end(); return; }
         if (!e || e.key !== "Escape") return;
         stop(e);
         if (e.stopImmediatePropagation) e.stopImmediatePropagation();
@@ -553,8 +566,13 @@
         if (pointer != null && handle.setPointerCapture) handle.setPointerCapture(pointer);
         doc.addEventListener("keydown", escape, true);
       });
-      handle.addEventListener("pointermove", e => { if (dragging) showDropLine(i, e); });
+      handle.addEventListener("pointermove", e => {
+        if (!dragging) return;
+        if (gone()) end();
+        else showDropLine(i, e);
+      });
       handle.addEventListener("pointercancel", end);
+      handle.addEventListener("lostpointercapture", end); // a browser fires it after the pointerup, which drops first
       handle.addEventListener("pointerup", e => {
         if (!dragging) return;
         const d = dropAt(e);
@@ -589,6 +607,11 @@
     if (memory.open) {
       if (slots.has(memory.open.key)) open(memory.open.key, false);
       else memory.open = null;
+    }
+    const holding = memory.open && sectionOf(memory.open.key);
+    if (holding && memory.collapsed[holding] && (!memory.open.sent || memory.open.error)) {
+      memory.collapsed[holding] = false;
+      shows[holding]();
     }
     if (busy) controls.forEach(c => { c.disabled = true; });
     memory.target = memory.focus ? findKey([aside], memory.focus) : null;
