@@ -234,7 +234,8 @@
 
   // ---------- what the log keeps between rebuilds ----------
   // The page rebuilds the log on every Chart.update; one memory, made once, carries across rebuilds the open
-  // inline form (its key, typed value, caret, choice, error, and whether it was sent) and the focused control.
+  // inline form (its key, typed value, caret, choice, error, and whether it was sent), the focused control and the
+  // folded sections (collapsed.lands, collapsed.seas: open at first, never saved beyond this memory).
   // After putting a rebuilt log in the page, call restore(): it gives the focus back (and the caret).
   // Feed it each edit's outcome with result({kind, message}): a sent form closes when its edit is done or the
   // chart changed, and stays open with the message on any other outcome (a name refusal from the core above all).
@@ -243,6 +244,7 @@
       open: null, // {key, value, start, end, choice, error, sent}
       focus: null, // data-key of the control to focus
       lost: false, // the focus could not be restored (a disabled control): try again on the next rebuild
+      collapsed: {lands: false, seas: false},
       target: null,
       capture(doc) {
         const a = doc && doc.activeElement, key = keyOf(a);
@@ -411,9 +413,35 @@
     }
     aside.append(block);
 
+    // --- the section headers: "Lands · 12" on a disclosure button folding the section's body (not an edit: it
+    // works while one is on its way); memory.collapsed keeps the fold across rebuilds ---
+    function section(className, name, which, count) {
+      const box = make(doc, "section", className), head = make(doc, "h3", "log-section-head");
+      const body = make(doc, "div", "log-section-body");
+      body.id = `${className}-body`;
+      const toggle = keyed(make(doc, "button", "log-disclosure"), `log:${which}:toggle`);
+      toggle.type = "button";
+      toggle.setAttribute("aria-controls", body.id);
+      const mark = make(doc, "span", "log-disclosure-mark");
+      mark.setAttribute("aria-hidden", "true");
+      toggle.append(mark, make(doc, "span", "log-section-name", `${name} \u00B7 ${count}`));
+      const show = () => {
+        const open = !memory.collapsed[which];
+        toggle.setAttribute("aria-expanded", String(open));
+        mark.textContent = open ? "\u25BE" : "\u25B8"; // ▾ open, ▸ folded
+        body.hidden = !open;
+      };
+      toggle.addEventListener("click", () => { memory.collapsed[which] = !memory.collapsed[which]; show(); });
+      show();
+      head.append(toggle);
+      box.append(head, body);
+      return {box, body};
+    }
+
     // --- Lands: every territory and continent ---
-    const lands = make(doc, "section", "log-lands"), landList = make(doc, "ul", "log-list");
-    lands.append(make(doc, "h3", null, "Lands"), landList);
+    const {box: lands, body: landsBody} = section("log-lands", "Lands", "lands", (ledger.lands || []).length);
+    const landList = make(doc, "ul", "log-list");
+    landsBody.append(landList);
     (ledger.lands || []).forEach(l => {
       const row = make(doc, "li", "log-land"), actions = make(doc, "span", "log-actions"), k = `log:land:${l.id}`;
       row.setAttribute("data-land", String(l.id));
@@ -431,9 +459,31 @@
     aside.append(lands);
 
     // --- Seas: every theme in display order; reordered by Alt+↑/↓ on a row or by dragging its ≡ ---
-    const seas = make(doc, "section", "log-seas"), seaList = make(doc, "ol", "log-list");
-    seas.append(make(doc, "h3", null, "Seas"), seaList);
-    const seaRows = [], ledgerSeas = ledger.seas || [];
+    const ledgerSeas = ledger.seas || [];
+    const {box: seas, body: seasBody} = section("log-seas", "Seas", "seas", ledgerSeas.length);
+    const seaList = make(doc, "ol", "log-list");
+    // while a ≡ is dragged, an ink line between rows marks where the sea will land (absolute in the body: no row moves)
+    const dropLine = make(doc, "div", "log-drop-line");
+    dropLine.setAttribute("aria-hidden", "true");
+    dropLine.hidden = true;
+    seasBody.append(seaList, dropLine);
+    const seaRows = [];
+    // the row a sea dragged from row `from` lands on for the pointer of `e` (the same answer for the line and the
+    // release), or null when the pointer is off the list, left or right
+    const dropAt = e => {
+      const box = seaList.getBoundingClientRect();
+      if (box.width > 0 && e.clientX != null && (e.clientX < box.left || e.clientX > box.right)) return null;
+      const rects = seaRows.map(r => r.getBoundingClientRect());
+      return {to: seaDropIndex(rects.map(b => (b.top + b.bottom) / 2), e.clientY), rects};
+    };
+    // above the row it passes moving up, below it moving down; none over its own row
+    const showDropLine = (from, e) => {
+      const d = dropAt(e);
+      if (!d || d.to < 0 || d.to === from) { dropLine.hidden = true; return; }
+      const edge = d.to < from ? d.rects[d.to].top : d.rects[d.to].bottom;
+      dropLine.style.top = `${edge - seasBody.getBoundingClientRect().top}px`;
+      dropLine.hidden = false;
+    };
     ledgerSeas.forEach((t, i) => {
       const row = keyed(make(doc, "li", "log-sea"), `log:sea:${t.id}`), actions = make(doc, "span", "log-actions");
       const k = `log:sea:${t.id}`;
@@ -475,24 +525,42 @@
         stop(e);
         call(on.moveSea, t.id, delta);
       });
-      let dragging = false;
+      // the drag: the row dims, the line follows the pointer; it ends on release (the sea lands where the line
+      // was), on pointercancel, or on Esc anywhere on the page (that Esc goes no further)
+      let dragging = false, pointer = null;
+      const end = () => {
+        if (!dragging) return;
+        dragging = false;
+        row.classList.remove("dragging");
+        dropLine.hidden = true;
+        doc.removeEventListener("keydown", escape, true);
+      };
+      const escape = e => {
+        if (!e || e.key !== "Escape") return;
+        stop(e);
+        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        else if (e.stopPropagation) e.stopPropagation();
+        if (pointer != null && handle.hasPointerCapture && handle.hasPointerCapture(pointer)) handle.releasePointerCapture(pointer);
+        end();
+      };
       handle.addEventListener("pointerdown", e => {
         if (busy || (e && e.button != null && e.button !== 0)) return;
+        end();
         dragging = true;
-        row.className = "log-sea dragging";
+        pointer = e && e.pointerId != null ? e.pointerId : null;
+        row.classList.add("dragging");
         stop(e);
-        if (e && e.pointerId != null && handle.setPointerCapture) handle.setPointerCapture(e.pointerId);
+        if (pointer != null && handle.setPointerCapture) handle.setPointerCapture(pointer);
+        doc.addEventListener("keydown", escape, true);
       });
-      const end = () => { dragging = false; row.className = "log-sea"; };
+      handle.addEventListener("pointermove", e => { if (dragging) showDropLine(i, e); });
       handle.addEventListener("pointercancel", end);
       handle.addEventListener("pointerup", e => {
         if (!dragging) return;
+        const d = dropAt(e);
         end();
-        const box = seaList.getBoundingClientRect();
-        if (box.width > 0 && e.clientX != null && (e.clientX < box.left || e.clientX > box.right)) return; // let go off the list
-        const mids = seaRows.map(r => { const b = r.getBoundingClientRect(); return (b.top + b.bottom) / 2; });
-        const delta = seaDropIndex(mids, e.clientY) - i;
-        if (!busy && delta !== 0) call(on.moveSea, t.id, delta);
+        if (!d || d.to < 0) return; // let go off the list
+        if (!busy && d.to !== i) call(on.moveSea, t.id, d.to - i);
       });
       seaRows.push(row);
       seaList.append(row);
@@ -502,7 +570,7 @@
     newSea.append(newSeaButton);
     nameSlot("log:new-sea-form", newSea, newSeaButton, {title: "New Sea", value: "", action: "Create", kind: "sea"},
       name => call(on.newSea, name));
-    seas.append(newSea);
+    seasBody.append(newSea);
     aside.append(seas);
 
     // --- undo, redo and the status line ---

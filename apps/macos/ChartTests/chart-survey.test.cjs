@@ -8,7 +8,7 @@ const path = require("node:path");
 const CHART = path.join(__dirname, "..", "Ressac", "Resources", "Chart");
 const survey = require(path.join(CHART, "chart-survey.js"));
 const core = require(path.join(CHART, "chart-core.js"));
-const {fakeDocument, walk, elements, byClass} = require("./fake-dom.cjs");
+const {fakeDocument, pressKey, walk, elements, byClass} = require("./fake-dom.cjs");
 
 const T = core.EDIT_TEXT;
 const fixture = () => JSON.parse(JSON.stringify(require("./fixture.json")));
@@ -125,8 +125,8 @@ test("log_lists_every_sea_and_land_from_the_ledger", () => {
   for (const r of landRows) assert.ok(button([r], "Rename"));
 
   assert.ok(button(nodes, "New Sea…"));
-  const sections = elements(nodes).filter(e => /^H\d$/.test(e.tagName)).map(e => e.textContent);
-  for (const heading of ["Lands", "Seas"]) assert.ok(sections.includes(heading), heading);
+  const sections = allByClass(nodes, "log-section-name").map(e => e.textContent);
+  assert.deepEqual(sections, [`Lands \u00B7 ${data.ledger.lands.length}`, `Seas \u00B7 ${data.ledger.seas.length}`]);
   assert.equal(one(nodes, "log-status").getAttribute("role"), "status");
 });
 
@@ -261,9 +261,12 @@ test("leave_land_is_disabled_on_a_continental_island", () => {
 test("log_controls_are_disabled_while_busy", () => {
   const data = fixture(), on = recorder();
   const nodes = log(data, {selected: 1, busy: true, titles: {undo: "Undo Join APPLE PRESS", redo: null}}, on);
-  const controls = elements(nodes).filter(e => ["BUTTON", "SELECT", "INPUT"].includes(e.tagName));
+  // every edit control; the section headers only fold, and stay usable
+  const isHeader = e => e.className.split(" ").includes("log-disclosure");
+  const controls = elements(nodes).filter(e => ["BUTTON", "SELECT", "INPUT"].includes(e.tagName) && !isHeader(e));
   assert.ok(controls.length > 40);
   for (const c of controls) assert.equal(c.disabled, true, `${c.tagName} ${c.textContent}`);
+  assert.equal(elements(nodes).filter(isHeader).length, 2);
   const row = allByClass(nodes, "log-sea")[1];
   assert.ok(row, "a second sea row");
   row.dispatch("keydown", ev({key: "ArrowUp", altKey: true}));
@@ -340,7 +343,7 @@ test("dragging_the_handle_moves_a_sea", () => {
 
   // let go off the list, left or right: nothing
   on.calls.length = 0;
-  one(nodes, "log-seas").childNodes.find(n => n.tagName === "OL").rect = {left: 0, right: 300, top: 0, bottom: 480, width: 300, height: 480, x: 0, y: 0};
+  tagged([one(nodes, "log-seas")], "OL").rect = {left: 0, right: 300, top: 0, bottom: 480, width: 300, height: 480, x: 0, y: 0};
   handle.dispatch("pointerdown", ev({clientY: 15, clientX: 40, pointerId: 7, button: 0}));
   handle.dispatch("pointerup", ev({clientY: 75, clientX: 640, pointerId: 7}));
   handle.dispatch("pointerdown", ev({clientY: 15, clientX: 40, pointerId: 8, button: 0}));
@@ -349,6 +352,182 @@ test("dragging_the_handle_moves_a_sea", () => {
   handle.dispatch("pointerdown", ev({clientY: 15, clientX: 40, pointerId: 9, button: 0}));
   handle.dispatch("pointerup", ev({clientY: 75, clientX: 120, pointerId: 9}));
   assert.deepEqual(on.calls, [["moveSea", a, 2]]);
+});
+
+// ---------- the drop line while a sea is dragged ----------
+// rows of 30 px from y = 100, the seas' section body from y = 60: the line's top is the row edge it marks, in the body
+function dragLog() {
+  const doc = fakeDocument(), data = fixture(), on = recorder(), nodes = log(data, {}, on, doc);
+  const rows = allByClass(nodes, "log-sea"), seas = one(nodes, "log-seas");
+  rows.forEach((r, i) => { r.rect = {left: 0, right: 300, top: 100 + i * 30, bottom: 130 + i * 30, width: 300, height: 30, x: 0, y: 100 + i * 30}; });
+  one([seas], "log-section-body").rect = {left: 0, right: 300, top: 60, bottom: 600, width: 300, height: 540, x: 0, y: 60};
+  tagged([seas], "OL").rect = {left: 0, right: 300, top: 100, bottom: 100 + rows.length * 30, width: 300, height: rows.length * 30, x: 0, y: 100};
+  const line = one([seas], "log-drop-line");
+  const mids = rows.map(r => (r.rect.top + r.rect.bottom) / 2);
+  return {doc, data, on, nodes, rows, line, mids};
+}
+
+test("dragging_a_sea_shows_where_it_will_land", () => {
+  const {data, on, rows, line, mids} = dragLog();
+  assert.equal(line.hidden, true, "no line before a drag");
+  assert.equal(line.getAttribute("aria-hidden"), "true");
+  // from the first row (moving down) and from the fourth (moving up and down), at every height
+  for (const from of [0, 3]) {
+    const handle = one([rows[from]], "log-handle"), id = data.ledger.seas[from].id;
+    for (let y = 80; y <= 100 + rows.length * 30 + 20; y += 7) {
+      on.calls.length = 0;
+      handle.dispatch("pointerdown", ev({clientX: 40, clientY: mids[from], pointerId: 1, button: 0}));
+      assert.ok(rows[from].classList.contains("dragging"), "the dragged row dims");
+      handle.dispatch("pointermove", ev({clientX: 40, clientY: y, pointerId: 1}));
+      const to = survey.seaDropIndex(mids, y);
+      if (to === from) assert.equal(line.hidden, true, `over its own row (y ${y}): no line`);
+      else {
+        assert.equal(line.hidden, false, `a line at y ${y}`);
+        const edge = to < from ? rows[to].rect.top : rows[to].rect.bottom; // above the row it passes moving up, below it moving down
+        assert.equal(line.style.top, `${edge - 60}px`, `from ${from} at y ${y}: the line marks row ${to}`);
+      }
+      handle.dispatch("pointerup", ev({clientX: 40, clientY: y, pointerId: 1}));
+      assert.deepEqual(on.calls, to === from ? [] : [["moveSea", id, to - from]], `released at y ${y}: lands where the line was`);
+      assert.equal(line.hidden, true, "the line goes on release");
+      assert.ok(!rows[from].classList.contains("dragging"), "the row is itself again on release");
+    }
+  }
+  // off the list, left or right: no line, and nothing on release
+  const handle = one([rows[0]], "log-handle");
+  on.calls.length = 0;
+  handle.dispatch("pointerdown", ev({clientX: 40, clientY: mids[0], pointerId: 1, button: 0}));
+  handle.dispatch("pointermove", ev({clientX: 40, clientY: mids[2], pointerId: 1}));
+  assert.equal(line.hidden, false);
+  handle.dispatch("pointermove", ev({clientX: 640, clientY: mids[2], pointerId: 1}));
+  assert.equal(line.hidden, true, "off the list: no line");
+  handle.dispatch("pointerup", ev({clientX: 640, clientY: mids[2], pointerId: 1}));
+  assert.deepEqual(on.calls, []);
+  // a move without a press shows nothing
+  handle.dispatch("pointermove", ev({clientX: 40, clientY: mids[2], pointerId: 1}));
+  assert.equal(line.hidden, true, "no press, no line");
+});
+
+test("the_drop_line_goes_on_escape_and_on_cancel", () => {
+  const {doc, data, on, rows, line, mids} = dragLog();
+  const handle = one([rows[1]], "log-handle");
+  // pointercancel
+  handle.dispatch("pointerdown", ev({clientX: 40, clientY: mids[1], pointerId: 1, button: 0}));
+  handle.dispatch("pointermove", ev({clientX: 40, clientY: mids[3], pointerId: 1}));
+  assert.equal(line.hidden, false);
+  handle.dispatch("pointercancel", ev({pointerId: 1}));
+  assert.equal(line.hidden, true, "cancelled: the line goes");
+  assert.ok(!rows[1].classList.contains("dragging"));
+  handle.dispatch("pointerup", ev({clientX: 40, clientY: mids[3], pointerId: 1}));
+  assert.deepEqual(on.calls, [], "a cancelled drag moves nothing");
+  // Esc, anywhere on the page: the drag ends there, and the page's own Esc does not see it
+  handle.dispatch("pointerdown", ev({clientX: 40, clientY: mids[1], pointerId: 2, button: 0}));
+  handle.dispatch("pointermove", ev({clientX: 40, clientY: mids[3], pointerId: 2}));
+  assert.equal(line.hidden, false);
+  let stopped = false;
+  doc.dispatch("keydown", ev({key: "Escape", stopImmediatePropagation() { stopped = true; }}));
+  assert.equal(line.hidden, true, "Esc: the line goes");
+  assert.ok(stopped, "the Esc ends with the drag");
+  assert.ok(!rows[1].classList.contains("dragging"));
+  handle.dispatch("pointerup", ev({clientX: 40, clientY: mids[3], pointerId: 2}));
+  assert.deepEqual(on.calls, [], "an Esc'd drag moves nothing");
+  assert.equal((doc.listeners.keydown || []).length, 0, "no key listener left behind");
+  // another key does not end the drag; the listener goes with the release
+  handle.dispatch("pointerdown", ev({clientX: 40, clientY: mids[1], pointerId: 3, button: 0}));
+  doc.dispatch("keydown", ev({key: "a"}));
+  handle.dispatch("pointermove", ev({clientX: 40, clientY: mids[3], pointerId: 3}));
+  assert.equal(line.hidden, false);
+  handle.dispatch("pointerup", ev({clientX: 40, clientY: mids[3], pointerId: 3}));
+  assert.deepEqual(on.calls, [["moveSea", data.ledger.seas[1].id, 2]]);
+  assert.equal((doc.listeners.keydown || []).length, 0, "released: no key listener left behind");
+});
+
+test("log_css_ends_sections_cleanly_and_keeps_still_under_reduce_motion", () => {
+  const css = require("node:fs").readFileSync(path.join(CHART, "chart.css"), "utf8");
+  assert.ok(/\.log-list > li:last-child\s*\{[^}]*border-bottom:\s*0/.test(css), "no dotted rule after a section's last row");
+  assert.ok(/\.log h3\s*\{[^}]*border-top:\s*1px solid/.test(css), "the solid rule between sections stays");
+  assert.ok(/\.log-sea\.dragging\s*\{[^}]*opacity:/.test(css), "the dragged row dims");
+  assert.ok(/\.log-drop-line\s*\{[^}]*position:\s*absolute/.test(css), "the drop line takes no room");
+  assert.ok(/body\.still \.log-drop-line[^{]*\{[^}]*transition:\s*none/.test(css), "no animation under the app's Reduce Motion");
+  assert.ok(/prefers-reduced-motion: reduce\)\s*\{[^}]*\.log-drop-line[^{]*\{[^}]*transition:\s*none/.test(css), "nor the system's");
+});
+
+// ---------- the section headers ----------
+const header = (nodes, cls) => { const h = one([one(nodes, cls)], "log-disclosure"); assert.equal(h.tagName, "BUTTON"); return h; };
+const bodyOf = (nodes, cls) => one([one(nodes, cls)], "log-section-body");
+const markOf = h => one([h], "log-disclosure-mark").textContent;
+
+test("lands_and_seas_are_headers_that_fold_their_lists", () => {
+  const data = fixture(), memory = survey.logMemory(), doc = fakeDocument();
+  const nodes = survey.logContent(doc, data, {}, recorder(), memory);
+  for (const [cls, name, n] of [["log-lands", "Lands", data.ledger.lands.length], ["log-seas", "Seas", data.ledger.seas.length]]) {
+    const h = header(nodes, cls), body = bodyOf(nodes, cls);
+    assert.equal(h.type, "button");
+    assert.equal(h.getAttribute("aria-expanded"), "true", `${name} open by default`);
+    assert.equal(h.getAttribute("aria-controls"), body.id);
+    assert.ok(body.id, "the body has an id");
+    assert.equal(markOf(h), "▾");
+    assert.equal(one([h], "log-disclosure-mark").getAttribute("aria-hidden"), "true");
+    const label = one([h], "log-section-name");
+    assert.deepEqual(label.childNodes, [{nodeType: 3, data: `${name} · ${n}`}], "text only");
+    assert.ok(!body.hidden);
+    h.dispatch("click", ev());
+    assert.equal(h.getAttribute("aria-expanded"), "false", `${name} folds`);
+    assert.equal(markOf(h), "▸");
+    assert.equal(body.hidden, true);
+    h.dispatch("click", ev());
+    assert.equal(h.getAttribute("aria-expanded"), "true", `${name} opens again`);
+    assert.equal(markOf(h), "▾");
+    assert.ok(!body.hidden);
+  }
+  assert.ok(one([bodyOf(nodes, "log-lands")], "log-land"), "the lands' rows are in their body");
+  assert.ok(one([bodyOf(nodes, "log-seas")], "log-sea"), "the seas' rows are in theirs");
+  assert.ok(button([bodyOf(nodes, "log-seas")], "New Sea…"), "New Sea… folds with the seas");
+});
+
+test("a_folded_section_stays_folded_across_rebuilds", () => {
+  const data = fixture(), memory = survey.logMemory(), doc = fakeDocument();
+  let nodes = survey.logContent(doc, data, {}, recorder(), memory);
+  const h = header(nodes, "log-lands");
+  h.focus();
+  h.dispatch("click", ev());
+  // a new snapshot: one land fewer, one sea more
+  const next = fixture();
+  next.ledger.lands = next.ledger.lands.slice(1);
+  next.ledger.seas = [...next.ledger.seas, {...next.ledger.seas[0], id: 999, key: "new-sea", sea: "NEW SEA", feeds: 0}];
+  nodes = survey.logContent(doc, next, {}, recorder(), memory);
+  memory.restore();
+  const lands = header(nodes, "log-lands"), seas = header(nodes, "log-seas");
+  assert.equal(lands.getAttribute("aria-expanded"), "false", "Lands stays folded");
+  assert.equal(bodyOf(nodes, "log-lands").hidden, true);
+  assert.equal(markOf(lands), "▸");
+  assert.equal(one([lands], "log-section-name").textContent, `Lands · ${next.ledger.lands.length}`, "with the new count");
+  assert.equal(seas.getAttribute("aria-expanded"), "true", "Seas stays open");
+  assert.equal(one([seas], "log-section-name").textContent, `Seas · ${next.ledger.seas.length}`);
+  assert.equal(doc.activeElement, lands, "the focus stays on the header");
+  // opened again, and rebuilt: open
+  lands.dispatch("click", ev());
+  nodes = survey.logContent(doc, next, {}, recorder(), memory);
+  assert.equal(header(nodes, "log-lands").getAttribute("aria-expanded"), "true");
+  assert.ok(!bodyOf(nodes, "log-lands").hidden);
+  // a busy log still folds (folding is no edit)
+  nodes = survey.logContent(doc, next, {busy: true}, recorder(), memory);
+  assert.ok(!header(nodes, "log-seas").disabled, "the header works while an edit is on its way");
+  // a fresh memory (a new window): both open
+  nodes = survey.logContent(fakeDocument(), next, {}, recorder(), survey.logMemory());
+  assert.equal(header(nodes, "log-lands").getAttribute("aria-expanded"), "true");
+});
+
+test("enter_and_space_fold_a_section", () => {
+  const nodes = survey.logContent(fakeDocument(), fixture(), {}, recorder(), survey.logMemory());
+  const h = header(nodes, "log-seas"), body = bodyOf(nodes, "log-seas");
+  pressKey(h, "Enter");
+  assert.equal(h.getAttribute("aria-expanded"), "false", "Enter folds");
+  assert.equal(body.hidden, true);
+  pressKey(h, " ");
+  assert.equal(h.getAttribute("aria-expanded"), "true", "Space opens");
+  assert.ok(!body.hidden);
+  pressKey(h, "a");
+  assert.equal(h.getAttribute("aria-expanded"), "true", "another key does nothing");
 });
 
 test("sea_drop_index_follows_the_pointer", () => {

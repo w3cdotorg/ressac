@@ -17,7 +17,8 @@ function fakeDocument() {
       setAttribute(k, v) { el.attributes[k] = String(v); },
       getAttribute(k) { return el.attributes[k] ?? null; },
       addEventListener(type, fn) { (el.listeners[type] ||= []).push(fn); },
-      dispatch(type, event) { (el.listeners[type] || []).forEach(fn => fn(event)); }, // any event type
+      removeEventListener(type, fn) { el.listeners[type] = (el.listeners[type] || []).filter(f => f !== fn); },
+      dispatch(type, event) { (el.listeners[type] || []).slice().forEach(fn => fn(event)); }, // any event type
       getBoundingClientRect() { return el.rect; },
       focus() { doc.activeElement = el; },
       // pointer capture as browsers do it: while captured, pointer events go to this element, and so does the
@@ -50,7 +51,8 @@ function fakeDocument() {
   doc.documentElement.style.setProperty = (k, v) => { doc.documentElement.style[k] = v; };
   doc.listeners = {};
   doc.addEventListener = (type, fn) => { (doc.listeners[type] ||= []).push(fn); };
-  doc.dispatch = (type, event) => { (doc.listeners[type] || []).forEach(fn => fn(event)); };
+  doc.removeEventListener = (type, fn) => { doc.listeners[type] = (doc.listeners[type] || []).filter(f => f !== fn); };
+  doc.dispatch = (type, event) => { (doc.listeners[type] || []).slice().forEach(fn => fn(event)); };
   return doc;
 }
 
@@ -96,6 +98,18 @@ function press(doc, origin, target, points, at) {
   doc.capture = null;
   (clickTo || origin).dispatch("click", ev(last, {type: "click", target: clickTo || target}));
 }
+// A key pressed on a focused element, as a browser does it: keydown, then, unless a handler prevented it, a button's
+// activation (Enter clicks on keydown, Space on keyup). Returns the keydown event.
+function pressKey(el, key) {
+  const ev = type => ({type, key, target: el, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}});
+  const down = ev("keydown");
+  el.dispatch("keydown", down);
+  if (key === "Enter" && !down.defaultPrevented && el.tagName === "BUTTON" && !el.disabled) el.dispatch("click", ev("click"));
+  const up = ev("keyup");
+  el.dispatch("keyup", up);
+  if (key === " " && !down.defaultPrevented && !up.defaultPrevented && el.tagName === "BUTTON" && !el.disabled) el.dispatch("click", ev("click"));
+  return down;
+}
 const walk = (nodes, out = []) => { nodes.forEach(n => { out.push(n); if (n.childNodes) walk(n.childNodes, out); }); return out; };
 const elements = nodes => walk(nodes).filter(n => n.nodeType === 1);
 const byClass = (nodes, cls) => elements(nodes).find(n => n.className.split(" ").includes(cls));
@@ -118,4 +132,4 @@ function recordingContext() {
   return {ctx, log, texts: () => log.filter(([op]) => op === "fillText").map(([, t]) => t)};
 }
 
-module.exports = {measure, fakeDocument, fakeWindow, press, walk, elements, byClass, recordingContext};
+module.exports = {measure, fakeDocument, fakeWindow, press, pressKey, walk, elements, byClass, recordingContext};
